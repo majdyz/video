@@ -10,16 +10,18 @@ void main() {
 const FRAG = `
 precision highp float;
 uniform sampler2D u_image;
+uniform sampler2D u_lut;
 uniform vec3 u_mean;
 uniform vec3 u_wbGain;
 uniform vec3 u_min;
 uniform vec3 u_max;
 uniform float u_alpha;
 uniform float u_intensity;
-uniform float u_redBoost;
 uniform float u_saturation;
 uniform float u_gamma;
 uniform float u_contrast;
+uniform float u_lutSize;
+uniform float u_lutMix;
 varying vec2 v_uv;
 
 vec3 sCurve(vec3 c, float k) {
@@ -27,35 +29,58 @@ vec3 sCurve(vec3 c, float k) {
   return mix(c, s, k);
 }
 
+// 3D LUT laid out as width = size*size, height = size. Each B slice tiles
+// horizontally; within a slice, X = R, Y = G. Manual lerp across the two
+// adjacent B slices, relying on hardware bilinear for R/G inside each slice.
+vec3 sampleLUT(vec3 color, float size) {
+  float fz = clamp(color.b, 0.0, 1.0) * (size - 1.0);
+  float zLow = floor(fz);
+  float zHigh = min(zLow + 1.0, size - 1.0);
+  float zMix = fz - zLow;
+
+  float r = clamp(color.r, 0.0, 1.0) * (size - 1.0);
+  float g = clamp(color.g, 0.0, 1.0) * (size - 1.0);
+  float texW = size * size;
+  float texH = size;
+
+  vec2 uvLow = vec2(zLow * size + r + 0.5, g + 0.5) / vec2(texW, texH);
+  vec2 uvHigh = vec2(zHigh * size + r + 0.5, g + 0.5) / vec2(texW, texH);
+
+  vec3 cLow = texture2D(u_lut, uvLow).rgb;
+  vec3 cHigh = texture2D(u_lut, uvHigh).rgb;
+  return mix(cLow, cHigh, zMix);
+}
+
 void main() {
   vec4 src = texture2D(u_image, v_uv);
   vec3 c = src.rgb;
 
   // Ancuti channel compensation: lift weak channels using the green channel
-  // (preserves naturalness vs. blind histogram stretch)
   float redComp = max(0.0, u_mean.g - u_mean.r);
   float blueComp = max(0.0, u_mean.g - u_mean.b);
   vec3 comp = c;
   comp.r = c.r + u_alpha * redComp * (1.0 - c.r) * c.g;
   comp.b = c.b + u_alpha * blueComp * (1.0 - c.b) * c.g;
 
-  // Gray-world white balance (gains derived from compensated means CPU-side)
+  // Shades-of-Gray white balance (gains derived from compensated Lp norms CPU-side)
   vec3 wb = comp * u_wbGain;
 
   // Robust per-channel stretch from post-WB percentiles
   vec3 stretched = clamp((wb - u_min) / max(u_max - u_min, vec3(1e-3)), 0.0, 1.0);
 
-  // Tone: gamma + S-curve in linearised space
+  // Tone: gamma + S-curve
   vec3 toned = pow(stretched, vec3(u_gamma));
   toned = sCurve(toned, u_contrast);
-
-  // Optional manual red push (user override)
-  float extra = max(0.0, (toned.b + toned.g) * 0.5 - toned.r);
-  toned.r = clamp(toned.r + u_redBoost * extra, 0.0, 1.0);
 
   // Saturation around BT.709 luminance
   float lum = dot(toned, vec3(0.2126, 0.7152, 0.0722));
   toned = mix(vec3(lum), toned, u_saturation);
+
+  // Optional Lightroom .cube LUT overlay
+  if (u_lutMix > 0.001 && u_lutSize > 0.5) {
+    vec3 graded = sampleLUT(toned, u_lutSize);
+    toned = mix(toned, graded, u_lutMix);
+  }
 
   // Blend with original
   vec3 finalColor = mix(src.rgb, toned, u_intensity);
@@ -73,10 +98,11 @@ export type Stats = {
 
 export type Settings = {
   intensity: number;
-  redBoost: number;
+  castStrength: number;
   saturation: number;
   gamma: number;
   contrast: number;
+  lutMix: number;
 };
 
 function compileShader(gl: WebGLRenderingContext, type: number, source: string) {
@@ -96,20 +122,24 @@ export class Renderer {
   private gl: WebGLRenderingContext;
   private program: WebGLProgram;
   private texture: WebGLTexture;
+  private lutTexture: WebGLTexture;
+  private lutSize: number = 0;
   private buffer: WebGLBuffer;
   private locs: {
     pos: number;
     image: WebGLUniformLocation;
+    lut: WebGLUniformLocation;
     mean: WebGLUniformLocation;
     wbGain: WebGLUniformLocation;
     min: WebGLUniformLocation;
     max: WebGLUniformLocation;
     alpha: WebGLUniformLocation;
     intensity: WebGLUniformLocation;
-    redBoost: WebGLUniformLocation;
     saturation: WebGLUniformLocation;
     gamma: WebGLUniformLocation;
     contrast: WebGLUniformLocation;
+    lutSize: WebGLUniformLocation;
+    lutMix: WebGLUniformLocation;
   };
 
   constructor(canvas: HTMLCanvasElement) {
@@ -144,20 +174,47 @@ export class Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
+    this.lutTexture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    // 1×1 placeholder so the sampler is always valid even with no LUT loaded.
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+
     this.locs = {
       pos: gl.getAttribLocation(prog, "a_pos"),
       image: gl.getUniformLocation(prog, "u_image")!,
+      lut: gl.getUniformLocation(prog, "u_lut")!,
       mean: gl.getUniformLocation(prog, "u_mean")!,
       wbGain: gl.getUniformLocation(prog, "u_wbGain")!,
       min: gl.getUniformLocation(prog, "u_min")!,
       max: gl.getUniformLocation(prog, "u_max")!,
       alpha: gl.getUniformLocation(prog, "u_alpha")!,
       intensity: gl.getUniformLocation(prog, "u_intensity")!,
-      redBoost: gl.getUniformLocation(prog, "u_redBoost")!,
       saturation: gl.getUniformLocation(prog, "u_saturation")!,
       gamma: gl.getUniformLocation(prog, "u_gamma")!,
       contrast: gl.getUniformLocation(prog, "u_contrast")!,
+      lutSize: gl.getUniformLocation(prog, "u_lutSize")!,
+      lutMix: gl.getUniformLocation(prog, "u_lutMix")!,
     };
+  }
+
+  uploadLUT(data: Uint8Array, size: number) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size * size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    this.lutSize = size;
+  }
+
+  clearLUT() {
+    this.lutSize = 0;
+  }
+
+  hasLUT(): boolean {
+    return this.lutSize > 0;
   }
 
   uploadSource(source: TexImageSource, width: number, height: number) {
@@ -185,24 +242,37 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.uniform1i(this.locs.image, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
+    gl.uniform1i(this.locs.lut, 1);
+
     gl.uniform3fv(this.locs.mean, stats.mean);
     gl.uniform3fv(this.locs.wbGain, stats.wbGain);
     gl.uniform3fv(this.locs.min, stats.min);
     gl.uniform3fv(this.locs.max, stats.max);
     gl.uniform1f(this.locs.alpha, stats.alpha);
     gl.uniform1f(this.locs.intensity, settings.intensity);
-    gl.uniform1f(this.locs.redBoost, settings.redBoost);
     gl.uniform1f(this.locs.saturation, settings.saturation);
     gl.uniform1f(this.locs.gamma, settings.gamma);
     gl.uniform1f(this.locs.contrast, settings.contrast);
+    gl.uniform1f(this.locs.lutSize, this.lutSize);
+    gl.uniform1f(this.locs.lutMix, this.lutSize > 0 ? settings.lutMix : 0);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 }
 
-const ALPHA = 1.0;
+const SOG_P = 6;
+const MAX_GAIN = 3.0;
+const MIN_GAIN = 0.5;
 
-export function computeStats(source: CanvasImageSource, srcWidth: number, srcHeight: number): Stats {
+export function computeStats(
+  source: CanvasImageSource,
+  srcWidth: number,
+  srcHeight: number,
+  alpha: number,
+): Stats {
   const target = 256;
   const scale = Math.min(1, target / Math.max(srcWidth, srcHeight));
   const w = Math.max(1, Math.round(srcWidth * scale));
@@ -230,27 +300,31 @@ export function computeStats(source: CanvasImageSource, srcWidth: number, srcHei
   const redCompTerm = Math.max(0, meanG - meanR);
   const blueCompTerm = Math.max(0, meanG - meanB);
 
-  let sumR2 = 0;
-  let sumB2 = 0;
+  // Compensate red and blue per pixel, accumulate Lp norms (Shades-of-Gray, Finlayson-Trezzi 2004).
   const compR = new Float32Array(total);
   const compB = new Float32Array(total);
+  let sumRp = 0;
+  let sumGp = 0;
+  let sumBp = 0;
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     const r = data[i] / 255;
     const g = data[i + 1] / 255;
     const b = data[i + 2] / 255;
-    const r2 = r + ALPHA * redCompTerm * (1 - r) * g;
-    const b2 = b + ALPHA * blueCompTerm * (1 - b) * g;
+    const r2 = r + alpha * redCompTerm * (1 - r) * g;
+    const b2 = b + alpha * blueCompTerm * (1 - b) * g;
     compR[p] = r2;
     compB[p] = b2;
-    sumR2 += r2;
-    sumB2 += b2;
+    sumRp += Math.pow(r2, SOG_P);
+    sumGp += Math.pow(g, SOG_P);
+    sumBp += Math.pow(b2, SOG_P);
   }
-  const meanR2 = sumR2 / total;
-  const meanB2 = sumB2 / total;
+  const normR = Math.pow(sumRp / total, 1 / SOG_P);
+  const normG = Math.pow(sumGp / total, 1 / SOG_P);
+  const normB = Math.pow(sumBp / total, 1 / SOG_P);
 
-  const gainR = meanR2 > 0.01 ? meanG / meanR2 : 1;
-  const gainB = meanB2 > 0.01 ? meanG / meanB2 : 1;
+  const gainR = clampGain(normR > 0.001 ? normG / normR : 1);
   const gainG = 1;
+  const gainB = clampGain(normB > 0.001 ? normG / normB : 1);
 
   const histR = new Uint32Array(256);
   const histG = new Uint32Array(256);
@@ -281,10 +355,14 @@ export function computeStats(source: CanvasImageSource, srcWidth: number, srcHei
     wbGain: [gainR, gainG, gainB],
     min: [findCut(histR, lowFrac) / 255, findCut(histG, lowFrac) / 255, findCut(histB, lowFrac) / 255],
     max: [findCut(histR, highFrac) / 255, findCut(histG, highFrac) / 255, findCut(histB, highFrac) / 255],
-    alpha: ALPHA,
+    alpha,
   };
 }
 
 function clamp255(v: number) {
   return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+
+function clampGain(g: number) {
+  return g < MIN_GAIN ? MIN_GAIN : g > MAX_GAIN ? MAX_GAIN : g;
 }

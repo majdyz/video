@@ -1,36 +1,47 @@
 import { useEffect, useRef, useState } from "react";
 import { Renderer, computeStats, type Settings, type Stats } from "./lib/correct";
-import { buildCaptureContext, pickBitrate, pickRecorderMime } from "./lib/recorder";
+import {
+  attachAudioRouting,
+  buildCaptureContext,
+  captureAudioForRecording,
+  pickBitrate,
+  pickRecorderMime,
+} from "./lib/recorder";
+import { parseCube } from "./lib/lut";
 import "./App.css";
 
 type Mode = "idle" | "photo" | "video";
 
 const DEFAULT_SETTINGS: Settings = {
   intensity: 1.0,
-  redBoost: 0.0,
-  saturation: 1.15,
-  gamma: 0.92,
-  contrast: 0.25,
+  castStrength: 0.6,
+  saturation: 1.08,
+  gamma: 0.95,
+  contrast: 0.2,
+  lutMix: 1.0,
 };
 
 const OFF_SETTINGS: Settings = {
   intensity: 0,
-  redBoost: 0,
+  castStrength: 0,
   saturation: 1,
   gamma: 1,
   contrast: 0,
+  lutMix: 0,
 };
 
 const PRESETS: { label: string; settings: Settings }[] = [
   { label: "Off", settings: OFF_SETTINGS },
-  { label: "Shallow", settings: { intensity: 0.7, redBoost: 0, saturation: 1.08, gamma: 0.95, contrast: 0.15 } },
+  { label: "Shallow", settings: { intensity: 0.7, castStrength: 0.4, saturation: 1.05, gamma: 1.0, contrast: 0.1, lutMix: 1.0 } },
   { label: "Reef", settings: DEFAULT_SETTINGS },
-  { label: "Deep", settings: { intensity: 1.0, redBoost: 0.25, saturation: 1.25, gamma: 0.86, contrast: 0.35 } },
+  { label: "Deep", settings: { intensity: 1.0, castStrength: 0.85, saturation: 1.18, gamma: 0.9, contrast: 0.3, lutMix: 1.0 } },
 ];
 
 type VideoWithRVFC = HTMLVideoElement & {
   requestVideoFrameCallback?: (cb: (now: number, metadata: unknown) => void) => number;
 };
+
+type AudioRouting = ReturnType<typeof attachAudioRouting>;
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -44,6 +55,7 @@ export default function App() {
   const recordingFlagRef = useRef(false);
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS);
   const showOriginalRef = useRef(false);
+  const audioRoutingRef = useRef<AudioRouting>(null);
 
   const [mode, setMode] = useState<Mode>("idle");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -53,6 +65,8 @@ export default function App() {
   const [recordProgress, setRecordProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [canRecord, setCanRecord] = useState(true);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [lutName, setLutName] = useState<string | null>(null);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -72,13 +86,27 @@ export default function App() {
     setCanRecord(pickRecorderMime() !== null);
   }, []);
 
+  // Re-render the loaded photo whenever any setting changes; recompute stats
+  // when castStrength changes (it affects the WB gains and stretch bounds).
   useEffect(() => {
-    if (mode !== "photo" || !rendererRef.current || !statsRef.current || !imageBitmapRef.current) return;
+    if (mode !== "photo" || !rendererRef.current || !imageBitmapRef.current) return;
     const bitmap = imageBitmapRef.current;
+    statsRef.current = computeStats(bitmap, bitmap.width, bitmap.height, settings.castStrength);
     rendererRef.current.uploadSource(bitmap, bitmap.width, bitmap.height);
     const eff = showOriginal ? OFF_SETTINGS : settings;
     rendererRef.current.render(statsRef.current, eff);
   }, [settings, mode, showOriginal]);
+
+  // For video, recompute stats when castStrength changes (sample current frame).
+  useEffect(() => {
+    if (mode !== "video" || !videoRef.current || videoRef.current.readyState < 2) return;
+    const v = videoRef.current;
+    const sampler = document.createElement("canvas");
+    sampler.width = v.videoWidth;
+    sampler.height = v.videoHeight;
+    sampler.getContext("2d", { willReadFrequently: true })!.drawImage(v, 0, 0);
+    statsRef.current = computeStats(sampler, sampler.width, sampler.height, settings.castStrength);
+  }, [settings.castStrength, mode]);
 
   function startPreview() {
     const video = videoRef.current as VideoWithRVFC | null;
@@ -140,10 +168,38 @@ export default function App() {
     setRecordProgress(0);
     teardownVideo();
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
-    if (file.type.startsWith("video/")) {
+    if (file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm)$/i.test(file.name)) {
       await loadVideo(file);
     } else {
       await loadImage(file);
+    }
+  }
+
+  async function handleLUTFile(file: File) {
+    setError(null);
+    try {
+      const text = await file.text();
+      const parsed = parseCube(text);
+      if (rendererRef.current) {
+        rendererRef.current.uploadLUT(parsed.data, parsed.size);
+      }
+      setLutName(file.name);
+      // re-render photo or trigger video repaint via state nudge
+      if (mode === "photo" && rendererRef.current && imageBitmapRef.current && statsRef.current) {
+        rendererRef.current.uploadSource(imageBitmapRef.current, imageBitmapRef.current.width, imageBitmapRef.current.height);
+        rendererRef.current.render(statsRef.current, showOriginal ? OFF_SETTINGS : settings);
+      }
+    } catch (e) {
+      setError("LUT load failed: " + (e instanceof Error ? e.message : String(e)));
+    }
+  }
+
+  function clearLUT() {
+    if (rendererRef.current) rendererRef.current.clearLUT();
+    setLutName(null);
+    if (mode === "photo" && rendererRef.current && imageBitmapRef.current && statsRef.current) {
+      rendererRef.current.uploadSource(imageBitmapRef.current, imageBitmapRef.current.width, imageBitmapRef.current.height);
+      rendererRef.current.render(statsRef.current, showOriginal ? OFF_SETTINGS : settings);
     }
   }
 
@@ -151,7 +207,7 @@ export default function App() {
     try {
       const bitmap = await createImageBitmap(file);
       imageBitmapRef.current = bitmap;
-      const stats = computeStats(bitmap, bitmap.width, bitmap.height);
+      const stats = computeStats(bitmap, bitmap.width, bitmap.height, settingsRef.current.castStrength);
       statsRef.current = stats;
       setMode("photo");
       requestAnimationFrame(() => {
@@ -189,6 +245,13 @@ export default function App() {
         video.addEventListener("error", onError);
       });
 
+      // Web Audio routing must be attached before play() so the source node
+      // captures the audio graph. createMediaElementSource only works once
+      // per element, so we keep the routing across file changes.
+      if (!audioRoutingRef.current) {
+        audioRoutingRef.current = attachAudioRouting(video);
+      }
+
       await video.play().catch(() => undefined);
 
       const sampler = document.createElement("canvas");
@@ -196,10 +259,8 @@ export default function App() {
       sampler.height = video.videoHeight;
       const sctx = sampler.getContext("2d", { willReadFrequently: true })!;
       sctx.drawImage(video, 0, 0);
-      statsRef.current = computeStats(sampler, sampler.width, sampler.height);
+      statsRef.current = computeStats(sampler, sampler.width, sampler.height, settingsRef.current.castStrength);
 
-      // size the canvas to the source's native resolution upfront so captureStream picks the
-      // correct dimensions when the user starts recording.
       if (canvasRef.current && rendererRef.current) {
         rendererRef.current.uploadSource(video, video.videoWidth, video.videoHeight);
         rendererRef.current.render(statsRef.current, settingsRef.current);
@@ -241,29 +302,33 @@ export default function App() {
 
     video.pause();
     video.loop = false;
-    video.muted = false;
     try {
       video.currentTime = 0;
     } catch {
       // ignore
     }
 
-    // Re-render the first frame so canvas matches native res before captureStream snaps it.
     if (rendererRef.current) {
       rendererRef.current.uploadSource(video, video.videoWidth, video.videoHeight);
       rendererRef.current.render(statsRef.current, settingsRef.current);
     }
 
-    const ctx = buildCaptureContext(canvas, video);
+    const captureCtx = buildCaptureContext(canvas);
+    const audioCapture = await captureAudioForRecording(audioRoutingRef.current);
+    const stream = new MediaStream([
+      ...captureCtx.videoStream.getVideoTracks(),
+      ...audioCapture.tracks,
+    ]);
     const bitrate = pickBitrate(video.videoWidth, video.videoHeight);
 
     let recorder: MediaRecorder;
     try {
-      recorder = new MediaRecorder(ctx.stream, {
+      recorder = new MediaRecorder(stream, {
         mimeType: candidate.mime || undefined,
         videoBitsPerSecond: bitrate,
       });
     } catch (e) {
+      audioCapture.cleanup();
       recordingFlagRef.current = false;
       setError("Recording failed: " + (e instanceof Error ? e.message : String(e)));
       startPreview();
@@ -275,6 +340,11 @@ export default function App() {
     recorder.ondataavailable = (e) => {
       if (e.data && e.data.size) chunks.push(e.data);
     };
+    recorder.onerror = (e: Event) => {
+      const evt = e as Event & { error?: unknown };
+      const msg = evt.error instanceof Error ? evt.error.message : "encoder error";
+      setError("Recording error: " + msg);
+    };
 
     let cancelled = false;
 
@@ -284,7 +354,7 @@ export default function App() {
       rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
       const eff = showOriginalRef.current ? OFF_SETTINGS : settingsRef.current;
       rendererRef.current.render(statsRef.current, eff);
-      ctx.pushFrame();
+      captureCtx.pushFrame();
       if (v.duration) setRecordProgress(v.currentTime / v.duration);
     };
 
@@ -310,6 +380,7 @@ export default function App() {
     const stopAndDownload = () =>
       new Promise<void>((resolve) => {
         recorder.onstop = () => {
+          audioCapture.cleanup();
           const blob = new Blob(chunks, { type: candidate.mime || "video/webm" });
           triggerDownload(blob, `${fileNameRef.current}-aqua.${candidate.ext}`);
           resolve();
@@ -317,6 +388,7 @@ export default function App() {
         try {
           recorder.stop();
         } catch {
+          audioCapture.cleanup();
           resolve();
         }
       });
@@ -329,7 +401,6 @@ export default function App() {
       setRecording(false);
       setRecordProgress(0);
       video.loop = true;
-      video.muted = true;
       try {
         video.currentTime = 0;
       } catch {
@@ -342,7 +413,7 @@ export default function App() {
 
     setRecording(true);
     setRecordProgress(0);
-    recorder.start(500);
+    recorder.start(1000);
     await video.play().catch(() => undefined);
   }
 
@@ -361,7 +432,6 @@ export default function App() {
     setRecordProgress(0);
     const v = videoRef.current;
     v.loop = true;
-    v.muted = true;
     try {
       v.currentTime = 0;
     } catch {
@@ -415,10 +485,7 @@ export default function App() {
             />
             <div className="dropper">
               <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M12 3l4 5h-3v6h-2V8H8l4-5zM5 18h14v2H5z"
-                  fill="currentColor"
-                />
+                <path d="M12 3l4 5h-3v6h-2V8H8l4-5zM5 18h14v2H5z" fill="currentColor" />
               </svg>
               <p>tap to pick a photo or video</p>
             </div>
@@ -510,12 +577,12 @@ export default function App() {
                 disabled={recording}
               />
               <Slider
-                label="Red boost"
-                value={settings.redBoost}
+                label="Cast removal"
+                value={settings.castStrength}
                 min={0}
                 max={1}
                 step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, redBoost: v }))}
+                onChange={(v) => setSettings((s) => ({ ...s, castStrength: v }))}
                 disabled={recording}
               />
               <Slider
@@ -528,6 +595,74 @@ export default function App() {
                 disabled={recording}
               />
             </div>
+
+            <button
+              className="adv-toggle"
+              onClick={() => setShowAdvanced((v) => !v)}
+              disabled={recording}
+            >
+              <span>Advanced</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true" className={showAdvanced ? "open" : ""}>
+                <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+
+            {showAdvanced && (
+              <div className="advanced">
+                <div className="lut-row">
+                  <label className="lut-pick">
+                    <input
+                      type="file"
+                      accept=".cube,application/octet-stream,text/plain"
+                      disabled={recording}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) handleLUTFile(f);
+                        e.target.value = "";
+                      }}
+                    />
+                    <span>
+                      {lutName ? "Replace LUT" : "Load Lightroom .cube LUT"}
+                    </span>
+                  </label>
+                  {lutName && (
+                    <button className="lut-clear" onClick={clearLUT} aria-label="Remove LUT">
+                      ×
+                    </button>
+                  )}
+                </div>
+                {lutName && (
+                  <p className="lut-name" title={lutName}>{lutName}</p>
+                )}
+                <Slider
+                  label="LUT mix"
+                  value={settings.lutMix}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  onChange={(v) => setSettings((s) => ({ ...s, lutMix: v }))}
+                  disabled={recording || !lutName}
+                />
+                <Slider
+                  label="Gamma"
+                  value={settings.gamma}
+                  min={0.5}
+                  max={1.5}
+                  step={0.01}
+                  onChange={(v) => setSettings((s) => ({ ...s, gamma: v }))}
+                  disabled={recording}
+                />
+                <Slider
+                  label="Contrast"
+                  value={settings.contrast}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  onChange={(v) => setSettings((s) => ({ ...s, contrast: v }))}
+                  disabled={recording}
+                />
+              </div>
+            )}
 
             <div className="actions">
               <button className="ghost" onClick={reset} disabled={recording}>
@@ -579,7 +714,7 @@ export default function App() {
 function matchesPreset(a: Settings, b: Settings, eps = 0.01) {
   return (
     Math.abs(a.intensity - b.intensity) < eps &&
-    Math.abs(a.redBoost - b.redBoost) < eps &&
+    Math.abs(a.castStrength - b.castStrength) < eps &&
     Math.abs(a.saturation - b.saturation) < eps &&
     Math.abs(a.gamma - b.gamma) < eps &&
     Math.abs(a.contrast - b.contrast) < eps

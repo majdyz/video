@@ -26,22 +26,20 @@ export function pickRecorderMime(): Candidate | null {
   return null;
 }
 
-// Roughly 6 bits/pixel·second — keeps 1080p around 12 Mbps and 4K around 50 Mbps.
+// ~4 bits/pixel·second, capped at 25 Mbps.
+// Safari's MediaRecorder gets unstable above this and stalls 30-60s in.
 export function pickBitrate(width: number, height: number): number {
   const px = width * height;
-  return Math.min(80_000_000, Math.max(4_000_000, Math.round(px * 6)));
+  return Math.min(25_000_000, Math.max(3_000_000, Math.round(px * 4)));
 }
 
 type CaptureContext = {
-  stream: MediaStream;
+  videoStream: MediaStream;
   videoTrack: MediaStreamTrack;
   pushFrame: () => void;
 };
 
-export function buildCaptureContext(
-  canvas: HTMLCanvasElement,
-  video: HTMLVideoElement,
-): CaptureContext {
+export function buildCaptureContext(canvas: HTMLCanvasElement): CaptureContext {
   // captureStream(0) = passive — frames only published via track.requestFrame()
   // so we can drive 1:1 mapping from the source's requestVideoFrameCallback.
   let canvasStream: MediaStream;
@@ -57,24 +55,10 @@ export function buildCaptureContext(
     canvasStream = canvas.captureStream(60);
   }
 
-  const tracks: MediaStreamTrack[] = [...canvasStream.getVideoTracks()];
-  const sourceWithCapture = video as HTMLVideoElement & {
-    captureStream?: () => MediaStream;
-    mozCaptureStream?: () => MediaStream;
-  };
-  try {
-    const sourceStream = sourceWithCapture.captureStream?.() ?? sourceWithCapture.mozCaptureStream?.();
-    if (sourceStream) {
-      for (const t of sourceStream.getAudioTracks()) tracks.push(t);
-    }
-  } catch {
-    // audio capture not supported
-  }
-
   const videoTrack = canvasStream.getVideoTracks()[0];
   const trackWithRequestFrame = videoTrack as MediaStreamTrack & { requestFrame?: () => void };
   return {
-    stream: new MediaStream(tracks),
+    videoStream: canvasStream,
     videoTrack,
     pushFrame: () => {
       if (useRequestFrame) {
@@ -83,6 +67,56 @@ export function buildCaptureContext(
         } catch {
           // ignore
         }
+      }
+    },
+  };
+}
+
+type AudioRouting = {
+  ctx: AudioContext;
+  source: MediaElementAudioSourceNode;
+};
+
+// Web Audio routes the element's audio through a graph; the gain stays at 0 so
+// preview is silent locally, while a MediaStreamAudioDestinationNode tap can
+// still pull the audio into MediaRecorder when the user starts a save.
+export function attachAudioRouting(video: HTMLVideoElement): AudioRouting | null {
+  const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!Ctx) return null;
+  try {
+    const ctx = new Ctx();
+    const source = ctx.createMediaElementSource(video);
+    const muteGain = ctx.createGain();
+    muteGain.gain.value = 0;
+    source.connect(muteGain);
+    muteGain.connect(ctx.destination);
+    return { ctx, source };
+  } catch {
+    return null;
+  }
+}
+
+export async function captureAudioForRecording(routing: AudioRouting | null): Promise<{
+  tracks: MediaStreamTrack[];
+  cleanup: () => void;
+}> {
+  if (!routing) return { tracks: [], cleanup: () => undefined };
+  if (routing.ctx.state === "suspended") {
+    try {
+      await routing.ctx.resume();
+    } catch {
+      // ignore
+    }
+  }
+  const dest = routing.ctx.createMediaStreamDestination();
+  routing.source.connect(dest);
+  return {
+    tracks: dest.stream.getAudioTracks(),
+    cleanup: () => {
+      try {
+        routing.source.disconnect(dest);
+      } catch {
+        // ignore
       }
     },
   };

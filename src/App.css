@@ -461,6 +461,93 @@ label.slider input[type="range"]::-moz-range-thumb {
   text-align: center;
 }
 
+/* advanced disclosure */
+.adv-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 10px;
+  cursor: pointer;
+}
+.adv-toggle:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.03);
+}
+.adv-toggle svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.2s ease;
+}
+.adv-toggle svg.open {
+  transform: rotate(180deg);
+}
+
+.advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.lut-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+label.lut-pick {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  background: rgba(95, 208, 255, 0.08);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+  cursor: pointer;
+}
+label.lut-pick input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.lut-clear {
+  width: 40px;
+  background: rgba(255, 107, 129, 0.15);
+  border: 1px solid rgba(255, 107, 129, 0.4);
+  border-radius: 10px;
+  color: var(--danger);
+  font-size: 18px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.lut-name {
+  margin: -4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+  font-family: ui-monospace, "SF Mono", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 footer {
   margin-top: auto;
   padding: 20px 0 8px;
