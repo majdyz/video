@@ -26,21 +26,64 @@ export function pickRecorderMime(): Candidate | null {
   return null;
 }
 
-export function buildRecordingStream(canvas: HTMLCanvasElement, video: HTMLVideoElement, fps = 30): MediaStream {
-  const canvasStream = canvas.captureStream(fps);
-  const tracks: MediaStreamTrack[] = [...canvasStream.getVideoTracks()];
+// Roughly 6 bits/pixel·second — keeps 1080p around 12 Mbps and 4K around 50 Mbps.
+export function pickBitrate(width: number, height: number): number {
+  const px = width * height;
+  return Math.min(80_000_000, Math.max(4_000_000, Math.round(px * 6)));
+}
 
+type CaptureContext = {
+  stream: MediaStream;
+  videoTrack: MediaStreamTrack;
+  pushFrame: () => void;
+};
+
+export function buildCaptureContext(
+  canvas: HTMLCanvasElement,
+  video: HTMLVideoElement,
+): CaptureContext {
+  // captureStream(0) = passive — frames only published via track.requestFrame()
+  // so we can drive 1:1 mapping from the source's requestVideoFrameCallback.
+  let canvasStream: MediaStream;
+  let useRequestFrame = false;
+  try {
+    canvasStream = canvas.captureStream(0);
+    const track = canvasStream.getVideoTracks()[0];
+    const trackWithRequestFrame = track as MediaStreamTrack & { requestFrame?: () => void };
+    if (track && typeof trackWithRequestFrame.requestFrame === "function") {
+      useRequestFrame = true;
+    }
+  } catch {
+    canvasStream = canvas.captureStream(60);
+  }
+
+  const tracks: MediaStreamTrack[] = [...canvasStream.getVideoTracks()];
   const sourceWithCapture = video as HTMLVideoElement & {
     captureStream?: () => MediaStream;
     mozCaptureStream?: () => MediaStream;
   };
   try {
-    const sourceStream = (sourceWithCapture.captureStream?.() ?? sourceWithCapture.mozCaptureStream?.());
+    const sourceStream = sourceWithCapture.captureStream?.() ?? sourceWithCapture.mozCaptureStream?.();
     if (sourceStream) {
       for (const t of sourceStream.getAudioTracks()) tracks.push(t);
     }
   } catch {
-    // audio capture not supported, video-only output
+    // audio capture not supported
   }
-  return new MediaStream(tracks);
+
+  const videoTrack = canvasStream.getVideoTracks()[0];
+  const trackWithRequestFrame = videoTrack as MediaStreamTrack & { requestFrame?: () => void };
+  return {
+    stream: new MediaStream(tracks),
+    videoTrack,
+    pushFrame: () => {
+      if (useRequestFrame) {
+        try {
+          trackWithRequestFrame.requestFrame?.();
+        } catch {
+          // ignore
+        }
+      }
+    },
+  };
 }

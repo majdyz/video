@@ -1,32 +1,49 @@
 import { useEffect, useRef, useState } from "react";
 import { Renderer, computeStats, type Settings, type Stats } from "./lib/correct";
-import { buildRecordingStream, pickRecorderMime } from "./lib/recorder";
+import { buildCaptureContext, pickBitrate, pickRecorderMime } from "./lib/recorder";
 import "./App.css";
 
 type Mode = "idle" | "photo" | "video";
 
 const DEFAULT_SETTINGS: Settings = {
   intensity: 1.0,
-  redBoost: 0.4,
-  saturation: 1.1,
+  redBoost: 0.0,
+  saturation: 1.15,
+  gamma: 0.92,
+  contrast: 0.25,
+};
+
+const OFF_SETTINGS: Settings = {
+  intensity: 0,
+  redBoost: 0,
+  saturation: 1,
+  gamma: 1,
+  contrast: 0,
 };
 
 const PRESETS: { label: string; settings: Settings }[] = [
-  { label: "Off", settings: { intensity: 0, redBoost: 0, saturation: 1 } },
-  { label: "Shallow", settings: { intensity: 0.8, redBoost: 0.25, saturation: 1.05 } },
-  { label: "Reef", settings: { intensity: 1.0, redBoost: 0.4, saturation: 1.1 } },
-  { label: "Deep", settings: { intensity: 1.0, redBoost: 0.7, saturation: 1.2 } },
+  { label: "Off", settings: OFF_SETTINGS },
+  { label: "Shallow", settings: { intensity: 0.7, redBoost: 0, saturation: 1.08, gamma: 0.95, contrast: 0.15 } },
+  { label: "Reef", settings: DEFAULT_SETTINGS },
+  { label: "Deep", settings: { intensity: 1.0, redBoost: 0.25, saturation: 1.25, gamma: 0.86, contrast: 0.35 } },
 ];
+
+type VideoWithRVFC = HTMLVideoElement & {
+  requestVideoFrameCallback?: (cb: (now: number, metadata: unknown) => void) => number;
+};
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const statsRef = useRef<Stats | null>(null);
-  const rafRef = useRef<number>(0);
   const imageBitmapRef = useRef<ImageBitmap | null>(null);
   const fileNameRef = useRef<string>("aqua");
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const previewActiveRef = useRef(false);
+  const recordingFlagRef = useRef(false);
+  const settingsRef = useRef<Settings>(DEFAULT_SETTINGS);
+  const showOriginalRef = useRef(false);
 
   const [mode, setMode] = useState<Mode>("idle");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -36,6 +53,14 @@ export default function App() {
   const [recordProgress, setRecordProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [canRecord, setCanRecord] = useState(true);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    showOriginalRef.current = showOriginal;
+  }, [showOriginal]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -49,33 +74,51 @@ export default function App() {
 
   useEffect(() => {
     if (mode !== "photo" || !rendererRef.current || !statsRef.current || !imageBitmapRef.current) return;
-    rendererRef.current.uploadSource(imageBitmapRef.current, imageBitmapRef.current.width, imageBitmapRef.current.height);
-    const effective = showOriginal ? { intensity: 0, redBoost: 0, saturation: 1 } : settings;
-    rendererRef.current.render(statsRef.current, effective);
+    const bitmap = imageBitmapRef.current;
+    rendererRef.current.uploadSource(bitmap, bitmap.width, bitmap.height);
+    const eff = showOriginal ? OFF_SETTINGS : settings;
+    rendererRef.current.render(statsRef.current, eff);
   }, [settings, mode, showOriginal]);
 
-  useEffect(() => {
-    if (mode !== "video") return;
-    const id = requestAnimationFrame(function loop() {
+  function startPreview() {
+    const video = videoRef.current as VideoWithRVFC | null;
+    if (!video) return;
+    previewActiveRef.current = true;
+
+    const renderFromVideo = () => {
       if (!rendererRef.current || !statsRef.current || !videoRef.current) return;
       const v = videoRef.current;
-      if (v.readyState >= 2 && !v.paused) {
-        rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
-        const effective = showOriginal ? { intensity: 0, redBoost: 0, saturation: 1 } : settings;
-        rendererRef.current.render(statsRef.current, effective);
-        if (recording && v.duration) {
-          setRecordProgress(v.currentTime / v.duration);
+      if (v.readyState < 2) return;
+      rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
+      const eff = showOriginalRef.current ? OFF_SETTINGS : settingsRef.current;
+      rendererRef.current.render(statsRef.current, eff);
+    };
+
+    if (typeof video.requestVideoFrameCallback === "function") {
+      const onFrame = () => {
+        if (!previewActiveRef.current || recordingFlagRef.current) return;
+        renderFromVideo();
+        const v = videoRef.current as VideoWithRVFC | null;
+        if (v && previewActiveRef.current && !recordingFlagRef.current) {
+          v.requestVideoFrameCallback?.(onFrame);
         }
-      }
-      rafRef.current = requestAnimationFrame(loop);
-    });
-    return () => cancelAnimationFrame(id);
-  }, [mode, settings, showOriginal, recording]);
+      };
+      video.requestVideoFrameCallback(onFrame);
+    } else {
+      const loop = () => {
+        if (!previewActiveRef.current || recordingFlagRef.current) return;
+        renderFromVideo();
+        requestAnimationFrame(loop);
+      };
+      requestAnimationFrame(loop);
+    }
+  }
 
   function teardownVideo() {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = 0;
+    previewActiveRef.current = false;
     if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      recorderRef.current.ondataavailable = null;
+      recorderRef.current.onstop = null;
       try {
         recorderRef.current.stop();
       } catch {
@@ -83,6 +126,7 @@ export default function App() {
       }
     }
     recorderRef.current = null;
+    recordingFlagRef.current = false;
     if (videoRef.current) {
       videoRef.current.pause();
       videoRef.current.removeAttribute("src");
@@ -96,7 +140,6 @@ export default function App() {
     setRecordProgress(0);
     teardownVideo();
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
-
     if (file.type.startsWith("video/")) {
       await loadVideo(file);
     } else {
@@ -114,7 +157,7 @@ export default function App() {
       requestAnimationFrame(() => {
         if (!rendererRef.current) return;
         rendererRef.current.uploadSource(bitmap, bitmap.width, bitmap.height);
-        rendererRef.current.render(stats, settings);
+        rendererRef.current.render(stats, settingsRef.current);
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -154,8 +197,17 @@ export default function App() {
       const sctx = sampler.getContext("2d", { willReadFrequently: true })!;
       sctx.drawImage(video, 0, 0);
       statsRef.current = computeStats(sampler, sampler.width, sampler.height);
+
+      // size the canvas to the source's native resolution upfront so captureStream picks the
+      // correct dimensions when the user starts recording.
+      if (canvasRef.current && rendererRef.current) {
+        rendererRef.current.uploadSource(video, video.videoWidth, video.videoHeight);
+        rendererRef.current.render(statsRef.current, settingsRef.current);
+      }
+
       setDuration(video.duration || 0);
       setMode("video");
+      startPreview();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -169,12 +221,14 @@ export default function App() {
         triggerDownload(blob, `${fileNameRef.current}-aqua.jpg`);
       },
       "image/jpeg",
-      0.92,
+      0.95,
     );
   }
 
   async function recordVideo() {
-    if (!canvasRef.current || !videoRef.current) return;
+    const canvas = canvasRef.current;
+    const video = videoRef.current as VideoWithRVFC | null;
+    if (!canvas || !video || !statsRef.current) return;
     const candidate = pickRecorderMime();
     if (!candidate) {
       setError("This browser can't encode video. Try the latest Safari or Chrome.");
@@ -182,8 +236,10 @@ export default function App() {
     }
     setError(null);
 
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
+    previewActiveRef.current = false;
+    recordingFlagRef.current = true;
+
+    video.pause();
     video.loop = false;
     video.muted = false;
     try {
@@ -192,23 +248,64 @@ export default function App() {
       // ignore
     }
 
-    const stream = buildRecordingStream(canvas, video, 30);
-    const chunks: BlobPart[] = [];
+    // Re-render the first frame so canvas matches native res before captureStream snaps it.
+    if (rendererRef.current) {
+      rendererRef.current.uploadSource(video, video.videoWidth, video.videoHeight);
+      rendererRef.current.render(statsRef.current, settingsRef.current);
+    }
+
+    const ctx = buildCaptureContext(canvas, video);
+    const bitrate = pickBitrate(video.videoWidth, video.videoHeight);
+
     let recorder: MediaRecorder;
     try {
-      recorder = new MediaRecorder(stream, {
+      recorder = new MediaRecorder(ctx.stream, {
         mimeType: candidate.mime || undefined,
-        videoBitsPerSecond: 8_000_000,
+        videoBitsPerSecond: bitrate,
       });
     } catch (e) {
+      recordingFlagRef.current = false;
       setError("Recording failed: " + (e instanceof Error ? e.message : String(e)));
+      startPreview();
       return;
     }
 
     recorderRef.current = recorder;
+    const chunks: BlobPart[] = [];
     recorder.ondataavailable = (e) => {
       if (e.data && e.data.size) chunks.push(e.data);
     };
+
+    let cancelled = false;
+
+    const renderAndPush = () => {
+      if (!rendererRef.current || !statsRef.current || !videoRef.current) return;
+      const v = videoRef.current;
+      rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
+      const eff = showOriginalRef.current ? OFF_SETTINGS : settingsRef.current;
+      rendererRef.current.render(statsRef.current, eff);
+      ctx.pushFrame();
+      if (v.duration) setRecordProgress(v.currentTime / v.duration);
+    };
+
+    if (typeof video.requestVideoFrameCallback === "function") {
+      const onFrame = () => {
+        if (cancelled) return;
+        renderAndPush();
+        const v = videoRef.current as VideoWithRVFC | null;
+        if (v && !cancelled && !v.ended) {
+          v.requestVideoFrameCallback?.(onFrame);
+        }
+      };
+      video.requestVideoFrameCallback(onFrame);
+    } else {
+      const loop = () => {
+        if (cancelled) return;
+        renderAndPush();
+        if (!video.ended) requestAnimationFrame(loop);
+      };
+      requestAnimationFrame(loop);
+    }
 
     const stopAndDownload = () =>
       new Promise<void>((resolve) => {
@@ -225,20 +322,27 @@ export default function App() {
       });
 
     const onEnded = async () => {
+      cancelled = true;
       video.removeEventListener("ended", onEnded);
       await stopAndDownload();
+      recordingFlagRef.current = false;
       setRecording(false);
       setRecordProgress(0);
       video.loop = true;
       video.muted = true;
-      video.currentTime = 0;
+      try {
+        video.currentTime = 0;
+      } catch {
+        // ignore
+      }
       await video.play().catch(() => undefined);
+      startPreview();
     };
     video.addEventListener("ended", onEnded);
 
     setRecording(true);
     setRecordProgress(0);
-    recorder.start(250);
+    recorder.start(500);
     await video.play().catch(() => undefined);
   }
 
@@ -252,12 +356,19 @@ export default function App() {
       // ignore
     }
     recorderRef.current = null;
+    recordingFlagRef.current = false;
     setRecording(false);
     setRecordProgress(0);
-    videoRef.current.loop = true;
-    videoRef.current.muted = true;
-    videoRef.current.currentTime = 0;
-    videoRef.current.play().catch(() => undefined);
+    const v = videoRef.current;
+    v.loop = true;
+    v.muted = true;
+    try {
+      v.currentTime = 0;
+    } catch {
+      // ignore
+    }
+    v.play().catch(() => undefined);
+    startPreview();
   }
 
   function reset() {
@@ -323,7 +434,14 @@ export default function App() {
             aria-label="Hold to compare"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 4v16M5 8l-3 4 3 4M19 8l3 4-3 4" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              <path
+                d="M12 4v16M5 8l-3 4 3 4M19 8l3 4-3 4"
+                stroke="currentColor"
+                strokeWidth="2"
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
             </svg>
             {showOriginal ? "Original" : "Hold"}
           </button>
@@ -344,7 +462,14 @@ export default function App() {
           />
           <span>
             <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M5 5h14v14H5z M9 9l3-3 3 3M12 6v9" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              <path
+                d="M5 5h14v14H5z M9 9l3-3 3 3M12 6v9"
+                stroke="currentColor"
+                strokeWidth="2"
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
             </svg>
             Pick photo or video
           </span>
@@ -402,7 +527,14 @@ export default function App() {
               {mode === "photo" && (
                 <button className="primary" onClick={savePhoto}>
                   <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M5 19h14M12 4v11M7 10l5 5 5-5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                    <path
+                      d="M5 19h14M12 4v11M7 10l5 5 5-5"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      fill="none"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
                   </svg>
                   Save photo
                 </button>
@@ -439,7 +571,9 @@ function matchesPreset(a: Settings, b: Settings, eps = 0.01) {
   return (
     Math.abs(a.intensity - b.intensity) < eps &&
     Math.abs(a.redBoost - b.redBoost) < eps &&
-    Math.abs(a.saturation - b.saturation) < eps
+    Math.abs(a.saturation - b.saturation) < eps &&
+    Math.abs(a.gamma - b.gamma) < eps &&
+    Math.abs(a.contrast - b.contrast) < eps
   );
 }
 
