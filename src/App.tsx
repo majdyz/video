@@ -83,6 +83,8 @@ export default function App() {
   const [recordProgress, setRecordProgress] = useState(0);
   const [recordTime, setRecordTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [isPaused, setIsPaused] = useState(false);
   const [canRecord, setCanRecord] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [lutName, setLutName] = useState<string | null>(null);
@@ -145,6 +147,56 @@ export default function App() {
     const v = videoRef.current;
     statsRef.current = computeStats(v, v.videoWidth, v.videoHeight, settings.castStrength);
   }, [settings.castStrength, mode]);
+
+  // Track playback time + paused state so the scrubber and the play-overlay reflect reality.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || mode !== "video") return;
+    const onTime = () => setCurrentTime(v.currentTime);
+    const onPlay = () => setIsPaused(false);
+    const onPause = () => setIsPaused(true);
+    const onSeeked = () => {
+      setCurrentTime(v.currentTime);
+      // re-render the seeked frame in case rVFC didn't fire
+      if (rendererRef.current && statsRef.current && v.readyState >= 2) {
+        rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
+        const eff = showOriginalRef.current ? OFF_SETTINGS : settingsRef.current;
+        rendererRef.current.render(statsRef.current, eff);
+      }
+    };
+    v.addEventListener("timeupdate", onTime);
+    v.addEventListener("play", onPlay);
+    v.addEventListener("pause", onPause);
+    v.addEventListener("seeked", onSeeked);
+    setCurrentTime(v.currentTime);
+    setIsPaused(v.paused);
+    return () => {
+      v.removeEventListener("timeupdate", onTime);
+      v.removeEventListener("play", onPlay);
+      v.removeEventListener("pause", onPause);
+      v.removeEventListener("seeked", onSeeked);
+    };
+  }, [mode]);
+
+  function togglePlay() {
+    const v = videoRef.current;
+    if (!v || recording) return;
+    if (v.paused) {
+      v.play().catch(() => undefined);
+    } else {
+      v.pause();
+    }
+  }
+
+  function seekTo(t: number) {
+    const v = videoRef.current;
+    if (!v || recording) return;
+    try {
+      v.currentTime = Math.min(Math.max(0, t), v.duration || 0);
+    } catch {
+      // ignore
+    }
+  }
 
   function maybeRefreshStats(video: HTMLVideoElement) {
     // Adaptive: re-sample stats every ~1s from the current frame and blend
@@ -680,7 +732,16 @@ export default function App() {
         </div>
       </header>
 
-      <div className={`stage ${mode === "idle" ? "is-empty" : ""}`}>
+      <div
+        className={`stage ${mode === "idle" ? "is-empty" : ""}`}
+        onClick={(e) => {
+          if (mode !== "video" || recording) return;
+          // Don't toggle when clicking the compare pill or other overlay buttons.
+          const target = e.target as HTMLElement;
+          if (target.closest("button")) return;
+          togglePlay();
+        }}
+      >
         <canvas ref={canvasRef} />
         <video ref={videoRef} style={{ display: "none" }} />
         {mode === "idle" && (
@@ -720,6 +781,13 @@ export default function App() {
             </div>
           </div>
         )}
+        {mode === "video" && isPaused && !recording && (
+          <div className="play-overlay" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M8 5v14l11-7z" fill="currentColor" />
+            </svg>
+          </div>
+        )}
         {mode !== "idle" && !recording && (
           <button
             className="compare"
@@ -742,6 +810,22 @@ export default function App() {
           </button>
         )}
       </div>
+
+      {mode === "video" && (
+        <div className="scrubber">
+          <span className="time">{formatTime(currentTime)}</span>
+          <input
+            type="range"
+            min={0}
+            max={duration || 0}
+            step={0.01}
+            value={Math.min(currentTime, duration || 0)}
+            disabled={recording || !duration}
+            onChange={(e) => seekTo(parseFloat(e.target.value))}
+          />
+          <span className="time">{formatTime(duration)}</span>
+        </div>
+      )}
 
       <section className="panel">
         <label className="file">
