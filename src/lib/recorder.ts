@@ -119,6 +119,26 @@ type WritableHandle = FileSystemFileHandle & {
   createWritable?: (options?: { keepExistingData?: boolean }) => Promise<FileSystemWritableFileStream>;
 };
 
+// Best-effort sweep of leftover aqua-*.tmp entries from previous sessions.
+export async function pruneOldRecordings(): Promise<void> {
+  const storage = navigator.storage as Navigator["storage"] & StorageWithDirectory;
+  if (!storage || typeof storage.getDirectory !== "function") return;
+  try {
+    const root = await storage.getDirectory();
+    const dir = root as FileSystemDirectoryHandle & {
+      values?: () => AsyncIterable<FileSystemHandle>;
+    };
+    if (typeof dir.values !== "function") return;
+    for await (const entry of dir.values()) {
+      if (entry.name.startsWith("aqua-") && entry.name.endsWith(".tmp")) {
+        root.removeEntry(entry.name).catch(() => undefined);
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
 export async function createRecordingSink(): Promise<RecordingSink> {
   const storage = navigator.storage as Navigator["storage"] & StorageWithDirectory;
   if (storage && typeof storage.getDirectory === "function") {
@@ -150,11 +170,12 @@ export async function createRecordingSink(): Promise<RecordingSink> {
               }
               closed = true;
             }
-            try {
-              await root.removeEntry(name);
-            } catch {
-              // ignore
-            }
+            // The download anchor is still streaming from this OPFS file when
+            // cleanup runs — removing it now truncates the saved file. Defer
+            // the entry removal; stale entries get pruned on next launch.
+            setTimeout(() => {
+              root.removeEntry(name).catch(() => undefined);
+            }, 60_000);
           },
         };
       }

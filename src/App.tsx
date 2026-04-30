@@ -7,6 +7,7 @@ import {
   createRecordingSink,
   pickBitrate,
   pickRecorderMime,
+  pruneOldRecordings,
   type RecordingSink,
 } from "./lib/recorder";
 import { parseCube } from "./lib/lut";
@@ -103,6 +104,7 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     }
     setCanRecord(pickRecorderMime() !== null);
+    pruneOldRecordings();
 
     const onLost = (e: Event) => {
       e.preventDefault();
@@ -382,10 +384,23 @@ export default function App() {
     // The audio still goes through a 0-gain Web Audio graph so the user
     // hears nothing locally, but createMediaElementSource gets real samples.
     video.muted = false;
-    try {
-      video.currentTime = 0;
-    } catch {
-      // ignore
+    // Wait for the seek-to-zero to complete before recording starts, otherwise
+    // play() can resume from the previous preview position and the recorded
+    // video starts mid-clip.
+    if (video.currentTime > 0.01) {
+      await new Promise<void>((resolve) => {
+        const onSeeked = () => {
+          video.removeEventListener("seeked", onSeeked);
+          resolve();
+        };
+        video.addEventListener("seeked", onSeeked);
+        try {
+          video.currentTime = 0;
+        } catch {
+          video.removeEventListener("seeked", onSeeked);
+          resolve();
+        }
+      });
     }
 
     // Wake lock fire-and-forget — don't await it (it can throw synchronously
@@ -460,24 +475,19 @@ export default function App() {
       if (v.duration) setRecordProgress(v.currentTime / v.duration);
     };
 
-    if (typeof video.requestVideoFrameCallback === "function") {
-      const onFrame = () => {
-        if (!recordingFlagRef.current) return;
-        renderAndPush();
-        const v = videoRef.current as VideoWithRVFC | null;
-        if (v && recordingFlagRef.current && !v.ended) {
-          v.requestVideoFrameCallback?.(onFrame);
-        }
-      };
-      video.requestVideoFrameCallback(onFrame);
-    } else {
-      const loop = () => {
-        if (!recordingFlagRef.current) return;
-        renderAndPush();
-        if (!video.ended && recordingFlagRef.current) requestAnimationFrame(loop);
-      };
-      requestAnimationFrame(loop);
-    }
+    // Drive recording renders via requestAnimationFrame (not rVFC). rAF runs
+    // before each display refresh, so the WebGL drawing buffer is presented in
+    // sync with the active captureStream sampler. Using rVFC here was leaving
+    // the canvas un-presented and the captured video stream ended up with only
+    // one frame (just an audio track plus the seed frame).
+    const loop = () => {
+      if (!recordingFlagRef.current) return;
+      renderAndPush();
+      if (!video.ended && recordingFlagRef.current) {
+        requestAnimationFrame(loop);
+      }
+    };
+    requestAnimationFrame(loop);
 
     const stopAndDownload = () =>
       new Promise<void>((resolve) => {
