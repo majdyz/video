@@ -32,6 +32,16 @@ const OFF_SETTINGS: Settings = {
   lutMix: 0,
 };
 
+// Identity stats let preview render immediately while real stats compute in
+// the background — output passes the source through unchanged.
+const IDENTITY_STATS: Stats = {
+  mean: [0.5, 0.5, 0.5],
+  wbGain: [1, 1, 1],
+  min: [0, 0, 0],
+  max: [1, 1, 1],
+  alpha: 0,
+};
+
 const PRESETS: { label: string; settings: Settings }[] = [
   { label: "Off", settings: OFF_SETTINGS },
   { label: "Shallow", settings: { intensity: 0.85, castStrength: 0.55, saturation: 1.1, gamma: 0.96, contrast: 0.18, lutMix: 1.0 } },
@@ -108,11 +118,7 @@ export default function App() {
   useEffect(() => {
     if (mode !== "video" || !videoRef.current || videoRef.current.readyState < 2) return;
     const v = videoRef.current;
-    const sampler = document.createElement("canvas");
-    sampler.width = v.videoWidth;
-    sampler.height = v.videoHeight;
-    sampler.getContext("2d", { willReadFrequently: true })!.drawImage(v, 0, 0);
-    statsRef.current = computeStats(sampler, sampler.width, sampler.height, settings.castStrength);
+    statsRef.current = computeStats(v, v.videoWidth, v.videoHeight, settings.castStrength);
   }, [settings.castStrength, mode]);
 
   function startPreview() {
@@ -241,47 +247,63 @@ export default function App() {
     video.muted = true;
     video.playsInline = true;
     video.loop = true;
+    video.preload = "auto";
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const onLoaded = () => {
-          video.removeEventListener("loadeddata", onLoaded);
-          video.removeEventListener("error", onError);
-          resolve();
-        };
-        const onError = () => {
-          video.removeEventListener("loadeddata", onLoaded);
-          video.removeEventListener("error", onError);
-          reject(new Error("Could not decode video"));
-        };
-        video.addEventListener("loadeddata", onLoaded);
-        video.addEventListener("error", onError);
-      });
-
-      // Web Audio routing must be attached before play() so the source node
-      // captures the audio graph. createMediaElementSource only works once
-      // per element, so we keep the routing across file changes.
-      if (!audioRoutingRef.current) {
-        audioRoutingRef.current = attachAudioRouting(video);
+      // Block only until metadata is parsed (videoWidth/duration available);
+      // don't wait for first-frame decode. That's where the multi-second stall
+      // was on 4K MOVs.
+      if (video.readyState < 1) {
+        await new Promise<void>((resolve, reject) => {
+          const onMeta = () => {
+            video.removeEventListener("loadedmetadata", onMeta);
+            video.removeEventListener("error", onErr);
+            resolve();
+          };
+          const onErr = () => {
+            video.removeEventListener("loadedmetadata", onMeta);
+            video.removeEventListener("error", onErr);
+            reject(new Error("Could not decode video"));
+          };
+          video.addEventListener("loadedmetadata", onMeta);
+          video.addEventListener("error", onErr);
+        });
       }
 
-      await video.play().catch(() => undefined);
+      // Audio routing (createMediaElementSource) is iOS Safari's slow path —
+      // attaching it here used to add a multi-second hang to the first video
+      // load. We attach lazily inside recordVideo() instead.
 
-      const sampler = document.createElement("canvas");
-      sampler.width = video.videoWidth;
-      sampler.height = video.videoHeight;
-      const sctx = sampler.getContext("2d", { willReadFrequently: true })!;
-      sctx.drawImage(video, 0, 0);
-      statsRef.current = computeStats(sampler, sampler.width, sampler.height, settingsRef.current.castStrength);
+      // Start playback in the background — don't await it before showing UI.
+      video.play().catch(() => undefined);
 
-      if (canvasRef.current && rendererRef.current) {
-        rendererRef.current.uploadSource(video, video.videoWidth, video.videoHeight);
-        rendererRef.current.render(statsRef.current, settingsRef.current);
-      }
-
+      // Identity stats let the preview show frames as they decode; real stats
+      // swap in once we have a decoded frame. Avoids a several-hundred-ms gap.
+      statsRef.current = IDENTITY_STATS;
       setDuration(video.duration || 0);
       setMode("video");
       startPreview();
+
+      // Compute real stats once the first frame is actually available.
+      const computeOnce = () => {
+        const v = videoRef.current;
+        if (!v || v.readyState < 2) return;
+        try {
+          // Pass the video element directly to skip allocating a 4K sampler canvas.
+          statsRef.current = computeStats(v, v.videoWidth, v.videoHeight, settingsRef.current.castStrength);
+        } catch {
+          // identity stats stay; preview keeps showing source
+        }
+      };
+      if (video.readyState >= 2) {
+        computeOnce();
+      } else {
+        const onCanPlay = () => {
+          video.removeEventListener("canplay", onCanPlay);
+          computeOnce();
+        };
+        video.addEventListener("canplay", onCanPlay);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -327,6 +349,9 @@ export default function App() {
     }
 
     const captureCtx = buildCaptureContext(canvas);
+    if (!audioRoutingRef.current) {
+      audioRoutingRef.current = attachAudioRouting(video);
+    }
     const audioCapture = await captureAudioForRecording(audioRoutingRef.current);
     const stream = new MediaStream([
       ...captureCtx.videoStream.getVideoTracks(),
