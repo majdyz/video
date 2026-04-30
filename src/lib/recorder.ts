@@ -26,11 +26,11 @@ export function pickRecorderMime(): Candidate | null {
   return null;
 }
 
-// ~4 bits/pixel·second, capped at 25 Mbps.
-// Safari's MediaRecorder gets unstable above this and stalls 30-60s in.
+// ~6 bits/pixel·second, capped at 50 Mbps. Matches iPhone's native 4K H.264
+// bitrate, leaves headroom under Safari's MediaRecorder memory ceiling.
 export function pickBitrate(width: number, height: number): number {
   const px = width * height;
-  return Math.min(25_000_000, Math.max(3_000_000, Math.round(px * 4)));
+  return Math.min(50_000_000, Math.max(3_000_000, Math.round(px * 6)));
 }
 
 type CaptureContext = {
@@ -40,19 +40,28 @@ type CaptureContext = {
 };
 
 export function buildCaptureContext(canvas: HTMLCanvasElement): CaptureContext {
-  // captureStream(0) = passive — frames only published via track.requestFrame()
-  // so we can drive 1:1 mapping from the source's requestVideoFrameCallback.
-  let canvasStream: MediaStream;
+  // Prefer passive capture (captureStream(0) + track.requestFrame) for 1:1
+  // source-to-output frame mapping, but only if both are actually available.
+  // iOS Safari versions that lack track.requestFrame would otherwise leave
+  // us with a passive stream and no way to push frames — recording would
+  // start and produce zero frames.
+  let canvasStream: MediaStream | null = null;
   let useRequestFrame = false;
   try {
-    canvasStream = canvas.captureStream(0);
-    const track = canvasStream.getVideoTracks()[0];
+    const passive = canvas.captureStream(0);
+    const track = passive.getVideoTracks()[0];
     const trackWithRequestFrame = track as MediaStreamTrack & { requestFrame?: () => void };
     if (track && typeof trackWithRequestFrame.requestFrame === "function") {
+      canvasStream = passive;
       useRequestFrame = true;
+    } else {
+      track?.stop();
     }
   } catch {
-    canvasStream = canvas.captureStream(60);
+    // ignore, fall through to active mode
+  }
+  if (!canvasStream) {
+    canvasStream = canvas.captureStream(30);
   }
 
   const videoTrack = canvasStream.getVideoTracks()[0];

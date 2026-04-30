@@ -14,10 +14,10 @@ type Mode = "idle" | "photo" | "video";
 
 const DEFAULT_SETTINGS: Settings = {
   intensity: 1.0,
-  castStrength: 0.6,
-  saturation: 1.08,
-  gamma: 0.95,
-  contrast: 0.2,
+  castStrength: 0.85,
+  saturation: 1.18,
+  gamma: 0.92,
+  contrast: 0.3,
   lutMix: 1.0,
 };
 
@@ -32,9 +32,9 @@ const OFF_SETTINGS: Settings = {
 
 const PRESETS: { label: string; settings: Settings }[] = [
   { label: "Off", settings: OFF_SETTINGS },
-  { label: "Shallow", settings: { intensity: 0.7, castStrength: 0.4, saturation: 1.05, gamma: 1.0, contrast: 0.1, lutMix: 1.0 } },
+  { label: "Shallow", settings: { intensity: 0.85, castStrength: 0.55, saturation: 1.1, gamma: 0.96, contrast: 0.18, lutMix: 1.0 } },
   { label: "Reef", settings: DEFAULT_SETTINGS },
-  { label: "Deep", settings: { intensity: 1.0, castStrength: 0.85, saturation: 1.18, gamma: 0.9, contrast: 0.3, lutMix: 1.0 } },
+  { label: "Deep", settings: { intensity: 1.0, castStrength: 1.0, saturation: 1.3, gamma: 0.86, contrast: 0.4, lutMix: 1.0 } },
 ];
 
 type VideoWithRVFC = HTMLVideoElement & {
@@ -56,6 +56,8 @@ export default function App() {
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS);
   const showOriginalRef = useRef(false);
   const audioRoutingRef = useRef<AudioRouting>(null);
+  const audioCleanupRef = useRef<(() => void) | null>(null);
+  const onEndedRef = useRef<(() => void) | null>(null);
 
   const [mode, setMode] = useState<Mode>("idle");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -63,10 +65,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordProgress, setRecordProgress] = useState(0);
+  const [recordTime, setRecordTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [canRecord, setCanRecord] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [lutName, setLutName] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -168,10 +172,16 @@ export default function App() {
     setRecordProgress(0);
     teardownVideo();
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
-    if (file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm)$/i.test(file.name)) {
-      await loadVideo(file);
-    } else {
-      await loadImage(file);
+    const isVideo = file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm)$/i.test(file.name);
+    setBusy(isVideo ? "Loading video…" : "Loading photo…");
+    try {
+      if (isVideo) {
+        await loadVideo(file);
+      } else {
+        await loadImage(file);
+      }
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -336,6 +346,7 @@ export default function App() {
     }
 
     recorderRef.current = recorder;
+    audioCleanupRef.current = audioCapture.cleanup;
     const chunks: BlobPart[] = [];
     recorder.ondataavailable = (e) => {
       if (e.data && e.data.size) chunks.push(e.data);
@@ -346,33 +357,32 @@ export default function App() {
       setError("Recording error: " + msg);
     };
 
-    let cancelled = false;
-
     const renderAndPush = () => {
-      if (!rendererRef.current || !statsRef.current || !videoRef.current) return;
+      if (!recordingFlagRef.current || !rendererRef.current || !statsRef.current || !videoRef.current) return;
       const v = videoRef.current;
       rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
       const eff = showOriginalRef.current ? OFF_SETTINGS : settingsRef.current;
       rendererRef.current.render(statsRef.current, eff);
       captureCtx.pushFrame();
+      setRecordTime(v.currentTime);
       if (v.duration) setRecordProgress(v.currentTime / v.duration);
     };
 
     if (typeof video.requestVideoFrameCallback === "function") {
       const onFrame = () => {
-        if (cancelled) return;
+        if (!recordingFlagRef.current) return;
         renderAndPush();
         const v = videoRef.current as VideoWithRVFC | null;
-        if (v && !cancelled && !v.ended) {
+        if (v && recordingFlagRef.current && !v.ended) {
           v.requestVideoFrameCallback?.(onFrame);
         }
       };
       video.requestVideoFrameCallback(onFrame);
     } else {
       const loop = () => {
-        if (cancelled) return;
+        if (!recordingFlagRef.current) return;
         renderAndPush();
-        if (!video.ended) requestAnimationFrame(loop);
+        if (!video.ended && recordingFlagRef.current) requestAnimationFrame(loop);
       };
       requestAnimationFrame(loop);
     }
@@ -381,6 +391,7 @@ export default function App() {
       new Promise<void>((resolve) => {
         recorder.onstop = () => {
           audioCapture.cleanup();
+          audioCleanupRef.current = null;
           const blob = new Blob(chunks, { type: candidate.mime || "video/webm" });
           triggerDownload(blob, `${fileNameRef.current}-aqua.${candidate.ext}`);
           resolve();
@@ -389,17 +400,19 @@ export default function App() {
           recorder.stop();
         } catch {
           audioCapture.cleanup();
+          audioCleanupRef.current = null;
           resolve();
         }
       });
 
     const onEnded = async () => {
-      cancelled = true;
+      recordingFlagRef.current = false;
+      onEndedRef.current = null;
       video.removeEventListener("ended", onEnded);
       await stopAndDownload();
-      recordingFlagRef.current = false;
       setRecording(false);
       setRecordProgress(0);
+      setRecordTime(0);
       video.loop = true;
       try {
         video.currentTime = 0;
@@ -409,35 +422,70 @@ export default function App() {
       await video.play().catch(() => undefined);
       startPreview();
     };
+    onEndedRef.current = onEnded;
     video.addEventListener("ended", onEnded);
 
     setRecording(true);
     setRecordProgress(0);
+    setRecordTime(0);
     recorder.start(1000);
-    await video.play().catch(() => undefined);
+    try {
+      await video.play();
+    } catch (e) {
+      recordingFlagRef.current = false;
+      audioCapture.cleanup();
+      audioCleanupRef.current = null;
+      try {
+        recorder.stop();
+      } catch {
+        // ignore
+      }
+      setRecording(false);
+      setError("Couldn't start playback for recording: " + (e instanceof Error ? e.message : String(e)));
+      startPreview();
+    }
   }
 
   function cancelRecording() {
-    if (!recorderRef.current || !videoRef.current) return;
-    recorderRef.current.ondataavailable = null;
-    recorderRef.current.onstop = null;
-    try {
-      recorderRef.current.stop();
-    } catch {
-      // ignore
-    }
-    recorderRef.current = null;
+    // Halt the rVFC/rAF capture loop first so it doesn't keep firing while we
+    // tear things down — that was freezing the page on cancel.
     recordingFlagRef.current = false;
+
+    const v = videoRef.current;
+    if (v && onEndedRef.current) {
+      v.removeEventListener("ended", onEndedRef.current);
+      onEndedRef.current = null;
+    }
+    if (v) v.pause();
+
+    if (recorderRef.current) {
+      recorderRef.current.ondataavailable = null;
+      recorderRef.current.onstop = null;
+      try {
+        if (recorderRef.current.state !== "inactive") recorderRef.current.stop();
+      } catch {
+        // ignore
+      }
+      recorderRef.current = null;
+    }
+    if (audioCleanupRef.current) {
+      audioCleanupRef.current();
+      audioCleanupRef.current = null;
+    }
+
     setRecording(false);
     setRecordProgress(0);
-    const v = videoRef.current;
-    v.loop = true;
-    try {
-      v.currentTime = 0;
-    } catch {
-      // ignore
+    setRecordTime(0);
+
+    if (v) {
+      v.loop = true;
+      try {
+        v.currentTime = 0;
+      } catch {
+        // ignore
+      }
+      v.play().catch(() => undefined);
     }
-    v.play().catch(() => undefined);
     startPreview();
   }
 
@@ -492,10 +540,18 @@ export default function App() {
           </label>
         )}
         {error && <div className="error">{error}</div>}
+        {busy && (
+          <div className="busy">
+            <div className="spinner" />
+            <span>{busy}</span>
+          </div>
+        )}
         {recording && (
           <div className="recording-overlay">
             <div className="rec-dot" />
-            <span>Recording {Math.round(recordProgress * 100)}%</span>
+            <span>
+              {formatTime(recordTime)} / {formatTime(duration)}
+            </span>
             <div className="progress">
               <div className="bar" style={{ width: `${recordProgress * 100}%` }} />
             </div>
@@ -709,6 +765,13 @@ export default function App() {
       </footer>
     </div>
   );
+}
+
+function formatTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 function matchesPreset(a: Settings, b: Settings, eps = 0.01) {
