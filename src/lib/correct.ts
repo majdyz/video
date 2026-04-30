@@ -11,6 +11,7 @@ const FRAG = `
 precision highp float;
 uniform sampler2D u_image;
 uniform sampler2D u_lut;
+uniform sampler2D u_tone;
 uniform vec3 u_mean;
 uniform vec3 u_wbGain;
 uniform vec3 u_min;
@@ -20,6 +21,7 @@ uniform float u_intensity;
 uniform float u_saturation;
 uniform float u_gamma;
 uniform float u_contrast;
+uniform float u_clahe;
 uniform float u_lutSize;
 uniform float u_lutMix;
 varying vec2 v_uv;
@@ -74,6 +76,17 @@ void main() {
   vec3 toned = pow(stretched, vec3(u_gamma));
   toned = sCurve(toned, u_contrast);
 
+  // Global luminance histogram equalisation (CLAHE-style). Look up the
+  // remapped luminance from the precomputed tone LUT and rescale the RGB
+  // by the L_out/L_in ratio so colour balance is preserved.
+  if (u_clahe > 0.001) {
+    float L_in = dot(toned, vec3(0.2126, 0.7152, 0.0722));
+    float L_out = texture2D(u_tone, vec2(L_in, 0.5)).r;
+    float ratio = L_out / max(L_in, 0.001);
+    vec3 enhanced = clamp(toned * ratio, 0.0, 1.0);
+    toned = mix(toned, enhanced, u_clahe);
+  }
+
   // Saturation around BT.709 luminance
   float lum = dot(toned, vec3(0.2126, 0.7152, 0.0722));
   toned = mix(vec3(lum), toned, u_saturation);
@@ -96,6 +109,9 @@ export type Stats = {
   min: [number, number, number];
   max: [number, number, number];
   alpha: number;
+  // 256x1 RGBA LUT for global luminance histogram equalisation (CLAHE-style).
+  // Same value is duplicated across R/G/B/A so any swizzle in the shader works.
+  toneLUT: Uint8Array;
 };
 
 export type Settings = {
@@ -104,6 +120,7 @@ export type Settings = {
   saturation: number;
   gamma: number;
   contrast: number;
+  clahe: number;
   lutMix: number;
 };
 
@@ -125,12 +142,14 @@ export class Renderer {
   private program: WebGLProgram;
   private texture: WebGLTexture;
   private lutTexture: WebGLTexture;
+  private toneTexture: WebGLTexture;
   private lutSize: number = 0;
   private buffer: WebGLBuffer;
   private locs: {
     pos: number;
     image: WebGLUniformLocation;
     lut: WebGLUniformLocation;
+    tone: WebGLUniformLocation;
     mean: WebGLUniformLocation;
     wbGain: WebGLUniformLocation;
     min: WebGLUniformLocation;
@@ -140,6 +159,7 @@ export class Renderer {
     saturation: WebGLUniformLocation;
     gamma: WebGLUniformLocation;
     contrast: WebGLUniformLocation;
+    clahe: WebGLUniformLocation;
     lutSize: WebGLUniformLocation;
     lutMix: WebGLUniformLocation;
   };
@@ -185,10 +205,27 @@ export class Renderer {
     // 1×1 placeholder so the sampler is always valid even with no LUT loaded.
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
 
+    // 256x1 luminance tone LUT, identity by default.
+    this.toneTexture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.toneTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    const idLut = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      idLut[i * 4] = i;
+      idLut[i * 4 + 1] = i;
+      idLut[i * 4 + 2] = i;
+      idLut[i * 4 + 3] = 255;
+    }
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, idLut);
+
     this.locs = {
       pos: gl.getAttribLocation(prog, "a_pos"),
       image: gl.getUniformLocation(prog, "u_image")!,
       lut: gl.getUniformLocation(prog, "u_lut")!,
+      tone: gl.getUniformLocation(prog, "u_tone")!,
       mean: gl.getUniformLocation(prog, "u_mean")!,
       wbGain: gl.getUniformLocation(prog, "u_wbGain")!,
       min: gl.getUniformLocation(prog, "u_min")!,
@@ -198,9 +235,17 @@ export class Renderer {
       saturation: gl.getUniformLocation(prog, "u_saturation")!,
       gamma: gl.getUniformLocation(prog, "u_gamma")!,
       contrast: gl.getUniformLocation(prog, "u_contrast")!,
+      clahe: gl.getUniformLocation(prog, "u_clahe")!,
       lutSize: gl.getUniformLocation(prog, "u_lutSize")!,
       lutMix: gl.getUniformLocation(prog, "u_lutMix")!,
     };
+  }
+
+  uploadToneLUT(lut: Uint8Array) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.toneTexture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, lut);
   }
 
   uploadLUT(data: Uint8Array, size: number) {
@@ -249,6 +294,11 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.lutTexture);
     gl.uniform1i(this.locs.lut, 1);
 
+    this.uploadToneLUT(stats.toneLUT);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.toneTexture);
+    gl.uniform1i(this.locs.tone, 2);
+
     gl.uniform3fv(this.locs.mean, stats.mean);
     gl.uniform3fv(this.locs.wbGain, stats.wbGain);
     gl.uniform3fv(this.locs.min, stats.min);
@@ -258,6 +308,7 @@ export class Renderer {
     gl.uniform1f(this.locs.saturation, settings.saturation);
     gl.uniform1f(this.locs.gamma, settings.gamma);
     gl.uniform1f(this.locs.contrast, settings.contrast);
+    gl.uniform1f(this.locs.clahe, settings.clahe);
     gl.uniform1f(this.locs.lutSize, this.lutSize);
     gl.uniform1f(this.locs.lutMix, this.lutSize > 0 ? settings.lutMix : 0);
 
@@ -376,12 +427,48 @@ export function computeStats(
     }
   }
 
+  // Build the CLAHE-style tone LUT for luminance histogram equalisation.
+  // Approximate the post-stretch luminance per sample, build a clipped
+  // histogram, redistribute the excess uniformly, then turn the CDF into a
+  // 256-entry LUT. The result is a tone curve that boosts contrast where
+  // there's actual detail and leaves dominant flat regions alone.
+  const histL = new Uint32Array(256);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const r = clamp01((compR[p] * gainR - min[0]) / Math.max(max[0] - min[0], 1e-3));
+    const g = clamp01(((data[i + 1] / 255) * gainG - min[1]) / Math.max(max[1] - min[1], 1e-3));
+    const b = clamp01((compB[p] * gainB - min[2]) / Math.max(max[2] - min[2], 1e-3));
+    const L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    histL[Math.min(255, (L * 255) | 0)]++;
+  }
+  // CLAHE clip + redistribute (cap any single bin at ~3% of total).
+  const clipLimit = total * 0.03;
+  let excess = 0;
+  for (let i = 0; i < 256; i++) {
+    if (histL[i] > clipLimit) {
+      excess += histL[i] - clipLimit;
+      histL[i] = clipLimit;
+    }
+  }
+  const redist = excess / 256;
+  let cum = 0;
+  const toneLUT = new Uint8Array(256 * 4);
+  for (let i = 0; i < 256; i++) {
+    cum += histL[i] + redist;
+    const v = (cum / total) * 255;
+    const clamped = v < 0 ? 0 : v > 255 ? 255 : Math.round(v);
+    toneLUT[i * 4] = clamped;
+    toneLUT[i * 4 + 1] = clamped;
+    toneLUT[i * 4 + 2] = clamped;
+    toneLUT[i * 4 + 3] = 255;
+  }
+
   return {
     mean: [meanR, meanG, meanB],
     wbGain: [gainR, gainG, gainB],
     min,
     max,
     alpha,
+    toneLUT,
   };
 }
 

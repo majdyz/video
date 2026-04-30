@@ -21,6 +21,7 @@ const DEFAULT_SETTINGS: Settings = {
   saturation: 1.18,
   gamma: 0.92,
   contrast: 0.3,
+  clahe: 0.6,
   lutMix: 1.0,
 };
 
@@ -30,8 +31,20 @@ const OFF_SETTINGS: Settings = {
   saturation: 1,
   gamma: 1,
   contrast: 0,
+  clahe: 0,
   lutMix: 0,
 };
+
+const IDENTITY_TONE_LUT = (() => {
+  const a = new Uint8Array(256 * 4);
+  for (let i = 0; i < 256; i++) {
+    a[i * 4] = i;
+    a[i * 4 + 1] = i;
+    a[i * 4 + 2] = i;
+    a[i * 4 + 3] = 255;
+  }
+  return a;
+})();
 
 // Identity stats let preview render immediately while real stats compute in
 // the background — output passes the source through unchanged.
@@ -41,13 +54,14 @@ const IDENTITY_STATS: Stats = {
   min: [0, 0, 0],
   max: [1, 1, 1],
   alpha: 0,
+  toneLUT: IDENTITY_TONE_LUT,
 };
 
 const PRESETS: { label: string; settings: Settings }[] = [
   { label: "Off", settings: OFF_SETTINGS },
-  { label: "Shallow", settings: { intensity: 0.85, castStrength: 0.55, saturation: 1.1, gamma: 0.96, contrast: 0.18, lutMix: 1.0 } },
+  { label: "Shallow", settings: { intensity: 0.85, castStrength: 0.55, saturation: 1.1, gamma: 0.96, contrast: 0.18, clahe: 0.4, lutMix: 1.0 } },
   { label: "Reef", settings: DEFAULT_SETTINGS },
-  { label: "Deep", settings: { intensity: 1.0, castStrength: 1.0, saturation: 1.3, gamma: 0.86, contrast: 0.4, lutMix: 1.0 } },
+  { label: "Deep", settings: { intensity: 1.0, castStrength: 1.0, saturation: 1.3, gamma: 0.86, contrast: 0.4, clahe: 0.75, lutMix: 1.0 } },
 ];
 
 type VideoWithRVFC = HTMLVideoElement & {
@@ -147,6 +161,20 @@ export default function App() {
     const v = videoRef.current;
     statsRef.current = computeStats(v, v.videoWidth, v.videoHeight, settings.castStrength);
   }, [settings.castStrength, mode]);
+
+  // When the video preview is paused, the rVFC render loop is dormant — so
+  // settings tweaks wouldn't repaint the frozen frame. This effect re-renders
+  // the current paused frame on every settings/showOriginal change.
+  useEffect(() => {
+    if (mode !== "video") return;
+    const v = videoRef.current;
+    if (!v || !rendererRef.current || !statsRef.current) return;
+    if (!v.paused) return;
+    if (v.readyState < 2) return;
+    rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
+    const eff = showOriginal ? OFF_SETTINGS : settings;
+    rendererRef.current.render(statsRef.current, eff);
+  }, [settings, showOriginal, isPaused, mode]);
 
   // Track playback time + paused state so the scrubber and the play-overlay reflect reality.
   useEffect(() => {
@@ -722,7 +750,11 @@ export default function App() {
                   <stop offset="1" stopColor="#2bb89e" />
                 </linearGradient>
               </defs>
-              <path d="M16 4 C 22 12, 22 20, 16 28 C 10 20, 10 12, 16 4 Z" fill="url(#lg)" />
+              <path
+                d="M5 19 C5 13 11 9 16 9 C18 9 19 8 20.5 8 C22 8 22 10.5 20 11.5 C22 12 24 12.5 25 13.5 C27 14 28.5 15.5 29 17 L30.5 14 L30.5 22 L29 19 C28 21 26 22 23 22 C18 23 11 23 7 22 C5 21.5 5 20 5 19 Z"
+                fill="url(#lg)"
+              />
+              <circle cx="19.5" cy="11" r="0.7" fill="#04101c" opacity="0.85" />
             </svg>
           </div>
           <div>
@@ -947,6 +979,15 @@ export default function App() {
                   disabled={recording || !lutName}
                 />
                 <Slider
+                  label="CLAHE"
+                  value={settings.clahe}
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  onChange={(v) => setSettings((s) => ({ ...s, clahe: v }))}
+                  disabled={recording}
+                />
+                <Slider
                   label="Gamma"
                   value={settings.gamma}
                   min={0.5}
@@ -1020,12 +1061,17 @@ function lerpStats(a: Stats, b: Stats, t: number): Stats {
     p: [number, number, number],
     q: [number, number, number],
   ): [number, number, number] => [mix(p[0], q[0]), mix(p[1], q[1]), mix(p[2], q[2])];
+  const lutOut = new Uint8Array(256 * 4);
+  for (let i = 0; i < 256 * 4; i++) {
+    lutOut[i] = Math.round(a.toneLUT[i] * (1 - t) + b.toneLUT[i] * t);
+  }
   return {
     mean: mix3(a.mean, b.mean),
     wbGain: mix3(a.wbGain, b.wbGain),
     min: mix3(a.min, b.min),
     max: mix3(a.max, b.max),
     alpha: b.alpha,
+    toneLUT: lutOut,
   };
 }
 
@@ -1042,7 +1088,8 @@ function matchesPreset(a: Settings, b: Settings, eps = 0.01) {
     Math.abs(a.castStrength - b.castStrength) < eps &&
     Math.abs(a.saturation - b.saturation) < eps &&
     Math.abs(a.gamma - b.gamma) < eps &&
-    Math.abs(a.contrast - b.contrast) < eps
+    Math.abs(a.contrast - b.contrast) < eps &&
+    Math.abs(a.clahe - b.clahe) < eps
   );
 }
 
