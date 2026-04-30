@@ -130,3 +130,75 @@ export async function captureAudioForRecording(routing: AudioRouting | null): Pr
     },
   };
 }
+
+// Output sink: streams MediaRecorder chunks to disk via the Origin Private File
+// System so a long recording doesn't sit in JS heap. Falls back to in-memory
+// if OPFS isn't available (older Safari, private mode).
+export type RecordingSink = {
+  write: (chunk: BlobPart) => Promise<void>;
+  finalize: (mimeType: string) => Promise<Blob>;
+  cleanup: () => Promise<void>;
+};
+
+type StorageWithDirectory = {
+  getDirectory?: () => Promise<FileSystemDirectoryHandle>;
+};
+
+type WritableHandle = FileSystemFileHandle & {
+  createWritable?: (options?: { keepExistingData?: boolean }) => Promise<FileSystemWritableFileStream>;
+};
+
+export async function createRecordingSink(): Promise<RecordingSink> {
+  const storage = navigator.storage as Navigator["storage"] & StorageWithDirectory;
+  if (storage && typeof storage.getDirectory === "function") {
+    try {
+      const root = await storage.getDirectory();
+      const name = `aqua-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`;
+      const handle = (await root.getFileHandle(name, { create: true })) as WritableHandle;
+      if (typeof handle.createWritable === "function") {
+        const writable = await handle.createWritable();
+        let closed = false;
+        return {
+          write: async (chunk) => {
+            if (!closed) await writable.write(chunk);
+          },
+          finalize: async (mimeType) => {
+            if (!closed) {
+              await writable.close();
+              closed = true;
+            }
+            const file = await handle.getFile();
+            return mimeType ? file.slice(0, file.size, mimeType) : file;
+          },
+          cleanup: async () => {
+            if (!closed) {
+              try {
+                await writable.close();
+              } catch {
+                // ignore
+              }
+              closed = true;
+            }
+            try {
+              await root.removeEntry(name);
+            } catch {
+              // ignore
+            }
+          },
+        };
+      }
+    } catch {
+      // fall through to memory
+    }
+  }
+  const chunks: BlobPart[] = [];
+  return {
+    write: async (chunk) => {
+      chunks.push(chunk);
+    },
+    finalize: async (mimeType) => new Blob(chunks, { type: mimeType }),
+    cleanup: async () => {
+      chunks.length = 0;
+    },
+  };
+}

@@ -13,6 +13,8 @@ uniform sampler2D u_image;
 uniform sampler2D u_lut;
 uniform vec3 u_mean;
 uniform vec3 u_wbGain;
+uniform vec3 u_min;
+uniform vec3 u_max;
 uniform float u_alpha;
 uniform float u_intensity;
 uniform float u_saturation;
@@ -61,12 +63,15 @@ void main() {
   comp.b = c.b + u_alpha * blueComp * (1.0 - c.b) * c.g;
 
   // Shades-of-Gray white balance (gains derived from compensated Lp norms CPU-side).
-  // Clamp to [0,1] so highlight regions don't overflow into a blowout — those
-  // pixels were already saturated in the source.
+  // Clamp to [0,1] first so highlight regions don't get over-amplified by stretch.
   vec3 wb = clamp(comp * u_wbGain, 0.0, 1.0);
 
+  // Soft stretch: input is bounded [0,1], stats are post-clamp percentiles, and
+  // the span is clamped to >=0.3 in computeStats so amplification stays sane.
+  vec3 stretched = clamp((wb - u_min) / max(u_max - u_min, vec3(1e-3)), 0.0, 1.0);
+
   // Tone: gamma + S-curve
-  vec3 toned = pow(wb, vec3(u_gamma));
+  vec3 toned = pow(stretched, vec3(u_gamma));
   toned = sCurve(toned, u_contrast);
 
   // Saturation around BT.709 luminance
@@ -88,6 +93,8 @@ void main() {
 export type Stats = {
   mean: [number, number, number];
   wbGain: [number, number, number];
+  min: [number, number, number];
+  max: [number, number, number];
   alpha: number;
 };
 
@@ -126,6 +133,8 @@ export class Renderer {
     lut: WebGLUniformLocation;
     mean: WebGLUniformLocation;
     wbGain: WebGLUniformLocation;
+    min: WebGLUniformLocation;
+    max: WebGLUniformLocation;
     alpha: WebGLUniformLocation;
     intensity: WebGLUniformLocation;
     saturation: WebGLUniformLocation;
@@ -182,6 +191,8 @@ export class Renderer {
       lut: gl.getUniformLocation(prog, "u_lut")!,
       mean: gl.getUniformLocation(prog, "u_mean")!,
       wbGain: gl.getUniformLocation(prog, "u_wbGain")!,
+      min: gl.getUniformLocation(prog, "u_min")!,
+      max: gl.getUniformLocation(prog, "u_max")!,
       alpha: gl.getUniformLocation(prog, "u_alpha")!,
       intensity: gl.getUniformLocation(prog, "u_intensity")!,
       saturation: gl.getUniformLocation(prog, "u_saturation")!,
@@ -240,6 +251,8 @@ export class Renderer {
 
     gl.uniform3fv(this.locs.mean, stats.mean);
     gl.uniform3fv(this.locs.wbGain, stats.wbGain);
+    gl.uniform3fv(this.locs.min, stats.min);
+    gl.uniform3fv(this.locs.max, stats.max);
     gl.uniform1f(this.locs.alpha, stats.alpha);
     gl.uniform1f(this.locs.intensity, settings.intensity);
     gl.uniform1f(this.locs.saturation, settings.saturation);
@@ -290,15 +303,20 @@ export function computeStats(
   const blueCompTerm = Math.max(0, meanG - meanB);
 
   // Compensate red and blue per pixel, accumulate Lp norms (Shades-of-Gray, Finlayson-Trezzi 2004).
+  // First pass: compensation + Lp accumulation.
+  const compR = new Float32Array(total);
+  const compB = new Float32Array(total);
   let sumRp = 0;
   let sumGp = 0;
   let sumBp = 0;
-  for (let i = 0; i < data.length; i += 4) {
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     const r = data[i] / 255;
     const g = data[i + 1] / 255;
     const b = data[i + 2] / 255;
     const r2 = r + alpha * redCompTerm * (1 - r) * g;
     const b2 = b + alpha * blueCompTerm * (1 - b) * g;
+    compR[p] = r2;
+    compB[p] = b2;
     sumRp += Math.pow(r2, SOG_P);
     sumGp += Math.pow(g, SOG_P);
     sumBp += Math.pow(b2, SOG_P);
@@ -311,11 +329,64 @@ export function computeStats(
   const gainG = 1;
   const gainB = clampGain(normB > 0.001 ? normG / normB : 1);
 
+  // Second pass: histogram of post-WB-and-clamp values for percentile stretch.
+  // Working in [0,1] guarantees the stretch can't blow out highlights.
+  const histR = new Uint32Array(256);
+  const histG = new Uint32Array(256);
+  const histB = new Uint32Array(256);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const r = clamp01(compR[p] * gainR);
+    const g = clamp01((data[i + 1] / 255) * gainG);
+    const b = clamp01(compB[p] * gainB);
+    histR[(r * 255) | 0]++;
+    histG[(g * 255) | 0]++;
+    histB[(b * 255) | 0]++;
+  }
+
+  const lowFrac = 0.005;
+  const highFrac = 0.995;
+  const findCut = (hist: Uint32Array, frac: number) => {
+    const targetN = frac * total;
+    let acc = 0;
+    for (let i = 0; i < 256; i++) {
+      acc += hist[i];
+      if (acc >= targetN) return i;
+    }
+    return 255;
+  };
+
+  const MIN_SPAN = 0.3;
+  const min: [number, number, number] = [
+    findCut(histR, lowFrac) / 255,
+    findCut(histG, lowFrac) / 255,
+    findCut(histB, lowFrac) / 255,
+  ];
+  const max: [number, number, number] = [
+    findCut(histR, highFrac) / 255,
+    findCut(histG, highFrac) / 255,
+    findCut(histB, highFrac) / 255,
+  ];
+  for (let c = 0; c < 3; c++) {
+    const span = max[c] - min[c];
+    if (span < MIN_SPAN) {
+      const center = (max[c] + min[c]) / 2;
+      const half = MIN_SPAN / 2;
+      min[c] = Math.max(0, center - half);
+      max[c] = Math.min(1, center + half);
+    }
+  }
+
   return {
     mean: [meanR, meanG, meanB],
     wbGain: [gainR, gainG, gainB],
+    min,
+    max,
     alpha,
   };
+}
+
+function clamp01(v: number) {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
 function clampGain(g: number) {

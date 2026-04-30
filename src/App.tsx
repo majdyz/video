@@ -4,8 +4,10 @@ import {
   attachAudioRouting,
   buildCaptureContext,
   captureAudioForRecording,
+  createRecordingSink,
   pickBitrate,
   pickRecorderMime,
+  type RecordingSink,
 } from "./lib/recorder";
 import { parseCube } from "./lib/lut";
 import "./App.css";
@@ -58,6 +60,7 @@ export default function App() {
   const audioRoutingRef = useRef<AudioRouting>(null);
   const audioCleanupRef = useRef<(() => void) | null>(null);
   const onEndedRef = useRef<(() => void) | null>(null);
+  const sinkRef = useRef<RecordingSink | null>(null);
 
   const [mode, setMode] = useState<Mode>("idle");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -347,9 +350,13 @@ export default function App() {
 
     recorderRef.current = recorder;
     audioCleanupRef.current = audioCapture.cleanup;
-    const chunks: BlobPart[] = [];
+    const sink = await createRecordingSink();
+    sinkRef.current = sink;
+    let writeQueue: Promise<void> = Promise.resolve();
     recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size) chunks.push(e.data);
+      if (!e.data || !e.data.size) return;
+      // serialize writes so OPFS sees chunks in arrival order
+      writeQueue = writeQueue.then(() => sink.write(e.data)).catch(() => undefined);
     };
     recorder.onerror = (e: Event) => {
       const evt = e as Event & { error?: unknown };
@@ -389,19 +396,30 @@ export default function App() {
 
     const stopAndDownload = () =>
       new Promise<void>((resolve) => {
-        recorder.onstop = () => {
+        recorder.onstop = async () => {
           audioCapture.cleanup();
           audioCleanupRef.current = null;
-          const blob = new Blob(chunks, { type: candidate.mime || "video/webm" });
-          triggerDownload(blob, `${fileNameRef.current}-aqua.${candidate.ext}`);
-          resolve();
+          try {
+            await writeQueue;
+            const blob = await sink.finalize(candidate.mime || "video/webm");
+            triggerDownload(blob, `${fileNameRef.current}-aqua.${candidate.ext}`);
+          } catch (err) {
+            setError("Save failed: " + (err instanceof Error ? err.message : String(err)));
+          } finally {
+            await sink.cleanup();
+            sinkRef.current = null;
+            resolve();
+          }
         };
         try {
           recorder.stop();
         } catch {
           audioCapture.cleanup();
           audioCleanupRef.current = null;
-          resolve();
+          sink.cleanup().finally(() => {
+            sinkRef.current = null;
+            resolve();
+          });
         }
       });
 
@@ -440,6 +458,12 @@ export default function App() {
       } catch {
         // ignore
       }
+      try {
+        await sink.cleanup();
+      } catch {
+        // ignore
+      }
+      sinkRef.current = null;
       setRecording(false);
       setError("Couldn't start playback for recording: " + (e instanceof Error ? e.message : String(e)));
       startPreview();
@@ -471,6 +495,10 @@ export default function App() {
     if (audioCleanupRef.current) {
       audioCleanupRef.current();
       audioCleanupRef.current = null;
+    }
+    if (sinkRef.current) {
+      sinkRef.current.cleanup().catch(() => undefined);
+      sinkRef.current = null;
     }
 
     setRecording(false);
