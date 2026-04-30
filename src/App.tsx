@@ -344,6 +344,25 @@ export default function App() {
   }
 
   async function recordVideo() {
+    try {
+      await recordVideoInner();
+    } catch (e) {
+      recordingFlagRef.current = false;
+      if (audioCleanupRef.current) {
+        audioCleanupRef.current();
+        audioCleanupRef.current = null;
+      }
+      if (sinkRef.current) {
+        sinkRef.current.cleanup().catch(() => undefined);
+        sinkRef.current = null;
+      }
+      setRecording(false);
+      setError("Recording failed: " + (e instanceof Error ? e.message : String(e)));
+      startPreview();
+    }
+  }
+
+  async function recordVideoInner() {
     const canvas = canvasRef.current;
     const video = videoRef.current as VideoWithRVFC | null;
     if (!canvas || !video || !statsRef.current) return;
@@ -369,14 +388,20 @@ export default function App() {
       // ignore
     }
 
-    if ("wakeLock" in navigator) {
-      try {
-        wakeLockRef.current = await (navigator as Navigator & {
-          wakeLock: { request: (type: "screen") => Promise<WakeLockSentinel> };
-        }).wakeLock.request("screen");
-      } catch {
-        // wake lock denied; recording will still work but iOS may throttle
-      }
+    // Wake lock fire-and-forget — don't await it (it can throw synchronously
+    // on browsers that announce the API but don't actually implement
+    // .request, and we don't want to consume the user-gesture window or
+    // delay recorder startup either way).
+    const wakeLockApi = (navigator as Navigator & {
+      wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinel> };
+    }).wakeLock;
+    if (wakeLockApi && typeof wakeLockApi.request === "function") {
+      wakeLockApi
+        .request("screen")
+        .then((lock) => {
+          wakeLockRef.current = lock;
+        })
+        .catch(() => undefined);
     }
 
     if (rendererRef.current) {
@@ -388,7 +413,7 @@ export default function App() {
     if (!audioRoutingRef.current) {
       audioRoutingRef.current = attachAudioRouting(video);
     }
-    const audioCapture = await captureAudioForRecording(audioRoutingRef.current);
+    const audioCapture = captureAudioForRecording(audioRoutingRef.current);
     const stream = new MediaStream([
       ...captureCtx.videoStream.getVideoTracks(),
       ...audioCapture.tracks,

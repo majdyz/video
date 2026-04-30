@@ -78,17 +78,15 @@ export function attachAudioRouting(video: HTMLVideoElement): AudioRouting | null
   }
 }
 
-export async function captureAudioForRecording(routing: AudioRouting | null): Promise<{
+export function captureAudioForRecording(routing: AudioRouting | null): {
   tracks: MediaStreamTrack[];
   cleanup: () => void;
-}> {
+} {
   if (!routing) return { tracks: [], cleanup: () => undefined };
+  // Resume fire-and-forget so we don't burn the user-gesture window awaiting
+  // a Promise that can hang on some browsers.
   if (routing.ctx.state === "suspended") {
-    try {
-      await routing.ctx.resume();
-    } catch {
-      // ignore
-    }
+    routing.ctx.resume().catch(() => undefined);
   }
   const dest = routing.ctx.createMediaStreamDestination();
   routing.source.connect(dest);
