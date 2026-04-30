@@ -26,11 +26,12 @@ export function pickRecorderMime(): Candidate | null {
   return null;
 }
 
-// ~6 bits/pixel·second, capped at 50 Mbps. Matches iPhone's native 4K H.264
-// bitrate, leaves headroom under Safari's MediaRecorder memory ceiling.
+// ~4 bits/pixel·second, capped at 30 Mbps. iPhone's native 4K H.264 is around
+// 25–30 Mbps; pushing higher is where Safari's MediaRecorder starts dropping
+// frames or losing the WebGL context mid-recording.
 export function pickBitrate(width: number, height: number): number {
   const px = width * height;
-  return Math.min(50_000_000, Math.max(3_000_000, Math.round(px * 6)));
+  return Math.min(30_000_000, Math.max(3_000_000, Math.round(px * 4)));
 }
 
 type CaptureContext = {
@@ -40,44 +41,16 @@ type CaptureContext = {
 };
 
 export function buildCaptureContext(canvas: HTMLCanvasElement): CaptureContext {
-  // Prefer passive capture (captureStream(0) + track.requestFrame) for 1:1
-  // source-to-output frame mapping, but only if both are actually available.
-  // iOS Safari versions that lack track.requestFrame would otherwise leave
-  // us with a passive stream and no way to push frames — recording would
-  // start and produce zero frames.
-  let canvasStream: MediaStream | null = null;
-  let useRequestFrame = false;
-  try {
-    const passive = canvas.captureStream(0);
-    const track = passive.getVideoTracks()[0];
-    const trackWithRequestFrame = track as MediaStreamTrack & { requestFrame?: () => void };
-    if (track && typeof trackWithRequestFrame.requestFrame === "function") {
-      canvasStream = passive;
-      useRequestFrame = true;
-    } else {
-      track?.stop();
-    }
-  } catch {
-    // ignore, fall through to active mode
-  }
-  if (!canvasStream) {
-    canvasStream = canvas.captureStream(30);
-  }
-
+  // Active capture at 30fps. The passive captureStream(0)+requestFrame path
+  // gave 1:1 frame mapping but lost frames mid-recording on iOS Safari for
+  // long 4K clips ("black middle" symptom). Active mode is browser-managed
+  // and far more stable.
+  const canvasStream = canvas.captureStream(30);
   const videoTrack = canvasStream.getVideoTracks()[0];
-  const trackWithRequestFrame = videoTrack as MediaStreamTrack & { requestFrame?: () => void };
   return {
     videoStream: canvasStream,
     videoTrack,
-    pushFrame: () => {
-      if (useRequestFrame) {
-        try {
-          trackWithRequestFrame.requestFrame?.();
-        } catch {
-          // ignore
-        }
-      }
-    },
+    pushFrame: () => undefined,
   };
 }
 

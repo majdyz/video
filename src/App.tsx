@@ -71,6 +71,7 @@ export default function App() {
   const audioCleanupRef = useRef<(() => void) | null>(null);
   const onEndedRef = useRef<(() => void) | null>(null);
   const sinkRef = useRef<RecordingSink | null>(null);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
   const [mode, setMode] = useState<Mode>("idle");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -95,12 +96,33 @@ export default function App() {
 
   useEffect(() => {
     if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
     try {
-      rendererRef.current = new Renderer(canvasRef.current);
+      rendererRef.current = new Renderer(canvas);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
     setCanRecord(pickRecorderMime() !== null);
+
+    const onLost = (e: Event) => {
+      e.preventDefault();
+      setError("GPU context lost — try a smaller video or reload the page");
+      recordingFlagRef.current = false;
+    };
+    const onRestored = () => {
+      try {
+        rendererRef.current = new Renderer(canvas);
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    };
+    canvas.addEventListener("webglcontextlost", onLost);
+    canvas.addEventListener("webglcontextrestored", onRestored);
+    return () => {
+      canvas.removeEventListener("webglcontextlost", onLost);
+      canvas.removeEventListener("webglcontextrestored", onRestored);
+    };
   }, []);
 
   // Re-render the loaded photo whenever any setting changes; recompute stats
@@ -337,10 +359,24 @@ export default function App() {
 
     video.pause();
     video.loop = false;
+    // muted=false is required on iOS for the audio decoder to actually run.
+    // The audio still goes through a 0-gain Web Audio graph so the user
+    // hears nothing locally, but createMediaElementSource gets real samples.
+    video.muted = false;
     try {
       video.currentTime = 0;
     } catch {
       // ignore
+    }
+
+    if ("wakeLock" in navigator) {
+      try {
+        wakeLockRef.current = await (navigator as Navigator & {
+          wakeLock: { request: (type: "screen") => Promise<WakeLockSentinel> };
+        }).wakeLock.request("screen");
+      } catch {
+        // wake lock denied; recording will still work but iOS may throttle
+      }
     }
 
     if (rendererRef.current) {
@@ -395,7 +431,6 @@ export default function App() {
       rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
       const eff = showOriginalRef.current ? OFF_SETTINGS : settingsRef.current;
       rendererRef.current.render(statsRef.current, eff);
-      captureCtx.pushFrame();
       setRecordTime(v.currentTime);
       if (v.duration) setRecordProgress(v.currentTime / v.duration);
     };
@@ -453,10 +488,19 @@ export default function App() {
       onEndedRef.current = null;
       video.removeEventListener("ended", onEnded);
       await stopAndDownload();
+      if (wakeLockRef.current) {
+        try {
+          await wakeLockRef.current.release();
+        } catch {
+          // ignore
+        }
+        wakeLockRef.current = null;
+      }
       setRecording(false);
       setRecordProgress(0);
       setRecordTime(0);
       video.loop = true;
+      video.muted = true;
       try {
         video.currentTime = 0;
       } catch {
@@ -525,6 +569,10 @@ export default function App() {
       sinkRef.current.cleanup().catch(() => undefined);
       sinkRef.current = null;
     }
+    if (wakeLockRef.current) {
+      wakeLockRef.current.release().catch(() => undefined);
+      wakeLockRef.current = null;
+    }
 
     setRecording(false);
     setRecordProgress(0);
@@ -532,6 +580,7 @@ export default function App() {
 
     if (v) {
       v.loop = true;
+      v.muted = true;
       try {
         v.currentTime = 0;
       } catch {
