@@ -750,11 +750,15 @@ export default function App() {
                   <stop offset="1" stopColor="#2bb89e" />
                 </linearGradient>
               </defs>
+              {/* Standing sea lion: head tilted up, body vertical, rear flippers fanned at base */}
               <path
-                d="M5 19 C5 13 11 9 16 9 C18 9 19 8 20.5 8 C22 8 22 10.5 20 11.5 C22 12 24 12.5 25 13.5 C27 14 28.5 15.5 29 17 L30.5 14 L30.5 22 L29 19 C28 21 26 22 23 22 C18 23 11 23 7 22 C5 21.5 5 20 5 19 Z"
+                d="M15 3 C17 2.4 19 2.6 20.2 4 L22.4 3.6 L23 5.6 L21.4 6.4 C22 7.4 22 8.4 21.4 9.2 C22.6 10.2 23 11.6 23 13.4 C23 16.4 21.8 19.2 20.6 21.6 C21.6 23 24 24.6 25.8 26 L26.4 27.4 L20 27.4 L18.4 25.8 L18 21.4 L14 21.4 L13.6 25.8 L12 27.4 L5.6 27.4 L6.2 26 C8 24.6 10.4 23 11.4 21.6 C10.2 19.2 9 16.4 9 13.4 C9 11.6 9.4 10.2 10.6 9.2 C10 8.4 10 7.4 10.6 6.4 L9 5.6 L9.6 3.6 L11.8 4 C12.7 2.9 13.8 2.6 15 3 Z"
                 fill="url(#lg)"
               />
-              <circle cx="19.5" cy="11" r="0.7" fill="#04101c" opacity="0.85" />
+              {/* Eye */}
+              <circle cx="17.6" cy="6.4" r="0.7" fill="#04101c" opacity="0.85" />
+              {/* Nose dot */}
+              <circle cx="20.4" cy="5.4" r="0.45" fill="#04101c" opacity="0.6" />
             </svg>
           </div>
           <div>
