@@ -169,11 +169,16 @@ export async function analyzeVideo(
 
         if (prevThumb) {
           const t = trackAndFit(prevThumb, gray, features, scaleX, scaleY);
-          // Compose: cum = cum ∘ t
-          const newA = cumA * t.a - cumB * t.b;
-          const newB = cumA * t.b + cumB * t.a;
-          const newTX = cumA * t.tx - cumB * t.ty + cumTX;
-          const newTY = cumB * t.tx + cumA * t.ty + cumTY;
+          // t maps prev image coords → current image coords. The cumulative
+          // path tracks world → current-frame, so the new transform must be
+          // applied on the LEFT: cum_new = t · cum_old. (The previous
+          // right-multiplication produced wrong results once rotation was
+          // involved — it rotated the per-frame translation by the
+          // accumulated rotation, putting it in the wrong frame.)
+          const newA = t.a * cumA - t.b * cumB;
+          const newB = t.b * cumA + t.a * cumB;
+          const newTX = t.a * cumTX - t.b * cumTY + t.tx;
+          const newTY = t.b * cumTX + t.a * cumTY + t.ty;
           cumA = newA;
           cumB = newB;
           cumTX = newTX;
