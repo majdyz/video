@@ -78,8 +78,11 @@ export default function App() {
   useEffect(() => {
     const a = analysisRef.current;
     if (!a) return;
-    smoothRef.current = smoothPath(a, smoothing);
-  }, [smoothing, analysisReady]);
+    const v = videoRef.current;
+    const w = v?.videoWidth ?? 1920;
+    const h = v?.videoHeight ?? 1080;
+    smoothRef.current = smoothPath(a, smoothing, crop, w, h);
+  }, [smoothing, crop, analysisReady]);
 
   useEffect(() => {
     setCanRecord(pickRecorderMime() !== null);
@@ -258,7 +261,7 @@ export default function App() {
         setBusy(`Analyzing motion ${Math.floor(p * 100)}%`);
       });
       analysisRef.current = result;
-      smoothRef.current = smoothPath(result, smoothing);
+      smoothRef.current = smoothPath(result, smoothing, crop, v.videoWidth, v.videoHeight);
       setAnalysisReady(true);
 
       v.play().catch(() => undefined);
@@ -578,11 +581,18 @@ export default function App() {
             absolute camera path: <code>(a, b, tx, ty)</code> per frame.
           </li>
           <li>
-            <b>Smoothing</b> — median pre-filter to absorb tracking spikes,
-            then separable 1D Gaussian (mirror-padded). Slider maps
-            quadratically to <code>sigma 4..240</code> frames (0.13 s to 8 s
-            at 30 Hz). Re-smoothing is sub-millisecond — slider tweaks don't
-            re-run analysis.
+            <b>L1-optimal path smoothing</b> — median pre-filter, then ADMM
+            optimisation of{" "}
+            <code>min ‖p − c‖² + λ₁‖D¹p‖₁ + λ₂‖D²p‖₁</code> per path
+            component. The L1 penalties on first and second differences
+            produce piecewise-linear paths with smooth accelerations
+            (hold-still / linear-pan / smooth-accel segments) — the same
+            class of "professional camera move" Grundmann-Kwatra-Essa
+            target. The <code>‖p − c‖∞ ≤ box</code> constraint keeps the
+            virtual path within the crop budget. ADMM solves the
+            pentadiagonal system in O(n) per iteration via banded
+            Cholesky (LDLᵀ); 80 iterations are plenty for paths of
+            thousands of frames.
           </li>
           <li>
             <b>Render</b> — residual{" "}
@@ -594,10 +604,12 @@ export default function App() {
         </ul>
         <h4>Caveats</h4>
         <p>
-          No proper L1-optimal path solver yet — Gaussian + median is much
-          smaller code with similar visual results for typical hand-held
-          shake. Rolling-shutter wobble (CMOS skew on whip-pans) needs
-          per-row correction and is out of scope for v1.
+          We use the L1 first- and second-difference penalty (jitter +
+          acceleration). Grundmann's full formulation includes a third
+          derivative (jerk) and explicit constant/linear/parabolic regime
+          weights via linear programming — that's the natural next
+          upgrade. Rolling-shutter wobble (CMOS skew on whip-pans) needs
+          per-row correction and is out of scope.
         </p>
         <h4>Papers</h4>
         <ul>

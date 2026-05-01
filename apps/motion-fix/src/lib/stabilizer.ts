@@ -503,37 +503,237 @@ export function gaussianSmooth(arr: Float32Array, sigma: number): Float32Array {
   return out;
 }
 
-// Smooth the cumulative path: median pre-filter to absorb tracking spikes,
-// then Gaussian to mimic a smooth professional camera move. Maps slider 0..1
-// to a much wider sigma range (4..240 frames at 30Hz, i.e. 0.13s..8s).
+// L1 path optimisation via ADMM, inspired by Grundmann-Kwatra-Essa (2011).
+//
+// Solves:
+//   min_p sum_t (p[t] - c[t])^2
+//         + lambda1 * sum_t |p[t+1] - p[t]|          (first-difference, jitter)
+//         + lambda2 * sum_t |p[t+2] - 2p[t+1] + p[t]|  (second-difference, accel)
+//
+// L1 penalties produce piecewise-linear "professional" camera paths
+// (hold-still / linear-pan / smooth-accel segments) instead of the
+// constantly-curved output of plain Gaussian smoothing.
+//
+// We use an ADMM formulation with two auxiliary slack variables (z1 for
+// first-difference, z2 for second-difference) and the standard p-update /
+// z-update / u-update split. The p-update solves a pentadiagonal linear
+// system (I + rho1·D1ᵀD1 + rho2·D2ᵀD2) which we factor as I + 2ρ1 + 6ρ2 on
+// the diagonal etc and solve via banded Cholesky in O(n).
+//
+// Box constraint |p[t] - c[t]| ≤ box is applied as a projection after each
+// p-update. Approximate but robust and very fast.
+
+function l1Smooth(
+  c: Float32Array,
+  lambda1: number,
+  lambda2: number,
+  box: number,
+  iterations = 80,
+): Float32Array {
+  const n = c.length;
+  if (n < 3) return c.slice();
+
+  const p = new Float32Array(c);
+  const z1 = new Float32Array(n - 1);
+  const u1 = new Float32Array(n - 1);
+  const z2 = new Float32Array(Math.max(0, n - 2));
+  const u2 = new Float32Array(Math.max(0, n - 2));
+  const rho1 = 1.0;
+  const rho2 = 1.0;
+
+  // The system matrix M = I + ρ1·D1ᵀD1 + ρ2·D2ᵀD2 is symmetric pentadiagonal.
+  // D1ᵀD1 has diagonal [1, 2, 2, ..., 2, 1], sub/super = -1.
+  // D2ᵀD2 has diagonal [1, 5, 6, 6, ..., 6, 5, 1], with bands at +/-1 and +/-2.
+  // Build the five band arrays once; they don't change between iterations.
+  const d0 = new Float32Array(n);
+  const d1 = new Float32Array(n - 1);
+  const d2 = new Float32Array(n - 2);
+  for (let i = 0; i < n; i++) {
+    let dd0 = 1;
+    if (i === 0 || i === n - 1) dd0 += rho1; else dd0 += 2 * rho1;
+    if (i === 0 || i === n - 1) dd0 += rho2;
+    else if (i === 1 || i === n - 2) dd0 += 5 * rho2;
+    else dd0 += 6 * rho2;
+    d0[i] = dd0;
+  }
+  for (let i = 0; i < n - 1; i++) {
+    d1[i] = -rho1;
+    if (i === 0 || i === n - 2) d1[i] += -2 * rho2;
+    else d1[i] += -4 * rho2;
+  }
+  for (let i = 0; i < n - 2; i++) d2[i] = rho2;
+
+  // Banded LDLᵀ factorisation (symmetric, bandwidth = 2). Standard Cholesky
+  // for a pentadiagonal SPD matrix.
+  const L1 = new Float32Array(n - 1);
+  const L2 = new Float32Array(n - 2);
+  const D = new Float32Array(n);
+  factorPentadiag(d0, d1, d2, L1, L2, D);
+
+  const rhs = new Float32Array(n);
+  const tmp = new Float32Array(n);
+
+  for (let iter = 0; iter < iterations; iter++) {
+    // Build RHS = c + rho1·D1ᵀ(z1 - u1) + rho2·D2ᵀ(z2 - u2)
+    for (let i = 0; i < n; i++) rhs[i] = c[i];
+    for (let i = 0; i < n - 1; i++) {
+      const v = rho1 * (z1[i] - u1[i]);
+      rhs[i] -= v;
+      rhs[i + 1] += v;
+    }
+    for (let i = 0; i < n - 2; i++) {
+      const v = rho2 * (z2[i] - u2[i]);
+      rhs[i] += v;
+      rhs[i + 1] -= 2 * v;
+      rhs[i + 2] += v;
+    }
+    // p-update: solve M·p = rhs via banded LDLᵀ.
+    solvePentadiag(L1, L2, D, rhs, p, tmp);
+
+    // Box projection: |p[t] - c[t]| ≤ box.
+    if (box > 0 && Number.isFinite(box)) {
+      for (let i = 0; i < n; i++) {
+        const diff = p[i] - c[i];
+        if (diff > box) p[i] = c[i] + box;
+        else if (diff < -box) p[i] = c[i] - box;
+      }
+    }
+
+    // z1-update: soft-threshold(D1·p + u1, lambda1/rho1)
+    const t1 = lambda1 / rho1;
+    for (let i = 0; i < n - 1; i++) {
+      const v = (p[i + 1] - p[i]) + u1[i];
+      z1[i] = v > t1 ? v - t1 : v < -t1 ? v + t1 : 0;
+      u1[i] += (p[i + 1] - p[i]) - z1[i];
+    }
+    // z2-update: soft-threshold(D2·p + u2, lambda2/rho2)
+    const t2 = lambda2 / rho2;
+    for (let i = 0; i < n - 2; i++) {
+      const v = (p[i + 2] - 2 * p[i + 1] + p[i]) + u2[i];
+      z2[i] = v > t2 ? v - t2 : v < -t2 ? v + t2 : 0;
+      u2[i] += (p[i + 2] - 2 * p[i + 1] + p[i]) - z2[i];
+    }
+  }
+
+  return p;
+}
+
+// Banded Cholesky for symmetric pentadiagonal SPD matrix.
+//   M[i][i]   = d0[i]
+//   M[i][i+1] = d1[i]
+//   M[i][i+2] = d2[i]
+// Factors as M = L·D·Lᵀ where L is unit lower bidiagonal-of-bandwidth-2.
+function factorPentadiag(
+  d0: Float32Array,
+  d1: Float32Array,
+  d2: Float32Array,
+  L1: Float32Array,
+  L2: Float32Array,
+  D: Float32Array,
+): void {
+  const n = d0.length;
+  for (let i = 0; i < n; i++) {
+    let di = d0[i];
+    if (i >= 1) di -= L1[i - 1] * L1[i - 1] * D[i - 1];
+    if (i >= 2) di -= L2[i - 2] * L2[i - 2] * D[i - 2];
+    D[i] = di;
+    if (i + 1 < n) {
+      let v = d1[i];
+      if (i >= 1) v -= L2[i - 1] * L1[i - 1] * D[i - 1];
+      L1[i] = v / di;
+    }
+    if (i + 2 < n) L2[i] = d2[i] / di;
+  }
+}
+
+function solvePentadiag(
+  L1: Float32Array,
+  L2: Float32Array,
+  D: Float32Array,
+  rhs: Float32Array,
+  out: Float32Array,
+  tmp: Float32Array,
+): void {
+  const n = D.length;
+  // Forward solve: L·y = rhs
+  for (let i = 0; i < n; i++) {
+    let v = rhs[i];
+    if (i >= 1) v -= L1[i - 1] * tmp[i - 1];
+    if (i >= 2) v -= L2[i - 2] * tmp[i - 2];
+    tmp[i] = v;
+  }
+  // Diagonal: solve D·z = y
+  for (let i = 0; i < n; i++) tmp[i] /= D[i];
+  // Backward solve: Lᵀ·x = z
+  for (let i = n - 1; i >= 0; i--) {
+    let v = tmp[i];
+    if (i + 1 < n) v -= L1[i] * out[i + 1];
+    if (i + 2 < n) v -= L2[i] * out[i + 2];
+    out[i] = v;
+  }
+}
+
+// Smooth the cumulative path. The slider maps to L1 penalty weights for the
+// first and second derivatives — at high values the resulting path is
+// piecewise-linear with smooth accelerations, mimicking Grundmann-Kwatra-Essa
+// (2011). A median pre-filter absorbs any single-frame tracking spikes.
+//
+// The crop fraction is converted into a "box" budget (max deviation) for each
+// component so the optimiser respects what we can hide via the canvas
+// scale-up and translation clamp. Translation components get the budget in
+// pixels; rotation+scale components use a tiny hard cap (we don't want the
+// virtual camera to rotate or zoom away from the source significantly).
 export function smoothPath(
   result: AnalysisResult,
   smoothing: number,
+  crop: number = 0.1,
+  width: number = 1920,
+  height: number = 1080,
 ): {
   smoothA: Float32Array;
   smoothB: Float32Array;
   smoothTX: Float32Array;
   smoothTY: Float32Array;
 } {
-  const sigma = sigmaForSmoothing(smoothing);
-  // Light median pre-pass; radius scales with sigma but is capped.
-  const medRadius = Math.min(5, Math.max(1, Math.round(sigma / 12)));
+  const w = penaltiesForSmoothing(smoothing);
+  const medRadius = w.medianRadius;
   const aMed = medianFilter(result.cumA, medRadius);
   const bMed = medianFilter(result.cumB, medRadius);
   const txMed = medianFilter(result.cumTX, medRadius);
   const tyMed = medianFilter(result.cumTY, medRadius);
+
+  const txBox = Math.max(1, width * crop);
+  const tyBox = Math.max(1, height * crop);
+  // Rotation/scale don't have a meaningful "crop budget"; clamp via a
+  // generous box so the optimiser can deviate freely. Box is on the
+  // raw-vs-smooth distance, not absolute, so this just bounds drift.
+  const abBox = 0.2;
+
   return {
-    smoothA: gaussianSmooth(aMed, sigma),
-    smoothB: gaussianSmooth(bMed, sigma),
-    smoothTX: gaussianSmooth(txMed, sigma),
-    smoothTY: gaussianSmooth(tyMed, sigma),
+    smoothA: l1Smooth(aMed, w.lambda1Rs, w.lambda2Rs, abBox),
+    smoothB: l1Smooth(bMed, w.lambda1Rs, w.lambda2Rs, abBox),
+    smoothTX: l1Smooth(txMed, w.lambda1T, w.lambda2T, txBox),
+    smoothTY: l1Smooth(tyMed, w.lambda1T, w.lambda2T, tyBox),
   };
 }
 
-export function sigmaForSmoothing(smoothing: number): number {
+function penaltiesForSmoothing(smoothing: number): {
+  lambda1T: number;
+  lambda2T: number;
+  lambda1Rs: number;
+  lambda2Rs: number;
+  medianRadius: number;
+} {
   const s = Math.max(0, Math.min(1, smoothing));
-  // Quadratic ramp so the slider has fine control near the low end.
-  return 4 + (s * s) * 236;
+  // Quadratic ramp; the high end is "tripod-locked".
+  const k = 0.05 + s * s * 200;
+  return {
+    lambda1T: k * 4,            // translation jitter penalty
+    lambda2T: k * 60,           // translation acceleration penalty
+    lambda1Rs: k * 0.005,       // rotation/scale jitter (much smaller scale)
+    lambda2Rs: k * 0.08,
+    medianRadius: Math.min(4, 1 + Math.floor(s * 6)),
+  };
 }
 
 export function frameIndexForTime(result: AnalysisResult, time: number): number {
