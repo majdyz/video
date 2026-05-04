@@ -30,7 +30,7 @@ import { Renderer, computeStats, type Settings, type Stats } from "./lib/correct
 import { parseCube } from "./lib/lut";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
 import { isFunieReady, loadFunie, FUNIE_SIZE_MB } from "./lib/funie-loader";
-import { runFunie } from "./lib/funie-runner";
+import { runFunie, lerpTransferToIdentity } from "./lib/funie-runner";
 
 type Mode = "idle" | "photo" | "video";
 type Quality = "classical" | "ai";
@@ -232,9 +232,11 @@ export default function App() {
       // Always upload the current frame and apply the cached AI transfer at
       // full FPS. The model runs in the background — no render-frame is
       // gated on inference, so playback stays smooth even when inference
-      // takes 100+ ms per frame.
+      // takes 100+ ms per frame. Strength is lerped toward identity at
+      // render time so the slider takes effect on the very next render
+      // (no need to wait for the next inference).
       rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
-      const t = aiTransferRef.current;
+      const t = lerpTransferToIdentity(aiTransferRef.current, aiStrengthRef.current);
       rendererRef.current.renderAi(t.gain, t.bias);
       // Kick off a fresh inference if none in flight — refreshes the
       // transfer from the current frame's content.

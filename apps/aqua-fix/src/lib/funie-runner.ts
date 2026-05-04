@@ -101,6 +101,11 @@ export async function runFunie(src: Source, strength = 1.0): Promise<FunieResult
   }
   outCtx.putImageData(outputImageData, 0, 0);
 
+  // Transfer is ALWAYS full-strength. Strength is applied at render time
+  // by lerping toward identity in the shader caller — that way sliding
+  // the Strength slider takes effect immediately, even on paused video,
+  // without waiting for the next inference (which on a paused frame
+  // would never happen).
   const n = MODEL_SIZE * MODEL_SIZE;
   const meanS = [sumS[0] / n, sumS[1] / n, sumS[2] / n];
   const meanA = [sumA[0] / n, sumA[1] / n, sumA[2] / n];
@@ -113,15 +118,28 @@ export async function runFunie(src: Source, strength = 1.0): Promise<FunieResult
     // Clamp gain to keep transfer well-conditioned (prevents pathological
     // cases on near-monochromatic patches like deep-blue water frames).
     const gClamped = Math.max(0.4, Math.min(2.5, g));
-    // Apply strength lerp to the transfer too — strength=0 gives identity.
-    const gMixed = 1 + (gClamped - 1) * s;
-    const bRaw = meanA[c] - gClamped * meanS[c];
-    const bMixed = bRaw * s;
-    gain[c] = gMixed;
-    bias[c] = bMixed;
+    gain[c] = gClamped;
+    bias[c] = meanA[c] - gClamped * meanS[c];
   }
 
   return { canvas: outCanvas, transfer: { gain, bias } };
+}
+
+// Lerp a full-strength transfer toward identity by (1 - strength).
+// Strength = 1 → original transfer; strength = 0 → identity (no effect).
+export function lerpTransferToIdentity(
+  t: ColorTransfer,
+  strength: number,
+): ColorTransfer {
+  const s = Math.min(1, Math.max(0, strength));
+  return {
+    gain: [
+      1 + (t.gain[0] - 1) * s,
+      1 + (t.gain[1] - 1) * s,
+      1 + (t.gain[2] - 1) * s,
+    ],
+    bias: [t.bias[0] * s, t.bias[1] * s, t.bias[2] * s],
+  };
 }
 
 function clamp255(v: number): number {
