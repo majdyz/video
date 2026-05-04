@@ -30,17 +30,13 @@ import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
 
 type Mode = "idle" | "photo" | "video";
 
-// Defaults updated for the multi-scale fusion pipeline. CLAHE is gone:
-// fusion blends a gamma-corrected branch with an unsharp-masked branch and
-// the contrast slider now controls the unsharp amount on the I2 branch.
-// Detail drives the Aubry-style local-Laplacian "Clarity" remap.
 const DEFAULT_SETTINGS: Settings = {
   intensity: 1.0,
   castStrength: 0.85,
   saturation: 1.18,
   gamma: 0.92,
   contrast: 0.3,
-  detail: 0.4,
+  clahe: 0.6,
   lutMix: 1.0,
 };
 
@@ -50,9 +46,20 @@ const OFF_SETTINGS: Settings = {
   saturation: 1,
   gamma: 1,
   contrast: 0,
-  detail: 0,
+  clahe: 0,
   lutMix: 0,
 };
+
+const IDENTITY_TONE_LUT = (() => {
+  const a = new Uint8Array(256 * 4);
+  for (let i = 0; i < 256; i++) {
+    a[i * 4] = i;
+    a[i * 4 + 1] = i;
+    a[i * 4 + 2] = i;
+    a[i * 4 + 3] = 255;
+  }
+  return a;
+})();
 
 const IDENTITY_STATS: Stats = {
   mean: [0.5, 0.5, 0.5],
@@ -60,13 +67,14 @@ const IDENTITY_STATS: Stats = {
   min: [0, 0, 0],
   max: [1, 1, 1],
   alpha: 0,
+  toneLUT: IDENTITY_TONE_LUT,
 };
 
 const PRESETS: { label: string; settings: Settings }[] = [
   { label: "Off", settings: OFF_SETTINGS },
-  { label: "Shallow", settings: { intensity: 0.85, castStrength: 0.55, saturation: 1.1, gamma: 0.96, contrast: 0.18, detail: 0.3, lutMix: 1.0 } },
+  { label: "Shallow", settings: { intensity: 0.85, castStrength: 0.55, saturation: 1.1, gamma: 0.96, contrast: 0.18, clahe: 0.4, lutMix: 1.0 } },
   { label: "Reef", settings: DEFAULT_SETTINGS },
-  { label: "Deep", settings: { intensity: 1.0, castStrength: 1.0, saturation: 1.3, gamma: 0.86, contrast: 0.4, detail: 0.55, lutMix: 1.0 } },
+  { label: "Deep", settings: { intensity: 1.0, castStrength: 1.0, saturation: 1.3, gamma: 0.86, contrast: 0.4, clahe: 0.75, lutMix: 1.0 } },
 ];
 
 type AudioRouting = ReturnType<typeof attachAudioRouting>;
@@ -669,7 +677,7 @@ export default function App() {
       <Modal open={showInfo} onClose={() => setShowInfo(false)} title="How Aqua Fix works">
         <h4>Pipeline</h4>
         <p>
-          Each frame runs through a multi-pass WebGL graph on-device:
+          Each frame runs through a single WebGL fragment shader on-device:
         </p>
         <ul>
           <li>
@@ -689,18 +697,10 @@ export default function App() {
             minimum span floor so flat scenes don't get over-amplified.
           </li>
           <li>
-            <b>Multi-scale Laplacian fusion</b> — the white-balanced image
-            forks into a gamma-corrected branch and an unsharp-masked branch.
-            For each branch we compute four Mertens / Achanta weight maps
-            (Laplacian contrast, frequency-tuned saliency, saturation,
-            exposedness), build Gaussian and Laplacian pyramids, and blend
-            per level. Reconstruction is artefact-free because every pixel
-            is composed at its native frequency band.
-          </li>
-          <li>
-            <b>Local-Laplacian "Clarity" detail</b> — a fast Aubry-style
-            remap on the fused image's high-frequency residual; controls
-            midtone detail without halos, gated by the Detail slider.
+            <b>CLAHE-style luminance equalisation</b> — histogram of the
+            BT.709 luma, clipped at 3% per bin, redistributed; the resulting
+            tone LUT rescales RGB by the <code>L_out / L_in</code> ratio so
+            colour balance is preserved while local contrast comes back.
           </li>
           <li>
             <b>Optional Lightroom .cube LUT</b> — packed as a 2D-tiled 3D
@@ -735,15 +735,8 @@ export default function App() {
             </a>
           </li>
           <li>
-            Mertens, Kautz, Van Reeth (2007) — Exposure Fusion (PG)
-          </li>
-          <li>
-            Achanta, Hemami, Estrada, Süsstrunk (2009) — Frequency-tuned
-            Salient Region Detection (CVPR)
-          </li>
-          <li>
-            Aubry, Paris, Hasinoff, Kautz, Durand (2014) — Fast Local
-            Laplacian Filters (TOG)
+            Pizer et al. (1987) — Adaptive Histogram Equalization and its
+            Variations (CLAHE)
           </li>
           <li>
             Reference impl that informed defaults:{" "}
@@ -860,8 +853,8 @@ export default function App() {
               {lutName && <p className="lut-name" title={lutName}>{lutName}</p>}
               <Slider label="LUT mix" value={settings.lutMix} min={0} max={1} step={0.01}
                 onChange={(v) => setSettings((s) => ({ ...s, lutMix: v }))} disabled={recording || !lutName} />
-              <Slider label="Detail" value={settings.detail} min={0} max={1} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, detail: v }))} disabled={recording} />
+              <Slider label="CLAHE" value={settings.clahe} min={0} max={1} step={0.01}
+                onChange={(v) => setSettings((s) => ({ ...s, clahe: v }))} disabled={recording} />
               <Slider label="Gamma" value={settings.gamma} min={0.5} max={1.5} step={0.01}
                 onChange={(v) => setSettings((s) => ({ ...s, gamma: v }))} disabled={recording} />
               <Slider label="Contrast" value={settings.contrast} min={0} max={1} step={0.01}
@@ -915,12 +908,17 @@ function lerpStats(a: Stats, b: Stats, t: number): Stats {
     p: [number, number, number],
     q: [number, number, number],
   ): [number, number, number] => [mix(p[0], q[0]), mix(p[1], q[1]), mix(p[2], q[2])];
+  const lutOut = new Uint8Array(256 * 4);
+  for (let i = 0; i < 256 * 4; i++) {
+    lutOut[i] = Math.round(a.toneLUT[i] * (1 - t) + b.toneLUT[i] * t);
+  }
   return {
     mean: mix3(a.mean, b.mean),
     wbGain: mix3(a.wbGain, b.wbGain),
     min: mix3(a.min, b.min),
     max: mix3(a.max, b.max),
     alpha: b.alpha,
+    toneLUT: lutOut,
   };
 }
 
@@ -931,6 +929,6 @@ function matchesPreset(a: Settings, b: Settings, eps = 0.01) {
     Math.abs(a.saturation - b.saturation) < eps &&
     Math.abs(a.gamma - b.gamma) < eps &&
     Math.abs(a.contrast - b.contrast) < eps &&
-    Math.abs(a.detail - b.detail) < eps
+    Math.abs(a.clahe - b.clahe) < eps
   );
 }
