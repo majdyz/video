@@ -1,5 +1,9 @@
-const VERSION = "aqua-fix-v3";
+const VERSION = "aqua-fix-v4";
 const STATIC = ["./icon.svg", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png", "./manifest.webmanifest"];
+// Caches we own outside the SW (Cache API populated by the app's lazy
+// loaders). Activate-step must NOT delete these — otherwise every page
+// activation wipes the lazy-loaded model bytes the app just stashed.
+const DEPS_CACHE_PREFIXES = ["aqua-fix-models-"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -11,8 +15,13 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k)))
-    )
+      Promise.all(
+        keys
+          .filter((k) => k !== VERSION)
+          .filter((k) => !DEPS_CACHE_PREFIXES.some((p) => k.startsWith(p)))
+          .map((k) => caches.delete(k)),
+      ),
+    ),
   );
   self.clients.claim();
 });
