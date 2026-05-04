@@ -75,7 +75,14 @@ async function doLoad(onProgress?: (pct: number) => void): Promise<ortType.Infer
 
   const res = await fetch(FUNIE_URL);
   if (!res.ok) throw new Error(`Failed to fetch FUnIE model: HTTP ${res.status}`);
-  const total = parseInt(res.headers.get("Content-Length") || "0", 10);
+  // GitHub Pages serves the ONNX gzip-compressed in transit, so
+  // Content-Length is the *compressed* wire size — but each chunk we
+  // receive is already decoded. That makes received/total exceed 1.
+  // Use the known model size as an authoritative ceiling, and clamp
+  // the displayed progress to [0, 1] in either case.
+  const knownBytes = Math.round(FUNIE_SIZE_MB * 1024 * 1024);
+  const headerTotal = parseInt(res.headers.get("Content-Length") || "0", 10);
+  const total = Math.max(headerTotal, knownBytes);
   const reader = res.body?.getReader();
   if (!reader) throw new Error("Streaming not supported");
   const chunks: Uint8Array[] = [];
@@ -86,10 +93,7 @@ async function doLoad(onProgress?: (pct: number) => void): Promise<ortType.Infer
     if (value) {
       chunks.push(value);
       received += value.length;
-      if (onProgress) {
-        if (total > 0) onProgress(received / total);
-        else onProgress(Math.min(0.95, received / (FUNIE_SIZE_MB * 1024 * 1024)));
-      }
+      if (onProgress) onProgress(Math.min(0.99, received / total));
     }
   }
   const total2 = chunks.reduce((n, c) => n + c.length, 0);
