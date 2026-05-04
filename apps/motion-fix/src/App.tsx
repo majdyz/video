@@ -31,6 +31,8 @@ import {
   residualTransform,
   smoothPath,
 } from "./lib/stabilizer";
+import { analyzeVideoOpenCV } from "./lib/stabilizer-opencv";
+import { isOpenCVReady, loadOpenCV, OPENCV_SIZE_MB } from "./lib/opencv-loader";
 
 type Mode = "idle" | "video";
 type AudioRouting = ReturnType<typeof attachAudioRouting>;
@@ -67,6 +69,19 @@ export default function App() {
   const [canRecord, setCanRecord] = useState(true);
   const [showInfo, setShowInfo] = useState(false);
   const [showOriginal, setShowOriginal] = useState(false);
+  // Quality is the user-visible name. Internally: "fast" = built-in
+  // block matcher, "better" = OpenCV.js (lazy-loaded ~9 MB script).
+  const [quality, setQuality] = useState<"fast" | "better">(() => {
+    return (localStorage.getItem("motion-fix:quality") as "fast" | "better") || "fast";
+  });
+  const [opencvReady, setOpencvReady] = useState(isOpenCVReady());
+  const [opencvDownloadPct, setOpencvDownloadPct] = useState<number | null>(null);
+  const [showCvPrompt, setShowCvPrompt] = useState(false);
+  const pendingFileRef = useRef<File | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem("motion-fix:quality", quality);
+  }, [quality]);
 
   useEffect(() => {
     cropRef.current = crop;
@@ -283,6 +298,13 @@ export default function App() {
   }
 
   async function handleFile(file: File) {
+    // If the user has Better quality on but OpenCV isn't loaded yet, prompt
+    // for the one-time download before doing anything else with the file.
+    if (quality === "better" && !opencvReady && opencvDownloadPct === null) {
+      pendingFileRef.current = file;
+      setShowCvPrompt(true);
+      return;
+    }
     setError(null);
     setRecording(false);
     setRecordProgress(0);
@@ -320,7 +342,8 @@ export default function App() {
       setMode("video");
 
       setBusy("Analyzing motion 0%");
-      const result = await analyzeVideo(v, (p) => {
+      const analyzer = quality === "better" && opencvReady ? analyzeVideoOpenCV : analyzeVideo;
+      const result = await analyzer(v, (p) => {
         setBusy(`Analyzing motion ${Math.floor(p * 100)}%`);
       });
       analysisRef.current = result;
@@ -607,6 +630,22 @@ export default function App() {
     [analysisReady, recording, canRecord],
   );
 
+  async function confirmDownloadAndProceed() {
+    setShowCvPrompt(false);
+    setOpencvDownloadPct(0);
+    try {
+      await loadOpenCV((pct) => setOpencvDownloadPct(pct));
+      setOpencvReady(true);
+      setOpencvDownloadPct(null);
+      const f = pendingFileRef.current;
+      pendingFileRef.current = null;
+      if (f) handleFile(f);
+    } catch (e) {
+      setOpencvDownloadPct(null);
+      setError("Couldn't load OpenCV: " + (e instanceof Error ? e.message : String(e)));
+    }
+  }
+
   return (
     <div className="app motion-app">
       <div className="bg" aria-hidden="true" />
@@ -617,6 +656,62 @@ export default function App() {
         tagline={MOTION_FIX_BRAND.tagline}
         onInfoClick={() => setShowInfo(true)}
       />
+      <Modal
+        open={showCvPrompt}
+        onClose={() => {
+          setShowCvPrompt(false);
+          pendingFileRef.current = null;
+        }}
+        title={`Download Better-quality tracker (~${OPENCV_SIZE_MB.toFixed(0)} MB)`}
+      >
+        <p>
+          The Better quality mode uses{" "}
+          <a href="https://docs.opencv.org/4.x/d5/d10/tutorial_js_root.html" target="_blank" rel="noopener noreferrer">
+            OpenCV.js
+          </a>{" "}
+          for proper feature tracking (Shi-Tomasi corners + pyramidal Lucas-Kanade
+          optical flow + RANSAC similarity fit). It produces noticeably more stable
+          results on hand-held footage with moving content (fish, particles, caustics)
+          than the built-in block-matching tracker — much closer to what
+          Premiere/After Effects do.
+        </p>
+        <p>
+          The runtime is a one-time <b>~{OPENCV_SIZE_MB.toFixed(0)} MB</b> download
+          from a CDN, then it's cached on your device — subsequent uses are instant
+          and offline. First analysis after download is slower than Fast mode (more
+          compute per frame), but the result is markedly better.
+        </p>
+        <div className="actions">
+          <button
+            className="ghost"
+            onClick={() => {
+              setShowCvPrompt(false);
+              setQuality("fast");
+              const f = pendingFileRef.current;
+              pendingFileRef.current = null;
+              if (f) handleFile(f);
+            }}
+          >
+            Use Fast instead
+          </button>
+          <button className="primary" onClick={confirmDownloadAndProceed}>
+            Download &amp; continue
+          </button>
+        </div>
+      </Modal>
+      <Modal
+        open={opencvDownloadPct !== null}
+        onClose={() => undefined}
+        title="Downloading OpenCV.js…"
+      >
+        <p>This is a one-time download. Subsequent uses are instant.</p>
+        <div className="progress" style={{ height: 8, marginTop: 8 }}>
+          <div className="bar" style={{ width: `${(opencvDownloadPct || 0) * 100}%` }} />
+        </div>
+        <p style={{ textAlign: "center", marginTop: 12, fontSize: 13 }}>
+          {Math.round((opencvDownloadPct || 0) * 100)}%
+        </p>
+      </Modal>
       <Modal open={showInfo} onClose={() => setShowInfo(false)} title="How Motion Fix works">
         <h4>Pipeline</h4>
         <ul>
@@ -794,6 +889,26 @@ export default function App() {
                 onChange={setCrop}
                 disabled={recording}
               />
+            </div>
+
+            <div className="quality-row">
+              <span className="quality-label">Quality</span>
+              <div className="quality-segment">
+                <button
+                  className={quality === "fast" ? "active" : ""}
+                  disabled={recording}
+                  onClick={() => setQuality("fast")}
+                >
+                  Fast
+                </button>
+                <button
+                  className={quality === "better" ? "active" : ""}
+                  disabled={recording}
+                  onClick={() => setQuality("better")}
+                >
+                  Better {opencvReady ? "✓" : `(${OPENCV_SIZE_MB.toFixed(0)} MB)`}
+                </button>
+              </div>
             </div>
             <div className="actions">
               {!recording && (
