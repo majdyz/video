@@ -5,6 +5,7 @@ import {
   buildCaptureContext,
   BusyOverlay,
   captureAudioForRecording,
+  closeAudioRouting,
   CompareWipe,
   createRecordingSink,
   FilePickerButton,
@@ -45,6 +46,9 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileNameRef = useRef<string>(MOTION_FIX_BRAND.filenamePrefix);
+  // Track the current file's blob URL so we can revoke it on teardown
+  // / next load instead of leaking decoded bytes per file.
+  const sourceUrlRef = useRef<string | null>(null);
   // Source-video properties detected on load. Recording will use these to
   // match the input — same fps, same bitrate ceiling, same resolution.
   const sourceFpsRef = useRef<number>(60);
@@ -330,6 +334,14 @@ export default function App() {
       videoRef.current.removeAttribute("src");
       videoRef.current.load();
     }
+    if (sourceUrlRef.current) {
+      try { URL.revokeObjectURL(sourceUrlRef.current); } catch { /* ignore */ }
+      sourceUrlRef.current = null;
+    }
+    if (audioRoutingRef.current) {
+      closeAudioRouting(audioRoutingRef.current);
+      audioRoutingRef.current = null;
+    }
   }
 
   async function handleFile(file: File) {
@@ -354,7 +366,9 @@ export default function App() {
       await touchFile(file);
       const v = videoRef.current;
       if (!v) return;
-      v.src = URL.createObjectURL(file);
+      const url = URL.createObjectURL(file);
+      sourceUrlRef.current = url;
+      v.src = url;
       v.muted = true;
       v.playsInline = true;
       v.loop = true;
@@ -525,12 +539,22 @@ export default function App() {
       setError("Recording error: " + msg);
     };
 
+    // Throttle the React state updates to ~4 Hz. Updating every rAF
+    // (~60 Hz) re-commits the component on every frame and re-runs
+    // every effect that depends on `crop`/`smoothing`/etc, doubling
+    // the per-frame work during recording. Throttling decouples UI
+    // updates from the render loop without affecting frame capture.
+    let lastUiPushAt = 0;
     const renderAndPush = () => {
       if (!recordingFlagRef.current || !videoRef.current) return;
       const v = videoRef.current;
       drawStabilizedFrame();
-      setRecordTime(v.currentTime);
-      if (v.duration) setRecordProgress(v.currentTime / v.duration);
+      const now = performance.now();
+      if (now - lastUiPushAt > 250) {
+        lastUiPushAt = now;
+        setRecordTime(v.currentTime);
+        if (v.duration) setRecordProgress(v.currentTime / v.duration);
+      }
     };
 
     const loop = () => {

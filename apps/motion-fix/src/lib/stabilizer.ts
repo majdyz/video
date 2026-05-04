@@ -411,13 +411,23 @@ function trackAndFit(
   if (!fit) return { a: 1, b: 0, tx: 0, ty: 0 };
 
   // Sanity clamp: per-frame transforms shouldn't claim more than a few
-  // degrees of rotation or % of scale change. If they do, the tracker found
-  // a spurious match (independently-moving content, motion blur, scene cut)
-  // and we should disregard it.
+  // degrees of rotation or % of scale change. If they do, the tracker
+  // found a spurious match (independently-moving content, motion blur,
+  // scene cut) and we should disregard it. Refit translation only on
+  // the inliers — the previous fit's tx/ty was computed *under* the
+  // spurious rotation, so it's in the wrong frame and would accumulate
+  // phantom translation across rotated clips.
   const rotMag = Math.abs(Math.atan2(fit.b, fit.a));
   const scaleMag = Math.abs(Math.sqrt(fit.a * fit.a + fit.b * fit.b) - 1);
   if (rotMag > MAX_FRAME_ROT || scaleMag > MAX_FRAME_SCALE) {
-    fit = { a: 1, b: 0, tx: fit.tx, ty: fit.ty };
+    let sumDx = 0;
+    let sumDy = 0;
+    for (const m of bestInliers) {
+      sumDx += m.qx - m.px;
+      sumDy += m.qy - m.py;
+    }
+    const n = bestInliers.length;
+    fit = { a: 1, b: 0, tx: sumDx / n, ty: sumDy / n };
   }
   // Same idea for translation: clamp per-frame translation to a fraction
   // of the thumbnail size. Anything beyond ~25% of the thumb in one frame

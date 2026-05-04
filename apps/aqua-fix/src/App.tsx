@@ -6,6 +6,7 @@ import {
   buildCaptureContext,
   BusyOverlay,
   captureAudioForRecording,
+  closeAudioRouting,
   CompareWipe,
   createRecordingSink,
   detectVideoFps,
@@ -102,6 +103,10 @@ export default function App() {
   const statsRef = useRef<Stats | null>(null);
   const imageBitmapRef = useRef<ImageBitmap | null>(null);
   const fileNameRef = useRef<string>(AQUA_FIX_BRAND.filenamePrefix);
+  // URL.createObjectURL of the current source file. Tracked so we can
+  // revoke it on teardown / next load instead of leaking blob URLs (and
+  // the underlying decoded bytes) for every video the user opens.
+  const sourceUrlRef = useRef<string | null>(null);
   // Source-video properties detected on load. Used to record at the same
   // fps + bitrate as the input so we don't lose smoothness or quality.
   const sourceFpsRef = useRef<number>(60);
@@ -116,6 +121,12 @@ export default function App() {
   const sinkRef = useRef<RecordingSink | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const lastStatsRefreshRef = useRef(0);
+  // Tracks whether statsRef holds a real (lerped) stat value. Was being
+  // detected via `cur !== IDENTITY_STATS` which only catches the *first*
+  // replacement — subsequent file loads that reset to IDENTITY would not
+  // re-snap because the equality check was on object identity, not on a
+  // reset signal.
+  const statsRealRef = useRef(false);
 
   const [mode, setMode] = useState<Mode>("idle");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -361,10 +372,11 @@ export default function App() {
     try {
       const fresh = computeStats(video, video.videoWidth, video.videoHeight, settingsRef.current.castStrength);
       const cur = statsRef.current;
-      if (cur && cur !== IDENTITY_STATS) {
+      if (cur && statsRealRef.current) {
         statsRef.current = lerpStats(cur, fresh, 0.0375);
       } else {
         statsRef.current = fresh;
+        statsRealRef.current = true;
       }
       lastStatsRefreshRef.current = now;
     } catch {
@@ -427,6 +439,20 @@ export default function App() {
       videoRef.current.removeAttribute("src");
       videoRef.current.load();
     }
+    // Revoke the previous file's blob URL — without this every uploaded
+    // file leaked its decoded bytes for the rest of the session.
+    if (sourceUrlRef.current) {
+      try { URL.revokeObjectURL(sourceUrlRef.current); } catch { /* ignore */ }
+      sourceUrlRef.current = null;
+    }
+    // Tear down the audio routing attached to the previous video element.
+    // iOS Safari throws on the second createMediaElementSource for the
+    // same element, and the AudioContext leaked across files even where
+    // it didn't throw.
+    if (audioRoutingRef.current) {
+      closeAudioRouting(audioRoutingRef.current);
+      audioRoutingRef.current = null;
+    }
   }
 
   const pendingFileRef = useRef<File | null>(null);
@@ -450,6 +476,9 @@ export default function App() {
     // colour stats, which would look wrong for several seconds).
     aiTransferRef.current = { gain: [1, 1, 1], bias: [0, 0, 0] };
     aiTransferInitialisedRef.current = false;
+    // Same idea for the classical stats: force the first refresh to
+    // snap in instead of lerping from the previous file's mean/wbGain.
+    statsRealRef.current = false;
     setBusy(isVideo ? "Loading video…" : "Loading photo…");
     try {
       // Touch the file's first byte before we hand it to <video> /
@@ -544,6 +573,7 @@ export default function App() {
   async function loadVideo(file: File) {
     if (!videoRef.current || !rendererRef.current) return;
     const url = URL.createObjectURL(file);
+    sourceUrlRef.current = url;
     const video = videoRef.current;
     video.src = url;
     video.muted = true;
@@ -630,6 +660,13 @@ export default function App() {
       if (sinkRef.current) {
         sinkRef.current.cleanup().catch(() => undefined);
         sinkRef.current = null;
+      }
+      // Wake lock was acquired in recordVideoInner before this throw —
+      // the success/cancel paths release it but the outer catch was
+      // missing the call, leaking the lock for the rest of the session.
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch(() => undefined);
+        wakeLockRef.current = null;
       }
       setRecording(false);
       setError("Recording failed: " + (e instanceof Error ? e.message : String(e)));
@@ -729,13 +766,22 @@ export default function App() {
     };
 
     lastStatsRefreshRef.current = 0;
+    let lastUiPushAt = 0;
     const renderAndPush = () => {
       if (!recordingFlagRef.current || !videoRef.current) return;
       const v = videoRef.current;
       maybeRefreshStats(v);
       renderFrameSync(v);
-      setRecordTime(v.currentTime);
-      if (v.duration) setRecordProgress(v.currentTime / v.duration);
+      // Throttle React state updates to ~4 Hz; the rAF loop fires
+      // ~60 Hz but the recording overlay only needs to tick on a
+      // human-readable cadence. Avoids re-committing the component
+      // and re-running effects every frame during a long recording.
+      const now = performance.now();
+      if (now - lastUiPushAt > 250) {
+        lastUiPushAt = now;
+        setRecordTime(v.currentTime);
+        if (v.duration) setRecordProgress(v.currentTime / v.duration);
+      }
     };
 
     const loop = () => {
@@ -806,18 +852,15 @@ export default function App() {
     setRecording(true);
     setRecordProgress(0);
     setRecordTime(0);
-    recorder.start(1000);
+    // Start playback FIRST so an autoplay rejection doesn't leave the
+    // recorder running with no frames (which previously produced a
+    // 0-byte .tmp file in OPFS that lingered for 60s).
     try {
       await video.play();
     } catch (e) {
       recordingFlagRef.current = false;
       audioCapture.cleanup();
       audioCleanupRef.current = null;
-      try {
-        recorder.stop();
-      } catch {
-        // ignore
-      }
       try {
         await sink.cleanup();
       } catch {
@@ -827,7 +870,9 @@ export default function App() {
       setRecording(false);
       setError("Couldn't start playback for recording: " + (e instanceof Error ? e.message : String(e)));
       startPreview();
+      return;
     }
+    recorder.start(1000);
   }
 
   function cancelRecording() {

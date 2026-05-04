@@ -262,12 +262,33 @@ export async function analyzeVideoOpenCV(
               const rotMag = Math.abs(Math.atan2(b, a));
               const scaleMag = Math.abs(Math.sqrt(a * a + b * b) - 1);
               if (rotMag > MAX_FRAME_ROT || scaleMag > MAX_FRAME_SCALE) {
-                // Spurious rotation/scale — keep translation only
-                frameTX = tx * scaleBack;
-                frameTY = ty * scaleBack;
-                if (Math.abs(tx) > aw * 0.25 || Math.abs(ty) > ah * 0.25) {
-                  frameTX = 0;
-                  frameTY = 0;
+                // Spurious rotation/scale — refit translation-only on
+                // RANSAC inliers. The original tx/ty was computed under
+                // the spurious rotation, so it's in the wrong frame and
+                // would accumulate phantom drift across rotated clips.
+                let sumDx = 0;
+                let sumDy = 0;
+                let cnt = 0;
+                for (let i = 0; i < inliers.rows; i++) {
+                  if (inliers.data[i] !== 1) continue;
+                  const sx = srcMat.data32F[i * 2];
+                  const sy = srcMat.data32F[i * 2 + 1];
+                  const dx = dstMat.data32F[i * 2];
+                  const dy = dstMat.data32F[i * 2 + 1];
+                  sumDx += dx - sx;
+                  sumDy += dy - sy;
+                  cnt++;
+                }
+                if (cnt > 0) {
+                  const txOnly = sumDx / cnt;
+                  const tyOnly = sumDy / cnt;
+                  if (Math.abs(txOnly) > aw * 0.25 || Math.abs(tyOnly) > ah * 0.25) {
+                    frameTX = 0;
+                    frameTY = 0;
+                  } else {
+                    frameTX = txOnly * scaleBack;
+                    frameTY = tyOnly * scaleBack;
+                  }
                 }
               } else {
                 frameA = a;

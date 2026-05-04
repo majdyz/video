@@ -497,6 +497,15 @@ export function useVideoPlaybackState(
 ) {
   const [currentTime, setCurrentTime] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
+  // Hold onSeeked in a ref so we don't have to add the inline arrow
+  // function the caller passes to the effect deps. Without this every
+  // parent render rebound the four <video> listeners — fine on idle
+  // pages, but during recording the parent re-commits frequently and
+  // the listener thrash showed up as missed events.
+  const onSeekedRef = useRef(onSeeked);
+  useEffect(() => {
+    onSeekedRef.current = onSeeked;
+  }, [onSeeked]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -506,7 +515,7 @@ export function useVideoPlaybackState(
     const onPause = () => setIsPaused(true);
     const onSeekedHandler = () => {
       setCurrentTime(v.currentTime);
-      onSeeked?.();
+      onSeekedRef.current?.();
     };
     v.addEventListener("timeupdate", onTime);
     v.addEventListener("play", onPlay);
@@ -520,7 +529,7 @@ export function useVideoPlaybackState(
       v.removeEventListener("pause", onPause);
       v.removeEventListener("seeked", onSeekedHandler);
     };
-  }, [videoRef, active, onSeeked]);
+  }, [videoRef, active]);
 
   return { currentTime, isPaused };
 }

@@ -86,10 +86,15 @@ export async function detectVideoFps(video: HTMLVideoElement, samples = 12): Pro
     let lastMediaTime = -1;
     let count = 0;
     let done = false;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
     const finish = () => {
       if (done) return;
       done = true;
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
       if (intervals.length === 0) {
         resolve(60);
         return;
@@ -97,8 +102,6 @@ export async function detectVideoFps(video: HTMLVideoElement, samples = 12): Pro
       const sorted = [...intervals].sort((a, b) => a - b);
       const median = sorted[sorted.length >> 1];
       const raw = median > 0 ? 1 / median : 60;
-      // Snap to the closest common camera rate; underwater clips are
-      // almost always one of these.
       const closest = COMMON_FPS.reduce(
         (a, b) => (Math.abs(b - raw) < Math.abs(a - raw) ? b : a),
       );
@@ -121,9 +124,10 @@ export async function detectVideoFps(video: HTMLVideoElement, samples = 12): Pro
     };
 
     v.requestVideoFrameCallback?.(cb);
-    // Hard timeout — if the video isn't decoding for whatever reason, give
-    // up rather than block recording.
-    setTimeout(finish, 3000);
+    // Hard timeout — if the video isn't decoding for whatever reason,
+    // give up rather than block recording. Cleared by finish() on the
+    // happy path so we don't pin the closure for 3s after success.
+    timeoutId = setTimeout(finish, 3000);
   });
 }
 
@@ -135,11 +139,18 @@ type AudioRouting = {
 // Web Audio routes the element's audio through a graph; the gain stays at 0 so
 // preview is silent locally, while a MediaStreamAudioDestinationNode tap can
 // still pull the audio into MediaRecorder when the user starts a save.
+//
+// IMPORTANT: createMediaElementSource throws on iOS Safari the second time
+// it's called for the same <video> element. Callers must keep the returned
+// AudioRouting on a ref scoped to the *file* — destroy and null it via
+// closeAudioRouting whenever the video element is torn down or its src
+// changes, so the next file's first attach call doesn't see a stale source.
 export function attachAudioRouting(video: HTMLVideoElement): AudioRouting | null {
   const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!Ctx) return null;
+  let ctx: AudioContext | null = null;
   try {
-    const ctx = new Ctx();
+    ctx = new Ctx();
     const source = ctx.createMediaElementSource(video);
     const muteGain = ctx.createGain();
     muteGain.gain.value = 0;
@@ -147,8 +158,23 @@ export function attachAudioRouting(video: HTMLVideoElement): AudioRouting | null
     muteGain.connect(ctx.destination);
     return { ctx, source };
   } catch {
+    // createMediaElementSource threw — close the just-allocated context so
+    // it doesn't leak (the previous version of this code dropped it on the
+    // floor and Safari leaked an AudioContext per failed attach).
+    if (ctx) {
+      try { ctx.close(); } catch { /* ignore */ }
+    }
     return null;
   }
+}
+
+// Tear down an AudioRouting. Call from teardownVideo / on file change so a
+// new file can attach fresh routing without iOS Safari throwing the
+// already-attached error.
+export function closeAudioRouting(routing: AudioRouting | null): void {
+  if (!routing) return;
+  try { routing.source.disconnect(); } catch { /* ignore */ }
+  try { routing.ctx.close(); } catch { /* ignore */ }
 }
 
 export function captureAudioForRecording(routing: AudioRouting | null): {
@@ -278,7 +304,9 @@ export async function shareOrDownload(blob: Blob, filename: string): Promise<voi
   a.href = url;
   a.download = filename;
   a.rel = "noopener";
-  a.target = "_blank";
+  // No target="_blank" — iOS Safari treats target=_blank+download as
+  // "open in a new tab" and ignores the download attribute, leaving the
+  // user with a blob URL preview they can't save.
   document.body.appendChild(a);
   a.click();
   a.remove();
