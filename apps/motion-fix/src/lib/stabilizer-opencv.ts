@@ -171,13 +171,14 @@ export async function analyzeVideoOpenCV(
       cleanup();
       restore();
       onProgress(1);
+      const detectedRate = duration > 0 ? cumAArr.length / duration : 30;
       resolve({
         cumA: Float32Array.from(cumAArr),
         cumB: Float32Array.from(cumBArr),
         cumTX: Float32Array.from(cumTXArr),
         cumTY: Float32Array.from(cumTYArr),
         frameCount: cumAArr.length,
-        frameRate: 30,
+        frameRate: detectedRate,
       });
     };
 

@@ -142,13 +142,18 @@ export async function analyzeVideo(
       if (watchdog !== null) clearInterval(watchdog);
       restore();
       onProgress(1);
+      // Detected frame rate from captured count / duration. Hardcoding 30
+      // breaks the time→frame lookup on 60/120/240 fps phone footage, which
+      // shows up as visible jitter because the wrong frame's residual
+      // transform gets applied to each rendered frame.
+      const detectedRate = duration > 0 ? cumAArr.length / duration : 30;
       resolve({
         cumA: Float32Array.from(cumAArr),
         cumB: Float32Array.from(cumBArr),
         cumTX: Float32Array.from(cumTXArr),
         cumTY: Float32Array.from(cumTYArr),
         frameCount: cumAArr.length,
-        frameRate: 30,
+        frameRate: detectedRate,
       });
     };
 
