@@ -128,9 +128,6 @@ export default function App() {
     const a = analysisRef.current;
     const sm = smoothRef.current;
     const cropAmt = cropRef.current;
-    // Floor so the slider at 0 still leaves a tiny budget for stabilisation —
-    // the alternative is "Max crop = 0" disabling the algorithm entirely,
-    // which surprises users.
     const effCrop = Math.max(0.015, cropAmt);
     const maxScaleUp = 1 / (1 - 2 * effCrop);
 
@@ -141,15 +138,16 @@ export default function App() {
 
     const idx = frameIndexForTime(a, time);
     const raw = residualTransform(a, sm, idx);
-    // Clamp the residual so the canvas is fully covered by the source frame
-    // even at maxScaleUp. Without this, residual rotation or scale-down can
-    // expose canvas background and the result looks "warped".
-    const t = clampResidualToCanvas(raw, maxScaleUp, w, h);
-    // Use only as much zoom as actually required by this frame's residual,
-    // up to the user's max crop. Steady frames stay at scale 1 (no zoom);
-    // shaky frames zoom in to hide the residual edges.
-    const needed = requiredScaleUp(t, w, h);
-    const scaleUp = Math.max(1, Math.min(needed, maxScaleUp));
+    // Use the precomputed smoothed zoom for this frame. The smoother already
+    // looked across the whole clip and chose a zoom curve that pre-zooms
+    // before shaky segments and gradually zooms back out for steady ones —
+    // no jerks, no per-frame surprises.
+    const targetZoom = sm.zoom[idx] ?? 1;
+    const scaleUp = Math.max(1, Math.min(targetZoom, maxScaleUp));
+    // If the residual still wouldn't fit in the chosen zoom (e.g. user
+    // capped max-crop below what this frame really needs), lerp residual
+    // toward identity until it does.
+    const t = clampResidualToCanvas(raw, scaleUp, w, h);
     const cx = w * 0.5;
     const cy = h * 0.5;
     ctx.setTransform(

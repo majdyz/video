@@ -661,18 +661,25 @@ function solvePentadiag(
   }
 }
 
+export type SmoothPath = {
+  smoothA: Float32Array;
+  smoothB: Float32Array;
+  smoothTX: Float32Array;
+  smoothTY: Float32Array;
+  // Per-frame zoom factor used by the renderer. Pre-computed by sweeping
+  // the residual transforms and Gaussian-smoothing the required zoom over
+  // ~2 seconds, so the camera "tracks" motion (zooms in for shaky segments,
+  // zooms out for steady ones) instead of jerking between frames.
+  zoom: Float32Array;
+};
+
 export function smoothPath(
   result: AnalysisResult,
   smoothing: number,
   crop: number = 0.1,
   width: number = 1920,
   height: number = 1080,
-): {
-  smoothA: Float32Array;
-  smoothB: Float32Array;
-  smoothTX: Float32Array;
-  smoothTY: Float32Array;
-} {
+): SmoothPath {
   const w = penaltiesForSmoothing(smoothing);
   const medRadius = w.medianRadius;
   const aMed = medianFilter(result.cumA, medRadius);
@@ -689,15 +696,113 @@ export function smoothPath(
   const txL1 = l1Smooth(txMed, w.lambda1T, w.lambda2T, txBox);
   const tyL1 = l1Smooth(tyMed, w.lambda1T, w.lambda2T, tyBox);
 
-  // Final Gaussian polish to absorb any high-frequency residual estimation
-  // noise that survived the median + L1. Light: sigma 1..6 frames.
   const gSigma = w.gaussianSigma;
-  return {
-    smoothA: gaussianSmooth(aL1, gSigma),
-    smoothB: gaussianSmooth(bL1, gSigma),
-    smoothTX: gaussianSmooth(txL1, gSigma),
-    smoothTY: gaussianSmooth(tyL1, gSigma),
-  };
+  const smoothA = gaussianSmooth(aL1, gSigma);
+  const smoothB = gaussianSmooth(bL1, gSigma);
+  const smoothTX = gaussianSmooth(txL1, gSigma);
+  const smoothTY = gaussianSmooth(tyL1, gSigma);
+
+  // Compute the per-frame "needed zoom" by sweeping residuals, then
+  // smooth it with a wide Gaussian (~2 seconds) so the renderer's zoom
+  // moves like a slow-cinema crash zoom rather than jerking each frame.
+  // Capped at the user's max zoom; clamping happens in the renderer.
+  const maxZoom = 1 / Math.max(0.0001, 1 - 2 * crop);
+  const requiredPerFrame = computeRequiredZoomPerFrame(
+    result, smoothA, smoothB, smoothTX, smoothTY, width, height,
+  );
+  // Clamp to a sane range first so a single-frame estimation outlier
+  // doesn't push the smoothed zoom up.
+  for (let i = 0; i < requiredPerFrame.length; i++) {
+    if (requiredPerFrame[i] > maxZoom * 1.5) requiredPerFrame[i] = maxZoom * 1.5;
+    if (requiredPerFrame[i] < 1) requiredPerFrame[i] = 1;
+  }
+  // Heavy median pre-pass + wide Gaussian. Roughly 1s median window, 2s
+  // Gaussian window — gives the camera time to pre-zoom before bumps.
+  const zoomMed = medianFilter(requiredPerFrame, 15);
+  const zoomSmooth = gaussianSmooth(zoomMed, 60);
+  // Clamp final zoom to user's max — overflow becomes the renderer's job
+  // to handle via residual clamping.
+  for (let i = 0; i < zoomSmooth.length; i++) {
+    if (zoomSmooth[i] > maxZoom) zoomSmooth[i] = maxZoom;
+    if (zoomSmooth[i] < 1) zoomSmooth[i] = 1;
+  }
+
+  return { smoothA, smoothB, smoothTX, smoothTY, zoom: zoomSmooth };
+}
+
+function computeRequiredZoomPerFrame(
+  result: AnalysisResult,
+  smoothA: Float32Array,
+  smoothB: Float32Array,
+  smoothTX: Float32Array,
+  smoothTY: Float32Array,
+  width: number,
+  height: number,
+): Float32Array {
+  const n = result.frameCount;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const ra = result.cumA[i];
+    const rb = result.cumB[i];
+    const rtx = result.cumTX[i];
+    const rty = result.cumTY[i];
+    const sa = smoothA[i];
+    const sb = smoothB[i];
+    const stx = smoothTX[i];
+    const sty = smoothTY[i];
+    const denom = ra * ra + rb * rb;
+    if (denom < 1e-9) { out[i] = 1; continue; }
+    const ia = ra / denom;
+    const ib = -rb / denom;
+    const itx = -(ia * rtx - ib * rty);
+    const ity = -(ib * rtx + ia * rty);
+    const a = sa * ia - sb * ib;
+    const b = sa * ib + sb * ia;
+    const tx = sa * itx - sb * ity + stx;
+    const ty = sb * itx + sa * ity + sty;
+    out[i] = requiredScaleUpForResidual(a, b, tx, ty, width, height);
+  }
+  return out;
+}
+
+function requiredScaleUpForResidual(
+  a: number, b: number, tx: number, ty: number,
+  w: number, h: number,
+): number {
+  const r = a * a + b * b;
+  if (r < 1e-9) return 1e6;
+  const aInv = a / r;
+  const bInv = b / r;
+  const txInv = -(a * tx + b * ty) / r;
+  const tyInv = (b * tx - a * ty) / r;
+  const halfW = w * 0.5;
+  const halfH = h * 0.5;
+  let s = 1;
+  for (const cx of [-halfW, halfW]) {
+    for (const cy of [-halfH, halfH]) {
+      const numX = aInv * cx + bInv * cy;
+      const numY = -bInv * cx + aInv * cy;
+      const upperX = halfW - txInv;
+      const lowerX = -halfW - txInv;
+      const upperY = halfH - tyInv;
+      const lowerY = -halfH - tyInv;
+      if (numX > 0) {
+        if (upperX <= 0) return 1e6;
+        s = Math.max(s, numX / upperX);
+      } else if (numX < 0) {
+        if (lowerX >= 0) return 1e6;
+        s = Math.max(s, numX / lowerX);
+      }
+      if (numY > 0) {
+        if (upperY <= 0) return 1e6;
+        s = Math.max(s, numY / upperY);
+      } else if (numY < 0) {
+        if (lowerY >= 0) return 1e6;
+        s = Math.max(s, numY / lowerY);
+      }
+    }
+  }
+  return s;
 }
 
 function penaltiesForSmoothing(smoothing: number): {
@@ -727,7 +832,7 @@ export function frameIndexForTime(result: AnalysisResult, time: number): number 
 
 export function residualTransform(
   result: AnalysisResult,
-  smooth: ReturnType<typeof smoothPath>,
+  smooth: SmoothPath,
   frame: number,
 ): SimilarityTransform {
   const ra = result.cumA[frame];
