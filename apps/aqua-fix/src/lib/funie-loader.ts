@@ -30,8 +30,48 @@ export async function loadFunie(
   return loadingPromise;
 }
 
+const MODEL_CACHE = "aqua-fix-models-v1";
+
+async function buildSession(
+  ort: typeof ortType,
+  bytes: Uint8Array,
+): Promise<ortType.InferenceSession> {
+  // Try WebGPU first (fast), fall back to WASM.
+  try {
+    return await ort.InferenceSession.create(bytes, {
+      executionProviders: ["webgpu", "wasm"],
+    });
+  } catch {
+    return await ort.InferenceSession.create(bytes, {
+      executionProviders: ["wasm"],
+    });
+  }
+}
+
 async function doLoad(onProgress?: (pct: number) => void): Promise<ortType.InferenceSession> {
   const ort = await import("onnxruntime-web");
+
+  // Cache-first: a 17 MB model shouldn't re-download on every page load.
+  // The site-wide service worker is network-first to avoid stale JS, so
+  // we manage this big asset ourselves via the Cache API. Survives page
+  // refreshes and works offline once cached.
+  let cache: Cache | null = null;
+  try {
+    cache = await caches.open(MODEL_CACHE);
+    const cached = await cache.match(FUNIE_URL);
+    if (cached && cached.ok) {
+      const buf = await cached.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      session = await buildSession(ort, bytes);
+      if (onProgress) onProgress(1);
+      return session;
+    }
+  } catch {
+    // Cache API unavailable (private mode, old browser) — fall through
+    // to the network path. Every visit will re-download but the app
+    // still works.
+    cache = null;
+  }
 
   const res = await fetch(FUNIE_URL);
   if (!res.ok) throw new Error(`Failed to fetch FUnIE model: HTTP ${res.status}`);
@@ -60,16 +100,26 @@ async function doLoad(onProgress?: (pct: number) => void): Promise<ortType.Infer
     off += c.length;
   }
 
-  // Try WebGPU first (fast), fall back to WASM.
-  try {
-    session = await ort.InferenceSession.create(bytes, {
-      executionProviders: ["webgpu", "wasm"],
-    });
-  } catch {
-    session = await ort.InferenceSession.create(bytes, {
-      executionProviders: ["wasm"],
-    });
+  // Stash the downloaded bytes in the cache for the next visit. Build a
+  // fresh Response from the bytes (the original res.body is already
+  // consumed by the streaming reader above).
+  if (cache) {
+    try {
+      const arr = new Uint8Array(bytes);
+      const stored = new Response(arr, {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(arr.length),
+        },
+      });
+      await cache.put(FUNIE_URL, stored);
+    } catch {
+      // Quota or any other write failure — non-fatal, the user just
+      // re-downloads next time.
+    }
   }
+
+  session = await buildSession(ort, bytes);
   if (onProgress) onProgress(1);
   return session;
 }
