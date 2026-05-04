@@ -32,19 +32,27 @@ export function isOpenCVCached(): Promise<boolean> {
 
 export async function loadOpenCV(
   onProgress?: (pct: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (isOpenCVReady()) return;
   if (loadingPromise) return loadingPromise;
-  loadingPromise = doLoad(onProgress);
+  loadingPromise = doLoad(onProgress, signal).catch((e) => {
+    loadingPromise = null;
+    throw e;
+  });
   return loadingPromise;
 }
 
-async function doLoad(onProgress?: (pct: number) => void): Promise<void> {
+async function doLoad(
+  onProgress?: (pct: number) => void,
+  signal?: AbortSignal,
+): Promise<void> {
   const bytes = await cachedFetch(
     OPENCV_URL,
     Math.round(OPENCV_SIZE_MB * 1024 * 1024),
     OPENCV_CACHE,
     onProgress,
+    signal,
   );
 
   const blob = new Blob([bytes as BlobPart], { type: "text/javascript" });

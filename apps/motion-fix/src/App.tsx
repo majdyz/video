@@ -37,6 +37,7 @@ import {
 } from "./lib/stabilizer";
 import { analyzeVideoOpenCV } from "./lib/stabilizer-opencv";
 import { isOpenCVCached, isOpenCVReady, loadOpenCV, OPENCV_SIZE_MB } from "./lib/opencv-loader";
+import { LoadAbortedError } from "@dive-tools/shared";
 
 type Mode = "idle" | "video";
 type AudioRouting = ReturnType<typeof attachAudioRouting>;
@@ -99,6 +100,7 @@ export default function App() {
   const [opencvReady, setOpencvReady] = useState(isOpenCVReady());
   const [opencvDownloadPct, setOpencvDownloadPct] = useState<number | null>(null);
   const [showCvPrompt, setShowCvPrompt] = useState(false);
+  const opencvAbortRef = useRef<AbortController | null>(null);
   // True once we've confirmed the script is in Cache API. Probed once
   // on mount; if true, clicking Better skips the consent dialog and
   // loads silently.
@@ -703,16 +705,26 @@ export default function App() {
   async function confirmDownloadAndProceed() {
     setShowCvPrompt(false);
     setOpencvDownloadPct(0);
+    const ctrl = new AbortController();
+    opencvAbortRef.current = ctrl;
     try {
-      await loadOpenCV((pct) => setOpencvDownloadPct(pct));
+      await loadOpenCV((pct) => setOpencvDownloadPct(pct), ctrl.signal);
       setOpencvReady(true);
       setOpencvCached(true);
       setOpencvDownloadPct(null);
       setQuality("better");
     } catch (e) {
       setOpencvDownloadPct(null);
-      setError("Couldn't load OpenCV: " + (e instanceof Error ? e.message : String(e)));
+      if (!(e instanceof LoadAbortedError)) {
+        setError("Couldn't load OpenCV: " + (e instanceof Error ? e.message : String(e)));
+      }
+    } finally {
+      opencvAbortRef.current = null;
     }
+  }
+
+  function cancelOpenCVDownload() {
+    opencvAbortRef.current?.abort();
   }
 
   // Cached path: load silently (no dialog, no progress bar) and switch
@@ -777,7 +789,7 @@ export default function App() {
       </Modal>
       <Modal
         open={opencvDownloadPct !== null}
-        onClose={() => undefined}
+        onClose={cancelOpenCVDownload}
         title="Downloading OpenCV.js…"
       >
         <p>This is a one-time download. Subsequent uses are instant.</p>
@@ -787,6 +799,9 @@ export default function App() {
         <p style={{ textAlign: "center", marginTop: 12, fontSize: 13 }}>
           {Math.round((opencvDownloadPct || 0) * 100)}%
         </p>
+        <div className="actions">
+          <button className="ghost" onClick={cancelOpenCVDownload}>Cancel</button>
+        </div>
       </Modal>
       <Modal open={showInfo} onClose={() => setShowInfo(false)} title="How Motion Fix works">
         <h4>Pipeline</h4>

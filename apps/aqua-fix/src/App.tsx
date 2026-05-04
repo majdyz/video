@@ -33,6 +33,7 @@ import { Renderer, computeStats, type Settings, type Stats } from "./lib/correct
 import { parseCube } from "./lib/lut";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
 import { isFunieCached, isFunieReady, loadFunie, FUNIE_SIZE_MB } from "./lib/funie-loader";
+import { LoadAbortedError } from "@dive-tools/shared";
 import { runFunie, lerpTransferToIdentity } from "./lib/funie-runner";
 
 type Mode = "idle" | "photo" | "video";
@@ -152,6 +153,10 @@ export default function App() {
   const [funieReady, setFunieReady] = useState(isFunieReady());
   const [funieDownloadPct, setFunieDownloadPct] = useState<number | null>(null);
   const [showFuniePrompt, setShowFuniePrompt] = useState(false);
+  // AbortController for the in-flight model download. Lets the user
+  // bail out via the dialog's Cancel button without waiting for the
+  // full ~17 MB to finish (especially useful on flaky connections).
+  const funieAbortRef = useRef<AbortController | null>(null);
   // True once we've confirmed the model bytes are in Cache API. Probed
   // once on mount; if true, clicking the AI card skips the consent
   // dialog entirely (just decodes from cache and switches mode).
@@ -501,16 +506,26 @@ export default function App() {
   async function confirmFunieDownloadAndProceed() {
     setShowFuniePrompt(false);
     setFunieDownloadPct(0);
+    const ctrl = new AbortController();
+    funieAbortRef.current = ctrl;
     try {
-      await loadFunie((pct) => setFunieDownloadPct(pct));
+      await loadFunie((pct) => setFunieDownloadPct(pct), ctrl.signal);
       setFunieReady(true);
       setFunieCached(true);
       setFunieDownloadPct(null);
       setQuality("ai");
     } catch (e) {
       setFunieDownloadPct(null);
-      setError("Couldn't load AI model: " + (e instanceof Error ? e.message : String(e)));
+      if (!(e instanceof LoadAbortedError)) {
+        setError("Couldn't load AI model: " + (e instanceof Error ? e.message : String(e)));
+      }
+    } finally {
+      funieAbortRef.current = null;
     }
+  }
+
+  function cancelFunieDownload() {
+    funieAbortRef.current?.abort();
   }
 
   // Cached path: load silently (no dialog, no progress bar) and switch
@@ -978,7 +993,7 @@ export default function App() {
       </Modal>
       <Modal
         open={funieDownloadPct !== null}
-        onClose={() => undefined}
+        onClose={cancelFunieDownload}
         title="Downloading AI model…"
       >
         <p>This is a one-time download. Subsequent uses are instant.</p>
@@ -988,6 +1003,9 @@ export default function App() {
         <p style={{ textAlign: "center", marginTop: 12, fontSize: 13 }}>
           {Math.round((funieDownloadPct || 0) * 100)}%
         </p>
+        <div className="actions">
+          <button className="ghost" onClick={cancelFunieDownload}>Cancel</button>
+        </div>
       </Modal>
       <Modal open={showInfo} onClose={() => setShowInfo(false)} title="How Aqua Fix works">
         <h4>Pipeline</h4>

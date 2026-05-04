@@ -28,20 +28,31 @@ export function isFunieCached(): Promise<boolean> {
 
 export async function loadFunie(
   onProgress?: (pct: number) => void,
+  signal?: AbortSignal,
 ): Promise<ortType.InferenceSession> {
   if (session) return session;
   if (loadingPromise) return loadingPromise;
-  loadingPromise = doLoad(onProgress);
+  loadingPromise = doLoad(onProgress, signal).catch((e) => {
+    // Clear the in-flight promise on any failure (including abort) so a
+    // subsequent click can start a fresh load instead of being handed
+    // the same rejected promise.
+    loadingPromise = null;
+    throw e;
+  });
   return loadingPromise;
 }
 
-async function doLoad(onProgress?: (pct: number) => void): Promise<ortType.InferenceSession> {
+async function doLoad(
+  onProgress?: (pct: number) => void,
+  signal?: AbortSignal,
+): Promise<ortType.InferenceSession> {
   const ort = await import("onnxruntime-web");
   const bytes = await cachedFetch(
     FUNIE_URL,
     Math.round(FUNIE_SIZE_MB * 1024 * 1024),
     MODEL_CACHE,
     onProgress,
+    signal,
   );
 
   // Try WebGPU first (fast), fall back to WASM.

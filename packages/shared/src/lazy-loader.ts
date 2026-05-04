@@ -16,6 +16,15 @@
 
 export type Progress = (pct: number) => void;
 
+// Thrown when the caller's AbortSignal fires mid-download. Treated as
+// non-fatal by the consumer (they hide the dialog and reset state).
+export class LoadAbortedError extends Error {
+  constructor() {
+    super("Aborted");
+    this.name = "LoadAbortedError";
+  }
+}
+
 export async function isInCache(cacheName: string, url: string): Promise<boolean> {
   if (typeof caches === "undefined") return false;
   try {
@@ -30,13 +39,17 @@ export async function isInCache(cacheName: string, url: string): Promise<boolean
 // Fetch `url` with Cache-API persistence + chunked progress. `knownBytes`
 // is used as the progress denominator if larger than the response's
 // Content-Length (which is suspect when the server gzips in transit).
+// `signal` cancels the in-flight fetch and rejects with LoadAbortedError;
+// any partial bytes are discarded (nothing is written to the cache).
 // Returns the assembled Uint8Array.
 export async function cachedFetch(
   url: string,
   knownBytes: number,
   cacheName: string,
   onProgress?: Progress,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
+  if (signal?.aborted) throw new LoadAbortedError();
   let cache: Cache | null = null;
   try {
     cache = await caches.open(cacheName);
@@ -50,7 +63,7 @@ export async function cachedFetch(
     cache = null;
   }
 
-  const res = await fetch(url);
+  const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`Failed to fetch ${url}: HTTP ${res.status}`);
   const headerTotal = parseInt(res.headers.get("Content-Length") || "0", 10);
   const total = Math.max(headerTotal, knownBytes);
@@ -59,14 +72,26 @@ export async function cachedFetch(
 
   const chunks: Uint8Array[] = [];
   let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      received += value.length;
-      if (onProgress) onProgress(Math.min(0.99, received / total));
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        try { await reader.cancel(); } catch { /* ignore */ }
+        throw new LoadAbortedError();
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        received += value.length;
+        if (onProgress) onProgress(Math.min(0.99, received / total));
+      }
     }
+  } catch (e) {
+    // fetch's own AbortError surfaces as DOMException name='AbortError'
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new LoadAbortedError();
+    }
+    throw e;
   }
 
   let totalBytes = 0;
