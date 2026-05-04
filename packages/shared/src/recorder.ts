@@ -26,19 +26,28 @@ export function pickRecorderMime(): Candidate | null {
   return null;
 }
 
-// Bits per pixel per second. We capture at 60 fps now (was 30), and
-// iPhone's native 4K60 is 50–100 Mbps. Bump the per-pixel rate accordingly
-// so encoder quantisation stops being the visible bottleneck — particles /
-// 'marine snow' in underwater footage were getting mosquito-noise around
-// them at the previous bitrate.
+// Fallback bitrate when we can't estimate the source's. Bits per
+// pixel per frame at 0.12 is roughly the H.264 high-quality breakpoint
+// where flat regions stop showing block/mosquito noise.
 export function pickBitrate(width: number, height: number, fps = 60): number {
   const px = width * height;
-  // 0.12 bits per pixel per frame is roughly the H.264 high-quality
-  // breakpoint where flat regions stop showing block/mosquito noise.
   const bpsPerPixel = 0.12 * fps;
-  // Cap at 60 Mbps — beyond this Safari's MediaRecorder starts dropping
+  // Cap at 80 Mbps — beyond this Safari's MediaRecorder starts dropping
   // frames or losing the WebGL context.
-  return Math.min(60_000_000, Math.max(5_000_000, Math.round(px * bpsPerPixel)));
+  return Math.min(80_000_000, Math.max(5_000_000, Math.round(px * bpsPerPixel)));
+}
+
+// Estimate the source video's combined bitrate from file size + duration.
+// Includes audio + container overhead, which is what we want — using the
+// source's total bps as our video target ensures we never lose information
+// to encoder quantisation. Capped at 80 Mbps for the Safari ceiling.
+export function bitrateFromSource(fileSize: number, durationSec: number): number | null {
+  if (!fileSize || !durationSec || durationSec <= 0) return null;
+  const bps = (fileSize * 8) / durationSec;
+  // Sanity floor / ceiling. Below ~1 Mbps is almost certainly a measurement
+  // problem (corrupt metadata); above 80 Mbps Safari falls over.
+  if (!Number.isFinite(bps) || bps < 1_000_000) return null;
+  return Math.min(80_000_000, Math.round(bps));
 }
 
 type CaptureContext = {
@@ -47,12 +56,75 @@ type CaptureContext = {
 };
 
 export function buildCaptureContext(canvas: HTMLCanvasElement, fps = 60): CaptureContext {
-  // Active capture at the requested fps (default 60 to match modern phone
-  // footage; iPhone defaults are 30 or 60). Passive mode (no fps argument)
-  // drops frames mid-record on iOS Safari, so we always pin a rate.
+  // Active capture at the requested fps. Caller should pass the detected
+  // source fps via detectVideoFps so slo-mo (120/240) doesn't get
+  // downsampled. Passive mode (no fps argument) drops frames mid-record on
+  // iOS Safari, so we always pin a rate.
   const canvasStream = canvas.captureStream(fps);
   const videoTrack = canvasStream.getVideoTracks()[0];
   return { videoStream: canvasStream, videoTrack };
+}
+
+const COMMON_FPS = [24, 25, 30, 48, 50, 60, 90, 120, 180, 240];
+
+type RvfcMeta = { mediaTime?: number; presentedFrames?: number };
+type VideoWithRVFC = HTMLVideoElement & {
+  requestVideoFrameCallback?: (cb: (now: number, meta: RvfcMeta) => void) => number;
+};
+
+// Measure source fps from requestVideoFrameCallback timestamps. The video
+// must be playing for callbacks to fire — caller should call this with a
+// playing element (e.g., during preview after autoplay) and await the
+// result before starting a recording. Falls back to 60 if rVFC isn't
+// available or sampling times out (older browsers).
+export async function detectVideoFps(video: HTMLVideoElement, samples = 12): Promise<number> {
+  const v = video as VideoWithRVFC;
+  if (typeof v.requestVideoFrameCallback !== "function") return 60;
+
+  return new Promise<number>((resolve) => {
+    const intervals: number[] = [];
+    let lastMediaTime = -1;
+    let count = 0;
+    let done = false;
+
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (intervals.length === 0) {
+        resolve(60);
+        return;
+      }
+      const sorted = [...intervals].sort((a, b) => a - b);
+      const median = sorted[sorted.length >> 1];
+      const raw = median > 0 ? 1 / median : 60;
+      // Snap to the closest common camera rate; underwater clips are
+      // almost always one of these.
+      const closest = COMMON_FPS.reduce(
+        (a, b) => (Math.abs(b - raw) < Math.abs(a - raw) ? b : a),
+      );
+      resolve(closest);
+    };
+
+    const cb = (_now: number, meta: RvfcMeta) => {
+      if (done) return;
+      const t = meta?.mediaTime;
+      if (typeof t === "number" && t >= 0) {
+        if (lastMediaTime >= 0) {
+          const dt = t - lastMediaTime;
+          if (dt > 1e-4 && dt < 1) intervals.push(dt);
+        }
+        lastMediaTime = t;
+      }
+      count++;
+      if (count < samples + 2) v.requestVideoFrameCallback?.(cb);
+      else finish();
+    };
+
+    v.requestVideoFrameCallback?.(cb);
+    // Hard timeout — if the video isn't decoding for whatever reason, give
+    // up rather than block recording.
+    setTimeout(finish, 3000);
+  });
 }
 
 type AudioRouting = {

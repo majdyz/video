@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   attachAudioRouting,
+  bitrateFromSource,
   buildCaptureContext,
   BusyOverlay,
   captureAudioForRecording,
@@ -42,6 +43,10 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileNameRef = useRef<string>(MOTION_FIX_BRAND.filenamePrefix);
+  // Source-video properties detected on load. Recording will use these to
+  // match the input — same fps, same bitrate ceiling, same resolution.
+  const sourceFpsRef = useRef<number>(60);
+  const sourceBitrateRef = useRef<number | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const previewActiveRef = useRef(false);
   const recordingFlagRef = useRef(false);
@@ -350,6 +355,13 @@ export default function App() {
       smoothRef.current = smoothPath(result, smoothing, crop, v.videoWidth, v.videoHeight);
       setAnalysisReady(true);
 
+      // The analyser already counts frames over the duration — that's the
+      // most accurate fps reading we have, so use it directly. Bitrate
+      // comes from file size / duration to match the source's per-pixel
+      // budget.
+      sourceFpsRef.current = result.frameRate || 60;
+      sourceBitrateRef.current = bitrateFromSource(file.size, v.duration || 0);
+
       v.play().catch(() => undefined);
       startPreview();
     } catch (e) {
@@ -441,14 +453,16 @@ export default function App() {
 
     drawStabilizedFrame();
 
-    const captureCtx = buildCaptureContext(canvas);
+    const fps = sourceFpsRef.current;
+    const captureCtx = buildCaptureContext(canvas, fps);
     if (!audioRoutingRef.current) audioRoutingRef.current = attachAudioRouting(video);
     const audioCapture = captureAudioForRecording(audioRoutingRef.current);
     const stream = new MediaStream([
       ...captureCtx.videoStream.getVideoTracks(),
       ...audioCapture.tracks,
     ]);
-    const bitrate = pickBitrate(video.videoWidth, video.videoHeight);
+    const bitrate = sourceBitrateRef.current
+      ?? pickBitrate(video.videoWidth, video.videoHeight, fps);
 
     let recorder: MediaRecorder;
     try {

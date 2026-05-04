@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import {
   AdvancedDisclosure,
   attachAudioRouting,
+  bitrateFromSource,
   buildCaptureContext,
   BusyOverlay,
   captureAudioForRecording,
   CompareButton,
   createRecordingSink,
+  detectVideoFps,
   FilePickerButton,
   Hero,
   Modal,
@@ -98,6 +100,10 @@ export default function App() {
   const statsRef = useRef<Stats | null>(null);
   const imageBitmapRef = useRef<ImageBitmap | null>(null);
   const fileNameRef = useRef<string>(AQUA_FIX_BRAND.filenamePrefix);
+  // Source-video properties detected on load. Used to record at the same
+  // fps + bitrate as the input so we don't lose smoothness or quality.
+  const sourceFpsRef = useRef<number>(60);
+  const sourceBitrateRef = useRef<number | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const previewActiveRef = useRef(false);
   const recordingFlagRef = useRef(false);
@@ -365,11 +371,17 @@ export default function App() {
     setRecordProgress(0);
     teardownVideo();
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
+    sourceFpsRef.current = 60;
+    sourceBitrateRef.current = null;
     const isVideo = file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm)$/i.test(file.name);
     setBusy(isVideo ? "Loading video…" : "Loading photo…");
     try {
-      if (isVideo) await loadVideo(file);
-      else await loadImage(file);
+      if (isVideo) {
+        sourceBitrateRef.current = bitrateFromSource(file.size, 0);
+        await loadVideo(file);
+      } else {
+        await loadImage(file);
+      }
     } finally {
       setBusy(null);
     }
@@ -465,6 +477,15 @@ export default function App() {
       setDuration(video.duration || 0);
       setMode("video");
       startPreview();
+
+      // Recompute the source bitrate now that we have a reliable duration,
+      // and detect fps from the actual frame stream. Both are used by the
+      // recording flow so the saved file matches the input's smoothness
+      // and quality ceiling.
+      sourceBitrateRef.current = bitrateFromSource(file.size, video.duration || 0);
+      detectVideoFps(video).then((fps) => {
+        sourceFpsRef.current = fps;
+      }).catch(() => undefined);
 
       const computeOnce = () => {
         const v = videoRef.current;
@@ -568,14 +589,18 @@ export default function App() {
       rendererRef.current.render(statsRef.current, settingsRef.current);
     }
 
-    const captureCtx = buildCaptureContext(canvas);
+    const fps = sourceFpsRef.current;
+    const captureCtx = buildCaptureContext(canvas, fps);
     if (!audioRoutingRef.current) audioRoutingRef.current = attachAudioRouting(video);
     const audioCapture = captureAudioForRecording(audioRoutingRef.current);
     const stream = new MediaStream([
       ...captureCtx.videoStream.getVideoTracks(),
       ...audioCapture.tracks,
     ]);
-    const bitrate = pickBitrate(video.videoWidth, video.videoHeight);
+    // Match the source bitrate when we can; otherwise fall back to a
+    // pixel/fps formula that still hits visually-lossless quality.
+    const bitrate = sourceBitrateRef.current
+      ?? pickBitrate(video.videoWidth, video.videoHeight, fps);
 
     let recorder: MediaRecorder;
     try {
