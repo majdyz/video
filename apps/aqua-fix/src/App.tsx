@@ -29,7 +29,7 @@ import "@dive-tools/shared/theme.css";
 import { Renderer, computeStats, type Settings, type Stats } from "./lib/correct";
 import { parseCube } from "./lib/lut";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
-import { isFunieReady, loadFunie, FUNIE_SIZE_MB } from "./lib/funie-loader";
+import { isFunieCached, isFunieReady, loadFunie, FUNIE_SIZE_MB } from "./lib/funie-loader";
 import { runFunie, lerpTransferToIdentity } from "./lib/funie-runner";
 
 type Mode = "idle" | "photo" | "video";
@@ -135,6 +135,13 @@ export default function App() {
   const [funieReady, setFunieReady] = useState(isFunieReady());
   const [funieDownloadPct, setFunieDownloadPct] = useState<number | null>(null);
   const [showFuniePrompt, setShowFuniePrompt] = useState(false);
+  // True once we've confirmed the model bytes are in Cache API. Probed
+  // once on mount; if true, clicking the AI card skips the consent
+  // dialog entirely (just decodes from cache and switches mode).
+  const [funieCached, setFunieCached] = useState(false);
+  useEffect(() => {
+    isFunieCached().then(setFunieCached).catch(() => undefined);
+  }, []);
   // Mirror of funieReady — the play-loop captures its closure once at
   // startPreview() and never re-binds, so reading the state directly
   // would forever see the value at preview-start time. Reading via the
@@ -414,9 +421,24 @@ export default function App() {
     try {
       await loadFunie((pct) => setFunieDownloadPct(pct));
       setFunieReady(true);
+      setFunieCached(true);
       setFunieDownloadPct(null);
+      setQuality("ai");
     } catch (e) {
       setFunieDownloadPct(null);
+      setError("Couldn't load AI model: " + (e instanceof Error ? e.message : String(e)));
+    }
+  }
+
+  // Cached path: load silently (no dialog, no progress bar) and switch
+  // straight to AI. Decoding 17 MB from the local cache + building the
+  // ort session takes a handful of frames at most.
+  async function loadFunieFromCacheAndSwitch() {
+    try {
+      await loadFunie();
+      setFunieReady(true);
+      setQuality("ai");
+    } catch (e) {
       setError("Couldn't load AI model: " + (e instanceof Error ? e.message : String(e)));
     }
   }
@@ -1025,11 +1047,16 @@ export default function App() {
                 className={`model-card${quality === "ai" ? " active" : ""}`}
                 disabled={recording}
                 onClick={() => {
-                  if (!funieReady && funieDownloadPct === null) {
-                    setShowFuniePrompt(true);
+                  if (funieReady) {
+                    setQuality("ai");
                     return;
                   }
-                  setQuality("ai");
+                  if (funieDownloadPct !== null) return;
+                  if (funieCached) {
+                    loadFunieFromCacheAndSwitch();
+                    return;
+                  }
+                  setShowFuniePrompt(true);
                 }}
                 aria-pressed={quality === "ai"}
               >
@@ -1039,7 +1066,7 @@ export default function App() {
                   <span className="model-badge model-badge--experimental">Experimental</span>
                 </span>
                 <span className="model-sub">
-                  {funieReady
+                  {funieReady || funieCached
                     ? "FUnIE-GAN. Sometimes less natural than Classical — try both."
                     : `FUnIE-GAN. One-time ${FUNIE_SIZE_MB.toFixed(0)} MB download.`}
                 </span>

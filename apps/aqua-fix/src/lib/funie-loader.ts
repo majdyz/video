@@ -9,11 +9,27 @@ import type * as ortType from "onnxruntime-web";
 export const FUNIE_SIZE_MB = 16.9;
 const FUNIE_URL = `${import.meta.env.BASE_URL}funie.onnx`;
 
+const MODEL_CACHE = "aqua-fix-models-v1";
+
 let session: ortType.InferenceSession | null = null;
 let loadingPromise: Promise<ortType.InferenceSession> | null = null;
 
 export function isFunieReady(): boolean {
   return session !== null;
+}
+
+// Whether the model bytes are already in the Cache API. Resolves true when
+// the next loadFunie() call will skip the network entirely. Used by the UI
+// to decide whether to show the consent/download dialog.
+export async function isFunieCached(): Promise<boolean> {
+  if (typeof caches === "undefined") return false;
+  try {
+    const cache = await caches.open(MODEL_CACHE);
+    const hit = await cache.match(FUNIE_URL);
+    return !!hit && hit.ok;
+  } catch {
+    return false;
+  }
 }
 
 export function getFunieSession(): ortType.InferenceSession {
@@ -29,8 +45,6 @@ export async function loadFunie(
   loadingPromise = doLoad(onProgress);
   return loadingPromise;
 }
-
-const MODEL_CACHE = "aqua-fix-models-v1";
 
 async function buildSession(
   ort: typeof ortType,
