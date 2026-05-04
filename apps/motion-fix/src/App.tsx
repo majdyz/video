@@ -33,7 +33,7 @@ import {
   smoothPath,
 } from "./lib/stabilizer";
 import { analyzeVideoOpenCV } from "./lib/stabilizer-opencv";
-import { isOpenCVReady, loadOpenCV, OPENCV_SIZE_MB } from "./lib/opencv-loader";
+import { isOpenCVCached, isOpenCVReady, loadOpenCV, OPENCV_SIZE_MB } from "./lib/opencv-loader";
 
 type Mode = "idle" | "video";
 type AudioRouting = ReturnType<typeof attachAudioRouting>;
@@ -76,17 +76,19 @@ export default function App() {
   const [showOriginal, setShowOriginal] = useState(false);
   // Quality is the user-visible name. Internally: "fast" = built-in
   // block matcher, "better" = OpenCV.js (lazy-loaded ~9 MB script).
-  const [quality, setQuality] = useState<"fast" | "better">(() => {
-    return (localStorage.getItem("motion-fix:quality") as "fast" | "better") || "fast";
-  });
+  // No localStorage persistence — Better requires an opt-in click each
+  // session, same pattern as aqua-fix's AI mode.
+  const [quality, setQuality] = useState<"fast" | "better">("fast");
   const [opencvReady, setOpencvReady] = useState(isOpenCVReady());
   const [opencvDownloadPct, setOpencvDownloadPct] = useState<number | null>(null);
   const [showCvPrompt, setShowCvPrompt] = useState(false);
-  const pendingFileRef = useRef<File | null>(null);
-
+  // True once we've confirmed the script is in Cache API. Probed once
+  // on mount; if true, clicking Better skips the consent dialog and
+  // loads silently.
+  const [opencvCached, setOpencvCached] = useState(false);
   useEffect(() => {
-    localStorage.setItem("motion-fix:quality", quality);
-  }, [quality]);
+    isOpenCVCached().then(setOpencvCached).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     cropRef.current = crop;
@@ -303,13 +305,6 @@ export default function App() {
   }
 
   async function handleFile(file: File) {
-    // If the user has Better quality on but OpenCV isn't loaded yet, prompt
-    // for the one-time download before doing anything else with the file.
-    if (quality === "better" && !opencvReady && opencvDownloadPct === null) {
-      pendingFileRef.current = file;
-      setShowCvPrompt(true);
-      return;
-    }
     setError(null);
     setRecording(false);
     setRecordProgress(0);
@@ -650,12 +645,24 @@ export default function App() {
     try {
       await loadOpenCV((pct) => setOpencvDownloadPct(pct));
       setOpencvReady(true);
+      setOpencvCached(true);
       setOpencvDownloadPct(null);
-      const f = pendingFileRef.current;
-      pendingFileRef.current = null;
-      if (f) handleFile(f);
+      setQuality("better");
     } catch (e) {
       setOpencvDownloadPct(null);
+      setError("Couldn't load OpenCV: " + (e instanceof Error ? e.message : String(e)));
+    }
+  }
+
+  // Cached path: load silently (no dialog, no progress bar) and switch
+  // straight to Better. Decoding ~9 MB from cache + the ort runtime
+  // initialise takes a fraction of a second.
+  async function loadOpenCVFromCacheAndSwitch() {
+    try {
+      await loadOpenCV();
+      setOpencvReady(true);
+      setQuality("better");
+    } catch (e) {
       setError("Couldn't load OpenCV: " + (e instanceof Error ? e.message : String(e)));
     }
   }
@@ -672,10 +679,7 @@ export default function App() {
       />
       <Modal
         open={showCvPrompt}
-        onClose={() => {
-          setShowCvPrompt(false);
-          pendingFileRef.current = null;
-        }}
+        onClose={() => setShowCvPrompt(false)}
         title={`Download Better-quality tracker (~${OPENCV_SIZE_MB.toFixed(0)} MB)`}
       >
         <p>
@@ -701,9 +705,6 @@ export default function App() {
             onClick={() => {
               setShowCvPrompt(false);
               setQuality("fast");
-              const f = pendingFileRef.current;
-              pendingFileRef.current = null;
-              if (f) handleFile(f);
             }}
           >
             Use Fast instead
@@ -918,9 +919,20 @@ export default function App() {
                 <button
                   className={quality === "better" ? "active" : ""}
                   disabled={recording}
-                  onClick={() => setQuality("better")}
+                  onClick={() => {
+                    if (opencvReady) {
+                      setQuality("better");
+                      return;
+                    }
+                    if (opencvDownloadPct !== null) return;
+                    if (opencvCached) {
+                      loadOpenCVFromCacheAndSwitch();
+                      return;
+                    }
+                    setShowCvPrompt(true);
+                  }}
                 >
-                  Better {opencvReady ? "✓" : `(${OPENCV_SIZE_MB.toFixed(0)} MB)`}
+                  Better {opencvReady || opencvCached ? "✓" : `(${OPENCV_SIZE_MB.toFixed(0)} MB)`}
                 </button>
               </div>
             </div>

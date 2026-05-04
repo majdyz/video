@@ -1,13 +1,15 @@
-// Lazy loader for OpenCV.js. Fetches the script via fetch() so we can show a
-// download progress bar to the user (the alternative — appending a <script>
-// tag — gives no progress info on most browsers).
-//
-// Caches in the browser HTTP cache + service worker after first download;
-// subsequent loads are instant.
+// Lazy loader for OpenCV.js. Fetches via the shared cachedFetch helper so
+// the ~9 MB script downloads once and lives in Cache API across page
+// refreshes (jsdelivr's HTTP cache headers vary; Cache API gives us a
+// guaranteed sticky copy). After download the bytes are wrapped in a Blob
+// + injected as a <script> so the global `cv` object becomes available.
+
+import { cachedFetch, isInCache } from "@dive-tools/shared";
 
 const OPENCV_URL =
   "https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js";
 export const OPENCV_SIZE_MB = 8.6;
+const OPENCV_CACHE = "motion-fix-deps-v1";
 
 declare global {
   interface Window {
@@ -24,6 +26,10 @@ export function isOpenCVReady(): boolean {
   return !!cv && !!cv.Mat;
 }
 
+export function isOpenCVCached(): Promise<boolean> {
+  return isInCache(OPENCV_CACHE, OPENCV_URL);
+}
+
 export async function loadOpenCV(
   onProgress?: (pct: number) => void,
 ): Promise<void> {
@@ -34,28 +40,14 @@ export async function loadOpenCV(
 }
 
 async function doLoad(onProgress?: (pct: number) => void): Promise<void> {
-  const res = await fetch(OPENCV_URL);
-  if (!res.ok) throw new Error(`Failed to fetch OpenCV.js: HTTP ${res.status}`);
-  const total = parseInt(res.headers.get("Content-Length") || "0", 10);
-  const reader = res.body?.getReader();
-  if (!reader) throw new Error("Streaming not supported");
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      received += value.length;
-      if (onProgress) {
-        if (total > 0) onProgress(received / total);
-        else onProgress(Math.min(0.95, received / (OPENCV_SIZE_MB * 1024 * 1024)));
-      }
-    }
-  }
-  if (onProgress) onProgress(1);
+  const bytes = await cachedFetch(
+    OPENCV_URL,
+    Math.round(OPENCV_SIZE_MB * 1024 * 1024),
+    OPENCV_CACHE,
+    onProgress,
+  );
 
-  const blob = new Blob(chunks as BlobPart[], { type: "text/javascript" });
+  const blob = new Blob([bytes as BlobPart], { type: "text/javascript" });
   const url = URL.createObjectURL(blob);
 
   await new Promise<void>((resolve, reject) => {
@@ -69,6 +61,7 @@ async function doLoad(onProgress?: (pct: number) => void): Promise<void> {
         return;
       }
       if (cv.Mat) {
+        if (onProgress) onProgress(1);
         resolve();
         return;
       }
@@ -76,8 +69,12 @@ async function doLoad(onProgress?: (pct: number) => void): Promise<void> {
       let timer: number | null = null;
       const done = () => {
         if (timer !== null) clearInterval(timer);
-        if (isOpenCVReady()) resolve();
-        else reject(new Error("OpenCV.js failed to initialise"));
+        if (isOpenCVReady()) {
+          if (onProgress) onProgress(1);
+          resolve();
+        } else {
+          reject(new Error("OpenCV.js failed to initialise"));
+        }
       };
       cv.onRuntimeInitialized = done;
       timer = window.setInterval(() => {
