@@ -244,12 +244,18 @@ export default function App() {
 
   const aiInflightRef = useRef(false);
   // Cached colour transfer (gain * src + bias) from the most recent FUnIE
-  // inference. Refreshes whenever inference completes; until then, we render
-  // every video frame at full FPS through this 6-float remap.
+  // inference. Each inference EMA-blends into this ref instead of
+  // replacing it — without smoothing the model fits new gain/bias to
+  // every frame's content (particles, scene movement) and the wholesale
+  // swap shows up as visible flicker / flaring at 5–10 fps. 25% per
+  // inference settles in ~4 inferences while still tracking real scene
+  // changes within a fraction of a second.
   const aiTransferRef = useRef<{ gain: [number, number, number]; bias: [number, number, number] }>({
     gain: [1, 1, 1],
     bias: [0, 0, 0],
   });
+  const aiTransferInitialisedRef = useRef(false);
+  const AI_TRANSFER_SMOOTH = 0.25;
 
   function renderFrameSync(v: HTMLVideoElement) {
     if (!rendererRef.current || !statsRef.current) return;
@@ -269,7 +275,25 @@ export default function App() {
         aiInflightRef.current = true;
         runFunie(v, aiStrengthRef.current)
           .then((res) => {
-            aiTransferRef.current = res.transfer;
+            const prev = aiTransferRef.current;
+            const init = aiTransferInitialisedRef.current;
+            // First inference snaps in; subsequent inferences EMA-blend
+            // so transient particle-driven jitter doesn't show up as
+            // visible flicker.
+            const a = init ? AI_TRANSFER_SMOOTH : 1;
+            aiTransferRef.current = {
+              gain: [
+                prev.gain[0] + (res.transfer.gain[0] - prev.gain[0]) * a,
+                prev.gain[1] + (res.transfer.gain[1] - prev.gain[1]) * a,
+                prev.gain[2] + (res.transfer.gain[2] - prev.gain[2]) * a,
+              ],
+              bias: [
+                prev.bias[0] + (res.transfer.bias[0] - prev.bias[0]) * a,
+                prev.bias[1] + (res.transfer.bias[1] - prev.bias[1]) * a,
+                prev.bias[2] + (res.transfer.bias[2] - prev.bias[2]) * a,
+              ],
+            };
+            aiTransferInitialisedRef.current = true;
             // On paused video the play loop isn't redrawing — force a
             // re-render here so the just-computed transfer is visible
             // immediately. Without this, switching Classical→AI on a
@@ -416,6 +440,11 @@ export default function App() {
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
     sourceFpsRef.current = 60;
     sourceBitrateRef.current = null;
+    // Reset the AI transfer cache so the new file's first inference
+    // snaps in (instead of EMA-blending from the previous video's
+    // colour stats, which would look wrong for several seconds).
+    aiTransferRef.current = { gain: [1, 1, 1], bias: [0, 0, 0] };
+    aiTransferInitialisedRef.current = false;
     setBusy(isVideo ? "Loading video…" : "Loading photo…");
     try {
       // Touch the file's first byte before we hand it to <video> /
