@@ -346,6 +346,60 @@ header h1 {
 .compare svg { width: 16px; height: 16px; }
 .compare:active { background: rgba(95, 208, 255, 0.2); }
 
+/* Wipe overlay sits over the entire stage; drag anywhere on it to move
+   the split. Bar + handle are positioned via inline `left:%` style. */
+.compare-wipe {
+  position: absolute;
+  inset: 0;
+  cursor: ew-resize;
+  touch-action: none;
+  user-select: none;
+}
+.compare-wipe-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.compare-wipe-handle {
+  position: absolute;
+  top: 50%;
+  width: 36px;
+  height: 36px;
+  margin-left: -18px;
+  margin-top: -18px;
+  border-radius: 50%;
+  background: rgba(10, 32, 48, 0.85);
+  border: 1px solid var(--line-strong);
+  color: var(--text);
+  display: grid;
+  place-items: center;
+  box-shadow: 0 4px 14px -4px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  pointer-events: none;
+}
+.compare-wipe-handle svg { width: 18px; height: 18px; }
+.compare-wipe-tag {
+  position: absolute;
+  top: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(10, 32, 48, 0.75);
+  color: var(--muted);
+  pointer-events: none;
+}
+.compare-wipe-tag-left { left: 12px; }
+.compare-wipe-tag-right { right: 12px; }
+
 .busy {
   position: absolute;
   inset: 0;

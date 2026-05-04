@@ -6,7 +6,7 @@ import {
   buildCaptureContext,
   BusyOverlay,
   captureAudioForRecording,
-  CompareButton,
+  CompareWipe,
   createRecordingSink,
   detectVideoFps,
   FilePickerButton,
@@ -108,7 +108,6 @@ export default function App() {
   const previewActiveRef = useRef(false);
   const recordingFlagRef = useRef(false);
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS);
-  const showOriginalRef = useRef(false);
   const audioRoutingRef = useRef<AudioRouting>(null);
   const audioCleanupRef = useRef<(() => void) | null>(null);
   const onEndedRef = useRef<(() => void) | null>(null);
@@ -118,7 +117,12 @@ export default function App() {
 
   const [mode, setMode] = useState<Mode>("idle");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const [showOriginal, setShowOriginal] = useState(false);
+  // Compare-wipe state. compareActive shows the slider overlay; split is
+  // 0..1 (0 = whole frame original; 1 = whole frame corrected). Split
+  // value is pushed to the renderer per-frame so the WebGL shader can
+  // do the divide.
+  const [compareActive, setCompareActive] = useState(false);
+  const [compareSplit, setCompareSplit] = useState(0.5);
   const [error, setError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordProgress, setRecordProgress] = useState(0);
@@ -168,9 +172,14 @@ export default function App() {
     settingsRef.current = settings;
   }, [settings]);
 
+  // Push the wipe split into the renderer whenever it changes. Renderer
+  // holds the value so per-frame draws (preview + recording) pick it up
+  // without needing to thread it through every render call.
   useEffect(() => {
-    showOriginalRef.current = showOriginal;
-  }, [showOriginal]);
+    if (rendererRef.current) {
+      rendererRef.current.setSplit(compareActive ? compareSplit : 0);
+    }
+  }, [compareActive, compareSplit]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -208,7 +217,7 @@ export default function App() {
     if (mode !== "photo" || !rendererRef.current || !imageBitmapRef.current) return;
     const bitmap = imageBitmapRef.current;
     statsRef.current = computeStats(bitmap, bitmap.width, bitmap.height, settings.castStrength);
-    if (qualityRef.current === "ai" && funieReady && !showOriginal) {
+    if (qualityRef.current === "ai" && funieReady) {
       // Photos: run AI once at full quality, draw the model output directly
       // (no point doing color-transfer for a single still image — full output
       // is more accurate than a 6-float regression).
@@ -222,9 +231,8 @@ export default function App() {
       return;
     }
     rendererRef.current.uploadSource(bitmap, bitmap.width, bitmap.height);
-    const eff = showOriginal ? OFF_SETTINGS : settings;
-    rendererRef.current.render(statsRef.current, eff);
-  }, [settings, mode, showOriginal, funieReady, quality, aiStrength]);
+    rendererRef.current.render(statsRef.current, settings);
+  }, [settings, mode, funieReady, quality, aiStrength]);
 
   useEffect(() => {
     if (mode !== "video" || !videoRef.current || videoRef.current.readyState < 2) return;
@@ -243,7 +251,7 @@ export default function App() {
 
   function renderFrameSync(v: HTMLVideoElement) {
     if (!rendererRef.current || !statsRef.current) return;
-    if (qualityRef.current === "ai" && funieReadyRef.current && !showOriginalRef.current) {
+    if (qualityRef.current === "ai" && funieReadyRef.current) {
       // Always upload the current frame and apply the cached AI transfer at
       // full FPS. The model runs in the background — no render-frame is
       // gated on inference, so playback stays smooth even when inference
@@ -280,8 +288,7 @@ export default function App() {
       return;
     }
     rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
-    const eff = showOriginalRef.current ? OFF_SETTINGS : settingsRef.current;
-    rendererRef.current.render(statsRef.current, eff);
+    rendererRef.current.render(statsRef.current, settingsRef.current);
   }
 
   const { currentTime, isPaused } = useVideoPlaybackState(videoRef, mode === "video", () => {
@@ -297,7 +304,7 @@ export default function App() {
     if (!v || v.readyState < 2) return;
     if (!v.paused) return;
     renderFrameSync(v);
-  }, [settings, showOriginal, isPaused, mode, funieReady, quality, aiStrength]);
+  }, [settings, isPaused, mode, funieReady, quality, aiStrength]);
 
   function togglePlay() {
     const v = videoRef.current;
@@ -454,7 +461,7 @@ export default function App() {
       setLutName(file.name);
       if (mode === "photo" && rendererRef.current && imageBitmapRef.current && statsRef.current) {
         rendererRef.current.uploadSource(imageBitmapRef.current, imageBitmapRef.current.width, imageBitmapRef.current.height);
-        rendererRef.current.render(statsRef.current, showOriginal ? OFF_SETTINGS : settings);
+        rendererRef.current.render(statsRef.current, settings);
       }
     } catch (e) {
       setError("LUT load failed: " + (e instanceof Error ? e.message : String(e)));
@@ -466,7 +473,7 @@ export default function App() {
     setLutName(null);
     if (mode === "photo" && rendererRef.current && imageBitmapRef.current && statsRef.current) {
       rendererRef.current.uploadSource(imageBitmapRef.current, imageBitmapRef.current.width, imageBitmapRef.current.height);
-      rendererRef.current.render(statsRef.current, showOriginal ? OFF_SETTINGS : settings);
+      rendererRef.current.render(statsRef.current, settings);
     }
   }
 
@@ -996,10 +1003,11 @@ export default function App() {
         )}
         {mode === "video" && isPaused && !recording && <PlayOverlay />}
         {mode !== "idle" && !recording && (
-          <CompareButton
-            active={showOriginal}
-            onPress={() => setShowOriginal(true)}
-            onRelease={() => setShowOriginal(false)}
+          <CompareWipe
+            active={compareActive}
+            value={compareSplit}
+            onChange={setCompareSplit}
+            onToggle={() => setCompareActive((a) => !a)}
           />
         )}
       </div>

@@ -219,6 +219,83 @@ export function CompareButton({
   );
 }
 
+// Wipe-style comparison overlay. A vertical line plus a draggable handle
+// sits on top of the stage; the consumer reads the `value` (0..1) and
+// either passes it as a shader uniform (WebGL apps) or uses it to clip a
+// 2D context (canvas2D apps). At 0 the entire frame is the original; at
+// 1 the entire frame is corrected; the handle is drawn at value*100%.
+//
+// Pointer events use pointer-capture so dragging keeps tracking even if
+// the finger leaves the bounds. The line/handle live above the canvas
+// in DOM, so they're crisp regardless of canvas resolution.
+export function CompareWipe({
+  active,
+  value,
+  onChange,
+  onToggle,
+}: {
+  active: boolean;
+  value: number;
+  onChange: (v: number) => void;
+  onToggle: () => void;
+}) {
+  function pickFromEvent(el: HTMLElement, clientX: number) {
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0) return;
+    const v = (clientX - r.left) / r.width;
+    onChange(Math.max(0, Math.min(1, v)));
+  }
+
+  return (
+    <>
+      <button
+        className="compare"
+        onClick={onToggle}
+        aria-pressed={active}
+        aria-label={active ? "Hide comparison wipe" : "Show comparison wipe"}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M12 4v16M5 8l-3 4 3 4M19 8l3 4-3 4"
+            stroke="currentColor"
+            strokeWidth="2"
+            fill="none"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+        {active ? "Done" : "Compare"}
+      </button>
+      {active && (
+        <div
+          className="compare-wipe"
+          onPointerDown={(e) => {
+            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+            pickFromEvent(e.currentTarget as HTMLElement, e.clientX);
+          }}
+          onPointerMove={(e) => {
+            if (!(e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId)) return;
+            pickFromEvent(e.currentTarget as HTMLElement, e.clientX);
+          }}
+          onPointerUp={(e) => {
+            (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+          }}
+        >
+          <div className="compare-wipe-bar" style={{ left: `${value * 100}%` }} />
+          <div className="compare-wipe-handle" style={{ left: `${value * 100}%` }}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 6l-4 6 4 6M15 6l4 6-4 6" stroke="currentColor" strokeWidth="2"
+                fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </div>
+          <div className="compare-wipe-tag compare-wipe-tag-left">Before</div>
+          <div className="compare-wipe-tag compare-wipe-tag-right">After</div>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function RecordingOverlay({
   currentTime,
   duration,

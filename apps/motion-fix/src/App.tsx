@@ -5,7 +5,7 @@ import {
   buildCaptureContext,
   BusyOverlay,
   captureAudioForRecording,
-  CompareButton,
+  CompareWipe,
   createRecordingSink,
   FilePickerButton,
   Hero,
@@ -59,7 +59,11 @@ export default function App() {
   const analysisRef = useRef<AnalysisResult | null>(null);
   const smoothRef = useRef<SmoothPath | null>(null);
   const cropRef = useRef(0.1);
-  const showOriginalRef = useRef(false);
+  // Compare wipe (0..1). Stored as a ref so the per-frame draw picks
+  // up the live value without depending on React commits. compareActiveRef
+  // gates whether the wipe path is taken at all.
+  const compareActiveRef = useRef(false);
+  const compareSplitRef = useRef(0.5);
 
   const [mode, setMode] = useState<Mode>("idle");
   const [busy, setBusy] = useState<string | null>(null);
@@ -73,7 +77,14 @@ export default function App() {
   const [analysisReady, setAnalysisReady] = useState(false);
   const [canRecord, setCanRecord] = useState(true);
   const [showInfo, setShowInfo] = useState(false);
-  const [showOriginal, setShowOriginal] = useState(false);
+  const [compareActive, setCompareActive] = useState(false);
+  const [compareSplit, setCompareSplit] = useState(0.5);
+  useEffect(() => {
+    compareActiveRef.current = compareActive;
+  }, [compareActive]);
+  useEffect(() => {
+    compareSplitRef.current = compareSplit;
+  }, [compareSplit]);
   // Quality is the user-visible name. Internally: "fast" = built-in
   // block matcher, "better" = OpenCV.js (lazy-loaded ~9 MB script).
   // No localStorage persistence — Better requires an opt-in click each
@@ -93,9 +104,6 @@ export default function App() {
   useEffect(() => {
     cropRef.current = crop;
   }, [crop]);
-  useEffect(() => {
-    showOriginalRef.current = showOriginal;
-  }, [showOriginal]);
 
   useEffect(() => {
     const a = analysisRef.current;
@@ -118,7 +126,7 @@ export default function App() {
   useEffect(() => {
     if (mode !== "video") return;
     drawStabilizedFrame();
-  }, [crop, smoothing, mode, showOriginal]);
+  }, [crop, smoothing, mode, compareActive, compareSplit]);
 
   function drawStabilizedFrame() {
     const v = videoRef.current;
@@ -130,12 +138,30 @@ export default function App() {
     if (c.width !== v.videoWidth) c.width = v.videoWidth;
     if (c.height !== v.videoHeight) c.height = v.videoHeight;
     ctx.clearRect(0, 0, c.width, c.height);
-    if (showOriginalRef.current) {
-      // Original passthrough — no transform, no crop.
+
+    const splitActive = compareActiveRef.current;
+    const split = compareSplitRef.current;
+    if (splitActive) {
+      // Left of split: original passthrough, no transform.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, c.width * split, c.height);
+      ctx.clip();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.drawImage(v, 0, 0, c.width, c.height);
+      ctx.restore();
+      // Right of split: stabilised draw.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(c.width * split, 0, c.width * (1 - split), c.height);
+      ctx.clip();
+      applyStabilizedTransform(ctx, c.width, c.height, v.currentTime);
+      ctx.drawImage(v, 0, 0, c.width, c.height);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.restore();
       return;
     }
+
     applyStabilizedTransform(ctx, c.width, c.height, v.currentTime);
     ctx.drawImage(v, 0, 0, c.width, c.height);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -851,10 +877,11 @@ export default function App() {
         )}
         {mode === "video" && isPaused && !recording && <PlayOverlay />}
         {mode === "video" && analysisReady && !recording && (
-          <CompareButton
-            active={showOriginal}
-            onPress={() => setShowOriginal(true)}
-            onRelease={() => setShowOriginal(false)}
+          <CompareWipe
+            active={compareActive}
+            value={compareSplit}
+            onChange={setCompareSplit}
+            onToggle={() => setCompareActive((a) => !a)}
           />
         )}
       </div>

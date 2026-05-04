@@ -17,9 +17,14 @@ precision highp float;
 uniform sampler2D u_image;
 uniform vec3 u_gain;
 uniform vec3 u_bias;
+uniform float u_splitX;
 varying vec2 v_uv;
 void main() {
   vec4 src = texture2D(u_image, v_uv);
+  if (v_uv.x < u_splitX) {
+    gl_FragColor = src;
+    return;
+  }
   vec3 c = clamp(src.rgb * u_gain + u_bias, 0.0, 1.0);
   gl_FragColor = vec4(c, src.a);
 }
@@ -42,6 +47,7 @@ uniform float u_contrast;
 uniform float u_clahe;
 uniform float u_lutSize;
 uniform float u_lutMix;
+uniform float u_splitX;  // Compare-wipe split: pixels with uv.x < splitX show source.
 varying vec2 v_uv;
 
 vec3 sCurve(vec3 c, float k) {
@@ -73,6 +79,10 @@ vec3 sampleLUT(vec3 color, float size) {
 
 void main() {
   vec4 src = texture2D(u_image, v_uv);
+  if (v_uv.x < u_splitX) {
+    gl_FragColor = src;
+    return;
+  }
   vec3 c = src.rgb;
 
   // Ancuti channel compensation: lift weak channels using the green channel
@@ -164,7 +174,9 @@ export class Renderer {
     image: WebGLUniformLocation;
     gain: WebGLUniformLocation;
     bias: WebGLUniformLocation;
+    splitX: WebGLUniformLocation;
   };
+  private splitX = 0;
   private texture: WebGLTexture;
   private lutTexture: WebGLTexture;
   private toneTexture: WebGLTexture;
@@ -187,6 +199,7 @@ export class Renderer {
     clahe: WebGLUniformLocation;
     lutSize: WebGLUniformLocation;
     lutMix: WebGLUniformLocation;
+    splitX: WebGLUniformLocation;
   };
 
   constructor(canvas: HTMLCanvasElement) {
@@ -262,6 +275,7 @@ export class Renderer {
       image: gl.getUniformLocation(aiProg, "u_image")!,
       gain: gl.getUniformLocation(aiProg, "u_gain")!,
       bias: gl.getUniformLocation(aiProg, "u_bias")!,
+      splitX: gl.getUniformLocation(aiProg, "u_splitX")!,
     };
 
     this.locs = {
@@ -281,7 +295,13 @@ export class Renderer {
       clahe: gl.getUniformLocation(prog, "u_clahe")!,
       lutSize: gl.getUniformLocation(prog, "u_lutSize")!,
       lutMix: gl.getUniformLocation(prog, "u_lutMix")!,
+      splitX: gl.getUniformLocation(prog, "u_splitX")!,
     };
+  }
+
+  setSplit(x: number) {
+    // 0 = entire frame original, 1 = entire frame corrected.
+    this.splitX = Math.max(0, Math.min(1, x));
   }
 
   uploadToneLUT(lut: Uint8Array) {
@@ -354,6 +374,7 @@ export class Renderer {
     gl.uniform1f(this.locs.clahe, settings.clahe);
     gl.uniform1f(this.locs.lutSize, this.lutSize);
     gl.uniform1f(this.locs.lutMix, this.lutSize > 0 ? settings.lutMix : 0);
+    gl.uniform1f(this.locs.splitX, this.splitX);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
@@ -378,6 +399,7 @@ export class Renderer {
 
     gl.uniform3fv(this.aiLocs.gain, gain);
     gl.uniform3fv(this.aiLocs.bias, bias);
+    gl.uniform1f(this.aiLocs.splitX, this.splitX);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
