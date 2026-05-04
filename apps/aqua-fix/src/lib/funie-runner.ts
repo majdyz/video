@@ -37,7 +37,10 @@ function ensureBuffers() {
 
 type Source = HTMLVideoElement | HTMLImageElement | ImageBitmap | HTMLCanvasElement;
 
-export async function runFunie(src: Source): Promise<HTMLCanvasElement> {
+// strength: 0..1 lerp between source and AI output (default 1.0 = pure AI).
+// The blend is done at 256x256 and then upscaled by the caller, same as the
+// raw output — so strength is essentially free (one extra mul-add per pixel).
+export async function runFunie(src: Source, strength = 1.0): Promise<HTMLCanvasElement> {
   ensureBuffers();
   if (!downCtx || !outCtx || !inputBuffer || !outputImageData || !outCanvas) {
     throw new Error("FUnIE buffers not initialised");
@@ -58,10 +61,15 @@ export async function runFunie(src: Source): Promise<HTMLCanvasElement> {
   const outData = outputs[session.outputNames[0]].data as Float32Array;
 
   const dst = outputImageData.data;
+  const s = Math.min(1, Math.max(0, strength));
+  const oneMinusS = 1 - s;
   for (let j = 0, i = 0; j < outData.length; j += 3, i += 4) {
-    dst[i] = clamp255((outData[j] + 1) * 127.5);
-    dst[i + 1] = clamp255((outData[j + 1] + 1) * 127.5);
-    dst[i + 2] = clamp255((outData[j + 2] + 1) * 127.5);
+    const aiR = (outData[j] + 1) * 127.5;
+    const aiG = (outData[j + 1] + 1) * 127.5;
+    const aiB = (outData[j + 2] + 1) * 127.5;
+    dst[i] = clamp255(px[i] * oneMinusS + aiR * s);
+    dst[i + 1] = clamp255(px[i + 1] * oneMinusS + aiG * s);
+    dst[i + 2] = clamp255(px[i + 2] * oneMinusS + aiB * s);
     dst[i + 3] = 255;
   }
   outCtx.putImageData(outputImageData, 0, 0);

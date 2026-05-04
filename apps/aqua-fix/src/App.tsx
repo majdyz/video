@@ -119,11 +119,20 @@ export default function App() {
   const [funieReady, setFunieReady] = useState(isFunieReady());
   const [funieDownloadPct, setFunieDownloadPct] = useState<number | null>(null);
   const [showFuniePrompt, setShowFuniePrompt] = useState(false);
+  const [aiStrength, setAiStrength] = useState(() => {
+    const v = parseFloat(localStorage.getItem("aqua-fix:aiStrength") || "1");
+    return isNaN(v) ? 1 : Math.min(1, Math.max(0, v));
+  });
+  const aiStrengthRef = useRef(aiStrength);
   const qualityRef = useRef<Quality>(quality);
   useEffect(() => {
     qualityRef.current = quality;
     localStorage.setItem("aqua-fix:quality", quality);
   }, [quality]);
+  useEffect(() => {
+    aiStrengthRef.current = aiStrength;
+    localStorage.setItem("aqua-fix:aiStrength", aiStrength.toString());
+  }, [aiStrength]);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -170,7 +179,7 @@ export default function App() {
     const bitmap = imageBitmapRef.current;
     statsRef.current = computeStats(bitmap, bitmap.width, bitmap.height, settings.castStrength);
     if (qualityRef.current === "ai" && funieReady && !showOriginal) {
-      runFunie(bitmap)
+      runFunie(bitmap, aiStrengthRef.current)
         .then((aiOut) => {
           if (!rendererRef.current) return;
           rendererRef.current.uploadSource(aiOut, bitmap.width, bitmap.height);
@@ -182,7 +191,7 @@ export default function App() {
     rendererRef.current.uploadSource(bitmap, bitmap.width, bitmap.height);
     const eff = showOriginal ? OFF_SETTINGS : settings;
     rendererRef.current.render(statsRef.current, eff);
-  }, [settings, mode, showOriginal, funieReady, quality]);
+  }, [settings, mode, showOriginal, funieReady, quality, aiStrength]);
 
   useEffect(() => {
     if (mode !== "video" || !videoRef.current || videoRef.current.readyState < 2) return;
@@ -197,7 +206,7 @@ export default function App() {
     if (qualityRef.current === "ai" && funieReady && !showOriginalRef.current) {
       if (aiInflightRef.current) return;
       aiInflightRef.current = true;
-      runFunie(v)
+      runFunie(v, aiStrengthRef.current)
         .then((aiOut) => {
           if (!rendererRef.current) return;
           rendererRef.current.uploadSource(aiOut, v.videoWidth, v.videoHeight);
@@ -227,7 +236,7 @@ export default function App() {
     if (!v || v.readyState < 2) return;
     if (!v.paused) return;
     renderFrameSync(v);
-  }, [settings, showOriginal, isPaused, mode, funieReady, quality]);
+  }, [settings, showOriginal, isPaused, mode, funieReady, quality, aiStrength]);
 
   function togglePlay() {
     const v = videoRef.current;
@@ -934,29 +943,41 @@ export default function App() {
 
         {mode !== "idle" && (
           <>
-            <div className="quality-row">
-              <span className="quality-label">Mode</span>
-              <div className="quality-segment">
-                <button
-                  className={quality === "classical" ? "active" : ""}
-                  disabled={recording}
-                  onClick={() => setQuality("classical")}
-                >
-                  Classical
-                </button>
-                <button
-                  className={quality === "ai" ? "active" : ""}
-                  disabled={recording}
-                  onClick={() => {
-                    setQuality("ai");
-                    if (!funieReady && funieDownloadPct === null) {
-                      setShowFuniePrompt(true);
-                    }
-                  }}
-                >
-                  AI {funieReady ? "✓" : `(${FUNIE_SIZE_MB.toFixed(0)} MB)`}
-                </button>
-              </div>
+            <div className="model-picker">
+              <button
+                type="button"
+                className={`model-card${quality === "classical" ? " active" : ""}`}
+                disabled={recording}
+                onClick={() => setQuality("classical")}
+                aria-pressed={quality === "classical"}
+              >
+                {quality === "classical" && <span className="model-check">ON</span>}
+                <span className="model-title">Classical</span>
+                <span className="model-sub">CLAHE + Shades-of-Gray, runs on every device.</span>
+              </button>
+              <button
+                type="button"
+                className={`model-card${quality === "ai" ? " active" : ""}`}
+                disabled={recording}
+                onClick={() => {
+                  setQuality("ai");
+                  if (!funieReady && funieDownloadPct === null) {
+                    setShowFuniePrompt(true);
+                  }
+                }}
+                aria-pressed={quality === "ai"}
+              >
+                {quality === "ai" && <span className="model-check">ON</span>}
+                <span className="model-title">
+                  AI
+                  {!funieReady && <span className="model-badge">{FUNIE_SIZE_MB.toFixed(0)} MB</span>}
+                </span>
+                <span className="model-sub">
+                  {funieReady
+                    ? "FUnIE-GAN, on-device. More natural color, slower."
+                    : "FUnIE-GAN, on-device. One-time download."}
+                </span>
+              </button>
             </div>
 
             {quality === "classical" && (
@@ -985,6 +1006,12 @@ export default function App() {
                 AI model not loaded yet — pick a file to start the {FUNIE_SIZE_MB.toFixed(0)} MB
                 download, or switch back to Classical.
               </p>
+            )}
+            {quality === "ai" && funieReady && (
+              <div className="sliders">
+                <Slider label="Strength" value={aiStrength} min={0} max={1} step={0.01}
+                  onChange={setAiStrength} disabled={recording} />
+              </div>
             )}
 
             {quality === "classical" && (

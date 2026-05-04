@@ -6,3 +6,84 @@ body,
   background: #061018;
   min-height: 100%;
 }
+
+/* Model picker — two-card chooser. Mirrors Lightroom/Photos AI-feature
+   pickers: two equal cards, the active one rings in accent. */
+.model-picker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 4px;
+}
+.model-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease, transform 0.05s ease;
+  position: relative;
+  overflow: hidden;
+}
+.model-card:hover:not(:disabled):not(.active) {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.model-card:active:not(:disabled) {
+  transform: scale(0.985);
+}
+.model-card:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.model-card.active {
+  background: linear-gradient(180deg, rgba(95, 208, 255, 0.18), rgba(95, 208, 255, 0.06));
+  border-color: rgba(95, 208, 255, 0.55);
+  color: var(--text);
+  box-shadow: 0 0 0 1px rgba(95, 208, 255, 0.35) inset, 0 8px 24px -10px rgba(95, 208, 255, 0.4);
+}
+.model-card .model-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.1;
+}
+.model-card .model-sub {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.25;
+  font-weight: 400;
+}
+.model-card.active .model-sub {
+  color: var(--text);
+  opacity: 0.7;
+}
+.model-card .model-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #5fd0ff, #8effd4);
+  color: #00131f;
+  margin-left: auto;
+}
+.model-card .model-check {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba(95, 208, 255, 0.95);
+  letter-spacing: 0.04em;
+}
