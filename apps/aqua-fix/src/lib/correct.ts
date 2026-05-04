@@ -205,7 +205,12 @@ export class Renderer {
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const gl = canvas.getContext("webgl", {
-      preserveDrawingBuffer: true,
+      // preserveDrawingBuffer was true so canvas.toBlob in savePhoto
+      // could read the result. The cost is a backbuffer copy on every
+      // frame on most drivers — meaningful overhead during 60fps
+      // playback. Caller (savePhoto) now re-renders synchronously
+      // before toBlob, so we don't need preservation.
+      preserveDrawingBuffer: false,
       premultipliedAlpha: false,
       antialias: false,
     });

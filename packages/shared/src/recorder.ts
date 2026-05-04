@@ -182,13 +182,17 @@ export function closeAudioRouting(routing: AudioRouting | null): void {
   try { routing.ctx.close(); } catch { /* ignore */ }
 }
 
-export function captureAudioForRecording(routing: AudioRouting | null): {
+export async function captureAudioForRecording(routing: AudioRouting | null): Promise<{
   tracks: MediaStreamTrack[];
   cleanup: () => void;
-} {
+}> {
   if (!routing) return { tracks: [], cleanup: () => undefined };
+  // Await resume so the destination has live audio frames immediately —
+  // fire-and-forget resume meant the first ~few hundred ms of an iOS
+  // recording came out silent because the context wasn't running yet
+  // when MediaRecorder pulled the first audio chunk.
   if (routing.ctx.state === "suspended") {
-    routing.ctx.resume().catch(() => undefined);
+    try { await routing.ctx.resume(); } catch { /* ignore */ }
   }
   const dest = routing.ctx.createMediaStreamDestination();
   routing.source.connect(dest);
@@ -227,10 +231,22 @@ export async function pruneOldRecordings(prefix: string): Promise<void> {
       values?: () => AsyncIterable<FileSystemHandle>;
     };
     if (typeof dir.values !== "function") return;
+    // Only sweep entries older than 10 minutes — without an age check
+    // a second tab opening the app would nuke the first tab's
+    // in-flight .tmp recording.
+    const cutoff = Date.now() - 10 * 60 * 1000;
     for await (const entry of dir.values()) {
-      if (entry.name.startsWith(prefix) && entry.name.endsWith(".tmp")) {
-        root.removeEntry(entry.name).catch(() => undefined);
+      if (!entry.name.startsWith(prefix) || !entry.name.endsWith(".tmp")) continue;
+      try {
+        const fileEntry = entry as FileSystemFileHandle;
+        if (typeof fileEntry.getFile === "function") {
+          const file = await fileEntry.getFile();
+          if (file.lastModified > cutoff) continue;
+        }
+      } catch {
+        // can't stat — fall through and delete defensively
       }
+      root.removeEntry(entry.name).catch(() => undefined);
     }
   } catch {
     // ignore
@@ -315,5 +331,15 @@ export async function shareOrDownload(blob: Blob, filename: string): Promise<voi
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  // Defer revoke so the click has time to start the download, but also
+  // revoke on pagehide so users who close the tab quickly don't leak
+  // the blob URL until the eventual GC.
+  let revoked = false;
+  const revoke = () => {
+    if (revoked) return;
+    revoked = true;
+    URL.revokeObjectURL(url);
+  };
+  setTimeout(revoke, 60_000);
+  window.addEventListener("pagehide", revoke, { once: true });
 }

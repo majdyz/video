@@ -149,6 +149,11 @@ export async function analyzeVideoOpenCV(
   const lkCriteria = new cv.TermCriteria(
     cv.TermCriteria_EPS | cv.TermCriteria_COUNT, 10, 0.03,
   );
+  // Persistent RGBA Mat sized once. matFromImageData allocates a fresh
+  // wasm-heap buffer per frame (~aw*ah*4 bytes) — at 60 fps × 2× speed
+  // analysis on a 5-minute clip that's ~36 GB of churn through GC.
+  const persistentRgba = new cv.Mat(ah, aw, 24 /* CV_8UC4 */);
+  const cvImage = persistentRgba as unknown as { data: Uint8Array };
 
   const cumAArr: number[] = [1];
   const cumBArr: number[] = [0];
@@ -165,6 +170,7 @@ export async function analyzeVideoOpenCV(
       try { prevGray?.delete(); } catch { /* */ }
       try { prevPts?.delete(); } catch { /* */ }
       try { mask?.delete(); } catch { /* */ }
+      try { persistentRgba?.delete(); } catch { /* */ }
       // Free the per-call OpenCV scratch objects too — OpenCV.js wraps
       // these in wasm-heap allocations that don't get GC'd by JS alone.
       try { (winSize as unknown as { delete?: () => void }).delete?.(); } catch { /* */ }
@@ -219,7 +225,6 @@ export async function analyzeVideoOpenCV(
 
     const processFrame = () => {
       if (video.readyState < 2) return;
-      let frameRgba: CvMat | null = null;
       let currGray: CvMat | null = null;
       let nextPts: CvMat | null = null;
       let status: CvMat | null = null;
@@ -231,9 +236,11 @@ export async function analyzeVideoOpenCV(
       try {
         ctx.drawImage(video, 0, 0, aw, ah);
         const imageData = ctx.getImageData(0, 0, aw, ah);
-        frameRgba = cv.matFromImageData(imageData);
+        // Copy into the persistent Mat instead of allocating a fresh
+        // wasm-heap buffer (matFromImageData) every frame.
+        cvImage.data.set(imageData.data);
         currGray = new cv.Mat();
-        cv.cvtColor(frameRgba, currGray, cv.COLOR_RGBA2GRAY);
+        cv.cvtColor(persistentRgba, currGray, cv.COLOR_RGBA2GRAY);
 
         let frameA = 1, frameB = 0, frameTX = 0, frameTY = 0;
         let inlierCount = 0;
@@ -349,7 +356,6 @@ export async function analyzeVideoOpenCV(
         cumBArr.push(cB);
         cumTXArr.push(cTX);
         cumTYArr.push(cTY);
-        try { frameRgba?.delete(); } catch { /* */ }
         try { currGray?.delete(); } catch { /* */ }
         try { nextPts?.delete(); } catch { /* */ }
         try { status?.delete(); } catch { /* */ }

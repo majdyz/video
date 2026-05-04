@@ -121,6 +121,8 @@ export default function App() {
   const onEndedRef = useRef<(() => void) | null>(null);
   const sinkRef = useRef<RecordingSink | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const wakeLockListenerRef = useRef<(() => void) | null>(null);
+  const loadCanPlayListenerRef = useRef<(() => void) | null>(null);
   const lastStatsRefreshRef = useRef(0);
   // Tracks whether statsRef holds a real (lerped) stat value. Was being
   // detected via `cur !== IDENTITY_STATS` which only catches the *first*
@@ -162,6 +164,10 @@ export default function App() {
   // bail out via the dialog's Cancel button without waiting for the
   // full ~17 MB to finish (especially useful on flaky connections).
   const funieAbortRef = useRef<AbortController | null>(null);
+  // True while a load is in flight (cached or downloading). Without
+  // this a fast double-tap on the AI card fires two parallel
+  // loadFunie() calls and races their completions.
+  const funieLoadingRef = useRef(false);
   // True once we've confirmed the model bytes are in Cache API. Probed
   // once on mount; if true, clicking the AI card skips the consent
   // dialog entirely (just decodes from cache and switches mode).
@@ -455,6 +461,12 @@ export default function App() {
     recordingFlagRef.current = false;
     if (videoRef.current) {
       videoRef.current.pause();
+      // Remove the canplay listener if it never fired — otherwise it'd
+      // attach to the next file's load and run a stale closure.
+      if (loadCanPlayListenerRef.current) {
+        videoRef.current.removeEventListener("canplay", loadCanPlayListenerRef.current);
+        loadCanPlayListenerRef.current = null;
+      }
       videoRef.current.removeAttribute("src");
       videoRef.current.load();
     }
@@ -547,12 +559,16 @@ export default function App() {
   // straight to AI. Decoding 17 MB from the local cache + building the
   // ort session takes a handful of frames at most.
   async function loadFunieFromCacheAndSwitch() {
+    if (funieLoadingRef.current) return;
+    funieLoadingRef.current = true;
     try {
       await loadFunie();
       setFunieReady(true);
       setQuality("ai");
     } catch (e) {
       setError("Couldn't load AI model: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      funieLoadingRef.current = false;
     }
   }
 
@@ -665,8 +681,17 @@ export default function App() {
       else {
         const onCanPlay = () => {
           video.removeEventListener("canplay", onCanPlay);
+          loadCanPlayListenerRef.current = null;
           computeOnce();
         };
+        // Track the listener so teardownVideo can remove it. Without
+        // this, a teardown-before-canplay leaves the old listener
+        // attached and the next file's first canplay fires the stale
+        // closure.
+        if (loadCanPlayListenerRef.current) {
+          video.removeEventListener("canplay", loadCanPlayListenerRef.current);
+        }
+        loadCanPlayListenerRef.current = onCanPlay;
         video.addEventListener("canplay", onCanPlay);
       }
     } catch (e) {
@@ -676,6 +701,14 @@ export default function App() {
 
   function savePhoto() {
     if (!canvasRef.current) return;
+    // Re-render synchronously before toBlob — the WebGL context is
+    // created without preserveDrawingBuffer so the backbuffer may have
+    // been cleared since the last paint. Without this, toBlob could
+    // capture an empty canvas.
+    if (rendererRef.current && imageBitmapRef.current && statsRef.current) {
+      rendererRef.current.uploadSource(imageBitmapRef.current, imageBitmapRef.current.width, imageBitmapRef.current.height);
+      rendererRef.current.render(statsRef.current, settings);
+    }
     canvasRef.current.toBlob(
       (blob) => {
         if (!blob) return;
@@ -705,6 +738,10 @@ export default function App() {
       if (wakeLockRef.current) {
         wakeLockRef.current.release().catch(() => undefined);
         wakeLockRef.current = null;
+        if (wakeLockListenerRef.current) {
+          document.removeEventListener("visibilitychange", wakeLockListenerRef.current);
+          wakeLockListenerRef.current = null;
+        }
       }
       setRecording(false);
       setError("Recording failed: " + (e instanceof Error ? e.message : String(e)));
@@ -747,14 +784,34 @@ export default function App() {
     const wakeLockApi = (navigator as Navigator & {
       wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinel> };
     }).wakeLock;
-    if (wakeLockApi && typeof wakeLockApi.request === "function") {
+    const requestWakeLock = () => {
+      if (!wakeLockApi || typeof wakeLockApi.request !== "function") return;
       wakeLockApi
         .request("screen")
         .then((lock) => {
+          // Late-arrival guard: if the recording already finished or
+          // was cancelled before the promise resolved, release the
+          // lock immediately so it doesn't leak for the rest of the
+          // session.
+          if (!recordingFlagRef.current) {
+            lock.release().catch(() => undefined);
+            return;
+          }
           wakeLockRef.current = lock;
         })
         .catch(() => undefined);
-    }
+    };
+    requestWakeLock();
+    // iOS auto-releases the wake-lock sentinel when the tab is
+    // backgrounded; re-request on visibility return so a long
+    // recording resumed from lock screen still keeps the screen on.
+    const onVisibility = () => {
+      if (document.visibilityState === "visible" && recordingFlagRef.current && !wakeLockRef.current) {
+        requestWakeLock();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    wakeLockListenerRef.current = onVisibility;
 
     if (rendererRef.current) {
       rendererRef.current.uploadSource(video, video.videoWidth, video.videoHeight);
@@ -764,7 +821,7 @@ export default function App() {
     const fps = sourceFpsRef.current;
     const captureCtx = buildCaptureContext(canvas, fps);
     if (!audioRoutingRef.current) audioRoutingRef.current = attachAudioRouting(video);
-    const audioCapture = captureAudioForRecording(audioRoutingRef.current);
+    const audioCapture = await captureAudioForRecording(audioRoutingRef.current);
     const stream = new MediaStream([
       ...captureCtx.videoStream.getVideoTracks(),
       ...audioCapture.tracks,
@@ -870,6 +927,10 @@ export default function App() {
           // ignore
         }
         wakeLockRef.current = null;
+      }
+      if (wakeLockListenerRef.current) {
+        document.removeEventListener("visibilitychange", wakeLockListenerRef.current);
+        wakeLockListenerRef.current = null;
       }
       setRecording(false);
       setRecordProgress(0);

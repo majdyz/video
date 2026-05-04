@@ -66,6 +66,12 @@ export default function App() {
   const analysisRef = useRef<AnalysisResult | null>(null);
   const smoothRef = useRef<SmoothPath | null>(null);
   const cropRef = useRef(0.1);
+  // Single-slot memo for clampResidualToCanvas. Same frame (idx) is
+  // typically redrawn many times — paused playback, wipe drags, slider
+  // tweaks, two-rect wipe path renders the frame twice — so caching the
+  // most recent result skips up to 14 binary-search iterations × 8
+  // corner tests per repeat call.
+  const clampCacheRef = useRef<{ idx: number; scaleUp: number; w: number; h: number; rawA: number; rawB: number; rawTx: number; rawTy: number; t: { a: number; b: number; tx: number; ty: number } } | null>(null);
   // Compare wipe (0..1). Stored as a ref so the per-frame draw picks
   // up the live value without depending on React commits. compareActiveRef
   // gates whether the wipe path is taken at all.
@@ -101,6 +107,9 @@ export default function App() {
   const [opencvDownloadPct, setOpencvDownloadPct] = useState<number | null>(null);
   const [showCvPrompt, setShowCvPrompt] = useState(false);
   const opencvAbortRef = useRef<AbortController | null>(null);
+  // Inflight guard so a double-tap on Better doesn't fire two
+  // parallel loadOpenCV calls.
+  const opencvLoadingRef = useRef(false);
   // True once we've confirmed the script is in Cache API. Probed once
   // on mount; if true, clicking Better skips the consent dialog and
   // loads silently.
@@ -113,13 +122,26 @@ export default function App() {
     cropRef.current = crop;
   }, [crop]);
 
+  // Debounce smoothPath recomputes — it does median + L1 ADMM (80 iters)
+  // + Gaussian + zoom-curve over a Float32Array of frameCount size, so
+  // dragging the Smoothing slider was firing this 60×/s during the drag.
+  // ~120 ms gives the slider a chance to settle without making the
+  // first single-step interaction feel laggy.
   useEffect(() => {
-    const a = analysisRef.current;
-    if (!a) return;
-    const v = videoRef.current;
-    const w = v?.videoWidth ?? 1920;
-    const h = v?.videoHeight ?? 1080;
-    smoothRef.current = smoothPath(a, smoothing, crop, w, h);
+    if (!analysisRef.current) return;
+    const id = setTimeout(() => {
+      const a = analysisRef.current;
+      if (!a) return;
+      const v = videoRef.current;
+      const w = v?.videoWidth ?? 1920;
+      const h = v?.videoHeight ?? 1080;
+      smoothRef.current = smoothPath(a, smoothing, crop, w, h);
+      // Force a redraw with the new smoothing — the rAF loop reads from
+      // smoothRef so it'll pick this up next tick anyway, but on paused
+      // video there's no loop running.
+      drawStabilizedFrame();
+    }, 120);
+    return () => clearTimeout(id);
   }, [smoothing, crop, analysisReady]);
 
   useEffect(() => {
@@ -194,16 +216,30 @@ export default function App() {
 
     const idx = frameIndexForTime(a, time);
     const raw = residualTransform(a, sm, idx);
-    // Use the precomputed smoothed zoom for this frame. The smoother already
-    // looked across the whole clip and chose a zoom curve that pre-zooms
-    // before shaky segments and gradually zooms back out for steady ones —
-    // no jerks, no per-frame surprises.
     const targetZoom = sm.zoom[idx] ?? 1;
     const scaleUp = Math.max(1, Math.min(targetZoom, maxScaleUp));
-    // If the residual still wouldn't fit in the chosen zoom (e.g. user
-    // capped max-crop below what this frame really needs), lerp residual
-    // toward identity until it does.
-    const t = clampResidualToCanvas(raw, scaleUp, w, h);
+    const cache = clampCacheRef.current;
+    let t: { a: number; b: number; tx: number; ty: number };
+    if (
+      cache &&
+      cache.idx === idx &&
+      cache.scaleUp === scaleUp &&
+      cache.w === w &&
+      cache.h === h &&
+      cache.rawA === raw.a &&
+      cache.rawB === raw.b &&
+      cache.rawTx === raw.tx &&
+      cache.rawTy === raw.ty
+    ) {
+      t = cache.t;
+    } else {
+      t = clampResidualToCanvas(raw, scaleUp, w, h);
+      clampCacheRef.current = {
+        idx, scaleUp, w, h,
+        rawA: raw.a, rawB: raw.b, rawTx: raw.tx, rawTy: raw.ty,
+        t,
+      };
+    }
     const cx = w * 0.5;
     const cy = h * 0.5;
     ctx.setTransform(
@@ -504,7 +540,7 @@ export default function App() {
     const fps = sourceFpsRef.current;
     const captureCtx = buildCaptureContext(canvas, fps);
     if (!audioRoutingRef.current) audioRoutingRef.current = attachAudioRouting(video);
-    const audioCapture = captureAudioForRecording(audioRoutingRef.current);
+    const audioCapture = await captureAudioForRecording(audioRoutingRef.current);
     const stream = new MediaStream([
       ...captureCtx.videoStream.getVideoTracks(),
       ...audioCapture.tracks,
@@ -730,12 +766,16 @@ export default function App() {
   // straight to Better. Decoding ~9 MB from cache + the ort runtime
   // initialise takes a fraction of a second.
   async function loadOpenCVFromCacheAndSwitch() {
+    if (opencvLoadingRef.current) return;
+    opencvLoadingRef.current = true;
     try {
       await loadOpenCV();
       setOpencvReady(true);
       setQuality("better");
     } catch (e) {
       setError("Couldn't load OpenCV: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      opencvLoadingRef.current = false;
     }
   }
 

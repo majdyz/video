@@ -33,7 +33,15 @@ export function Modal({
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Lock body scroll while the modal is open. Without this, on iOS
+    // the page bounces behind the backdrop on long modals (Info,
+    // download consent), making it look like the dialog is broken.
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
   }, [open, onClose]);
   if (!open) return null;
   return (
