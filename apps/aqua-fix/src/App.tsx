@@ -351,13 +351,18 @@ export default function App() {
 
   function maybeRefreshStats(video: HTMLVideoElement) {
     const now = performance.now();
-    if (now - lastStatsRefreshRef.current < 1000) return;
+    // Refresh 4× per second instead of 1× — combined with a per-step
+    // lerp 4× smaller, the effective time constant matches the previous
+    // 1 Hz × 15% setup, but each visible step is 4× smaller. Eliminates
+    // the once-per-second pulse that showed as a flicker, especially on
+    // footage with drifting particles where stats wobble slightly.
+    if (now - lastStatsRefreshRef.current < 250) return;
     if (video.readyState < 2) return;
     try {
       const fresh = computeStats(video, video.videoWidth, video.videoHeight, settingsRef.current.castStrength);
       const cur = statsRef.current;
       if (cur && cur !== IDENTITY_STATS) {
-        statsRef.current = lerpStats(cur, fresh, 0.15);
+        statsRef.current = lerpStats(cur, fresh, 0.0375);
       } else {
         statsRef.current = fresh;
       }
