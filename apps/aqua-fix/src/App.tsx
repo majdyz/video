@@ -135,6 +135,14 @@ export default function App() {
   const [funieReady, setFunieReady] = useState(isFunieReady());
   const [funieDownloadPct, setFunieDownloadPct] = useState<number | null>(null);
   const [showFuniePrompt, setShowFuniePrompt] = useState(false);
+  // Mirror of funieReady — the play-loop captures its closure once at
+  // startPreview() and never re-binds, so reading the state directly
+  // would forever see the value at preview-start time. Reading via the
+  // ref always sees the latest.
+  const funieReadyRef = useRef(funieReady);
+  useEffect(() => {
+    funieReadyRef.current = funieReady;
+  }, [funieReady]);
   const [aiStrength, setAiStrength] = useState(() => {
     const v = parseFloat(localStorage.getItem("aqua-fix:aiStrength") || "1");
     return isNaN(v) ? 1 : Math.min(1, Math.max(0, v));
@@ -228,7 +236,7 @@ export default function App() {
 
   function renderFrameSync(v: HTMLVideoElement) {
     if (!rendererRef.current || !statsRef.current) return;
-    if (qualityRef.current === "ai" && funieReady && !showOriginalRef.current) {
+    if (qualityRef.current === "ai" && funieReadyRef.current && !showOriginalRef.current) {
       // Always upload the current frame and apply the cached AI transfer at
       // full FPS. The model runs in the background — no render-frame is
       // gated on inference, so playback stays smooth even when inference
