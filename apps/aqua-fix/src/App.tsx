@@ -27,8 +27,11 @@ import "@dive-tools/shared/theme.css";
 import { Renderer, computeStats, type Settings, type Stats } from "./lib/correct";
 import { parseCube } from "./lib/lut";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
+import { isFunieReady, loadFunie, FUNIE_SIZE_MB } from "./lib/funie-loader";
+import { runFunie } from "./lib/funie-runner";
 
 type Mode = "idle" | "photo" | "video";
+type Quality = "classical" | "ai";
 
 const DEFAULT_SETTINGS: Settings = {
   intensity: 1.0,
@@ -110,6 +113,17 @@ export default function App() {
   const [lutName, setLutName] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [showInfo, setShowInfo] = useState(false);
+  const [quality, setQuality] = useState<Quality>(() => {
+    return (localStorage.getItem("aqua-fix:quality") as Quality) || "classical";
+  });
+  const [funieReady, setFunieReady] = useState(isFunieReady());
+  const [funieDownloadPct, setFunieDownloadPct] = useState<number | null>(null);
+  const [showFuniePrompt, setShowFuniePrompt] = useState(false);
+  const qualityRef = useRef<Quality>(quality);
+  useEffect(() => {
+    qualityRef.current = quality;
+    localStorage.setItem("aqua-fix:quality", quality);
+  }, [quality]);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -155,10 +169,20 @@ export default function App() {
     if (mode !== "photo" || !rendererRef.current || !imageBitmapRef.current) return;
     const bitmap = imageBitmapRef.current;
     statsRef.current = computeStats(bitmap, bitmap.width, bitmap.height, settings.castStrength);
+    if (qualityRef.current === "ai" && funieReady && !showOriginal) {
+      runFunie(bitmap)
+        .then((aiOut) => {
+          if (!rendererRef.current) return;
+          rendererRef.current.uploadSource(aiOut, bitmap.width, bitmap.height);
+          rendererRef.current.render(IDENTITY_STATS, OFF_SETTINGS);
+        })
+        .catch((e) => setError("AI inference failed: " + (e instanceof Error ? e.message : String(e))));
+      return;
+    }
     rendererRef.current.uploadSource(bitmap, bitmap.width, bitmap.height);
     const eff = showOriginal ? OFF_SETTINGS : settings;
     rendererRef.current.render(statsRef.current, eff);
-  }, [settings, mode, showOriginal]);
+  }, [settings, mode, showOriginal, funieReady, quality]);
 
   useEffect(() => {
     if (mode !== "video" || !videoRef.current || videoRef.current.readyState < 2) return;
@@ -166,24 +190,44 @@ export default function App() {
     statsRef.current = computeStats(v, v.videoWidth, v.videoHeight, settings.castStrength);
   }, [settings.castStrength, mode]);
 
-  const { currentTime, isPaused } = useVideoPlaybackState(videoRef, mode === "video", () => {
-    const v = videoRef.current;
-    if (!v || !rendererRef.current || !statsRef.current || v.readyState < 2) return;
+  const aiInflightRef = useRef(false);
+
+  function renderFrameSync(v: HTMLVideoElement) {
+    if (!rendererRef.current || !statsRef.current) return;
+    if (qualityRef.current === "ai" && funieReady && !showOriginalRef.current) {
+      if (aiInflightRef.current) return;
+      aiInflightRef.current = true;
+      runFunie(v)
+        .then((aiOut) => {
+          if (!rendererRef.current) return;
+          rendererRef.current.uploadSource(aiOut, v.videoWidth, v.videoHeight);
+          rendererRef.current.render(IDENTITY_STATS, OFF_SETTINGS);
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          aiInflightRef.current = false;
+        });
+      return;
+    }
     rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
     const eff = showOriginalRef.current ? OFF_SETTINGS : settingsRef.current;
     rendererRef.current.render(statsRef.current, eff);
+  }
+
+  const { currentTime, isPaused } = useVideoPlaybackState(videoRef, mode === "video", () => {
+    const v = videoRef.current;
+    if (!v || v.readyState < 2) return;
+    renderFrameSync(v);
   });
 
   // Repaint the frozen frame when settings change while paused.
   useEffect(() => {
     if (mode !== "video") return;
     const v = videoRef.current;
-    if (!v || !rendererRef.current || !statsRef.current) return;
-    if (!v.paused || v.readyState < 2) return;
-    rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
-    const eff = showOriginal ? OFF_SETTINGS : settings;
-    rendererRef.current.render(statsRef.current, eff);
-  }, [settings, showOriginal, isPaused, mode]);
+    if (!v || v.readyState < 2) return;
+    if (!v.paused) return;
+    renderFrameSync(v);
+  }, [settings, showOriginal, isPaused, mode, funieReady, quality]);
 
   function togglePlay() {
     const v = videoRef.current;
@@ -231,13 +275,10 @@ export default function App() {
     lastStatsRefreshRef.current = 0;
 
     const renderFromVideo = () => {
-      if (!rendererRef.current || !statsRef.current || !videoRef.current) return;
       const v = videoRef.current;
-      if (v.readyState < 2) return;
+      if (!v || v.readyState < 2) return;
       maybeRefreshStats(v);
-      rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
-      const eff = showOriginalRef.current ? OFF_SETTINGS : settingsRef.current;
-      rendererRef.current.render(statsRef.current, eff);
+      renderFrameSync(v);
     };
 
     if (typeof video.requestVideoFrameCallback === "function") {
@@ -280,7 +321,14 @@ export default function App() {
     }
   }
 
+  const pendingFileRef = useRef<File | null>(null);
+
   async function handleFile(file: File) {
+    if (qualityRef.current === "ai" && !funieReady && funieDownloadPct === null) {
+      pendingFileRef.current = file;
+      setShowFuniePrompt(true);
+      return;
+    }
     setError(null);
     setRecording(false);
     setRecordProgress(0);
@@ -293,6 +341,22 @@ export default function App() {
       else await loadImage(file);
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function confirmFunieDownloadAndProceed() {
+    setShowFuniePrompt(false);
+    setFunieDownloadPct(0);
+    try {
+      await loadFunie((pct) => setFunieDownloadPct(pct));
+      setFunieReady(true);
+      setFunieDownloadPct(null);
+      const f = pendingFileRef.current;
+      pendingFileRef.current = null;
+      if (f) handleFile(f);
+    } catch (e) {
+      setFunieDownloadPct(null);
+      setError("Couldn't load AI model: " + (e instanceof Error ? e.message : String(e)));
     }
   }
 
@@ -516,12 +580,10 @@ export default function App() {
 
     lastStatsRefreshRef.current = 0;
     const renderAndPush = () => {
-      if (!recordingFlagRef.current || !rendererRef.current || !statsRef.current || !videoRef.current) return;
+      if (!recordingFlagRef.current || !videoRef.current) return;
       const v = videoRef.current;
       maybeRefreshStats(v);
-      rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
-      const eff = showOriginalRef.current ? OFF_SETTINGS : settingsRef.current;
-      rendererRef.current.render(statsRef.current, eff);
+      renderFrameSync(v);
       setRecordTime(v.currentTime);
       if (v.duration) setRecordProgress(v.currentTime / v.duration);
     };
@@ -674,6 +736,64 @@ export default function App() {
         tagline={AQUA_FIX_BRAND.tagline}
         onInfoClick={() => setShowInfo(true)}
       />
+      <Modal
+        open={showFuniePrompt}
+        onClose={() => {
+          setShowFuniePrompt(false);
+          pendingFileRef.current = null;
+        }}
+        title={`Download AI model (~${FUNIE_SIZE_MB.toFixed(0)} MB)`}
+      >
+        <p>
+          AI mode uses{" "}
+          <a href="https://arxiv.org/abs/1903.09766" target="_blank" rel="noopener noreferrer">
+            FUnIE-GAN
+          </a>{" "}
+          (Islam et al., RAL 2020) — a U-Net trained end-to-end on the EUVP
+          underwater dataset. It learns the inverse of the underwater
+          attenuation directly from data, with no per-image stats to tune. On
+          most footage it produces noticeably more natural colour than the
+          classical CLAHE + Shades-of-Gray pipeline, especially on deep / very
+          green water.
+        </p>
+        <p>
+          The model is a one-time <b>~{FUNIE_SIZE_MB.toFixed(0)} MB</b>{" "}
+          download from this site, then it's cached on your device — subsequent
+          uses are instant and offline. Inference runs locally on WebGPU when
+          available, otherwise WASM. Output is fixed at 256×256 internally and
+          upscaled.
+        </p>
+        <div className="actions">
+          <button
+            className="ghost"
+            onClick={() => {
+              setShowFuniePrompt(false);
+              setQuality("classical");
+              const f = pendingFileRef.current;
+              pendingFileRef.current = null;
+              if (f) handleFile(f);
+            }}
+          >
+            Use Classical instead
+          </button>
+          <button className="primary" onClick={confirmFunieDownloadAndProceed}>
+            Download &amp; continue
+          </button>
+        </div>
+      </Modal>
+      <Modal
+        open={funieDownloadPct !== null}
+        onClose={() => undefined}
+        title="Downloading AI model…"
+      >
+        <p>This is a one-time download. Subsequent uses are instant.</p>
+        <div className="progress" style={{ height: 8, marginTop: 8 }}>
+          <div className="bar" style={{ width: `${(funieDownloadPct || 0) * 100}%` }} />
+        </div>
+        <p style={{ textAlign: "center", marginTop: 12, fontSize: 13 }}>
+          {Math.round((funieDownloadPct || 0) * 100)}%
+        </p>
+      </Modal>
       <Modal open={showInfo} onClose={() => setShowInfo(false)} title="How Aqua Fix works">
         <h4>Pipeline</h4>
         <p>
@@ -814,23 +934,60 @@ export default function App() {
 
         {mode !== "idle" && (
           <>
-            <PresetsRow
-              presets={PRESETS}
-              current={settings}
-              matches={matchesPreset}
-              onSelect={setSettings}
-              disabled={recording}
-            />
-
-            <div className="sliders">
-              <Slider label="Intensity" value={settings.intensity} min={0} max={1} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, intensity: v }))} disabled={recording} />
-              <Slider label="Cast removal" value={settings.castStrength} min={0} max={1} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, castStrength: v }))} disabled={recording} />
-              <Slider label="Saturation" value={settings.saturation} min={0} max={2} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, saturation: v }))} disabled={recording} />
+            <div className="quality-row">
+              <span className="quality-label">Mode</span>
+              <div className="quality-segment">
+                <button
+                  className={quality === "classical" ? "active" : ""}
+                  disabled={recording}
+                  onClick={() => setQuality("classical")}
+                >
+                  Classical
+                </button>
+                <button
+                  className={quality === "ai" ? "active" : ""}
+                  disabled={recording}
+                  onClick={() => {
+                    setQuality("ai");
+                    if (!funieReady && funieDownloadPct === null) {
+                      setShowFuniePrompt(true);
+                    }
+                  }}
+                >
+                  AI {funieReady ? "✓" : `(${FUNIE_SIZE_MB.toFixed(0)} MB)`}
+                </button>
+              </div>
             </div>
 
+            {quality === "classical" && (
+              <>
+                <PresetsRow
+                  presets={PRESETS}
+                  current={settings}
+                  matches={matchesPreset}
+                  onSelect={setSettings}
+                  disabled={recording}
+                />
+
+                <div className="sliders">
+                  <Slider label="Intensity" value={settings.intensity} min={0} max={1} step={0.01}
+                    onChange={(v) => setSettings((s) => ({ ...s, intensity: v }))} disabled={recording} />
+                  <Slider label="Cast removal" value={settings.castStrength} min={0} max={1} step={0.01}
+                    onChange={(v) => setSettings((s) => ({ ...s, castStrength: v }))} disabled={recording} />
+                  <Slider label="Saturation" value={settings.saturation} min={0} max={2} step={0.01}
+                    onChange={(v) => setSettings((s) => ({ ...s, saturation: v }))} disabled={recording} />
+                </div>
+              </>
+            )}
+
+            {quality === "ai" && !funieReady && (
+              <p className="note">
+                AI model not loaded yet — pick a file to start the {FUNIE_SIZE_MB.toFixed(0)} MB
+                download, or switch back to Classical.
+              </p>
+            )}
+
+            {quality === "classical" && (
             <AdvancedDisclosure disabled={recording}>
               <div className="lut-row">
                 <label className="lut-pick">
@@ -860,6 +1017,7 @@ export default function App() {
               <Slider label="Contrast" value={settings.contrast} min={0} max={1} step={0.01}
                 onChange={(v) => setSettings((s) => ({ ...s, contrast: v }))} disabled={recording} />
             </AdvancedDisclosure>
+            )}
 
             <div className="actions">
               <button className="ghost" onClick={() => setSettings(DEFAULT_SETTINGS)} disabled={recording}>
