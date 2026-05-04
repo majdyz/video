@@ -517,10 +517,19 @@ export function useVideoPlaybackState(
       setCurrentTime(v.currentTime);
       onSeekedRef.current?.();
     };
+    // Also fire onSeeked on `loadeddata` — when a fresh src finishes
+    // loading at t=0 there's no `seeked` event (browser was already
+    // there), so the first paint relied on the rVFC loop catching up.
+    // Surface it explicitly so the canvas paints the very first frame.
+    const onLoaded = () => {
+      setCurrentTime(v.currentTime);
+      onSeekedRef.current?.();
+    };
     v.addEventListener("timeupdate", onTime);
     v.addEventListener("play", onPlay);
     v.addEventListener("pause", onPause);
     v.addEventListener("seeked", onSeekedHandler);
+    v.addEventListener("loadeddata", onLoaded);
     setCurrentTime(v.currentTime);
     setIsPaused(v.paused);
     return () => {
@@ -528,6 +537,7 @@ export function useVideoPlaybackState(
       v.removeEventListener("play", onPlay);
       v.removeEventListener("pause", onPause);
       v.removeEventListener("seeked", onSeekedHandler);
+      v.removeEventListener("loadeddata", onLoaded);
     };
   }, [videoRef, active]);
 

@@ -627,18 +627,15 @@ export default function App() {
     setRecording(true);
     setRecordProgress(0);
     setRecordTime(0);
-    recorder.start(1000);
+    // Start playback FIRST so an autoplay rejection doesn't leave the
+    // recorder running with no canvas frames (which would write a 0-byte
+    // .tmp file to OPFS — same bug aqua-fix had).
     try {
       await video.play();
     } catch (e) {
       recordingFlagRef.current = false;
       audioCapture.cleanup();
       audioCleanupRef.current = null;
-      try {
-        recorder.stop();
-      } catch {
-        // ignore
-      }
       try {
         await sink.cleanup();
       } catch {
@@ -648,7 +645,9 @@ export default function App() {
       setRecording(false);
       setError("Couldn't start playback for recording: " + (e instanceof Error ? e.message : String(e)));
       startPreview();
+      return;
     }
+    recorder.start(1000);
   }
 
   function cancelRecording() {
@@ -904,6 +903,7 @@ export default function App() {
         onClick={(e) => {
           if (mode !== "video" || recording) return;
           if ((e.target as HTMLElement).closest("button")) return;
+          if (compareActive) return;
           togglePlay();
         }}
       >

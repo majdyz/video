@@ -100,7 +100,12 @@ export async function detectVideoFps(video: HTMLVideoElement, samples = 12): Pro
         return;
       }
       const sorted = [...intervals].sort((a, b) => a - b);
-      const median = sorted[sorted.length >> 1];
+      // Average the two middle samples for even-length arrays — picking
+      // sorted[length>>1] biases the median toward the upper sample,
+      // which on borderline rates (29.97, 119.88) snaps the wrong way.
+      const median = sorted.length % 2 === 0
+        ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+        : sorted[sorted.length >> 1];
       const raw = median > 0 ? 1 / median : 60;
       const closest = COMMON_FPS.reduce(
         (a, b) => (Math.abs(b - raw) < Math.abs(a - raw) ? b : a),

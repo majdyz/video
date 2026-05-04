@@ -73,13 +73,20 @@ export async function analyzeVideo(
   thumbCtx.imageSmoothingQuality = "high";
 
   if (video.readyState < 2) {
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const onReady = () => {
         video.removeEventListener("canplay", onReady);
+        clearTimeout(t);
         resolve();
       };
       video.addEventListener("canplay", onReady);
-      setTimeout(resolve, 6000);
+      // Reject (don't silently resolve) so a non-decodable container —
+      // iOS HEVC HDR / ProRes / corrupt mov — fails clean instead of
+      // racing into the analyser and producing a frameRate≈0 result.
+      const t = setTimeout(() => {
+        video.removeEventListener("canplay", onReady);
+        reject(new Error("Video decoder didn't become ready (unsupported format?)"));
+      }, 6000);
     });
   }
 

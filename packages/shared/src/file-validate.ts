@@ -9,6 +9,21 @@ const MIN_VIDEO_BYTES = 8 * 1024;  // ~8 KB; smaller is almost certainly a place
 const MIN_IMAGE_BYTES = 1024;
 
 export function validateUploadedFile(file: File, kind: "image" | "video" | "any"): FileValidation {
+  // HEIC/HEIF stills (the iPhone default photo format) get accepted as
+  // "image/*" by the picker, but `<video>` and createImageBitmap on most
+  // browsers can't decode them. Reject explicitly with an actionable
+  // message instead of letting the load path fail with a generic decode
+  // error 30 seconds later.
+  const isHeic = /image\/(heic|heif)/i.test(file.type) || /\.(heic|heif)$/i.test(file.name);
+  if (isHeic) {
+    return {
+      ok: false,
+      message:
+        "HEIC/HEIF files aren't supported in browsers yet. In iOS Photos, " +
+        "tap Edit → ⋯ → Convert to JPEG (or change Settings → Camera → Formats " +
+        "to 'Most Compatible' before shooting) and pick the JPEG.",
+    };
+  }
   if (file.size === 0) {
     return {
       ok: false,

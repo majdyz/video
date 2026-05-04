@@ -153,6 +153,11 @@ export default function App() {
   const [funieReady, setFunieReady] = useState(isFunieReady());
   const [funieDownloadPct, setFunieDownloadPct] = useState<number | null>(null);
   const [showFuniePrompt, setShowFuniePrompt] = useState(false);
+  // Bumped on every file load. Async work in flight (AI inference,
+  // detectVideoFps, runFunie .then callbacks) reads this at the start
+  // and bails if it changed, so completing inferences for a stale file
+  // can't clobber the new file's render or stats.
+  const fileGenRef = useRef(0);
   // AbortController for the in-flight model download. Lets the user
   // bail out via the dialog's Cancel button without waiting for the
   // full ~17 MB to finish (especially useful on flaky connections).
@@ -236,11 +241,15 @@ export default function App() {
     const bitmap = imageBitmapRef.current;
     statsRef.current = computeStats(bitmap, bitmap.width, bitmap.height, settings.castStrength);
     if (qualityRef.current === "ai" && funieReady) {
-      // Photos: run AI once at full quality, draw the model output directly
-      // (no point doing color-transfer for a single still image — full output
-      // is more accurate than a 6-float regression).
+      // Photos: run AI once at full quality, draw the model output
+      // directly. Capture the file generation now and bail if a new
+      // file has been picked by the time inference completes — without
+      // this guard the stale inference's then() would clobber the new
+      // file's already-rendered frame.
+      const myGen = fileGenRef.current;
       runFunie(bitmap, aiStrengthRef.current)
         .then((res) => {
+          if (myGen !== fileGenRef.current) return;
           if (!rendererRef.current) return;
           rendererRef.current.uploadSource(res.canvas, bitmap.width, bitmap.height);
           rendererRef.current.render(IDENTITY_STATS, OFF_SETTINGS);
@@ -289,8 +298,13 @@ export default function App() {
       // transfer from the current frame's content.
       if (!aiInflightRef.current) {
         aiInflightRef.current = true;
+        const myGen = fileGenRef.current;
         runFunie(v, aiStrengthRef.current)
           .then((res) => {
+            // Bail if a new file replaced this one mid-inference —
+            // otherwise the stale transfer EMA-blends into the new
+            // file's cache.
+            if (myGen !== fileGenRef.current) return;
             const prev = aiTransferRef.current;
             const init = aiTransferInitialisedRef.current;
             // First inference snaps in; subsequent inferences EMA-blend
@@ -473,6 +487,7 @@ export default function App() {
       return;
     }
     teardownVideo();
+    fileGenRef.current++;
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
     sourceFpsRef.current = 60;
     sourceBitrateRef.current = null;
@@ -570,7 +585,13 @@ export default function App() {
 
   async function loadImage(file: File) {
     try {
-      const bitmap = await createImageBitmap(file);
+      // imageOrientation: "from-image" honours the JPEG's EXIF
+      // Orientation tag. Without it iOS Safari renders portrait iPhone
+      // photos rotated 90° (the camera shoots in landscape but tags
+      // them with the rotation in EXIF). Some older browsers ignore
+      // the option silently, which is fine — they were already
+      // rendering whatever orientation they pleased.
+      const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
       imageBitmapRef.current = bitmap;
       const stats = computeStats(bitmap, bitmap.width, bitmap.height, settingsRef.current.castStrength);
       statsRef.current = stats;
@@ -625,7 +646,9 @@ export default function App() {
       // recording flow so the saved file matches the input's smoothness
       // and quality ceiling.
       sourceBitrateRef.current = bitrateFromSource(file.size, video.duration || 0);
+      const myGen = fileGenRef.current;
       detectVideoFps(video).then((fps) => {
+        if (myGen !== fileGenRef.current) return;
         sourceFpsRef.current = fps;
       }).catch(() => undefined);
 
@@ -1100,6 +1123,11 @@ export default function App() {
         onClick={(e) => {
           if (mode !== "video" || recording) return;
           if ((e.target as HTMLElement).closest("button")) return;
+          // Suppress play/pause when the wipe is open — iOS dispatches
+          // a synthetic click after pointerup, so a finger-drag of the
+          // wipe handle that happens to land outside the bar still
+          // bubbled here and toggled playback.
+          if (compareActive) return;
           togglePlay();
         }}
       >

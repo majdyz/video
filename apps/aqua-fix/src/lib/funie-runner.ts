@@ -70,7 +70,8 @@ export async function runFunie(src: Source, strength = 1.0): Promise<FunieResult
   const ort = await import("onnxruntime-web");
   const input = new ort.Tensor("float32", inputBuffer, [1, MODEL_SIZE, MODEL_SIZE, 3]);
   const outputs = await session.run({ [session.inputNames[0]]: input });
-  const outData = outputs[session.outputNames[0]].data as Float32Array;
+  const outTensor = outputs[session.outputNames[0]];
+  const outData = outTensor.data as Float32Array;
 
   // Pack AI output to ImageData and compute least-squares per-channel transfer
   // (ai = gain * src + bias) in a single pass over the 256² pixels.
@@ -121,6 +122,18 @@ export async function runFunie(src: Source, strength = 1.0): Promise<FunieResult
     gain[c] = gClamped;
     bias[c] = meanA[c] - gClamped * meanS[c];
   }
+
+  // Dispose ort tensors. Without this, every inference (5–10 fps during
+  // playback) leaks the WebGPU/WASM-backed buffers — over a minute of
+  // playback that's hundreds of MB of leaked GPU memory. The input
+  // tensor wraps inputBuffer (which we own and reuse) — disposing it is
+  // safe in current ort versions because the wrapper doesn't own the
+  // backing storage.
+  try { input.dispose?.(); } catch { /* ignore */ }
+  for (const t of Object.values(outputs)) {
+    try { t.dispose?.(); } catch { /* ignore */ }
+  }
+  void outTensor;
 
   return { canvas: outCanvas, transfer: { gain, bias } };
 }

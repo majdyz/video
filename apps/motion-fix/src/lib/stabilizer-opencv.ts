@@ -96,13 +96,17 @@ export async function analyzeVideoOpenCV(
   ctx.imageSmoothingQuality = "high";
 
   if (video.readyState < 2) {
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const onReady = () => {
         video.removeEventListener("canplay", onReady);
+        clearTimeout(t);
         resolve();
       };
       video.addEventListener("canplay", onReady);
-      setTimeout(resolve, 6000);
+      const t = setTimeout(() => {
+        video.removeEventListener("canplay", onReady);
+        reject(new Error("Video decoder didn't become ready (unsupported format?)"));
+      }, 6000);
     });
   }
 
@@ -137,6 +141,14 @@ export async function analyzeVideoOpenCV(
   let prevGray: CvMat | null = null;
   let prevPts: CvMat | null = null;
   let mask: CvMat | null = null;
+  // Hoist these once per analyse-call instead of allocating per frame —
+  // OpenCV.js wraps each `new cv.Size`/`cv.TermCriteria` as a wasm
+  // heap entry that doesn't auto-free, so per-frame alloc leaks
+  // thousands of entries on long clips.
+  const winSize = new cv.Size(15, 15);
+  const lkCriteria = new cv.TermCriteria(
+    cv.TermCriteria_EPS | cv.TermCriteria_COUNT, 10, 0.03,
+  );
 
   const cumAArr: number[] = [1];
   const cumBArr: number[] = [0];
@@ -153,6 +165,10 @@ export async function analyzeVideoOpenCV(
       try { prevGray?.delete(); } catch { /* */ }
       try { prevPts?.delete(); } catch { /* */ }
       try { mask?.delete(); } catch { /* */ }
+      // Free the per-call OpenCV scratch objects too — OpenCV.js wraps
+      // these in wasm-heap allocations that don't get GC'd by JS alone.
+      try { (winSize as unknown as { delete?: () => void }).delete?.(); } catch { /* */ }
+      try { (lkCriteria as unknown as { delete?: () => void }).delete?.(); } catch { /* */ }
     };
 
     const restore = () => {
@@ -226,13 +242,9 @@ export async function analyzeVideoOpenCV(
           nextPts = new cv.Mat();
           status = new cv.Mat();
           err = new cv.Mat();
-          const winSize = new cv.Size(15, 15);
-          const criteria = new cv.TermCriteria(
-            cv.TermCriteria_EPS | cv.TermCriteria_COUNT, 10, 0.03,
-          );
           cv.calcOpticalFlowPyrLK(
             prevGray, currGray, prevPts, nextPts, status, err,
-            winSize, 3, criteria,
+            winSize, 3, lkCriteria,
           );
 
           const srcPts: number[] = [];
