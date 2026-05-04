@@ -245,6 +245,17 @@ export default function App() {
         runFunie(v, aiStrengthRef.current)
           .then((res) => {
             aiTransferRef.current = res.transfer;
+            // On paused video the play loop isn't redrawing — force a
+            // re-render here so the just-computed transfer is visible
+            // immediately. Without this, switching Classical→AI on a
+            // paused frame would show identity (the initial transfer)
+            // forever until the user pressed play.
+            const vv = videoRef.current;
+            if (vv && vv.paused && rendererRef.current && qualityRef.current === "ai") {
+              rendererRef.current.uploadSource(vv, vv.videoWidth, vv.videoHeight);
+              const tt = lerpTransferToIdentity(aiTransferRef.current, aiStrengthRef.current);
+              rendererRef.current.renderAi(tt.gain, tt.bias);
+            }
           })
           .catch(() => undefined)
           .finally(() => {
