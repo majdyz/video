@@ -1,7 +1,12 @@
-// Run FUnIE-GAN inference on an image source. Returns a 256x256 canvas with
-// the enhanced result that the caller can upload as a WebGL texture (so the
-// existing pipeline canvas stays a WebGL context — getContext('2d') on it
-// would otherwise fail forever).
+// Run FUnIE-GAN inference on an image source. Returns BOTH a 256x256
+// canvas (the raw enhanced output) AND a per-channel linear color transfer
+// (gain * src + bias) fitted by least-squares to map source pixels to AI
+// pixels.
+//
+// The transfer is what App.tsx uses for smooth video playback: derive it
+// once per inference, apply via a simple WebGL shader to every render frame
+// at full source resolution. This means the model can run at 5–10 fps while
+// the on-screen video stays at full native fps.
 
 import { getFunieSession } from "./funie-loader";
 
@@ -37,10 +42,17 @@ function ensureBuffers() {
 
 type Source = HTMLVideoElement | HTMLImageElement | ImageBitmap | HTMLCanvasElement;
 
-// strength: 0..1 lerp between source and AI output (default 1.0 = pure AI).
-// The blend is done at 256x256 and then upscaled by the caller, same as the
-// raw output — so strength is essentially free (one extra mul-add per pixel).
-export async function runFunie(src: Source, strength = 1.0): Promise<HTMLCanvasElement> {
+export type ColorTransfer = {
+  gain: [number, number, number];
+  bias: [number, number, number];
+};
+
+export type FunieResult = {
+  canvas: HTMLCanvasElement;
+  transfer: ColorTransfer;
+};
+
+export async function runFunie(src: Source, strength = 1.0): Promise<FunieResult> {
   ensureBuffers();
   if (!downCtx || !outCtx || !inputBuffer || !outputImageData || !outCanvas) {
     throw new Error("FUnIE buffers not initialised");
@@ -60,20 +72,56 @@ export async function runFunie(src: Source, strength = 1.0): Promise<HTMLCanvasE
   const outputs = await session.run({ [session.inputNames[0]]: input });
   const outData = outputs[session.outputNames[0]].data as Float32Array;
 
+  // Pack AI output to ImageData and compute least-squares per-channel transfer
+  // (ai = gain * src + bias) in a single pass over the 256² pixels.
   const dst = outputImageData.data;
   const s = Math.min(1, Math.max(0, strength));
   const oneMinusS = 1 - s;
+  const sumS = [0, 0, 0];
+  const sumA = [0, 0, 0];
+  const sumS2 = [0, 0, 0];
+  const sumSA = [0, 0, 0];
   for (let j = 0, i = 0; j < outData.length; j += 3, i += 4) {
-    const aiR = (outData[j] + 1) * 127.5;
-    const aiG = (outData[j + 1] + 1) * 127.5;
-    const aiB = (outData[j + 2] + 1) * 127.5;
-    dst[i] = clamp255(px[i] * oneMinusS + aiR * s);
-    dst[i + 1] = clamp255(px[i + 1] * oneMinusS + aiG * s);
-    dst[i + 2] = clamp255(px[i + 2] * oneMinusS + aiB * s);
+    const aiR = (outData[j] + 1) * 0.5;
+    const aiG = (outData[j + 1] + 1) * 0.5;
+    const aiB = (outData[j + 2] + 1) * 0.5;
+    const srR = px[i] / 255;
+    const srG = px[i + 1] / 255;
+    const srB = px[i + 2] / 255;
+    sumS[0] += srR; sumS[1] += srG; sumS[2] += srB;
+    sumA[0] += aiR; sumA[1] += aiG; sumA[2] += aiB;
+    sumS2[0] += srR * srR; sumS2[1] += srG * srG; sumS2[2] += srB * srB;
+    sumSA[0] += srR * aiR; sumSA[1] += srG * aiG; sumSA[2] += srB * aiB;
+    // Pixel output for the still-image / paused-frame path. Strength lerps
+    // between source and AI on the 256² thumbnail.
+    dst[i] = clamp255((srR * oneMinusS + aiR * s) * 255);
+    dst[i + 1] = clamp255((srG * oneMinusS + aiG * s) * 255);
+    dst[i + 2] = clamp255((srB * oneMinusS + aiB * s) * 255);
     dst[i + 3] = 255;
   }
   outCtx.putImageData(outputImageData, 0, 0);
-  return outCanvas;
+
+  const n = MODEL_SIZE * MODEL_SIZE;
+  const meanS = [sumS[0] / n, sumS[1] / n, sumS[2] / n];
+  const meanA = [sumA[0] / n, sumA[1] / n, sumA[2] / n];
+  const gain: [number, number, number] = [1, 1, 1];
+  const bias: [number, number, number] = [0, 0, 0];
+  for (let c = 0; c < 3; c++) {
+    const varS = sumS2[c] / n - meanS[c] * meanS[c];
+    const cov = sumSA[c] / n - meanS[c] * meanA[c];
+    const g = varS > 1e-6 ? cov / varS : 1;
+    // Clamp gain to keep transfer well-conditioned (prevents pathological
+    // cases on near-monochromatic patches like deep-blue water frames).
+    const gClamped = Math.max(0.4, Math.min(2.5, g));
+    // Apply strength lerp to the transfer too — strength=0 gives identity.
+    const gMixed = 1 + (gClamped - 1) * s;
+    const bRaw = meanA[c] - gClamped * meanS[c];
+    const bMixed = bRaw * s;
+    gain[c] = gMixed;
+    bias[c] = bMixed;
+  }
+
+  return { canvas: outCanvas, transfer: { gain, bias } };
 }
 
 function clamp255(v: number): number {

@@ -33,13 +33,18 @@ import { runFunie } from "./lib/funie-runner";
 type Mode = "idle" | "photo" | "video";
 type Quality = "classical" | "ai";
 
+// Defaults retuned against bornfree/dive-color-corrector's constants
+// (MIN_AVG_RED=60, BLUE_MAGIC_VALUE=1.2, THRESHOLD_RATIO=2000) and the
+// Ancuti 2018 fusion-input recipe (gamma-corrected branch ≈ 0.9–0.95).
+// Previous defaults blew highlights to cyan-white — these match what
+// practitioners use as a Lightroom reef baseline.
 const DEFAULT_SETTINGS: Settings = {
-  intensity: 1.0,
-  castStrength: 0.85,
-  saturation: 1.18,
+  intensity: 0.85,
+  castStrength: 0.65,
+  saturation: 1.25,
   gamma: 0.92,
-  contrast: 0.3,
-  clahe: 0.6,
+  contrast: 0.35,
+  clahe: 0.35,
   lutMix: 1.0,
 };
 
@@ -73,11 +78,15 @@ const IDENTITY_STATS: Stats = {
   toneLUT: IDENTITY_TONE_LUT,
 };
 
+// Shallow / Reef / Deep values from the research synthesis above —
+// Reef matches bornfree's auto-correction defaults; Shallow scales red
+// compensation low (0–10 m, reds mostly intact); Deep pushes near-max
+// cast removal (>15 m, reds largely lost per TDI/SDI guidance).
 const PRESETS: { label: string; settings: Settings }[] = [
   { label: "Off", settings: OFF_SETTINGS },
-  { label: "Shallow", settings: { intensity: 0.85, castStrength: 0.55, saturation: 1.1, gamma: 0.96, contrast: 0.18, clahe: 0.4, lutMix: 1.0 } },
+  { label: "Shallow", settings: { intensity: 0.55, castStrength: 0.35, saturation: 1.10, gamma: 1.00, contrast: 0.20, clahe: 0.15, lutMix: 1.0 } },
   { label: "Reef", settings: DEFAULT_SETTINGS },
-  { label: "Deep", settings: { intensity: 1.0, castStrength: 1.0, saturation: 1.3, gamma: 0.86, contrast: 0.4, clahe: 0.75, lutMix: 1.0 } },
+  { label: "Deep", settings: { intensity: 1.00, castStrength: 0.90, saturation: 1.40, gamma: 0.80, contrast: 0.45, clahe: 0.55, lutMix: 1.0 } },
 ];
 
 type AudioRouting = ReturnType<typeof attachAudioRouting>;
@@ -179,10 +188,13 @@ export default function App() {
     const bitmap = imageBitmapRef.current;
     statsRef.current = computeStats(bitmap, bitmap.width, bitmap.height, settings.castStrength);
     if (qualityRef.current === "ai" && funieReady && !showOriginal) {
+      // Photos: run AI once at full quality, draw the model output directly
+      // (no point doing color-transfer for a single still image — full output
+      // is more accurate than a 6-float regression).
       runFunie(bitmap, aiStrengthRef.current)
-        .then((aiOut) => {
+        .then((res) => {
           if (!rendererRef.current) return;
-          rendererRef.current.uploadSource(aiOut, bitmap.width, bitmap.height);
+          rendererRef.current.uploadSource(res.canvas, bitmap.width, bitmap.height);
           rendererRef.current.render(IDENTITY_STATS, OFF_SETTINGS);
         })
         .catch((e) => setError("AI inference failed: " + (e instanceof Error ? e.message : String(e))));
@@ -200,22 +212,37 @@ export default function App() {
   }, [settings.castStrength, mode]);
 
   const aiInflightRef = useRef(false);
+  // Cached colour transfer (gain * src + bias) from the most recent FUnIE
+  // inference. Refreshes whenever inference completes; until then, we render
+  // every video frame at full FPS through this 6-float remap.
+  const aiTransferRef = useRef<{ gain: [number, number, number]; bias: [number, number, number] }>({
+    gain: [1, 1, 1],
+    bias: [0, 0, 0],
+  });
 
   function renderFrameSync(v: HTMLVideoElement) {
     if (!rendererRef.current || !statsRef.current) return;
     if (qualityRef.current === "ai" && funieReady && !showOriginalRef.current) {
-      if (aiInflightRef.current) return;
-      aiInflightRef.current = true;
-      runFunie(v, aiStrengthRef.current)
-        .then((aiOut) => {
-          if (!rendererRef.current) return;
-          rendererRef.current.uploadSource(aiOut, v.videoWidth, v.videoHeight);
-          rendererRef.current.render(IDENTITY_STATS, OFF_SETTINGS);
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          aiInflightRef.current = false;
-        });
+      // Always upload the current frame and apply the cached AI transfer at
+      // full FPS. The model runs in the background — no render-frame is
+      // gated on inference, so playback stays smooth even when inference
+      // takes 100+ ms per frame.
+      rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
+      const t = aiTransferRef.current;
+      rendererRef.current.renderAi(t.gain, t.bias);
+      // Kick off a fresh inference if none in flight — refreshes the
+      // transfer from the current frame's content.
+      if (!aiInflightRef.current) {
+        aiInflightRef.current = true;
+        runFunie(v, aiStrengthRef.current)
+          .then((res) => {
+            aiTransferRef.current = res.transfer;
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            aiInflightRef.current = false;
+          });
+      }
       return;
     }
     rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);

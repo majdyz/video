@@ -7,6 +7,24 @@ void main() {
 }
 `;
 
+// AI color-transfer shader: applies a 6-float per-channel linear remap
+// (gain * src + bias) derived offline from a FUnIE-GAN inference. Lets us
+// run the model at slow cadence (~5–10 fps) but render at full source
+// resolution and full display fps — much smoother than upscaling the
+// 256×256 model output every frame.
+const FRAG_AI = `
+precision highp float;
+uniform sampler2D u_image;
+uniform vec3 u_gain;
+uniform vec3 u_bias;
+varying vec2 v_uv;
+void main() {
+  vec4 src = texture2D(u_image, v_uv);
+  vec3 c = clamp(src.rgb * u_gain + u_bias, 0.0, 1.0);
+  gl_FragColor = vec4(c, src.a);
+}
+`;
+
 const FRAG = `
 precision highp float;
 uniform sampler2D u_image;
@@ -140,6 +158,13 @@ export class Renderer {
   canvas: HTMLCanvasElement;
   private gl: WebGLRenderingContext;
   private program: WebGLProgram;
+  private aiProgram: WebGLProgram;
+  private aiLocs: {
+    pos: number;
+    image: WebGLUniformLocation;
+    gain: WebGLUniformLocation;
+    bias: WebGLUniformLocation;
+  };
   private texture: WebGLTexture;
   private lutTexture: WebGLTexture;
   private toneTexture: WebGLTexture;
@@ -220,6 +245,24 @@ export class Renderer {
       idLut[i * 4 + 3] = 255;
     }
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, idLut);
+
+    // Build the AI color-transfer program (parallel pipeline).
+    const aiVs = compileShader(gl, gl.VERTEX_SHADER, VERT);
+    const aiFs = compileShader(gl, gl.FRAGMENT_SHADER, FRAG_AI);
+    const aiProg = gl.createProgram()!;
+    gl.attachShader(aiProg, aiVs);
+    gl.attachShader(aiProg, aiFs);
+    gl.linkProgram(aiProg);
+    if (!gl.getProgramParameter(aiProg, gl.LINK_STATUS)) {
+      throw new Error("AI link failed: " + gl.getProgramInfoLog(aiProg));
+    }
+    this.aiProgram = aiProg;
+    this.aiLocs = {
+      pos: gl.getAttribLocation(aiProg, "a_pos"),
+      image: gl.getUniformLocation(aiProg, "u_image")!,
+      gain: gl.getUniformLocation(aiProg, "u_gain")!,
+      bias: gl.getUniformLocation(aiProg, "u_bias")!,
+    };
 
     this.locs = {
       pos: gl.getAttribLocation(prog, "a_pos"),
@@ -311,6 +354,30 @@ export class Renderer {
     gl.uniform1f(this.locs.clahe, settings.clahe);
     gl.uniform1f(this.locs.lutSize, this.lutSize);
     gl.uniform1f(this.locs.lutMix, this.lutSize > 0 ? settings.lutMix : 0);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  // AI-mode render: applies a per-channel linear remap (gain * src + bias)
+  // computed from a recent FUnIE inference. Decouples model FPS from render
+  // FPS — model can run at 5–10 fps while render stays at native source fps.
+  renderAi(gain: [number, number, number], bias: [number, number, number]) {
+    const gl = this.gl;
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(this.aiProgram);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+    gl.enableVertexAttribArray(this.aiLocs.pos);
+    gl.vertexAttribPointer(this.aiLocs.pos, 2, gl.FLOAT, false, 0, 0);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.uniform1i(this.aiLocs.image, 0);
+
+    gl.uniform3fv(this.aiLocs.gain, gain);
+    gl.uniform3fv(this.aiLocs.bias, bias);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
