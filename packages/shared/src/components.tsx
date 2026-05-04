@@ -2,7 +2,7 @@
  * Shared UI primitives used by both apps. Keeps styling/behaviour identical
  * across the suite — only the brand and the per-app processing differ.
  */
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 export function InfoButton({ onClick }: { onClick: () => void }) {
   return (
@@ -223,34 +223,97 @@ export function CompareButton({
 // sits on top of the stage; the consumer reads the `value` (0..1) and
 // either passes it as a shader uniform (WebGL apps) or uses it to clip a
 // 2D context (canvas2D apps). At 0 the entire frame is the original; at
-// 1 the entire frame is corrected; the handle is drawn at value*100%.
+// 1 the entire frame is corrected.
 //
-// Pointer events use pointer-capture so dragging keeps tracking even if
-// the finger leaves the bounds. The line/handle live above the canvas
-// in DOM, so they're crisp regardless of canvas resolution.
+// canvasRef positions the overlay over the canvas's *visible content
+// rect* — not the stage. With `object-fit: contain`, the canvas content
+// is letterboxed inside its DOM box; without this calculation the bar
+// would track the stage edges (including the letterbox bands) instead
+// of the video itself.
+type Rect = { left: number; top: number; width: number; height: number };
+
+function contentRect(canvas: HTMLCanvasElement): Rect {
+  const cw = canvas.clientWidth;
+  const ch = canvas.clientHeight;
+  const iw = canvas.width;
+  const ih = canvas.height;
+  if (!iw || !ih || !cw || !ch) {
+    return { left: 0, top: 0, width: cw, height: ch };
+  }
+  const scale = Math.min(cw / iw, ch / ih);
+  const renderedW = iw * scale;
+  const renderedH = ih * scale;
+  return {
+    left: (cw - renderedW) / 2,
+    top: (ch - renderedH) / 2,
+    width: renderedW,
+    height: renderedH,
+  };
+}
+
 export function CompareWipe({
   active,
   value,
   onChange,
   onToggle,
+  canvasRef,
 }: {
   active: boolean;
   value: number;
   onChange: (v: number) => void;
   onToggle: () => void;
+  canvasRef?: React.RefObject<HTMLCanvasElement | null>;
 }) {
-  function pickFromEvent(el: HTMLElement, clientX: number) {
-    const r = el.getBoundingClientRect();
+  const [rect, setRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+
+  // Recompute the canvas's visible content rect on resize and whenever
+  // the wipe is toggled on. We only need this when the wipe is active.
+  useEffect(() => {
+    if (!active || !canvasRef?.current) return;
+    const canvas = canvasRef.current;
+    const update = () => setRect(contentRect(canvas));
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(canvas);
+    window.addEventListener("resize", update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, [active, canvasRef]);
+
+  function pickFromEvent(clientX: number) {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const r = overlay.getBoundingClientRect();
     if (r.width <= 0) return;
     const v = (clientX - r.left) / r.width;
     onChange(Math.max(0, Math.min(1, v)));
   }
 
+  // Position the overlay over the canvas's actual visible content area
+  // when canvasRef is provided. Without it, fall back to filling the
+  // parent (legacy behavior for callers that don't pass a ref).
+  const overlayStyle: React.CSSProperties = canvasRef
+    ? {
+        position: "absolute",
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      }
+    : { position: "absolute", inset: 0 };
+
   return (
     <>
       <button
         className="compare"
-        onClick={onToggle}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggle();
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
         aria-pressed={active}
         aria-label={active ? "Hide comparison wipe" : "Show comparison wipe"}
       >
@@ -268,18 +331,25 @@ export function CompareWipe({
       </button>
       {active && (
         <div
+          ref={overlayRef}
           className="compare-wipe"
+          style={overlayStyle}
           onPointerDown={(e) => {
+            // Stop propagation so the parent stage's onClick (toggle
+            // play/pause) doesn't fire when the user finishes a drag.
+            e.stopPropagation();
             (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-            pickFromEvent(e.currentTarget as HTMLElement, e.clientX);
+            pickFromEvent(e.clientX);
           }}
           onPointerMove={(e) => {
             if (!(e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId)) return;
-            pickFromEvent(e.currentTarget as HTMLElement, e.clientX);
+            pickFromEvent(e.clientX);
           }}
           onPointerUp={(e) => {
+            e.stopPropagation();
             (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
           }}
+          onClick={(e) => e.stopPropagation()}
         >
           <div className="compare-wipe-bar" style={{ left: `${value * 100}%` }} />
           <div className="compare-wipe-handle" style={{ left: `${value * 100}%` }}>

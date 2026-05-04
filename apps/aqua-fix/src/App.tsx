@@ -10,6 +10,8 @@ import {
   createRecordingSink,
   detectVideoFps,
   FilePickerButton,
+  touchFile,
+  validateUploadedFile,
   Hero,
   Modal,
   PlaceholderDropZone,
@@ -404,13 +406,24 @@ export default function App() {
     setError(null);
     setRecording(false);
     setRecordProgress(0);
+    const isVideo = file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm)$/i.test(file.name);
+    const validation = validateUploadedFile(file, isVideo ? "video" : "image");
+    if (!validation.ok) {
+      setError(validation.message);
+      return;
+    }
     teardownVideo();
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
     sourceFpsRef.current = 60;
     sourceBitrateRef.current = null;
-    const isVideo = file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm)$/i.test(file.name);
     setBusy(isVideo ? "Loading video…" : "Loading photo…");
     try {
+      // Touch the file's first byte before we hand it to <video> /
+      // createImageBitmap. On iOS, items from "Recently Saved" can be
+      // iCloud placeholders that the picker hands over before the bytes
+      // are local — touching here either coaxes the download or surfaces
+      // a clean error before the heavier load path swallows it.
+      await touchFile(file);
       if (isVideo) {
         sourceBitrateRef.current = bitrateFromSource(file.size, 0);
         await loadVideo(file);
@@ -1008,6 +1021,7 @@ export default function App() {
             value={compareSplit}
             onChange={setCompareSplit}
             onToggle={() => setCompareActive((a) => !a)}
+            canvasRef={canvasRef}
           />
         )}
       </div>

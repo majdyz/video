@@ -14,6 +14,8 @@ import {
   PlayOverlay,
   pickBitrate,
   pickRecorderMime,
+  touchFile,
+  validateUploadedFile,
   pruneOldRecordings,
   RecordingOverlay,
   type RecordingSink,
@@ -337,10 +339,19 @@ export default function App() {
     setAnalysisReady(false);
     analysisRef.current = null;
     smoothRef.current = null;
+    const validation = validateUploadedFile(file, "video");
+    if (!validation.ok) {
+      setError(validation.message);
+      return;
+    }
     teardownVideo();
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
     setBusy("Loading video…");
     try {
+      // Touch the first byte to coax iOS Photos into completing an
+      // iCloud download on items from "Recently Saved" / similar before
+      // the rest of the load path tries to read the file.
+      await touchFile(file);
       const v = videoRef.current;
       if (!v) return;
       v.src = URL.createObjectURL(file);
@@ -882,6 +893,7 @@ export default function App() {
             value={compareSplit}
             onChange={setCompareSplit}
             onToggle={() => setCompareActive((a) => !a)}
+            canvasRef={canvasRef}
           />
         )}
       </div>
