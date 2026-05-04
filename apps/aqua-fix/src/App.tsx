@@ -31,16 +31,22 @@ import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
 type Mode = "idle" | "photo" | "video";
 
 // Defaults updated for the multi-scale fusion pipeline. CLAHE is gone:
-// fusion blends a gamma-corrected branch with an unsharp-masked branch and
-// the contrast slider now controls the unsharp amount on the I2 branch.
-// Detail drives the Aubry-style local-Laplacian "Clarity" remap.
+// fusion blends a gamma-corrected branch with an unsharp-masked branch.
+// Contrast = unsharp amount on the I2 branch. Detail = Aubry-style
+// local-Laplacian Clarity remap on the high-frequency residual.
+//
+// Toned down vs first-pass defaults: the fusion produced visible halos
+// and over-saturated coral on real underwater clips at intensity 1.0 +
+// detail 0.4 + contrast 0.3. Those three compound aggressively. New
+// defaults aim for a natural look that still clearly improves on the
+// input; users can dial up via Advanced if they want the punchy look.
 const DEFAULT_SETTINGS: Settings = {
-  intensity: 1.0,
-  castStrength: 0.85,
-  saturation: 1.18,
-  gamma: 0.92,
-  contrast: 0.3,
-  detail: 0.4,
+  intensity: 0.85,
+  castStrength: 0.7,
+  saturation: 1.08,
+  gamma: 0.96,
+  contrast: 0.12,
+  detail: 0.15,
   lutMix: 1.0,
 };
 
@@ -64,9 +70,9 @@ const IDENTITY_STATS: Stats = {
 
 const PRESETS: { label: string; settings: Settings }[] = [
   { label: "Off", settings: OFF_SETTINGS },
-  { label: "Shallow", settings: { intensity: 0.85, castStrength: 0.55, saturation: 1.1, gamma: 0.96, contrast: 0.18, detail: 0.3, lutMix: 1.0 } },
+  { label: "Shallow", settings: { intensity: 0.7, castStrength: 0.45, saturation: 1.04, gamma: 0.98, contrast: 0.08, detail: 0.1, lutMix: 1.0 } },
   { label: "Reef", settings: DEFAULT_SETTINGS },
-  { label: "Deep", settings: { intensity: 1.0, castStrength: 1.0, saturation: 1.3, gamma: 0.86, contrast: 0.4, detail: 0.55, lutMix: 1.0 } },
+  { label: "Deep", settings: { intensity: 1.0, castStrength: 0.95, saturation: 1.18, gamma: 0.9, contrast: 0.22, detail: 0.3, lutMix: 1.0 } },
 ];
 
 type AudioRouting = ReturnType<typeof attachAudioRouting>;
