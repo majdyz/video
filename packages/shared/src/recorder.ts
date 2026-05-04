@@ -26,12 +26,19 @@ export function pickRecorderMime(): Candidate | null {
   return null;
 }
 
-// ~4 bits/pixel·second, capped at 30 Mbps. iPhone's native 4K H.264 is around
-// 25–30 Mbps; pushing higher is where Safari's MediaRecorder starts dropping
-// frames or losing the WebGL context mid-recording.
-export function pickBitrate(width: number, height: number): number {
+// Bits per pixel per second. We capture at 60 fps now (was 30), and
+// iPhone's native 4K60 is 50–100 Mbps. Bump the per-pixel rate accordingly
+// so encoder quantisation stops being the visible bottleneck — particles /
+// 'marine snow' in underwater footage were getting mosquito-noise around
+// them at the previous bitrate.
+export function pickBitrate(width: number, height: number, fps = 60): number {
   const px = width * height;
-  return Math.min(30_000_000, Math.max(3_000_000, Math.round(px * 4)));
+  // 0.12 bits per pixel per frame is roughly the H.264 high-quality
+  // breakpoint where flat regions stop showing block/mosquito noise.
+  const bpsPerPixel = 0.12 * fps;
+  // Cap at 60 Mbps — beyond this Safari's MediaRecorder starts dropping
+  // frames or losing the WebGL context.
+  return Math.min(60_000_000, Math.max(5_000_000, Math.round(px * bpsPerPixel)));
 }
 
 type CaptureContext = {
@@ -39,9 +46,11 @@ type CaptureContext = {
   videoTrack: MediaStreamTrack;
 };
 
-export function buildCaptureContext(canvas: HTMLCanvasElement): CaptureContext {
-  // Active capture at 30fps. Passive mode dropped frames mid-record on iOS Safari.
-  const canvasStream = canvas.captureStream(30);
+export function buildCaptureContext(canvas: HTMLCanvasElement, fps = 60): CaptureContext {
+  // Active capture at the requested fps (default 60 to match modern phone
+  // footage; iPhone defaults are 30 or 60). Passive mode (no fps argument)
+  // drops frames mid-record on iOS Safari, so we always pin a rate.
+  const canvasStream = canvas.captureStream(fps);
   const videoTrack = canvasStream.getVideoTracks()[0];
   return { videoStream: canvasStream, videoTrack };
 }

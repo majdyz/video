@@ -122,9 +122,10 @@ export default function App() {
   const [lutName, setLutName] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [showInfo, setShowInfo] = useState(false);
-  const [quality, setQuality] = useState<Quality>(() => {
-    return (localStorage.getItem("aqua-fix:quality") as Quality) || "classical";
-  });
+  // AI is experimental — always start in classical, even if a previous
+  // session had AI selected. The user has to opt in each time, which is
+  // also why the prompt only fires on AI-button click (not on file pick).
+  const [quality, setQuality] = useState<Quality>("classical");
   const [funieReady, setFunieReady] = useState(isFunieReady());
   const [funieDownloadPct, setFunieDownloadPct] = useState<number | null>(null);
   const [showFuniePrompt, setShowFuniePrompt] = useState(false);
@@ -136,7 +137,6 @@ export default function App() {
   const qualityRef = useRef<Quality>(quality);
   useEffect(() => {
     qualityRef.current = quality;
-    localStorage.setItem("aqua-fix:quality", quality);
   }, [quality]);
   useEffect(() => {
     aiStrengthRef.current = aiStrength;
@@ -360,11 +360,6 @@ export default function App() {
   const pendingFileRef = useRef<File | null>(null);
 
   async function handleFile(file: File) {
-    if (qualityRef.current === "ai" && !funieReady && funieDownloadPct === null) {
-      pendingFileRef.current = file;
-      setShowFuniePrompt(true);
-      return;
-    }
     setError(null);
     setRecording(false);
     setRecordProgress(0);
@@ -387,9 +382,6 @@ export default function App() {
       await loadFunie((pct) => setFunieDownloadPct(pct));
       setFunieReady(true);
       setFunieDownloadPct(null);
-      const f = pendingFileRef.current;
-      pendingFileRef.current = null;
-      if (f) handleFile(f);
     } catch (e) {
       setFunieDownloadPct(null);
       setError("Couldn't load AI model: " + (e instanceof Error ? e.message : String(e)));
@@ -987,22 +979,23 @@ export default function App() {
                 className={`model-card${quality === "ai" ? " active" : ""}`}
                 disabled={recording}
                 onClick={() => {
-                  setQuality("ai");
                   if (!funieReady && funieDownloadPct === null) {
                     setShowFuniePrompt(true);
+                    return;
                   }
+                  setQuality("ai");
                 }}
                 aria-pressed={quality === "ai"}
               >
                 {quality === "ai" && <span className="model-check">ON</span>}
                 <span className="model-title">
                   AI
-                  {!funieReady && <span className="model-badge">{FUNIE_SIZE_MB.toFixed(0)} MB</span>}
+                  <span className="model-badge model-badge--experimental">Experimental</span>
                 </span>
                 <span className="model-sub">
                   {funieReady
-                    ? "FUnIE-GAN, on-device. More natural color, slower."
-                    : "FUnIE-GAN, on-device. One-time download."}
+                    ? "FUnIE-GAN. Sometimes less natural than Classical — try both."
+                    : `FUnIE-GAN. One-time ${FUNIE_SIZE_MB.toFixed(0)} MB download.`}
                 </span>
               </button>
             </div>

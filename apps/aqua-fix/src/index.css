@@ -78,6 +78,9 @@ body,
   color: #00131f;
   margin-left: auto;
 }
+.model-card .model-badge--experimental {
+  background: linear-gradient(135deg, #ffb866, #ff7a7a);
+}
 .model-card .model-check {
   position: absolute;
   top: 10px;
