@@ -117,11 +117,78 @@ export default function App() {
   const opencvLoadingRef = useRef(false);
   // True once we've confirmed the script is in Cache API. Probed once
   // on mount; if true, clicking Better skips the consent dialog and
-  // loads silently.
+  // loads silently — and we also default Quality to Better and
+  // pre-warm OpenCV so picking a file uses the better tracker right
+  // away (no Fast→Better re-analyse needed).
   const [opencvCached, setOpencvCached] = useState(false);
   useEffect(() => {
-    isOpenCVCached().then(setOpencvCached).catch(() => undefined);
+    isOpenCVCached().then((cached) => {
+      setOpencvCached(cached);
+      if (cached) {
+        // Pre-warm: load opencv silently so quality auto-flips to
+        // Better once it's ready.
+        loadOpenCV().then(() => {
+          setOpencvReady(true);
+          setQuality("better");
+        }).catch(() => undefined);
+      }
+    }).catch(() => undefined);
   }, []);
+  // Tracks which analyzer was actually used to produce analysisRef.
+  // When the user toggles Quality after analysis is done, we compare
+  // against this and re-run if the desired analyzer differs.
+  const lastAnalyzerRef = useRef<"fast" | "better" | null>(null);
+  const reanalysingRef = useRef(false);
+
+  // Re-run analysis with the *currently-selected* quality on the
+  // already-loaded video. Used by the auto-trigger below — without
+  // this, picking a video with Fast then clicking Better silently
+  // kept the Fast result.
+  async function reanalyseWithCurrentQuality() {
+    const v = videoRef.current;
+    if (!v || v.readyState < 2 || reanalysingRef.current) return;
+    const useBetter = quality === "better" && opencvReady;
+    if (lastAnalyzerRef.current === (useBetter ? "better" : "fast")) return;
+    reanalysingRef.current = true;
+    setError(null);
+    setAnalysisReady(false);
+    setBusy("Re-analyzing with " + (useBetter ? "Better" : "Fast") + " 0%");
+    try {
+      const analyzer = useBetter ? analyzeVideoOpenCV : analyzeVideo;
+      const result = await analyzer(v, (p) => {
+        setBusy(`Re-analyzing with ${useBetter ? "Better" : "Fast"} ${Math.floor(p * 100)}%`);
+      });
+      analysisRef.current = result;
+      lastAnalyzerRef.current = useBetter ? "better" : "fast";
+      smoothRef.current = smoothPath(result, smoothing, crop, v.videoWidth, v.videoHeight);
+      sourceFpsRef.current = Math.max(24, result.frameRate || 60);
+      setAnalysisReady(true);
+      v.play().catch(() => undefined);
+      startPreview();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+      reanalysingRef.current = false;
+    }
+  }
+
+  // When the user toggles Quality after a file is loaded — and the
+  // chosen analyzer differs from the one already used — re-run.
+  // Without this, switching to Better after a Fast analysis just sat
+  // there showing the Fast-stabilised result.
+  useEffect(() => {
+    if (!analysisReady) return;
+    if (recording) return;
+    const v = videoRef.current;
+    if (!v || v.readyState < 2) return;
+    const desired = quality === "better" && opencvReady ? "better" : "fast";
+    if (lastAnalyzerRef.current === desired) return;
+    reanalyseWithCurrentQuality();
+    // We intentionally only depend on quality + opencvReady; the
+    // analyser ref itself isn't a React state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quality, opencvReady]);
 
   useEffect(() => {
     cropRef.current = crop;
@@ -442,11 +509,13 @@ export default function App() {
       setMode("video");
 
       setBusy("Analyzing motion 0%");
-      const analyzer = quality === "better" && opencvReady ? analyzeVideoOpenCV : analyzeVideo;
+      const useBetter = quality === "better" && opencvReady;
+      const analyzer = useBetter ? analyzeVideoOpenCV : analyzeVideo;
       const result = await analyzer(v, (p) => {
         setBusy(`Analyzing motion ${Math.floor(p * 100)}%`);
       });
       analysisRef.current = result;
+      lastAnalyzerRef.current = useBetter ? "better" : "fast";
       smoothRef.current = smoothPath(result, smoothing, crop, v.videoWidth, v.videoHeight);
       setAnalysisReady(true);
 

@@ -604,7 +604,12 @@ function l1Smooth(
   lambda1: number,
   lambda2: number,
   box: number,
-  iterations = 80,
+  // Bumped from 80 — ADMM converges roughly linearly, and at higher
+  // lambda values (smoothing > 0.7) the path needs more passes to
+  // settle into its piecewise-flat optimum. 200 typically converges
+  // tightly and adds maybe ~30 ms to the total smoothPath call on a
+  // 50 s 60 fps clip — well below the analyser's wallclock cost.
+  iterations = 200,
 ): Float32Array {
   const n = c.length;
   if (n < 3) return c.slice();
