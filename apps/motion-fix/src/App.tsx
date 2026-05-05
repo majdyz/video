@@ -131,6 +131,11 @@ export default function App() {
   // Inflight guard so a double-tap on Better doesn't fire two
   // parallel loadOpenCV calls.
   const opencvLoadingRef = useRef(false);
+  // Which Mode the user actually clicked when the OpenCV-download
+  // prompt opened. The download flow is shared between the Better
+  // and Mesh cards, so without this the post-download setQuality
+  // always lands on Better, even if the user clicked Mesh.
+  const pendingTargetRef = useRef<Quality | null>(null);
   // True once we've confirmed the script is in Cache API. Probed once
   // on mount; if true, clicking Better skips the consent dialog and
   // loads silently — and we also default Quality to Better and
@@ -232,20 +237,36 @@ export default function App() {
   useEffect(() => {
     if (recording) return;
     const v = videoRef.current;
-    if (!v || v.readyState < 2) return;
+    if (!v) return;
     const desired = desiredAnalyzer(quality, opencvReady);
     if (lastAnalyzerRef.current === desired) return;
-    // If an analyzer is in flight for the WRONG mode, abort it. The
-    // analyzer's catch swallows the AbortError, its finally clears
-    // busy/reanalysingRef/inflightAnalyzerRef, and this effect re-fires
-    // — by then there's no in-flight, so the second branch starts the
-    // correct analyzer. Don't abort if the in-flight IS for `desired`
-    // (e.g. busy/analysisReady deps re-ran the effect mid-analysis).
+    // Abort an in-flight analyzer running for the WRONG mode. Its
+    // catch swallows AbortError and finally clears the refs/busy,
+    // re-firing this effect.
     if (analysisAbortRef.current && inflightAnalyzerRef.current !== desired) {
       analysisAbortRef.current.abort();
       return;
     }
     if (reanalysingRef.current || busy !== null) return;
+    // Aborting an analyzer triggers a seek-to-resumeAt in restore(),
+    // which transiently drops readyState below 2. If we tried to start
+    // reanalyse right now we'd bail; instead, wait for `loadeddata` so
+    // the next reanalyse sees a usable video. (The analyzers wait for
+    // loadeddata internally too, but reanalyse's early-bail check on
+    // readyState would short-circuit before getting there.)
+    if (v.readyState < 2) {
+      const onReady = () => {
+        v.removeEventListener("loadeddata", onReady);
+        v.removeEventListener("canplay", onReady);
+        // Re-run the effect by bumping a state — easiest is to read
+        // current refs and call reanalyse directly. desired is captured
+        // via current quality state, which hasn't changed.
+        reanalyseWithCurrentQuality();
+      };
+      v.addEventListener("loadeddata", onReady);
+      v.addEventListener("canplay", onReady);
+      return;
+    }
     reanalyseWithCurrentQuality();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality, opencvReady, analysisReady, busy]);
@@ -994,7 +1015,8 @@ export default function App() {
       setOpencvReady(true);
       setOpencvCached(true);
       setOpencvDownloadPct(null);
-      setQuality("better");
+      setQuality(pendingTargetRef.current ?? "better");
+      pendingTargetRef.current = null;
     } catch (e) {
       setOpencvDownloadPct(null);
       if (!(e instanceof LoadAbortedError)) {
@@ -1302,9 +1324,10 @@ export default function App() {
                     }
                     if (opencvDownloadPct !== null) return;
                     if (opencvCached) {
-                      loadOpenCVFromCacheAndSwitch();
+                      loadOpenCVFromCacheAndSwitch("better");
                       return;
                     }
+                    pendingTargetRef.current = "better";
                     setShowCvPrompt(true);
                   }}
                 >
@@ -1323,6 +1346,7 @@ export default function App() {
                       loadOpenCVFromCacheAndSwitch("mesh");
                       return;
                     }
+                    pendingTargetRef.current = "mesh";
                     setShowCvPrompt(true);
                   }}
                 >
