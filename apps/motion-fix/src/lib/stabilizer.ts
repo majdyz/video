@@ -185,7 +185,20 @@ export async function analyzeVideo(
       if (!wasPaused) video.play().catch(() => undefined);
     };
 
-    const onAbort = () => fail(new DOMException("Aborted", "AbortError"));
+    // Abort path skips restore() — restore would issue a seek-to-resumeAt
+    // and (if !wasPaused) a video.play(), both of which race with the
+    // NEXT analyzer's setup if the user is mid-mode-switch. Leaving the
+    // video paused at its current position is safe: the next analyzer's
+    // setup pauses + seeks-to-zero unconditionally, and cancelAnalysis
+    // calls teardownVideo to fully reset.
+    const onAbort = () => {
+      if (finished) return;
+      finished = true;
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (watchdog !== null) clearInterval(watchdog);
+      try { video.pause(); } catch { /* */ }
+      reject(new DOMException("Aborted", "AbortError"));
+    };
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
     const finish = () => {
@@ -292,21 +305,31 @@ export async function analyzeVideo(
       .play()
       .then(() => {
         lastWatchdogTime = video.currentTime;
+        // Stall detector: 10 s window, advance threshold 0.1 s, and
+        // require TWO consecutive stalled checks before failing. The
+        // single-strike 5 s × 0.05 s threshold tripped on heavy 4K
+        // iPhone clips where the decoder genuinely paces frames at
+        // that boundary (especially right after a play() resumes from
+        // a paused state — first frames can take 2–3 s on Safari).
+        let stalledStrikes = 0;
         watchdog = window.setInterval(() => {
           if (finished) return;
-          // Don't trip the stall detector if the tab is backgrounded —
-          // Safari/iOS pause decode while not visible, which previously
-          // surfaced as a misleading 'Video decoder stalled' error.
           if (document.visibilityState !== "visible") {
+            stalledStrikes = 0;
             lastWatchdogTime = video.currentTime;
             return;
           }
-          if (video.currentTime <= lastWatchdogTime + 0.05) {
-            fail(new Error("Video decoder stalled during analysis"));
-            return;
+          if (video.currentTime <= lastWatchdogTime + 0.1) {
+            stalledStrikes++;
+            if (stalledStrikes >= 2) {
+              fail(new Error("Video decoder stalled during analysis"));
+              return;
+            }
+          } else {
+            stalledStrikes = 0;
           }
           lastWatchdogTime = video.currentTime;
-        }, 5000);
+        }, 10000);
       })
       .catch((e) =>
         fail(new Error("Couldn't play video for analysis: " + (e instanceof Error ? e.message : String(e)))),

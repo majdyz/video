@@ -208,7 +208,17 @@ export async function analyzeVideoOpenCV(
       if (!wasPaused) video.play().catch(() => undefined);
     };
 
-    const onAbort = () => fail(new DOMException("Aborted", "AbortError"));
+    // Skip restore() on abort — see stabilizer.ts for rationale (the
+    // restore's seek + play race with the next analyzer's setup).
+    const onAbort = () => {
+      if (finished) return;
+      finished = true;
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (watchdog !== null) clearInterval(watchdog);
+      cleanup();
+      try { video.pause(); } catch { /* */ }
+      reject(new DOMException("Aborted", "AbortError"));
+    };
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
     const finish = () => {
@@ -440,18 +450,26 @@ export async function analyzeVideoOpenCV(
       .play()
       .then(() => {
         lastWatchdogTime = video.currentTime;
+        // 10 s × 0.1 s × 2 strikes — see stabilizer.ts.
+        let stalledStrikes = 0;
         watchdog = window.setInterval(() => {
           if (finished) return;
           if (document.visibilityState !== "visible") {
+            stalledStrikes = 0;
             lastWatchdogTime = video.currentTime;
             return;
           }
-          if (video.currentTime <= lastWatchdogTime + 0.05) {
-            fail(new Error("Video decoder stalled during analysis"));
-            return;
+          if (video.currentTime <= lastWatchdogTime + 0.1) {
+            stalledStrikes++;
+            if (stalledStrikes >= 2) {
+              fail(new Error("Video decoder stalled during analysis"));
+              return;
+            }
+          } else {
+            stalledStrikes = 0;
           }
           lastWatchdogTime = video.currentTime;
-        }, 5000);
+        }, 10000);
       })
       .catch((e) =>
         fail(new Error("Couldn't play video for analysis: " + (e instanceof Error ? e.message : String(e)))),

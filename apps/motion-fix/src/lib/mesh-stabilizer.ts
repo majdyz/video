@@ -224,7 +224,16 @@ export async function analyzeVideoMesh(
       if (!wasPaused) video.play().catch(() => undefined);
     };
 
-    const onAbort = () => fail(new DOMException("Aborted", "AbortError"));
+    // Skip restore() on abort — see stabilizer.ts for rationale.
+    const onAbort = () => {
+      if (finished) return;
+      finished = true;
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (watchdog !== null) clearInterval(watchdog);
+      cleanup();
+      try { video.pause(); } catch { /* */ }
+      reject(new DOMException("Aborted", "AbortError"));
+    };
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
     const finish = () => {
@@ -454,18 +463,26 @@ export async function analyzeVideoMesh(
 
     video.play().then(() => {
       lastWatchdogTime = video.currentTime;
+      // 10 s × 0.1 s × 2 strikes — see stabilizer.ts.
+      let stalledStrikes = 0;
       watchdog = window.setInterval(() => {
         if (finished) return;
         if (document.visibilityState !== "visible") {
+          stalledStrikes = 0;
           lastWatchdogTime = video.currentTime;
           return;
         }
-        if (video.currentTime <= lastWatchdogTime + 0.05) {
-          fail(new Error("Video decoder stalled during analysis"));
-          return;
+        if (video.currentTime <= lastWatchdogTime + 0.1) {
+          stalledStrikes++;
+          if (stalledStrikes >= 2) {
+            fail(new Error("Video decoder stalled during analysis"));
+            return;
+          }
+        } else {
+          stalledStrikes = 0;
         }
         lastWatchdogTime = video.currentTime;
-      }, 5000);
+      }, 10000);
     }).catch((e) => {
       fail(new Error("Couldn't play video for analysis: " + (e instanceof Error ? e.message : String(e))));
     });
@@ -611,14 +628,17 @@ export function smoothMeshPath(
   const tmpRaw = new Float32Array(n);
   const tmpOut = new Float32Array(n);
 
-  // Box constraint per vertex. Halved relative to the global
+  // Box constraint per vertex. Quartered relative to the global
   // stabiliser's budget — applied per vertex, the full `width * crop`
-  // would let two adjacent vertices independently deviate in opposite
-  // directions, producing inter-vertex shear of 2 × budget. That much
-  // local deformation tears the mesh visibly. Half-budget caps the
-  // maximum shear at one full crop budget.
-  const boxX = analysis.width * crop * 0.5;
-  const boxY = analysis.height * crop * 0.5;
+  // would let two adjacent vertices deviate in opposite directions,
+  // producing 2× budget of inter-vertex shear which tears the mesh
+  // into visible swirling distortion. Quarter-budget keeps adjacent
+  // vertex residuals within crop/2 of each other (max), which the
+  // multi-pass spatial smoother below can blur into something visually
+  // coherent. The user pays a bit of un-removed shake in exchange for
+  // mesh that doesn't look like a fun-house mirror.
+  const boxX = analysis.width * crop * 0.25;
+  const boxY = analysis.height * crop * 0.25;
 
   for (let v = 0; v < VERT_COUNT; v++) {
     // X axis
@@ -631,50 +651,59 @@ export function smoothMeshPath(
     for (let f = 0; f < n; f++) smoothY[f * VERT_COUNT + v] = tmpOut[f];
   }
 
-  // Step 4: spatial smoothing per frame on the smoothed paths. Without
-  // this, adjacent vertices' smoothers can converge to per-vertex
-  // residuals that differ by up to boxX between neighbours, producing
-  // wavy distortion within each cell. A 1-pass 3×3 average over each
-  // frame's smooth grid keeps inter-vertex motion coherent (the eye
-  // is sensitive to *relative* deformation between nearby pixels far
-  // more than to absolute camera motion).
+  // Step 4: spatial smoothing per frame on the smoothed paths.
+  // - 4 iterations of 3×3 average ≈ a Gaussian-ish 9×9 kernel which
+  //   actually flattens inter-vertex divergence. One pass barely
+  //   nudged the boundary; 3 still left visible swirling on parallax
+  //   regions; 4 is enough to make the mesh look coherent.
+  // - Mirror-pad neighbours so corner vertices see a full 9-tap
+  //   stencil. Without it, edge vertices average fewer neighbours
+  //   and lag behind the interior — the frame border visibly
+  //   "breathes" relative to the centre.
   const spatialBuf = new Float32Array(VERT_COUNT);
-  for (let f = 0; f < n; f++) {
-    const off = f * VERT_COUNT;
-    // X axis
-    for (let vy = 0; vy < VERT_H; vy++) {
-      for (let vx = 0; vx < VERT_W; vx++) {
-        let sum = 0, cnt = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const nx = vx + dx;
-            const ny = vy + dy;
-            if (nx < 0 || nx >= VERT_W || ny < 0 || ny >= VERT_H) continue;
-            sum += smoothX[off + ny * VERT_W + nx];
-            cnt++;
+  const SPATIAL_PASSES = 4;
+  for (let pass = 0; pass < SPATIAL_PASSES; pass++) {
+    for (let f = 0; f < n; f++) {
+      const off = f * VERT_COUNT;
+      // X axis
+      for (let vy = 0; vy < VERT_H; vy++) {
+        for (let vx = 0; vx < VERT_W; vx++) {
+          let sum = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              let nx = vx + dx;
+              let ny = vy + dy;
+              if (nx < 0) nx = -nx;
+              if (nx >= VERT_W) nx = 2 * (VERT_W - 1) - nx;
+              if (ny < 0) ny = -ny;
+              if (ny >= VERT_H) ny = 2 * (VERT_H - 1) - ny;
+              sum += smoothX[off + ny * VERT_W + nx];
+            }
           }
+          spatialBuf[vy * VERT_W + vx] = sum / 9;
         }
-        spatialBuf[vy * VERT_W + vx] = sum / cnt;
       }
-    }
-    smoothX.set(spatialBuf, off);
-    // Y axis
-    for (let vy = 0; vy < VERT_H; vy++) {
-      for (let vx = 0; vx < VERT_W; vx++) {
-        let sum = 0, cnt = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const nx = vx + dx;
-            const ny = vy + dy;
-            if (nx < 0 || nx >= VERT_W || ny < 0 || ny >= VERT_H) continue;
-            sum += smoothY[off + ny * VERT_W + nx];
-            cnt++;
+      smoothX.set(spatialBuf, off);
+      // Y axis
+      for (let vy = 0; vy < VERT_H; vy++) {
+        for (let vx = 0; vx < VERT_W; vx++) {
+          let sum = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              let nx = vx + dx;
+              let ny = vy + dy;
+              if (nx < 0) nx = -nx;
+              if (nx >= VERT_W) nx = 2 * (VERT_W - 1) - nx;
+              if (ny < 0) ny = -ny;
+              if (ny >= VERT_H) ny = 2 * (VERT_H - 1) - ny;
+              sum += smoothY[off + ny * VERT_W + nx];
+            }
           }
+          spatialBuf[vy * VERT_W + vx] = sum / 9;
         }
-        spatialBuf[vy * VERT_W + vx] = sum / cnt;
       }
+      smoothY.set(spatialBuf, off);
     }
-    smoothY.set(spatialBuf, off);
   }
 
   // Re-clamp post-spatial. The 3×3 average mixes a vertex's clamped
