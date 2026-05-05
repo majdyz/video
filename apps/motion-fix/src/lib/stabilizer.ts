@@ -418,11 +418,21 @@ function trackAndFit(
   for (const f of features) {
     const m = matchPatch(prev, curr, f.x, f.y, THUMB_W, THUMB_H);
     if (!m) continue;
-    if (m.conf < 1.05) continue; // very ambiguous match — drop
+    // Stricter than before (was 1.05). On low-texture underwater frames
+    // — clear water columns, uniform sand — block-matching can find a
+    // 'best' match that's barely better than chance, then RANSAC fits a
+    // similarity through that noise. The smoother passes the noise into
+    // the residual transform, and the rendered output ends up MORE
+    // shaky than the input. 1.20 keeps confident matches and drops the
+    // noisy ones; the smoother handles the resulting frames-with-no-
+    // motion gracefully (residual stays at identity).
+    if (m.conf < 1.2) continue;
     matches.push({ px: f.x, py: f.y, qx: f.x + m.dx, qy: f.y + m.dy });
   }
 
-  if (matches.length < 4) return { a: 1, b: 0, tx: 0, ty: 0 };
+  // Need at least 6 (was 4) confident matches to even attempt a fit —
+  // a similarity has 4 DoF and we want comfortable over-determination.
+  if (matches.length < 6) return { a: 1, b: 0, tx: 0, ty: 0 };
 
   // RANSAC: random 2-point similarity hypotheses.
   let bestInliers: Match[] = [];
@@ -445,9 +455,10 @@ function trackAndFit(
     if (bestInliers.length >= matches.length * 0.9) break;
   }
 
-  // Need at least 3 inliers to trust the result; otherwise return identity
-  // (better to skip a frame than apply a wrong correction).
-  if (bestInliers.length < 3) return { a: 1, b: 0, tx: 0, ty: 0 };
+  // Need at least 5 (was 3) inliers to trust the result; otherwise
+  // return identity. Better to skip a frame than apply a wrong
+  // correction that the smoother will then propagate as noise.
+  if (bestInliers.length < 5) return { a: 1, b: 0, tx: 0, ty: 0 };
 
   // Refit on the inlier set via least squares.
   let fit = fitSimilarity(bestInliers);
@@ -872,14 +883,20 @@ function penaltiesForSmoothing(smoothing: number): {
   gaussianSigma: number;
 } {
   const s = Math.max(0, Math.min(1, smoothing));
-  const k = 0.05 + s * s * 200;
+  // Bumped 5× — at the prior weights the L1 path still tracked
+  // sample-rate noise too closely on undersampled (compute-bound
+  // decoder) clips, so the residual carried that noise into the
+  // rendered output. Larger lambdas force the L1 path to be
+  // piecewise-very-flat; the wider Gaussian post-smooth absorbs
+  // residual high-frequency content the L1 left behind.
+  const k = 0.05 + s * s * 1000;
   return {
     lambda1T: k * 4,
     lambda2T: k * 60,
     lambda1Rs: k * 0.005,
     lambda2Rs: k * 0.08,
-    medianRadius: Math.min(5, 2 + Math.floor(s * 6)),
-    gaussianSigma: 1 + s * 5,
+    medianRadius: Math.min(9, 2 + Math.floor(s * 12)),
+    gaussianSigma: 1 + s * 18,
   };
 }
 

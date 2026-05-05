@@ -272,7 +272,11 @@ export async function analyzeVideoOpenCV(
           }
           inlierCount = srcPts.length / 2;
 
-          if (inlierCount >= 4) {
+          // Was 4 — bumped to 6 so a noisy LK match on a low-texture
+          // underwater frame doesn't fit a similarity through 4
+          // tracking errors and produce a false motion that propagates
+          // to the smoother as shake.
+          if (inlierCount >= 6) {
             srcMat = cv.matFromArray(inlierCount, 1, cv.CV_32FC2, srcPts);
             dstMat = cv.matFromArray(inlierCount, 1, cv.CV_32FC2, dstPts);
             inliers = new cv.Mat();

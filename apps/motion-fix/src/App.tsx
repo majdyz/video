@@ -65,7 +65,7 @@ export default function App() {
 
   const analysisRef = useRef<AnalysisResult | null>(null);
   const smoothRef = useRef<SmoothPath | null>(null);
-  const cropRef = useRef(0.1);
+  const cropRef = useRef(0.18);
   // Single-slot memo for clampResidualToCanvas. Same frame (idx) is
   // typically redrawn many times — paused playback, wipe drags, slider
   // tweaks, two-rect wipe path renders the frame twice — so caching the
@@ -82,8 +82,13 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [duration, setDuration] = useState(0);
-  const [smoothing, setSmoothing] = useState(0.6);
-  const [crop, setCrop] = useState(0.1);
+  // Bumped from 0.6/0.1: at the prior defaults the L1 smoother kept
+  // more residual variance and the crop budget left little room to
+  // smooth aggressive handheld jitter, so the corrected output still
+  // visibly shook. 0.85 / 0.18 is closer to what consumer apps default
+  // to — feels like 'on' rather than 'mild'.
+  const [smoothing, setSmoothing] = useState(0.85);
+  const [crop, setCrop] = useState(0.18);
   const [recording, setRecording] = useState(false);
   const [recordProgress, setRecordProgress] = useState(0);
   const [recordTime, setRecordTime] = useState(0);
