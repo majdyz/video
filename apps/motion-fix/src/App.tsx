@@ -202,15 +202,21 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!analysisReady) return;
     if (recording) return;
     const v = videoRef.current;
     if (!v || v.readyState < 2) return;
     const desired = desiredAnalyzer(quality, opencvReady);
     if (lastAnalyzerRef.current === desired) return;
+    // Gate while ANY analysis is running — handleFile's initial pass
+    // OR a previous reanalyse. analysisReady is in deps so a mode
+    // click made during the first analysis re-evaluates the moment
+    // that pass completes (analysisReady flips true) and kicks off
+    // the correct analyzer; without this the click was silently
+    // dropped and Mode stayed visually selected but unused.
+    if (reanalysingRef.current || busy !== null) return;
     reanalyseWithCurrentQuality();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [quality, opencvReady]);
+  }, [quality, opencvReady, analysisReady, busy]);
 
   useEffect(() => {
     cropRef.current = crop;
@@ -1199,7 +1205,7 @@ export default function App() {
             </div>
 
             <div className="quality-row">
-              <span className="quality-label">Quality</span>
+              <span className="quality-label">Mode</span>
               <div className="quality-segment">
                 <button
                   className={quality === "fast" ? "active" : ""}
