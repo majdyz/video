@@ -37,14 +37,29 @@ import {
 } from "./lib/stabilizer";
 import { analyzeVideoOpenCV } from "./lib/stabilizer-opencv";
 import { isOpenCVCached, isOpenCVReady, loadOpenCV, OPENCV_SIZE_MB } from "./lib/opencv-loader";
+import {
+  analyzeVideoMesh,
+  meshPositionsAtTime,
+  smoothMeshPath,
+  type MeshAnalysis,
+  type MeshSmoothPath,
+} from "./lib/mesh-stabilizer";
+import { buildIdentityPositions, MeshRenderer, VERT_COUNT } from "./lib/mesh-renderer";
 import { LoadAbortedError } from "@dive-tools/shared";
 
 type Mode = "idle" | "video";
+type Quality = "fast" | "better" | "mesh";
 type AudioRouting = ReturnType<typeof attachAudioRouting>;
 type SmoothPath = ReturnType<typeof smoothPath>;
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const meshCanvasRef = useRef<HTMLCanvasElement>(null);
+  const meshRendererRef = useRef<MeshRenderer | null>(null);
+  const meshAnalysisRef = useRef<MeshAnalysis | null>(null);
+  const meshSmoothRef = useRef<MeshSmoothPath | null>(null);
+  const meshIdentityRef = useRef<Float32Array | null>(null);
+  const meshScratchRef = useRef<Float32Array | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileNameRef = useRef<string>(MOTION_FIX_BRAND.filenamePrefix);
   // Track the current file's blob URL so we can revoke it on teardown
@@ -107,7 +122,9 @@ export default function App() {
   // block matcher, "better" = OpenCV.js (lazy-loaded ~9 MB script).
   // No localStorage persistence — Better requires an opt-in click each
   // session, same pattern as aqua-fix's AI mode.
-  const [quality, setQuality] = useState<"fast" | "better">("fast");
+  const [quality, setQuality] = useState<Quality>("fast");
+  const qualityRef = useRef<Quality>("fast");
+  useEffect(() => { qualityRef.current = quality; }, [quality]);
   const [opencvReady, setOpencvReady] = useState(isOpenCVReady());
   const [opencvDownloadPct, setOpencvDownloadPct] = useState<number | null>(null);
   const [showCvPrompt, setShowCvPrompt] = useState(false);
@@ -137,31 +154,43 @@ export default function App() {
   // Tracks which analyzer was actually used to produce analysisRef.
   // When the user toggles Quality after analysis is done, we compare
   // against this and re-run if the desired analyzer differs.
-  const lastAnalyzerRef = useRef<"fast" | "better" | null>(null);
+  const lastAnalyzerRef = useRef<"fast" | "better" | "mesh" | null>(null);
   const reanalysingRef = useRef(false);
 
-  // Re-run analysis with the *currently-selected* quality on the
-  // already-loaded video. Used by the auto-trigger below — without
-  // this, picking a video with Fast then clicking Better silently
-  // kept the Fast result.
+  function desiredAnalyzer(q: Quality, cvReady: boolean): "fast" | "better" | "mesh" {
+    if ((q === "mesh" || q === "better") && !cvReady) return "fast";
+    return q;
+  }
+
   async function reanalyseWithCurrentQuality() {
     const v = videoRef.current;
     if (!v || v.readyState < 2 || reanalysingRef.current) return;
-    const useBetter = quality === "better" && opencvReady;
-    if (lastAnalyzerRef.current === (useBetter ? "better" : "fast")) return;
+    const desired = desiredAnalyzer(quality, opencvReady);
+    if (lastAnalyzerRef.current === desired) return;
     reanalysingRef.current = true;
     setError(null);
     setAnalysisReady(false);
-    setBusy("Re-analyzing with " + (useBetter ? "Better" : "Fast") + " 0%");
+    const label = desired === "mesh" ? "Mesh" : desired === "better" ? "Better" : "Fast";
+    setBusy(`Re-analyzing with ${label} 0%`);
     try {
-      const analyzer = useBetter ? analyzeVideoOpenCV : analyzeVideo;
-      const result = await analyzer(v, (p) => {
-        setBusy(`Re-analyzing with ${useBetter ? "Better" : "Fast"} ${Math.floor(p * 100)}%`);
-      });
-      analysisRef.current = result;
-      lastAnalyzerRef.current = useBetter ? "better" : "fast";
-      smoothRef.current = smoothPath(result, smoothing, crop, v.videoWidth, v.videoHeight);
-      sourceFpsRef.current = Math.max(24, result.frameRate || 60);
+      if (desired === "mesh") {
+        const meshResult = await analyzeVideoMesh(v, (p) => {
+          setBusy(`Re-analyzing with Mesh ${Math.floor(p * 100)}%`);
+        });
+        meshAnalysisRef.current = meshResult;
+        meshSmoothRef.current = smoothMeshPath(meshResult, smoothing, crop);
+        lastAnalyzerRef.current = "mesh";
+        sourceFpsRef.current = Math.max(24, meshResult.frameRate || 60);
+      } else {
+        const analyzer = desired === "better" ? analyzeVideoOpenCV : analyzeVideo;
+        const result = await analyzer(v, (p) => {
+          setBusy(`Re-analyzing with ${label} ${Math.floor(p * 100)}%`);
+        });
+        analysisRef.current = result;
+        lastAnalyzerRef.current = desired;
+        smoothRef.current = smoothPath(result, smoothing, crop, v.videoWidth, v.videoHeight);
+        sourceFpsRef.current = Math.max(24, result.frameRate || 60);
+      }
       setAnalysisReady(true);
       v.play().catch(() => undefined);
       startPreview();
@@ -173,20 +202,14 @@ export default function App() {
     }
   }
 
-  // When the user toggles Quality after a file is loaded — and the
-  // chosen analyzer differs from the one already used — re-run.
-  // Without this, switching to Better after a Fast analysis just sat
-  // there showing the Fast-stabilised result.
   useEffect(() => {
     if (!analysisReady) return;
     if (recording) return;
     const v = videoRef.current;
     if (!v || v.readyState < 2) return;
-    const desired = quality === "better" && opencvReady ? "better" : "fast";
+    const desired = desiredAnalyzer(quality, opencvReady);
     if (lastAnalyzerRef.current === desired) return;
     reanalyseWithCurrentQuality();
-    // We intentionally only depend on quality + opencvReady; the
-    // analyser ref itself isn't a React state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality, opencvReady]);
 
@@ -202,15 +225,19 @@ export default function App() {
   useEffect(() => {
     if (!analysisRef.current) return;
     const id = setTimeout(() => {
+      // Re-smooth whichever analysis path the user is on.
+      const meshA = meshAnalysisRef.current;
+      if (qualityRef.current === "mesh" && meshA) {
+        meshSmoothRef.current = smoothMeshPath(meshA, smoothing, crop);
+        drawStabilizedFrame();
+        return;
+      }
       const a = analysisRef.current;
       if (!a) return;
       const v = videoRef.current;
       const w = v?.videoWidth ?? 1920;
       const h = v?.videoHeight ?? 1080;
       smoothRef.current = smoothPath(a, smoothing, crop, w, h);
-      // Force a redraw with the new smoothing — the rAF loop reads from
-      // smoothRef so it'll pick this up next tick anyway, but on paused
-      // video there's no loop running.
       drawStabilizedFrame();
     }, 120);
     return () => clearTimeout(id);
@@ -219,6 +246,20 @@ export default function App() {
   useEffect(() => {
     setCanRecord(pickRecorderMime() !== null);
     pruneOldRecordings(MOTION_FIX_BRAND.opfsPrefix);
+  }, []);
+
+  // Initialise the WebGL MeshRenderer once on mount.
+  useEffect(() => {
+    const c = meshCanvasRef.current;
+    if (!c || meshRendererRef.current) return;
+    try {
+      meshRendererRef.current = new MeshRenderer(c);
+      meshIdentityRef.current = buildIdentityPositions();
+      meshScratchRef.current = new Float32Array(VERT_COUNT * 2);
+    } catch (e) {
+      // Mesh mode unavailable — UI will fall back to Fast/Better.
+      console.warn("MeshRenderer init failed:", e);
+    }
   }, []);
 
   const { currentTime, isPaused } = useVideoPlaybackState(videoRef, mode === "video", () => {
@@ -230,7 +271,30 @@ export default function App() {
     drawStabilizedFrame();
   }, [crop, smoothing, mode, compareActive, compareSplit]);
 
+  function drawMeshFrame() {
+    const v = videoRef.current;
+    const renderer = meshRendererRef.current;
+    const analysis = meshAnalysisRef.current;
+    const smooth = meshSmoothRef.current;
+    const identity = meshIdentityRef.current;
+    const scratch = meshScratchRef.current;
+    if (!v || !renderer || !analysis || !smooth || !identity || !scratch) return;
+    if (v.readyState < 2) return;
+    renderer.resize(v.videoWidth, v.videoHeight);
+    renderer.uploadSource(v);
+    const cropAmt = cropRef.current;
+    const effCrop = Math.max(0.015, cropAmt);
+    const scaleUp = 1 / (1 - 2 * effCrop);
+    meshPositionsAtTime(analysis, smooth, v.currentTime, identity, scaleUp, scratch);
+    renderer.setVertexPositions(scratch);
+    renderer.render();
+  }
+
   function drawStabilizedFrame() {
+    if (qualityRef.current === "mesh") {
+      drawMeshFrame();
+      return;
+    }
     const v = videoRef.current;
     const c = canvasRef.current;
     if (!v || !c) return;
@@ -508,25 +572,33 @@ export default function App() {
       setDuration(v.duration || 0);
       setMode("video");
 
-      setBusy("Analyzing motion 0%");
+      meshAnalysisRef.current = null;
+      meshSmoothRef.current = null;
+      const useMesh = quality === "mesh" && opencvReady;
       const useBetter = quality === "better" && opencvReady;
-      const analyzer = useBetter ? analyzeVideoOpenCV : analyzeVideo;
-      const result = await analyzer(v, (p) => {
-        setBusy(`Analyzing motion ${Math.floor(p * 100)}%`);
-      });
-      analysisRef.current = result;
-      lastAnalyzerRef.current = useBetter ? "better" : "fast";
-      smoothRef.current = smoothPath(result, smoothing, crop, v.videoWidth, v.videoHeight);
+      let detectedRate = 60;
+      if (useMesh) {
+        setBusy("Analyzing per-vertex motion 0%");
+        const meshResult = await analyzeVideoMesh(v, (p) => {
+          setBusy(`Analyzing per-vertex motion ${Math.floor(p * 100)}%`);
+        });
+        meshAnalysisRef.current = meshResult;
+        meshSmoothRef.current = smoothMeshPath(meshResult, smoothing, crop);
+        lastAnalyzerRef.current = "mesh";
+        detectedRate = meshResult.frameRate;
+      } else {
+        setBusy("Analyzing motion 0%");
+        const analyzer = useBetter ? analyzeVideoOpenCV : analyzeVideo;
+        const result = await analyzer(v, (p) => {
+          setBusy(`Analyzing motion ${Math.floor(p * 100)}%`);
+        });
+        analysisRef.current = result;
+        lastAnalyzerRef.current = useBetter ? "better" : "fast";
+        smoothRef.current = smoothPath(result, smoothing, crop, v.videoWidth, v.videoHeight);
+        detectedRate = result.frameRate;
+      }
       setAnalysisReady(true);
-
-      // The analyser already counts frames over the duration — that's the
-      // most accurate fps reading we have, so use it directly. Bitrate
-      // comes from file size / duration to match the source's per-pixel
-      // budget.
-      // Floor at 24 — very short clips can yield analyser fps below
-      // 1 fps which captureStream would honour, producing essentially-
-      // empty recordings.
-      sourceFpsRef.current = Math.max(24, result.frameRate || 60);
+      sourceFpsRef.current = Math.max(24, detectedRate || 60);
       sourceBitrateRef.current = bitrateFromSource(file.size, v.duration || 0);
 
       v.play().catch(() => undefined);
@@ -1040,7 +1112,8 @@ export default function App() {
           togglePlay();
         }}
       >
-        <canvas ref={canvasRef} />
+        <canvas ref={canvasRef} style={{ display: quality === "mesh" ? "none" : undefined }} />
+        <canvas ref={meshCanvasRef} style={{ display: quality === "mesh" ? undefined : "none" }} />
         <video ref={videoRef} style={{ display: "none" }} />
         {mode === "idle" && (
           <PlaceholderDropZone
@@ -1144,6 +1217,26 @@ export default function App() {
                   }}
                 >
                   Better {opencvReady || opencvCached ? "✓" : `(${OPENCV_SIZE_MB.toFixed(0)} MB)`}
+                </button>
+                <button
+                  className={quality === "mesh" ? "active" : ""}
+                  disabled={recording}
+                  onClick={() => {
+                    if (opencvReady) {
+                      setQuality("mesh");
+                      return;
+                    }
+                    if (opencvDownloadPct !== null) return;
+                    if (opencvCached) {
+                      loadOpenCVFromCacheAndSwitch();
+                      // setQuality runs after opencv loads; force it here too
+                      setTimeout(() => setQuality("mesh"), 0);
+                      return;
+                    }
+                    setShowCvPrompt(true);
+                  }}
+                >
+                  Mesh {opencvReady || opencvCached ? "✓" : `(${OPENCV_SIZE_MB.toFixed(0)} MB)`}
                 </button>
               </div>
             </div>
