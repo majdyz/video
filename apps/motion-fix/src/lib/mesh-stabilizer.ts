@@ -588,16 +588,21 @@ export function smoothMeshPath(
   // main thread. Gaussian + median gives most of the benefit at
   // a fraction of the cost.
   const s = Math.max(0, Math.min(1, smoothing));
-  // Cap sigma + medRadius at n/4. Without this, on short clips a wide
-  // Gaussian collapses every output sample to ~the mean (mirror-pad
-  // reflects the same few samples back), so the smoothed path becomes
-  // constant → residual = raw_cum at every frame → mesh saturates the
-  // box clamp constantly → output is just zoomed-cropped raw with no
-  // benefit from the smoother.
+  // Cap sigma at n/4. Without this, on short clips a wide Gaussian
+  // collapses every output sample to ~the mean (mirror-pad reflects the
+  // same few samples back), so the smoothed path becomes constant →
+  // residual = raw_cum at every frame → mesh saturates the box clamp
+  // constantly → output is just zoomed-cropped raw with no benefit from
+  // the smoother.
   const sigmaMax = Math.max(2, Math.floor(n / 4));
-  const medMax = Math.max(2, Math.floor(n / 8));
   const sigma = Math.min(sigmaMax, 4 + s * 60);
-  const medRadius = Math.min(medMax, Math.min(15, 2 + Math.floor(s * 24)));
+  // medRadius is purely an outlier-rejection window — the smoother's
+  // bandwidth knob is sigma. A wider median attacks transients (panning
+  // starts/stops) more than jitter, which we don't want; pin to a small
+  // constant so a high smoothing slider only widens the Gaussian, not
+  // the median.
+  const medMax = Math.max(2, Math.floor(n / 8));
+  const medRadius = Math.min(medMax, 5);
 
   const smoothX = new Float32Array(n * VERT_COUNT);
   const smoothY = new Float32Array(n * VERT_COUNT);
@@ -613,116 +618,161 @@ export function smoothMeshPath(
   const boxX = analysis.width * crop * 0.5;
   const boxY = analysis.height * crop * 0.5;
 
+  // Hoist the Gaussian kernel and median scratch outside the per-vertex
+  // loop — sigma/medRadius are constant across all 340 calls, and
+  // re-allocating + re-computing the kernel each time was the smoother's
+  // biggest hot-path cost. Same for the median scratch — a single
+  // Float32Array re-used across calls beats a per-call number[] +
+  // comparator sort by ~3× in v8.
+  const kRadius = Math.max(1, Math.ceil(sigma * 3));
+  const kLen = kRadius * 2 + 1;
+  const kernel = new Float32Array(kLen);
+  {
+    const denom = 2 * sigma * sigma;
+    let kSum = 0;
+    for (let k = -kRadius; k <= kRadius; k++) {
+      const v = Math.exp(-(k * k) / denom);
+      kernel[k + kRadius] = v;
+      kSum += v;
+    }
+    for (let k = 0; k < kLen; k++) kernel[k] /= kSum;
+  }
+  const medScratch = new Float32Array(n);
+  const medBuf = new Float32Array(2 * medRadius + 1);
+
   for (let v = 0; v < VERT_COUNT; v++) {
     // X axis
     for (let f = 0; f < n; f++) tmpRaw[f] = cumX![f * VERT_COUNT + v];
-    medianAndGaussianAndClamp(tmpRaw, tmpOut, sigma, medRadius, boxX);
+    medianGaussianSoftClamp(tmpRaw, tmpOut, kernel, kRadius, medRadius, boxX, medScratch, medBuf);
     for (let f = 0; f < n; f++) smoothX[f * VERT_COUNT + v] = tmpOut[f];
     // Y axis
     for (let f = 0; f < n; f++) tmpRaw[f] = cumY![f * VERT_COUNT + v];
-    medianAndGaussianAndClamp(tmpRaw, tmpOut, sigma, medRadius, boxY);
+    medianGaussianSoftClamp(tmpRaw, tmpOut, kernel, kRadius, medRadius, boxY, medScratch, medBuf);
     for (let f = 0; f < n; f++) smoothY[f * VERT_COUNT + v] = tmpOut[f];
   }
 
   // Step 4: spatial smoothing per frame on the smoothed paths. Without
   // this, adjacent vertices' smoothers can converge to per-vertex
   // residuals that differ by up to boxX between neighbours, producing
-  // wavy distortion within each cell. A 1-pass 3×3 average over each
-  // frame's smooth grid keeps inter-vertex motion coherent (the eye
-  // is sensitive to *relative* deformation between nearby pixels far
-  // more than to absolute camera motion).
-  const spatialBuf = new Float32Array(VERT_COUNT);
+  // wavy distortion within each cell. The eye is sensitive to *relative*
+  // deformation between nearby pixels far more than to absolute camera
+  // motion, so this pass matters a lot.
+  //
+  // - 3 iterations: with box = width*crop*0.5 (~96px on 1920×0.1), one
+  //   pass reduces inter-vertex spread by only ~1/3, so 3 × 3×3 average
+  //   ≈ a 9×9 Gaussian-ish kernel which actually flattens the spread.
+  // - Mirror-pad neighbours: edge/corner vertices would otherwise see
+  //   only 6/4 neighbours and be pulled less toward the spatial mean,
+  //   leaving the frame border visibly "breathing" relative to the
+  //   interior. Reflecting nx,ny back inside gives every vertex a true
+  //   9-tap average.
+  // - Re-apply box clamp at the end: the spatial average can re-push
+  //   samples outside ±box from raw, so we re-saturate against the raw
+  //   cum (read from cumX/cumY) to guarantee the final smooth path
+  //   stays inside the crop budget the user picked.
+  spatialSmoothPass(smoothX, n, 3);
+  spatialSmoothPass(smoothY, n, 3);
+
+  // Re-saturate against the raw cum after spatial mixing.
   for (let f = 0; f < n; f++) {
     const off = f * VERT_COUNT;
-    // X axis
-    for (let vy = 0; vy < VERT_H; vy++) {
-      for (let vx = 0; vx < VERT_W; vx++) {
-        let sum = 0, cnt = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const nx = vx + dx;
-            const ny = vy + dy;
-            if (nx < 0 || nx >= VERT_W || ny < 0 || ny >= VERT_H) continue;
-            sum += smoothX[off + ny * VERT_W + nx];
-            cnt++;
-          }
-        }
-        spatialBuf[vy * VERT_W + vx] = sum / cnt;
-      }
+    for (let i = 0; i < VERT_COUNT; i++) {
+      const rx = cumX![off + i];
+      const dx = smoothX[off + i] - rx;
+      smoothX[off + i] = rx + softSaturate(dx, boxX);
+      const ry = cumY![off + i];
+      const dy = smoothY[off + i] - ry;
+      smoothY[off + i] = ry + softSaturate(dy, boxY);
     }
-    smoothX.set(spatialBuf, off);
-    // Y axis
-    for (let vy = 0; vy < VERT_H; vy++) {
-      for (let vx = 0; vx < VERT_W; vx++) {
-        let sum = 0, cnt = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const nx = vx + dx;
-            const ny = vy + dy;
-            if (nx < 0 || nx >= VERT_W || ny < 0 || ny >= VERT_H) continue;
-            sum += smoothY[off + ny * VERT_W + nx];
-            cnt++;
-          }
-        }
-        spatialBuf[vy * VERT_W + vx] = sum / cnt;
-      }
-    }
-    smoothY.set(spatialBuf, off);
   }
 
   return { smoothX, smoothY };
 }
 
-function medianAndGaussianAndClamp(
+// Soft saturation — `box * tanh(x / box)` keeps |out - raw| ≤ box but
+// transitions smoothly through the boundary. A hard clamp produces a
+// C0 kink in the smoothed path at the saturation boundary; that kink is
+// itself visible motion in the rendered output. The soft transition
+// trades a tiny amount of margin near the boundary for a continuous
+// derivative, so the path doesn't suddenly snap when it would have
+// drifted past the box.
+function softSaturate(diff: number, box: number): number {
+  if (box <= 0) return 0;
+  return box * Math.tanh(diff / box);
+}
+
+function spatialSmoothPass(buf: Float32Array, frames: number, iterations: number) {
+  const tmp = new Float32Array(VERT_COUNT);
+  for (let it = 0; it < iterations; it++) {
+    for (let f = 0; f < frames; f++) {
+      const off = f * VERT_COUNT;
+      for (let vy = 0; vy < VERT_H; vy++) {
+        for (let vx = 0; vx < VERT_W; vx++) {
+          let sum = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              // Mirror-pad: reflect out-of-range indices back inside
+              // so corner/edge vertices get a full 9-tap stencil and
+              // converge at the same rate as interior vertices.
+              let nx = vx + dx;
+              let ny = vy + dy;
+              if (nx < 0) nx = -nx;
+              if (nx >= VERT_W) nx = 2 * (VERT_W - 1) - nx;
+              if (ny < 0) ny = -ny;
+              if (ny >= VERT_H) ny = 2 * (VERT_H - 1) - ny;
+              sum += buf[off + ny * VERT_W + nx];
+            }
+          }
+          tmp[vy * VERT_W + vx] = sum / 9;
+        }
+      }
+      buf.set(tmp, off);
+    }
+  }
+}
+
+function medianGaussianSoftClamp(
   raw: Float32Array,
   out: Float32Array,
-  sigma: number,
+  kernel: Float32Array,
+  kRadius: number,
   medRadius: number,
   box: number,
+  med: Float32Array,
+  buf: Float32Array,
 ) {
   const n = raw.length;
-  // Median pre-pass
-  const med = new Float32Array(n);
-  const buf: number[] = [];
+  // Median pre-pass — Float32Array.sort() with no comparator runs the
+  // engine's native numeric sort path and is ~3× faster than a number[]
+  // .sort((a,b)=>a-b) at our window sizes.
   for (let i = 0; i < n; i++) {
-    buf.length = 0;
+    let bi = 0;
     for (let k = -medRadius; k <= medRadius; k++) {
       let idx = i + k;
       if (idx < 0) idx = -idx;
       if (idx >= n) idx = 2 * (n - 1) - idx;
       if (idx < 0) idx = 0;
-      buf.push(raw[idx]);
+      buf[bi++] = raw[idx];
     }
-    buf.sort((a, b) => a - b);
+    buf.sort();
     med[i] = buf[buf.length >> 1];
   }
-  // Gaussian smooth
-  const radius = Math.max(1, Math.ceil(sigma * 3));
-  const denom = 2 * sigma * sigma;
-  const kernel = new Float32Array(radius * 2 + 1);
-  let kSum = 0;
-  for (let k = -radius; k <= radius; k++) {
-    const v = Math.exp(-(k * k) / denom);
-    kernel[k + radius] = v;
-    kSum += v;
-  }
-  for (let k = 0; k < kernel.length; k++) kernel[k] /= kSum;
+  // Gaussian smooth (kernel pre-built by caller)
   for (let i = 0; i < n; i++) {
     let acc = 0;
-    for (let k = -radius; k <= radius; k++) {
+    for (let k = -kRadius; k <= kRadius; k++) {
       let idx = i + k;
       if (idx < 0) idx = -idx;
       if (idx >= n) idx = 2 * (n - 1) - idx;
       if (idx < 0) idx = 0;
-      acc += med[idx] * kernel[k + radius];
+      acc += med[idx] * kernel[k + kRadius];
     }
     out[i] = acc;
   }
-  // Box constraint vs raw
+  // Soft-saturating constraint vs raw — see softSaturate() for why
+  // tanh instead of hard clamp.
   for (let i = 0; i < n; i++) {
-    const diff = out[i] - raw[i];
-    if (diff > box) out[i] = raw[i] + box;
-    else if (diff < -box) out[i] = raw[i] - box;
+    out[i] = raw[i] + softSaturate(out[i] - raw[i], box);
   }
 }
 
@@ -790,13 +840,24 @@ export function meshUVsAtTime(
   const h = analysis.height;
   const invScaleUp = 1 / Math.max(1e-6, scaleUp);
 
+  // residual = rawCum - smoothCum (both cumulative, in source pixels).
+  // analysis.motionX is the per-frame DELTA, NOT the cumulative path —
+  // using delta here would compute residual = delta - smoothCum, which
+  // is unit-nonsense and produced static off-centre framing that didn't
+  // track camera motion at all. cumX/cumY are populated by
+  // smoothMeshPath() which runs before any meshUVsAtTime call (the call
+  // site assigns smoothRef immediately after smoothing), so the
+  // non-null assertion is safe.
+  const cumXSrc = analysis.cumX!;
+  const cumYSrc = analysis.cumY!;
+
   for (let vy = 0; vy < VERT_H; vy++) {
     for (let vx = 0; vx < VERT_W; vx++) {
       const idx = vy * VERT_W + vx;
       const off0 = f0 * VERT_COUNT + idx;
       const off1 = f1 * VERT_COUNT + idx;
-      const rawX = analysis.motionX[off0] * (1 - frac) + analysis.motionX[off1] * frac;
-      const rawY = analysis.motionY[off0] * (1 - frac) + analysis.motionY[off1] * frac;
+      const rawX = cumXSrc[off0] * (1 - frac) + cumXSrc[off1] * frac;
+      const rawY = cumYSrc[off0] * (1 - frac) + cumYSrc[off1] * frac;
       const sX = smooth.smoothX[off0] * (1 - frac) + smooth.smoothX[off1] * frac;
       const sY = smooth.smoothY[off0] * (1 - frac) + smooth.smoothY[off1] * frac;
       const residualX = rawX - sX;
