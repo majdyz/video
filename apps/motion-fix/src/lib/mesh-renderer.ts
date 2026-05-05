@@ -118,14 +118,8 @@ export class MeshRenderer {
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
-    // preserveDrawingBuffer:true is required for canvas.captureStream to
-    // reliably read the rendered frame. Without it the browser is allowed
-    // to clear the back buffer between draw + composite, so captureStream
-    // (which samples the drawing buffer asynchronously) lands on an
-    // already-cleared buffer and records intermittent black frames. The
-    // perf cost is negligible at our 16×9 mesh.
     const gl = canvas.getContext("webgl", {
-      preserveDrawingBuffer: true,
+      preserveDrawingBuffer: false,
       premultipliedAlpha: false,
       antialias: false,
     });

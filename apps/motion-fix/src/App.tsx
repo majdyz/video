@@ -69,11 +69,6 @@ export default function App() {
   const sourceFpsRef = useRef<number>(60);
   const sourceBitrateRef = useRef<number | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
-  // Hold the active captureStream so cancel/end paths can call
-  // .stop() on its tracks. Without this, on Chromium the WebGL canvas
-  // stays pinned as a producer for the just-cancelled recording, and
-  // a follow-up record starts from a stale framebuffer.
-  const captureCtxRef = useRef<{ videoStream: MediaStream; videoTrack: MediaStreamTrack } | null>(null);
   const previewActiveRef = useRef(false);
   const recordingFlagRef = useRef(false);
   const audioRoutingRef = useRef<AudioRouting>(null);
@@ -136,45 +131,24 @@ export default function App() {
   // Inflight guard so a double-tap on Better doesn't fire two
   // parallel loadOpenCV calls.
   const opencvLoadingRef = useRef(false);
-  // Latest target the user clicked while a load is in flight. The
-  // resolving load reads this so a fast Mesh→Better tap lands on
-  // Better, not whichever click happened to start the load first.
-  const pendingTargetRef = useRef<Quality | null>(null);
   // True once we've confirmed the script is in Cache API. Probed once
   // on mount; if true, clicking Better skips the consent dialog and
   // loads silently — and we also default Quality to Better and
   // pre-warm OpenCV so picking a file uses the better tracker right
   // away (no Fast→Better re-analyse needed).
   const [opencvCached, setOpencvCached] = useState(false);
-  // Mesh button availability — false if WebGL init failed at mount.
-  const [meshAvailable, setMeshAvailable] = useState(true);
-  // Mount-time pre-warm: probe cache + (if cached) silently load OpenCV.
-  // Guard with a mountedRef so React StrictMode's double-mount doesn't
-  // race a quality flip past whatever the user picked in the brief
-  // async window between mount and resolve.
   useEffect(() => {
-    let mounted = true;
-    let userTouched = false;
-    const onPointer = () => { userTouched = true; };
-    window.addEventListener("pointerdown", onPointer, { once: true, capture: true });
     isOpenCVCached().then((cached) => {
-      if (!mounted) return;
       setOpencvCached(cached);
       if (cached) {
+        // Pre-warm: load opencv silently so quality auto-flips to
+        // Better once it's ready.
         loadOpenCV().then(() => {
-          if (!mounted) return;
           setOpencvReady(true);
-          // Don't clobber a user's explicit Fast pick during the
-          // async window — only auto-promote if they haven't touched
-          // anything yet.
-          if (!userTouched) setQuality("better");
+          setQuality("better");
         }).catch(() => undefined);
       }
     }).catch(() => undefined);
-    return () => {
-      mounted = false;
-      window.removeEventListener("pointerdown", onPointer, { capture: true });
-    };
   }, []);
   // Tracks which analyzer was actually used to produce analysisRef.
   // When the user toggles Quality after analysis is done, we compare
@@ -220,25 +194,10 @@ export default function App() {
       v.play().catch(() => undefined);
       startPreview();
     } catch (e) {
-      // On failure, clear the "last analyzer" tag so the next quality
-      // toggle isn't short-circuited by lastAnalyzerRef === desired
-      // pointing at a now-stale label.
-      lastAnalyzerRef.current = null;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
       reanalysingRef.current = false;
-      // If quality flipped while we were running, the [quality] effect
-      // already returned because reanalysingRef was true. Re-check now
-      // and recurse so a fast Fast→Mesh→Better lands on Better.
-      const v2 = videoRef.current;
-      if (v2 && v2.readyState >= 2) {
-        const stillDesired = desiredAnalyzer(quality, opencvReady);
-        if (lastAnalyzerRef.current !== stillDesired) {
-          // Defer a tick so React commits + ref writes settle.
-          setTimeout(() => reanalyseWithCurrentQuality(), 0);
-        }
-      }
     }
   }
 
@@ -290,8 +249,7 @@ export default function App() {
     pruneOldRecordings(MOTION_FIX_BRAND.opfsPrefix);
   }, []);
 
-  // Initialise the WebGL MeshRenderer once on mount; dispose on
-  // unmount so the GL program/textures/buffers are freed.
+  // Initialise the WebGL MeshRenderer once on mount.
   useEffect(() => {
     const c = meshCanvasRef.current;
     if (!c || meshRendererRef.current) return;
@@ -301,12 +259,7 @@ export default function App() {
     } catch (e) {
       // Mesh mode unavailable — UI will fall back to Fast/Better.
       console.warn("MeshRenderer init failed:", e);
-      setMeshAvailable(false);
     }
-    return () => {
-      meshRendererRef.current?.dispose();
-      meshRendererRef.current = null;
-    };
   }, []);
 
   const { currentTime, isPaused } = useVideoPlaybackState(videoRef, mode === "video", () => {
@@ -570,15 +523,6 @@ export default function App() {
       closeAudioRouting(audioRoutingRef.current);
       audioRoutingRef.current = null;
     }
-    // Clear analysis refs in teardown (not just at next handleFile
-    // start) so that an error between teardown and re-analysis
-    // doesn't leave stale per-vertex motion in mesh refs to be
-    // re-rendered against the next file's video frames.
-    analysisRef.current = null;
-    smoothRef.current = null;
-    meshAnalysisRef.current = null;
-    meshSmoothRef.current = null;
-    lastAnalyzerRef.current = null;
   }
 
   async function handleFile(file: File) {
@@ -661,18 +605,7 @@ export default function App() {
       v.play().catch(() => undefined);
       startPreview();
     } catch (e) {
-      // Surface the error and roll the UI back to idle so the user
-      // can pick another file. Otherwise the scrubber/sliders/Save
-      // stay disabled (they all gate on analysisReady) with no
-      // recovery path other than reload.
       setError(e instanceof Error ? e.message : String(e));
-      lastAnalyzerRef.current = null;
-      analysisRef.current = null;
-      smoothRef.current = null;
-      meshAnalysisRef.current = null;
-      meshSmoothRef.current = null;
-      setMode("idle");
-      setAnalysisReady(false);
     } finally {
       setBusy(null);
     }
@@ -757,28 +690,6 @@ export default function App() {
         }
       });
     }
-    // Wait for an actual decoded frame to land before we open the
-    // captureStream — `seeked` fires after the seek is committed but
-    // not necessarily after a new frame is presented. On Safari the
-    // ~1-frame gap means captureStream samples whatever the canvas
-    // had drawn last (which after a fresh load is the cleared
-    // backbuffer → black recording).
-    if (typeof video.requestVideoFrameCallback === "function") {
-      await new Promise<void>((resolve) => {
-        let resolved = false;
-        const done = () => { if (!resolved) { resolved = true; resolve(); } };
-        video.requestVideoFrameCallback?.(() => done());
-        // Hard 200ms cap so a non-decoding video doesn't hang record.
-        setTimeout(done, 200);
-      });
-    }
-    // Resize the mesh canvas BEFORE buildCaptureContext — the very
-    // first captureStream reads pin track dimensions on Chromium, so
-    // a 300×150 default-sized canvas at capture time produces a
-    // 300×150 recorded file regardless of subsequent resizes.
-    if (useMesh && meshRendererRef.current) {
-      meshRendererRef.current.resize(video.videoWidth, video.videoHeight);
-    }
 
     const wakeLockApi = (navigator as Navigator & {
       wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinel> };
@@ -796,7 +707,6 @@ export default function App() {
 
     const fps = sourceFpsRef.current;
     const captureCtx = buildCaptureContext(canvas, fps);
-    captureCtxRef.current = captureCtx;
     if (!audioRoutingRef.current) audioRoutingRef.current = attachAudioRouting(video);
     const audioCapture = await captureAudioForRecording(audioRoutingRef.current);
     const stream = new MediaStream([
@@ -894,11 +804,6 @@ export default function App() {
       onEndedRef.current = null;
       video.removeEventListener("ended", onEnded);
       await stopAndDownload();
-      // Stop the captureStream tracks so the canvas isn't pinned as
-      // a producer for the just-finished recording. Without this, on
-      // Chromium the next record starts from a stale framebuffer.
-      try { captureCtx.videoTrack.stop(); } catch { /* ignore */ }
-      captureCtxRef.current = null;
       if (wakeLockRef.current) {
         try {
           await wakeLockRef.current.release();
@@ -941,27 +846,11 @@ export default function App() {
         // ignore
       }
       sinkRef.current = null;
-      try { captureCtx.videoTrack.stop(); } catch { /* ignore */ }
-      captureCtxRef.current = null;
       setRecording(false);
       setError("Couldn't start playback for recording: " + (e instanceof Error ? e.message : String(e)));
       startPreview();
       return;
     }
-    // Wait for one fresh decoded frame after play() — between play()
-    // resolving and recorder.start(), captureStream would otherwise
-    // pin its first sample to whatever the canvas held *before* the
-    // post-seek frame landed. Result: the first ~16ms of the recording
-    // was a stale frame from the prior record/preview state.
-    if (typeof video.requestVideoFrameCallback === "function") {
-      await new Promise<void>((resolve) => {
-        let resolved = false;
-        const done = () => { if (!resolved) { resolved = true; resolve(); } };
-        video.requestVideoFrameCallback?.(() => done());
-        setTimeout(done, 200);
-      });
-    }
-    drawStabilizedFrame();
     recorder.start(1000);
   }
 
@@ -990,11 +879,6 @@ export default function App() {
     if (sinkRef.current) {
       sinkRef.current.cleanup().catch(() => undefined);
       sinkRef.current = null;
-    }
-    // Stop the captureStream tracks — see onEnded for why.
-    if (captureCtxRef.current) {
-      try { captureCtxRef.current.videoTrack.stop(); } catch { /* ignore */ }
-      captureCtxRef.current = null;
     }
     if (wakeLockRef.current) {
       wakeLockRef.current.release().catch(() => undefined);
@@ -1031,7 +915,7 @@ export default function App() {
       setOpencvReady(true);
       setOpencvCached(true);
       setOpencvDownloadPct(null);
-      setQuality(pendingTargetRef.current ?? "better");
+      setQuality("better");
     } catch (e) {
       setOpencvDownloadPct(null);
       if (!(e instanceof LoadAbortedError)) {
@@ -1050,22 +934,17 @@ export default function App() {
   // to the requested quality. Parameterised so the Mesh card can ask
   // for "mesh"; otherwise the await would resolve and clobber back to
   // "better" after the caller's local setQuality("mesh") attempt.
-  // pendingTargetRef captures the *latest* click while a load is in
-  // flight, so a fast Mesh→Better double-tap lands on Better instead
-  // of whichever click started the load first.
   async function loadOpenCVFromCacheAndSwitch(target: Quality = "better") {
-    pendingTargetRef.current = target;
     if (opencvLoadingRef.current) return;
     opencvLoadingRef.current = true;
     try {
       await loadOpenCV();
       setOpencvReady(true);
-      setQuality(pendingTargetRef.current ?? target);
+      setQuality(target);
     } catch (e) {
       setError("Couldn't load OpenCV: " + (e instanceof Error ? e.message : String(e)));
     } finally {
       opencvLoadingRef.current = false;
-      pendingTargetRef.current = null;
     }
   }
 
@@ -1349,10 +1228,8 @@ export default function App() {
                 </button>
                 <button
                   className={quality === "mesh" ? "active" : ""}
-                  disabled={recording || !meshAvailable}
-                  title={meshAvailable ? undefined : "WebGL unavailable on this browser"}
+                  disabled={recording}
                   onClick={() => {
-                    if (!meshAvailable) return;
                     if (opencvReady) {
                       setQuality("mesh");
                       return;
