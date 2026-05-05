@@ -1,17 +1,19 @@
-// WebGL mesh-warp renderer for motion-fix. Replaces the canvas2d
-// drawImage(setTransform) renderer with a textured mesh whose vertices
-// can be displaced per-cell, enabling MeshFlow-style stabilisation
-// (handles parallax + local wobble + rolling-shutter pan-skew the
-// global 2D similarity model can't represent).
+// WebGL mesh-warp renderer for motion-fix.
 //
-// Mesh layout: GRID_W × GRID_H cells = (GRID_W+1) × (GRID_H+1) vertices.
-// Vertices store (a) their static source UV (0..1, the texture sample
-// position) and (b) their dynamic stabilised position in NDC (-1..1).
-// The dynamic position is updated per-frame via setVertexPositions().
+// Coordinate model:
+//   * Vertex POSITIONS are static — each vertex sits at its identity grid
+//     spot in NDC. The OUTPUT pixel under each vertex never moves.
+//   * Vertex UVs are dynamic — each vertex samples a different point in
+//     the source per frame to compensate for camera motion. Identity UV
+//     = (vx/GRID_W, vy/GRID_H); the stabiliser shifts this per-vertex
+//     to undo the camera's actual motion.
 //
-// For an "identity" mesh (no warp), each vertex's NDC position is its
-// source UV mapped to NDC — drawing the mesh produces a pixel-perfect
-// pass-through of the source texture.
+// Why this model and not the inverse: putting per-frame motion on the
+// VERTEX POSITIONS pushes the mesh geometry off-screen at the edges
+// (any displacement carries the corner triangles outside [-1, 1] NDC),
+// so the corners get stretched into hideous shapes. Moving UVs leaves
+// geometry rock-solid; the source texture is sampled with bilinear
+// hardware interpolation between the moved UVs.
 
 export const GRID_W = 16;
 export const GRID_H = 9;
@@ -20,8 +22,8 @@ export const VERT_H = GRID_H + 1;
 export const VERT_COUNT = VERT_W * VERT_H;
 
 const VERT_SHADER = `
-attribute vec2 a_pos;   // stabilised canvas position in NDC (-1..1)
-attribute vec2 a_uv;    // source UV (0..1)
+attribute vec2 a_pos;   // static NDC position
+attribute vec2 a_uv;    // dynamic source UV (0..1)
 varying vec2 v_uv;
 void main() {
   v_uv = a_uv;
@@ -32,20 +34,35 @@ void main() {
 const FRAG_SHADER = `
 precision highp float;
 uniform sampler2D u_image;
-uniform float u_splitX;   // compare-wipe split (0 = all source, 1 = all stabilised)
-uniform sampler2D u_origImage;  // unwarped source for the wipe's left half
 varying vec2 v_uv;
 void main() {
-  // Sample stabilised on the right of split, original on the left.
-  // Both samplers point to the same texture; the difference is the
-  // mesh — split is enforced in screen-space via gl_FragCoord here.
+  // Sampling outside [0, 1] would wrap or clamp depending on texture
+  // wrap mode. We use CLAMP_TO_EDGE so out-of-range UVs read the edge
+  // pixel — which becomes visible black bands when stabilisation
+  // demands more crop than the user's budget. Better to show the band
+  // than to repeat content.
   vec4 c = texture2D(u_image, v_uv);
   gl_FragColor = c;
 }
 `;
 
-// Returns flat array of source UVs per vertex, row-major (y outer, x inner).
-function buildUVs(): Float32Array {
+// Identity NDC positions per vertex (row-major, y-outer / x-inner).
+// UV (0,0) → NDC (-1, +1); UV (1,1) → NDC (+1, -1) — y-flipped because
+// WebGL NDC is +y up while UV is +y down.
+function buildIdentityPositions(): Float32Array {
+  const pos = new Float32Array(VERT_COUNT * 2);
+  let i = 0;
+  for (let vy = 0; vy < VERT_H; vy++) {
+    for (let vx = 0; vx < VERT_W; vx++) {
+      pos[i++] = (vx / GRID_W) * 2 - 1;
+      pos[i++] = 1 - (vy / GRID_H) * 2;
+    }
+  }
+  return pos;
+}
+
+// Identity UVs (sample directly from each vertex's grid spot in source).
+export function buildIdentityUVs(): Float32Array {
   const uv = new Float32Array(VERT_COUNT * 2);
   let i = 0;
   for (let vy = 0; vy < VERT_H; vy++) {
@@ -57,7 +74,7 @@ function buildUVs(): Float32Array {
   return uv;
 }
 
-// Returns indices for triangle list (2 triangles per cell).
+// Triangle list indices — 2 triangles per cell.
 function buildIndices(): Uint16Array {
   const idx = new Uint16Array(GRID_W * GRID_H * 6);
   let i = 0;
@@ -67,27 +84,11 @@ function buildIndices(): Uint16Array {
       const v10 = v00 + 1;
       const v01 = v00 + VERT_W;
       const v11 = v01 + 1;
-      // Two triangles: (v00, v10, v11) and (v00, v11, v01)
       idx[i++] = v00; idx[i++] = v10; idx[i++] = v11;
       idx[i++] = v00; idx[i++] = v11; idx[i++] = v01;
     }
   }
   return idx;
-}
-
-// Identity vertex positions: each vertex placed at its source UV mapped
-// to NDC (-1..1). UV (0,0) → NDC (-1, 1), UV (1,1) → NDC (1, -1).
-// Y is flipped because WebGL NDC has +Y up but UV has +Y down.
-export function buildIdentityPositions(): Float32Array {
-  const pos = new Float32Array(VERT_COUNT * 2);
-  let i = 0;
-  for (let vy = 0; vy < VERT_H; vy++) {
-    for (let vx = 0; vx < VERT_W; vx++) {
-      pos[i++] = (vx / GRID_W) * 2 - 1;
-      pos[i++] = 1 - (vy / GRID_H) * 2;
-    }
-  }
-  return pos;
 }
 
 export class MeshRenderer {
@@ -131,13 +132,15 @@ export class MeshRenderer {
       image: gl.getUniformLocation(prog, "u_image")!,
     };
 
+    // Positions: static identity grid.
     this.posBuffer = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, buildIdentityPositions(), gl.DYNAMIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, buildIdentityPositions(), gl.STATIC_DRAW);
 
+    // UVs: identity to start; will be replaced per-frame by setVertexUVs.
     this.uvBuffer = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.uvBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, buildUVs(), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, buildIdentityUVs(), gl.DYNAMIC_DRAW);
 
     this.indexBuffer = gl.createBuffer()!;
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
@@ -164,14 +167,11 @@ export class MeshRenderer {
     return sh;
   }
 
-  // Resize the canvas to match the source video. Called once per file
-  // when source dimensions change.
   resize(width: number, height: number) {
     if (this.canvas.width !== width) this.canvas.width = width;
     if (this.canvas.height !== height) this.canvas.height = height;
   }
 
-  // Upload source video frame into texture.
   uploadSource(source: TexImageSource) {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
@@ -179,15 +179,14 @@ export class MeshRenderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
   }
 
-  // Update vertex NDC positions. positions is a Float32Array of length
-  // VERT_COUNT * 2 (x, y per vertex, row-major y-outer / x-inner).
-  setVertexPositions(positions: Float32Array) {
-    if (positions.length !== VERT_COUNT * 2) {
-      throw new Error(`Expected ${VERT_COUNT * 2} position floats, got ${positions.length}`);
+  // Replace per-vertex UVs (length = VERT_COUNT * 2; row-major, y-outer).
+  setVertexUVs(uvs: Float32Array) {
+    if (uvs.length !== VERT_COUNT * 2) {
+      throw new Error(`Expected ${VERT_COUNT * 2} UV floats, got ${uvs.length}`);
     }
     const gl = this.gl;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, positions);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.uvBuffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, uvs);
   }
 
   render() {

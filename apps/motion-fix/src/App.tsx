@@ -39,12 +39,12 @@ import { analyzeVideoOpenCV } from "./lib/stabilizer-opencv";
 import { isOpenCVCached, isOpenCVReady, loadOpenCV, OPENCV_SIZE_MB } from "./lib/opencv-loader";
 import {
   analyzeVideoMesh,
-  meshPositionsAtTime,
+  meshUVsAtTime,
   smoothMeshPath,
   type MeshAnalysis,
   type MeshSmoothPath,
 } from "./lib/mesh-stabilizer";
-import { buildIdentityPositions, MeshRenderer, VERT_COUNT } from "./lib/mesh-renderer";
+import { MeshRenderer, VERT_COUNT } from "./lib/mesh-renderer";
 import { LoadAbortedError } from "@dive-tools/shared";
 
 type Mode = "idle" | "video";
@@ -58,7 +58,6 @@ export default function App() {
   const meshRendererRef = useRef<MeshRenderer | null>(null);
   const meshAnalysisRef = useRef<MeshAnalysis | null>(null);
   const meshSmoothRef = useRef<MeshSmoothPath | null>(null);
-  const meshIdentityRef = useRef<Float32Array | null>(null);
   const meshScratchRef = useRef<Float32Array | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileNameRef = useRef<string>(MOTION_FIX_BRAND.filenamePrefix);
@@ -254,7 +253,6 @@ export default function App() {
     if (!c || meshRendererRef.current) return;
     try {
       meshRendererRef.current = new MeshRenderer(c);
-      meshIdentityRef.current = buildIdentityPositions();
       meshScratchRef.current = new Float32Array(VERT_COUNT * 2);
     } catch (e) {
       // Mesh mode unavailable — UI will fall back to Fast/Better.
@@ -276,17 +274,16 @@ export default function App() {
     const renderer = meshRendererRef.current;
     const analysis = meshAnalysisRef.current;
     const smooth = meshSmoothRef.current;
-    const identity = meshIdentityRef.current;
     const scratch = meshScratchRef.current;
-    if (!v || !renderer || !analysis || !smooth || !identity || !scratch) return;
+    if (!v || !renderer || !analysis || !smooth || !scratch) return;
     if (v.readyState < 2) return;
     renderer.resize(v.videoWidth, v.videoHeight);
     renderer.uploadSource(v);
     const cropAmt = cropRef.current;
     const effCrop = Math.max(0.015, cropAmt);
     const scaleUp = 1 / (1 - 2 * effCrop);
-    meshPositionsAtTime(analysis, smooth, v.currentTime, identity, scaleUp, scratch);
-    renderer.setVertexPositions(scratch);
+    meshUVsAtTime(analysis, smooth, v.currentTime, scaleUp, scratch);
+    renderer.setVertexUVs(scratch);
     renderer.render();
   }
 

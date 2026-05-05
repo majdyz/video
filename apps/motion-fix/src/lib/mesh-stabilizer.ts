@@ -580,17 +580,44 @@ function medianAndGaussianAndClamp(
   }
 }
 
-// Compute per-vertex NDC positions for the renderer at a given playback
-// time. Each vertex's identity NDC position is shifted by the residual
-// (smoothed - raw) motion in source pixels, normalised to NDC.
+// Compute per-vertex source UVs for the renderer at a given playback
+// time. The vertex POSITIONS are static (fixed identity grid in NDC);
+// each vertex's UV says "this OUTPUT pixel should sample THIS source
+// pixel".
 //
-// `times[]` is interpolated for sub-sample times.
-export function meshPositionsAtTime(
+// Math (per vertex):
+//   output_uv     = (vx / GRID_W, vy / GRID_H)   — fixed: where the
+//                                                  vertex lives on the
+//                                                  output canvas, in
+//                                                  [0, 1]
+//   zoomed_uv     = 0.5 + (output_uv - 0.5) / scaleUp
+//                                                — pull toward centre
+//                                                  to crop in by
+//                                                  `scaleUp` (gives the
+//                                                  smoother room to
+//                                                  cancel motion)
+//   residual      = rawCum - smoothCum           — how far the actual
+//                                                  camera drifted from
+//                                                  the smoothed
+//                                                  virtual camera, in
+//                                                  source pixels
+//   source_uv     = zoomed_uv + residual / sourceSize
+//                                                — shift the sample
+//                                                  point so the OUTPUT
+//                                                  shows what the
+//                                                  smoothed camera
+//                                                  would have seen
+//
+// Sign of the residual: if raw moved +100 px right (rawCum=100) and
+// smooth stayed at 0 (smoothCum=0), residual = +100 — the actual frame
+// is showing world content shifted +100 in source. To put the same
+// world point at OUTPUT centre, we sample from source at a UV that's
+// to the right of centre. That matches `+ residual / sourceSize`.
+export function meshUVsAtTime(
   analysis: MeshAnalysis,
   smooth: MeshSmoothPath,
   time: number,
-  identityPositions: Float32Array,  // VERT_COUNT*2
-  scaleUp: number,                   // applied uniformly to compensate for displacement going off-frame
+  scaleUp: number,
   out: Float32Array,                 // VERT_COUNT*2 — written in place
 ): void {
   const t = analysis.times;
@@ -615,31 +642,25 @@ export function meshPositionsAtTime(
 
   const w = analysis.width;
   const h = analysis.height;
+  const invScaleUp = 1 / Math.max(1e-6, scaleUp);
 
   for (let vy = 0; vy < VERT_H; vy++) {
     for (let vx = 0; vx < VERT_W; vx++) {
       const idx = vy * VERT_W + vx;
       const off0 = f0 * VERT_COUNT + idx;
       const off1 = f1 * VERT_COUNT + idx;
-      const cumX = analysis.motionX[off0] * (1 - frac) + analysis.motionX[off1] * frac;
-      const cumY = analysis.motionY[off0] * (1 - frac) + analysis.motionY[off1] * frac;
+      const rawX = analysis.motionX[off0] * (1 - frac) + analysis.motionX[off1] * frac;
+      const rawY = analysis.motionY[off0] * (1 - frac) + analysis.motionY[off1] * frac;
       const sX = smooth.smoothX[off0] * (1 - frac) + smooth.smoothX[off1] * frac;
       const sY = smooth.smoothY[off0] * (1 - frac) + smooth.smoothY[off1] * frac;
-      // Residual displacement: where the smoothed virtual camera would
-      // place a feature minus where the actual camera placed it. To
-      // undo the actual motion we shift the SOURCE sample point by the
-      // residual (negated because UV moves opposite to vertex).
-      // For our renderer model (vertex positions move, UVs stay), the
-      // vertex moves by +(sCum - rawCum) in source pixels.
-      const dxPx = sX - cumX;
-      const dyPx = sY - cumY;
-      // Convert to NDC: source pixel deltas → NDC deltas.
-      // Identity NDC for vertex was already applied by buildIdentityPositions.
-      // NDC range for w pixels is 2.0 (-1 to +1), so 1 px = 2/w NDC.
-      const ndcDx = (dxPx / w) * 2 * scaleUp;
-      const ndcDy = -(dyPx / h) * 2 * scaleUp;
-      out[idx * 2] = identityPositions[idx * 2] * scaleUp + ndcDx;
-      out[idx * 2 + 1] = identityPositions[idx * 2 + 1] * scaleUp + ndcDy;
+      const residualX = rawX - sX;
+      const residualY = rawY - sY;
+      const outputU = vx / GRID_W;
+      const outputV = vy / GRID_H;
+      const zoomedU = 0.5 + (outputU - 0.5) * invScaleUp;
+      const zoomedV = 0.5 + (outputV - 0.5) * invScaleUp;
+      out[idx * 2] = zoomedU + residualX / w;
+      out[idx * 2 + 1] = zoomedV + residualY / h;
     }
   }
 }
