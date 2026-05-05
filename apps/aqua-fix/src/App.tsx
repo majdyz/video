@@ -520,39 +520,38 @@ export default function App() {
 
   const pendingFileRef = useRef<File | null>(null);
 
-  // Animate sliders from OFF → current preset over ~700 ms when a new
-  // file is revealed, so the user briefly sees the original frame and
-  // watches the correction ease in. Reads `settingsRef.current` for the
-  // target so a non-default preset (Reef/Deep) the user picked before
-  // loading is honoured. Cancels any in-flight animation first.
+  // Animate the compare-wipe across the frame on initial reveal so
+  // the user sees a clear before/after slide: original on the left,
+  // corrected on the right, divider sweeping from 0 → 1 over ~1.6 s,
+  // then the wipe overlay turns off so normal editing resumes. Reads
+  // current refs to drive the renderer's split per frame.
   function animateEntrySettings() {
     if (entryAnimRef.current !== null) {
       cancelAnimationFrame(entryAnimRef.current);
       entryAnimRef.current = null;
     }
-    const target = { ...settingsRef.current };
-    const off = OFF_SETTINGS;
-    setSettings(off);
+    setCompareActive(true);
+    setCompareSplit(0);
     let start: number | null = null;
     const tick = (now: number) => {
       if (start === null) start = now;
-      const t = Math.min(1, (now - start) / 700);
-      // Ease-out cubic — fast at the start (so the original frame isn't
-      // visible for too long) and a soft landing on the target.
-      const e = 1 - Math.pow(1 - t, 3);
-      setSettings({
-        intensity: off.intensity + (target.intensity - off.intensity) * e,
-        castStrength: off.castStrength + (target.castStrength - off.castStrength) * e,
-        saturation: off.saturation + (target.saturation - off.saturation) * e,
-        gamma: off.gamma + (target.gamma - off.gamma) * e,
-        contrast: off.contrast + (target.contrast - off.contrast) * e,
-        clahe: off.clahe + (target.clahe - off.clahe) * e,
-        lutMix: off.lutMix + (target.lutMix - off.lutMix) * e,
-      });
+      const t = Math.min(1, (now - start) / 1600);
+      // Ease-in-out cubic — accelerates through the middle of the
+      // frame (where the contrast is most visible) and decelerates
+      // at both ends so the start/finish feel intentional.
+      const e = t < 0.5
+        ? 4 * t * t * t
+        : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      setCompareSplit(e);
       if (t < 1) {
         entryAnimRef.current = requestAnimationFrame(tick);
       } else {
         entryAnimRef.current = null;
+        // Hand control back to the user — the wipe overlay disappears
+        // and the corrected frame fills the canvas. Users can re-enter
+        // compare via the toolbar button.
+        setCompareActive(false);
+        setCompareSplit(0.5);
       }
     };
     entryAnimRef.current = requestAnimationFrame(tick);
