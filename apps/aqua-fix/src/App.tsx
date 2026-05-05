@@ -521,35 +521,46 @@ export default function App() {
   const pendingFileRef = useRef<File | null>(null);
 
   // Animate the compare-wipe across the frame on initial reveal so
-  // the user sees a clear before/after slide: original on the left,
-  // corrected on the right, divider sweeping from 0 → 1 over ~1.6 s,
-  // then the wipe overlay turns off so normal editing resumes. Reads
-  // current refs to drive the renderer's split per frame.
+  // the user sees a clear before→after slide: full original first
+  // (split=1: every pixel where uv.x < 1, i.e. all pixels, shows
+  // source), wipe sweeps left to reveal the corrected frame, ending
+  // at split=0 (no pixels show source → fully corrected). Hold the
+  // first ~400 ms at full original so the eye registers it before
+  // the slide starts.
   function animateEntrySettings() {
     if (entryAnimRef.current !== null) {
       cancelAnimationFrame(entryAnimRef.current);
       entryAnimRef.current = null;
     }
     setCompareActive(true);
-    setCompareSplit(0);
+    setCompareSplit(1);
+    const HOLD_MS = 400;
+    const SLIDE_MS = 2200;
     let start: number | null = null;
     const tick = (now: number) => {
       if (start === null) start = now;
-      const t = Math.min(1, (now - start) / 1600);
-      // Ease-in-out cubic — accelerates through the middle of the
-      // frame (where the contrast is most visible) and decelerates
-      // at both ends so the start/finish feel intentional.
+      const elapsed = now - start;
+      if (elapsed < HOLD_MS) {
+        // Hold full original.
+        setCompareSplit(1);
+        entryAnimRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      const t = Math.min(1, (elapsed - HOLD_MS) / SLIDE_MS);
+      // Ease-in-out cubic — accelerate through the middle of the
+      // frame (where the contrast is most visible) and decelerate
+      // at the ends so the start/finish feel intentional.
       const e = t < 0.5
         ? 4 * t * t * t
         : 1 - Math.pow(-2 * t + 2, 3) / 2;
-      setCompareSplit(e);
+      setCompareSplit(1 - e);
       if (t < 1) {
         entryAnimRef.current = requestAnimationFrame(tick);
       } else {
         entryAnimRef.current = null;
         // Hand control back to the user — the wipe overlay disappears
-        // and the corrected frame fills the canvas. Users can re-enter
-        // compare via the toolbar button.
+        // and the corrected frame fills the canvas. The compare button
+        // in the toolbar stays available for manual before/after.
         setCompareActive(false);
         setCompareSplit(0.5);
       }
