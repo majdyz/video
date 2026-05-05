@@ -97,17 +97,31 @@ export async function analyzeVideoOpenCV(
   ctx.imageSmoothingQuality = "high";
 
   if (video.readyState < 2) {
+    try { video.preload = "auto"; video.load(); } catch { /* ignore */ }
     await new Promise<void>((resolve, reject) => {
       const onReady = () => {
+        video.removeEventListener("loadeddata", onReady);
         video.removeEventListener("canplay", onReady);
+        video.removeEventListener("error", onErr);
         clearTimeout(t);
         resolve();
       };
-      video.addEventListener("canplay", onReady);
-      const t = setTimeout(() => {
+      const onErr = () => {
+        video.removeEventListener("loadeddata", onReady);
         video.removeEventListener("canplay", onReady);
-        reject(new Error("Video decoder didn't become ready (unsupported format?)"));
-      }, 6000);
+        video.removeEventListener("error", onErr);
+        clearTimeout(t);
+        reject(new Error("Video decoder rejected the file (unsupported format)"));
+      };
+      video.addEventListener("loadeddata", onReady);
+      video.addEventListener("canplay", onReady);
+      video.addEventListener("error", onErr);
+      const t = setTimeout(() => {
+        video.removeEventListener("loadeddata", onReady);
+        video.removeEventListener("canplay", onReady);
+        video.removeEventListener("error", onErr);
+        reject(new Error("Video took too long to load — check the file format and connection"));
+      }, 30000);
     });
   }
 

@@ -83,20 +83,41 @@ export async function analyzeVideo(
   thumbCtx.imageSmoothingQuality = "high";
 
   if (video.readyState < 2) {
+    // Wait for `loadeddata` (readyState >= 2 = HAVE_CURRENT_DATA) — that's
+    // exactly what the analyser checks for, vs the previous `canplay`
+    // listener (HAVE_FUTURE_DATA, stricter). The browser sometimes takes
+    // a while to buffer enough for canplay even when the file decodes
+    // fine. Also nudge the decoder by setting preload + calling load(),
+    // which forces immediate buffering instead of waiting for play().
+    try { video.preload = "auto"; video.load(); } catch { /* ignore */ }
     await new Promise<void>((resolve, reject) => {
       const onReady = () => {
+        video.removeEventListener("loadeddata", onReady);
         video.removeEventListener("canplay", onReady);
+        video.removeEventListener("error", onErr);
         clearTimeout(t);
         resolve();
       };
-      video.addEventListener("canplay", onReady);
-      // Reject (don't silently resolve) so a non-decodable container —
-      // iOS HEVC HDR / ProRes / corrupt mov — fails clean instead of
-      // racing into the analyser and producing a frameRate≈0 result.
-      const t = setTimeout(() => {
+      const onErr = () => {
+        video.removeEventListener("loadeddata", onReady);
         video.removeEventListener("canplay", onReady);
-        reject(new Error("Video decoder didn't become ready (unsupported format?)"));
-      }, 6000);
+        video.removeEventListener("error", onErr);
+        clearTimeout(t);
+        reject(new Error("Video decoder rejected the file (unsupported format)"));
+      };
+      video.addEventListener("loadeddata", onReady);
+      video.addEventListener("canplay", onReady);
+      video.addEventListener("error", onErr);
+      // Generous timeout — large 4K files on slow devices can take a
+      // while to demux + decode the first frame. The error message
+      // points at network/format because at 30s the file is almost
+      // certainly broken or unsupported, not slow.
+      const t = setTimeout(() => {
+        video.removeEventListener("loadeddata", onReady);
+        video.removeEventListener("canplay", onReady);
+        video.removeEventListener("error", onErr);
+        reject(new Error("Video took too long to load — check the file format and connection"));
+      }, 30000);
     });
   }
 
