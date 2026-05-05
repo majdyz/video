@@ -539,8 +539,8 @@ export default function App() {
       cancelAnimationFrame(entryAnimRef.current);
       entryAnimRef.current = null;
     }
-    const HOLD_MS = 400;
-    const SLIDE_MS = 2200;
+    const HOLD_MS = 800;
+    const SLIDE_MS = 4400;
     const apply = (v: number) => {
       entryAnimSplitRef.current = v;
       // Push the value through the renderer immediately. The per-frame
