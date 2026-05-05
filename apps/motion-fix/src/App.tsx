@@ -1031,6 +1031,10 @@ export default function App() {
         className={`stage ${mode === "idle" ? "is-empty" : ""}`}
         onClick={(e) => {
           if (mode !== "video" || recording) return;
+          // Don't toggle play during analysis — the analyser is driving
+          // playback to capture frames; user-triggered play/pause would
+          // disrupt the per-frame counter.
+          if (!analysisReady) return;
           if ((e.target as HTMLElement).closest("button")) return;
           if (compareActive) return;
           togglePlay();
@@ -1070,7 +1074,7 @@ export default function App() {
         <Scrubber
           currentTime={currentTime}
           duration={duration}
-          disabled={recording}
+          disabled={recording || !analysisReady}
           onSeek={seekTo}
         />
       )}
@@ -1109,7 +1113,7 @@ export default function App() {
                 max={0.45}
                 step={0.005}
                 onChange={setCrop}
-                disabled={recording}
+                disabled={recording || !analysisReady}
               />
             </div>
 
