@@ -670,6 +670,29 @@ export function smoothMeshPath(
     smoothY.set(spatialBuf, off);
   }
 
+  // Re-clamp post-spatial. The 3×3 average mixes a vertex's clamped
+  // smoothCum with neighbours' clamped smoothCums; for vertices where
+  // neighbours' raw cumX differs (parallax), the spatial average drifts
+  // back outside ±box of THIS vertex's cumX. Without this re-clamp,
+  // crop=0 (box=0) would still produce non-zero residuals after the
+  // spatial pass and the renderer would push UVs out of [0,1] → black
+  // bars. Forcing |smoothX - cumX| ≤ box at the end guarantees the
+  // residual stays inside the user's chosen crop budget per vertex,
+  // and crop=0 produces identity output as expected.
+  for (let f = 0; f < n; f++) {
+    const off = f * VERT_COUNT;
+    for (let i = 0; i < VERT_COUNT; i++) {
+      const rx = cumX![off + i];
+      const dx = smoothX[off + i] - rx;
+      if (dx > boxX) smoothX[off + i] = rx + boxX;
+      else if (dx < -boxX) smoothX[off + i] = rx - boxX;
+      const ry = cumY![off + i];
+      const dy = smoothY[off + i] - ry;
+      if (dy > boxY) smoothY[off + i] = ry + boxY;
+      else if (dy < -boxY) smoothY[off + i] = ry - boxY;
+    }
+  }
+
   return { smoothX, smoothY };
 }
 
