@@ -790,13 +790,39 @@ export function meshUVsAtTime(
   const h = analysis.height;
   const invScaleUp = 1 / Math.max(1e-6, scaleUp);
 
+  // RAW must be the cumulative path (cumX/cumY), not the per-frame
+  // delta (motionX/motionY). The smoother stores its output as a
+  // smoothed CUMULATIVE path; subtracting a per-frame delta from it
+  // produces a residual dominated by -smoothCum (in the 1000s of px),
+  // which divided by source width pushes UVs to ±1 and beyond — the
+  // out-of-range UVs render as black bars and the visible region
+  // becomes a jagged silhouette of whichever vertices happened to be
+  // in range. Cumulative minus cumulative is bounded by the smoother's
+  // box clamp (≤ width × crop × 0.5), keeping all UVs inside [0, 1].
+  // Fallback to identity zoomed UV if cumX hasn't been built yet
+  // (smoothMeshPath populates it; we shouldn't render before then,
+  // but defensively avoid NaN UVs which fall through the fragment
+  // shader's range check and also render as black).
+  const cumXSrc = analysis.cumX;
+  const cumYSrc = analysis.cumY;
+  if (!cumXSrc || !cumYSrc) {
+    for (let vy = 0; vy < VERT_H; vy++) {
+      for (let vx = 0; vx < VERT_W; vx++) {
+        const idx = vy * VERT_W + vx;
+        out[idx * 2] = 0.5 + (vx / GRID_W - 0.5) * invScaleUp;
+        out[idx * 2 + 1] = 0.5 + (vy / GRID_H - 0.5) * invScaleUp;
+      }
+    }
+    return;
+  }
+
   for (let vy = 0; vy < VERT_H; vy++) {
     for (let vx = 0; vx < VERT_W; vx++) {
       const idx = vy * VERT_W + vx;
       const off0 = f0 * VERT_COUNT + idx;
       const off1 = f1 * VERT_COUNT + idx;
-      const rawX = analysis.motionX[off0] * (1 - frac) + analysis.motionX[off1] * frac;
-      const rawY = analysis.motionY[off0] * (1 - frac) + analysis.motionY[off1] * frac;
+      const rawX = cumXSrc[off0] * (1 - frac) + cumXSrc[off1] * frac;
+      const rawY = cumYSrc[off0] * (1 - frac) + cumYSrc[off1] * frac;
       const sX = smooth.smoothX[off0] * (1 - frac) + smooth.smoothX[off1] * frac;
       const sY = smooth.smoothY[off0] * (1 - frac) + smooth.smoothY[off1] * frac;
       const residualX = rawX - sX;
