@@ -396,6 +396,10 @@ export async function analyzeVideoOpenCV(
         lastWatchdogTime = video.currentTime;
         watchdog = window.setInterval(() => {
           if (finished) return;
+          if (document.visibilityState !== "visible") {
+            lastWatchdogTime = video.currentTime;
+            return;
+          }
           if (video.currentTime <= lastWatchdogTime + 0.05) {
             fail(new Error("Video decoder stalled during analysis"));
             return;

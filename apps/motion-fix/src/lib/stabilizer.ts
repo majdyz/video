@@ -237,6 +237,13 @@ export async function analyzeVideo(
         lastWatchdogTime = video.currentTime;
         watchdog = window.setInterval(() => {
           if (finished) return;
+          // Don't trip the stall detector if the tab is backgrounded —
+          // Safari/iOS pause decode while not visible, which previously
+          // surfaced as a misleading 'Video decoder stalled' error.
+          if (document.visibilityState !== "visible") {
+            lastWatchdogTime = video.currentTime;
+            return;
+          }
           if (video.currentTime <= lastWatchdogTime + 0.05) {
             fail(new Error("Video decoder stalled during analysis"));
             return;

@@ -14,6 +14,16 @@ export function validateUploadedFile(file: File, kind: "image" | "video" | "any"
   // browsers can't decode them. Reject explicitly with an actionable
   // message instead of letting the load path fail with a generic decode
   // error 30 seconds later.
+  // Audio-only files (m4a, mp3, wav, etc.) bypass the picker's
+  // image/video filters in some browsers. They load as <video> with
+  // videoWidth=0, then every render path fails silently. Reject up
+  // front when expecting an image or video.
+  if (kind !== "any" && file.type.startsWith("audio/")) {
+    return {
+      ok: false,
+      message: "Audio files aren't supported — pick a photo or video.",
+    };
+  }
   const isHeic = /image\/(heic|heif)/i.test(file.type) || /\.(heic|heif)$/i.test(file.name);
   if (isHeic) {
     return {

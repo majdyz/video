@@ -443,7 +443,10 @@ export default function App() {
       // most accurate fps reading we have, so use it directly. Bitrate
       // comes from file size / duration to match the source's per-pixel
       // budget.
-      sourceFpsRef.current = result.frameRate || 60;
+      // Floor at 24 — very short clips can yield analyser fps below
+      // 1 fps which captureStream would honour, producing essentially-
+      // empty recordings.
+      sourceFpsRef.current = Math.max(24, result.frameRate || 60);
       sourceBitrateRef.current = bitrateFromSource(file.size, v.duration || 0);
 
       v.play().catch(() => undefined);
@@ -503,6 +506,12 @@ export default function App() {
     setError(null);
     previewActiveRef.current = false;
     recordingFlagRef.current = true;
+    // Disable the compare wipe before recording — otherwise the saved
+    // file is split (original on left, stabilised on right).
+    if (compareActiveRef.current) {
+      compareActiveRef.current = false;
+      setCompareActive(false);
+    }
 
     video.pause();
     video.loop = false;
@@ -591,7 +600,7 @@ export default function App() {
       if (now - lastUiPushAt > 250) {
         lastUiPushAt = now;
         setRecordTime(v.currentTime);
-        if (v.duration) setRecordProgress(v.currentTime / v.duration);
+        if (Number.isFinite(v.duration) && v.duration > 0) setRecordProgress(v.currentTime / v.duration);
       }
     };
 

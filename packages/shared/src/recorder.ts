@@ -56,11 +56,15 @@ type CaptureContext = {
 };
 
 export function buildCaptureContext(canvas: HTMLCanvasElement, fps = 60): CaptureContext {
-  // Active capture at the requested fps. Caller should pass the detected
-  // source fps via detectVideoFps so slo-mo (120/240) doesn't get
-  // downsampled. Passive mode (no fps argument) drops frames mid-record on
-  // iOS Safari, so we always pin a rate.
-  const canvasStream = canvas.captureStream(fps);
+  // Active capture at the requested fps. Cap at 60 — the canvas update
+  // loop is rAF-driven (display refresh, typically 60–120 Hz), so
+  // captureStream(120) or (240) would pull the *same* rendered frame
+  // multiple times on most monitors and produce duplicated frames in
+  // the saved file (slo-mo source -> bloated identical-frames output).
+  // Passive mode (no fps argument) drops frames mid-record on iOS
+  // Safari, so we always pin a rate.
+  const captureFps = Math.min(60, fps);
+  const canvasStream = canvas.captureStream(captureFps);
   const videoTrack = canvasStream.getVideoTracks()[0];
   return { videoStream: canvasStream, videoTrack };
 }

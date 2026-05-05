@@ -110,7 +110,10 @@ void main() {
   if (u_clahe > 0.001) {
     float L_in = dot(toned, vec3(0.2126, 0.7152, 0.0722));
     float L_out = texture2D(u_tone, vec2(L_in, 0.5)).r;
-    float ratio = L_out / max(L_in, 0.001);
+    // Clamp the rescale ratio so near-black pixels don't get a 100×+
+    // boost — without the cap, dark scenes lifted to milky grey via
+    // mix(toned, enhanced, u_clahe) because every dark pixel pinned to 1.
+    float ratio = min(L_out / max(L_in, 0.001), 4.0);
     vec3 enhanced = clamp(toned * ratio, 0.0, 1.0);
     toned = mix(toned, enhanced, u_clahe);
   }

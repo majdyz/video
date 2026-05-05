@@ -665,7 +665,7 @@ export default function App() {
       const myGen = fileGenRef.current;
       detectVideoFps(video).then((fps) => {
         if (myGen !== fileGenRef.current) return;
-        sourceFpsRef.current = fps;
+        sourceFpsRef.current = Math.max(24, fps);
       }).catch(() => undefined);
 
       const computeOnce = () => {
@@ -699,24 +699,46 @@ export default function App() {
     }
   }
 
-  function savePhoto() {
-    if (!canvasRef.current) return;
-    // Re-render synchronously before toBlob — the WebGL context is
-    // created without preserveDrawingBuffer so the backbuffer may have
-    // been cleared since the last paint. Without this, toBlob could
-    // capture an empty canvas.
-    if (rendererRef.current && imageBitmapRef.current && statsRef.current) {
-      rendererRef.current.uploadSource(imageBitmapRef.current, imageBitmapRef.current.width, imageBitmapRef.current.height);
-      rendererRef.current.render(statsRef.current, settings);
+  async function savePhoto() {
+    const canvas = canvasRef.current;
+    const renderer = rendererRef.current;
+    const bitmap = imageBitmapRef.current;
+    if (!canvas || !renderer || !bitmap) return;
+    // Disable the wipe for the saved file even if it's currently on.
+    const prevSplit = renderer;
+    renderer.setSplit(0);
+    try {
+      // Re-render synchronously before toBlob — the WebGL context is
+      // created without preserveDrawingBuffer so the backbuffer may have
+      // been cleared since the last paint.
+      if (qualityRef.current === "ai" && funieReadyRef.current) {
+        // Critical: the previous version of this function always called
+        // the classical render even in AI mode, so the saved photo
+        // showed a *different* result from what the user was seeing on
+        // screen. Run the model and render its output.
+        const res = await runFunie(bitmap, aiStrengthRef.current);
+        renderer.uploadSource(res.canvas, bitmap.width, bitmap.height);
+        renderer.render(IDENTITY_STATS, OFF_SETTINGS);
+      } else if (statsRef.current) {
+        renderer.uploadSource(bitmap, bitmap.width, bitmap.height);
+        renderer.render(statsRef.current, settings);
+      }
+      await new Promise<void>((resolve) => {
+        canvas.toBlob(
+          (blob) => {
+            if (blob) shareOrDownload(blob, `${fileNameRef.current}-aqua.jpg`).catch(() => undefined);
+            resolve();
+          },
+          "image/jpeg",
+          0.95,
+        );
+      });
+    } finally {
+      // Restore wipe split so the on-screen view goes back to what
+      // the user had set.
+      void prevSplit;
+      renderer.setSplit(compareActive ? compareSplit : 0);
     }
-    canvasRef.current.toBlob(
-      (blob) => {
-        if (!blob) return;
-        shareOrDownload(blob, `${fileNameRef.current}-aqua.jpg`).catch(() => undefined);
-      },
-      "image/jpeg",
-      0.95,
-    );
   }
 
   async function recordVideo() {
@@ -761,6 +783,13 @@ export default function App() {
     setError(null);
     previewActiveRef.current = false;
     recordingFlagRef.current = true;
+    // Disable the compare wipe before recording — otherwise the saved
+    // file is split (original on left, corrected on right) which is
+    // never what the user wants in their final video.
+    if (compareActive) {
+      setCompareActive(false);
+      rendererRef.current?.setSplit(0);
+    }
 
     video.pause();
     video.loop = false;
@@ -875,7 +904,7 @@ export default function App() {
       if (now - lastUiPushAt > 250) {
         lastUiPushAt = now;
         setRecordTime(v.currentTime);
-        if (v.duration) setRecordProgress(v.currentTime / v.duration);
+        if (Number.isFinite(v.duration) && v.duration > 0) setRecordProgress(v.currentTime / v.duration);
       }
     };
 

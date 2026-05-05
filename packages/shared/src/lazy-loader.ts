@@ -65,6 +65,21 @@ export async function cachedFetch(
 
   const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`Failed to fetch ${url}: HTTP ${res.status}`);
+  // Guard against a misconfigured CDN returning an HTML error page
+  // with a 200 status — caching that would poison the cache and
+  // every subsequent visit would feed garbage bytes to ORT / the
+  // OpenCV blob loader. Accept only opaque/binary/script content.
+  const contentType = (res.headers.get("Content-Type") || "").toLowerCase();
+  const isExpected =
+    contentType === "" ||
+    contentType.includes("octet-stream") ||
+    contentType.includes("javascript") ||
+    contentType.includes("wasm") ||
+    contentType.includes("onnx") ||
+    contentType.includes("application/");
+  if (!isExpected) {
+    throw new Error(`Unexpected response Content-Type: ${contentType}`);
+  }
   const headerTotal = parseInt(res.headers.get("Content-Length") || "0", 10);
   const total = Math.max(headerTotal, knownBytes);
   const reader = res.body?.getReader();
