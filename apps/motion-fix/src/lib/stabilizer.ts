@@ -44,12 +44,22 @@ export type AnalysisResult = {
   cumB: Float32Array;
   cumTX: Float32Array;
   cumTY: Float32Array;
+  // Source media time (seconds) of each captured frame. Looked up at
+  // render time via binary search instead of multiplying by an averaged
+  // frame rate — that previous approach was off whenever the analyser's
+  // captured-frame count didn't match the source's true frame count
+  // (browser-dependent rVFC behaviour at playbackRate=2 was the most
+  // common cause), and the wrong-frame-index bug applied a different
+  // moment's residual transform to the rendered pixels — the user-
+  // visible result was output that looked *more* shaky than the input.
+  times: Float32Array;
   frameCount: number;
   frameRate: number;
 };
 
+type RvfcMetadata = { mediaTime?: number; presentedFrames?: number };
 type VideoWithRVFC = HTMLVideoElement & {
-  requestVideoFrameCallback?: (cb: (now: number, metadata: unknown) => void) => number;
+  requestVideoFrameCallback?: (cb: (now: number, metadata: RvfcMetadata) => void) => number;
 };
 
 export async function analyzeVideo(
@@ -124,6 +134,8 @@ export async function analyzeVideo(
   const cumBArr: number[] = [0];
   const cumTXArr: number[] = [0];
   const cumTYArr: number[] = [0];
+  const timesArr: number[] = [0];
+  let lastMediaTime = -1;
   let cumA = 1, cumB = 0, cumTX = 0, cumTY = 0;
   let prevThumb: Uint8Array | null = null;
 
@@ -149,16 +161,17 @@ export async function analyzeVideo(
       if (watchdog !== null) clearInterval(watchdog);
       restore();
       onProgress(1);
-      // Detected frame rate from captured count / duration. Hardcoding 30
-      // breaks the time→frame lookup on 60/120/240 fps phone footage, which
-      // shows up as visible jitter because the wrong frame's residual
-      // transform gets applied to each rendered frame.
+      // Detected frame rate is now informational only — the render path
+      // does time→idx via binary search over the captured `times` array,
+      // not by `Math.round(time * frameRate)`. Kept on the result for
+      // any external consumers / debug.
       const detectedRate = duration > 0 ? cumAArr.length / duration : 30;
       resolve({
         cumA: Float32Array.from(cumAArr),
         cumB: Float32Array.from(cumBArr),
         cumTX: Float32Array.from(cumTXArr),
         cumTY: Float32Array.from(cumTYArr),
+        times: Float32Array.from(timesArr),
         frameCount: cumAArr.length,
         frameRate: detectedRate,
       });
@@ -172,7 +185,7 @@ export async function analyzeVideo(
       reject(err);
     };
 
-    const processFrame = () => {
+    const processFrame = (mediaTime: number) => {
       if (video.readyState < 2) return;
       try {
         thumbCtx.drawImage(video, 0, 0, THUMB_W, THUMB_H);
@@ -181,12 +194,6 @@ export async function analyzeVideo(
 
         if (prevThumb) {
           const t = trackAndFit(prevThumb, gray, features, scaleX, scaleY);
-          // t maps prev image coords → current image coords. The cumulative
-          // path tracks world → current-frame, so the new transform must be
-          // applied on the LEFT: cum_new = t · cum_old. (The previous
-          // right-multiplication produced wrong results once rotation was
-          // involved — it rotated the per-frame translation by the
-          // accumulated rotation, putting it in the wrong frame.)
           const newA = t.a * cumA - t.b * cumB;
           const newB = t.b * cumA + t.a * cumB;
           const newTX = t.a * cumTX - t.b * cumTY + t.tx;
@@ -200,21 +207,30 @@ export async function analyzeVideo(
         cumBArr.push(cumB);
         cumTXArr.push(cumTX);
         cumTYArr.push(cumTY);
+        timesArr.push(mediaTime);
         prevThumb = gray;
       } catch {
         cumAArr.push(cumA);
         cumBArr.push(cumB);
         cumTXArr.push(cumTX);
         cumTYArr.push(cumTY);
+        timesArr.push(mediaTime);
       }
       onProgress(Math.min(1, video.currentTime / duration));
     };
 
     const useRvfc = typeof v.requestVideoFrameCallback === "function";
     if (useRvfc) {
-      const onFrame = () => {
+      const onFrame = (_now: number, meta: RvfcMetadata) => {
         if (finished) return;
-        processFrame();
+        // Use the source media time (not wall-clock) so playbackRate=2
+        // doesn't double our sample rate, and so we can dedupe re-
+        // presented frames if the decoder hands us the same one twice.
+        const t = typeof meta?.mediaTime === "number" ? meta.mediaTime : video.currentTime;
+        if (t > lastMediaTime + 1e-4) {
+          lastMediaTime = t;
+          processFrame(t);
+        }
         if (video.ended) finish();
         else v.requestVideoFrameCallback?.(onFrame);
       };
@@ -222,7 +238,13 @@ export async function analyzeVideo(
     } else {
       const loop = () => {
         if (finished) return;
-        if (!video.paused && video.readyState >= 2) processFrame();
+        if (!video.paused && video.readyState >= 2) {
+          const t = video.currentTime;
+          if (t > lastMediaTime + 1e-4) {
+            lastMediaTime = t;
+            processFrame(t);
+          }
+        }
         if (video.ended) finish();
         else requestAnimationFrame(loop);
       };
@@ -855,8 +877,32 @@ function penaltiesForSmoothing(smoothing: number): {
 }
 
 export function frameIndexForTime(result: AnalysisResult, time: number): number {
-  const idx = Math.round(time * result.frameRate);
-  return Math.max(0, Math.min(result.frameCount - 1, idx));
+  // Binary-search the captured `times` array for the closest sample.
+  // The previous Math.round(time * frameRate) approach produced wrong
+  // indices whenever cumArrayLength / duration didn't equal the true
+  // source frame rate — most commonly because the analyser ran the
+  // video at playbackRate=2 and rVFC's per-callback frequency depends
+  // on the browser. The wrong-index lookup caused the rendered output
+  // to receive a different frame's residual transform, which the user
+  // experienced as 'output is shakier than the input'.
+  const t = result.times;
+  if (!t || t.length === 0) {
+    return Math.max(0, Math.min(result.frameCount - 1, Math.round(time * result.frameRate)));
+  }
+  if (time <= t[0]) return 0;
+  const last = t.length - 1;
+  if (time >= t[last]) return last;
+  let lo = 0;
+  let hi = last;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (t[mid] < time) lo = mid + 1;
+    else hi = mid;
+  }
+  // lo is the first index with times[lo] >= time. Pick whichever of lo
+  // and lo-1 is closer.
+  if (lo > 0 && time - t[lo - 1] < t[lo] - time) return lo - 1;
+  return lo;
 }
 
 export function residualTransform(

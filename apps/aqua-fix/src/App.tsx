@@ -1346,8 +1346,23 @@ export default function App() {
 
             {quality === "classical" && (
             <AdvancedDisclosure disabled={recording}>
-              <div className="lut-row">
-                <label className="lut-pick">
+              <div className="lut-picker">
+                {lutName ? (
+                  <div className="lut-chip">
+                    <svg className="lut-chip-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M4 6h16v4H4zM4 12h16v4H4zM4 18h10v2H4z" fill="currentColor" />
+                    </svg>
+                    <span className="lut-chip-name" title={lutName}>{lutName}</span>
+                    <button
+                      type="button"
+                      className="lut-chip-clear"
+                      onClick={clearLUT}
+                      aria-label="Remove LUT"
+                      disabled={recording}
+                    >×</button>
+                  </div>
+                ) : null}
+                <label className="lut-button">
                   <input
                     type="file"
                     accept=".cube,application/octet-stream,text/plain"
@@ -1358,13 +1373,14 @@ export default function App() {
                       e.target.value = "";
                     }}
                   />
-                  <span>{lutName ? "Replace LUT" : "Load Lightroom .cube LUT"}</span>
+                  <span className="lut-button-label">.cube LUT</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 5h14v14H5z M9 9l3-3 3 3M12 6v9" stroke="currentColor"
+                      strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  {lutName ? "Replace" : "Load Lightroom preset"}
                 </label>
-                {lutName && (
-                  <button className="lut-clear" onClick={clearLUT} aria-label="Remove LUT">×</button>
-                )}
               </div>
-              {lutName && <p className="lut-name" title={lutName}>{lutName}</p>}
               <Slider label="LUT mix" value={settings.lutMix} min={0} max={1} step={0.01}
                 onChange={(v) => setSettings((s) => ({ ...s, lutMix: v }))} disabled={recording || !lutName} />
               <Slider label="CLAHE" value={settings.clahe} min={0} max={1} step={0.01}

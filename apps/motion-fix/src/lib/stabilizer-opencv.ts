@@ -62,8 +62,9 @@ type CvMat = {
   delete: () => void;
 };
 
+type RvfcMetadata = { mediaTime?: number; presentedFrames?: number };
 type VideoWithRVFC = HTMLVideoElement & {
-  requestVideoFrameCallback?: (cb: (now: number, metadata: unknown) => void) => number;
+  requestVideoFrameCallback?: (cb: (now: number, metadata: RvfcMetadata) => void) => number;
 };
 
 export async function analyzeVideoOpenCV(
@@ -159,6 +160,8 @@ export async function analyzeVideoOpenCV(
   const cumBArr: number[] = [0];
   const cumTXArr: number[] = [0];
   const cumTYArr: number[] = [0];
+  const timesArr: number[] = [0];
+  let lastMediaTime = -1;
   let cA = 1, cB = 0, cTX = 0, cTY = 0;
 
   return new Promise<AnalysisResult>((resolve, reject) => {
@@ -199,6 +202,7 @@ export async function analyzeVideoOpenCV(
         cumB: Float32Array.from(cumBArr),
         cumTX: Float32Array.from(cumTXArr),
         cumTY: Float32Array.from(cumTYArr),
+        times: Float32Array.from(timesArr),
         frameCount: cumAArr.length,
         frameRate: detectedRate,
       });
@@ -223,7 +227,7 @@ export async function analyzeVideoOpenCV(
       return corners;
     };
 
-    const processFrame = () => {
+    const processFrame = (mediaTime: number) => {
       if (video.readyState < 2) return;
       let currGray: CvMat | null = null;
       let nextPts: CvMat | null = null;
@@ -356,6 +360,7 @@ export async function analyzeVideoOpenCV(
         cumBArr.push(cB);
         cumTXArr.push(cTX);
         cumTYArr.push(cTY);
+        timesArr.push(mediaTime);
         try { currGray?.delete(); } catch { /* */ }
         try { nextPts?.delete(); } catch { /* */ }
         try { status?.delete(); } catch { /* */ }
@@ -371,9 +376,16 @@ export async function analyzeVideoOpenCV(
     const v = video as VideoWithRVFC;
     const useRvfc = typeof v.requestVideoFrameCallback === "function";
     if (useRvfc) {
-      const onFrame = () => {
+      const onFrame = (_now: number, meta: RvfcMetadata) => {
         if (finished) return;
-        processFrame();
+        // Source media time, deduped — see stabilizer.ts for the full
+        // explanation of why per-frame mediaTime matters more than
+        // wall-clock counting at playbackRate=2.
+        const t = typeof meta?.mediaTime === "number" ? meta.mediaTime : video.currentTime;
+        if (t > lastMediaTime + 1e-4) {
+          lastMediaTime = t;
+          processFrame(t);
+        }
         if (video.ended) finish();
         else v.requestVideoFrameCallback?.(onFrame);
       };
@@ -381,7 +393,13 @@ export async function analyzeVideoOpenCV(
     } else {
       const loop = () => {
         if (finished) return;
-        if (!video.paused && video.readyState >= 2) processFrame();
+        if (!video.paused && video.readyState >= 2) {
+          const t = video.currentTime;
+          if (t > lastMediaTime + 1e-4) {
+            lastMediaTime = t;
+            processFrame(t);
+          }
+        }
         if (video.ended) finish();
         else requestAnimationFrame(loop);
       };
