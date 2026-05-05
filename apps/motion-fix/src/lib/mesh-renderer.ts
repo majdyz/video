@@ -75,6 +75,14 @@ export function buildIdentityUVs(): Float32Array {
 }
 
 // Triangle list indices — 2 triangles per cell.
+//
+// Winding: vertex (vx, vy) NDC = (vx*2/GRID_W - 1, 1 - vy*2/GRID_H).
+// So increasing vy means decreasing NDC.y. A triangle (v00, v10, v11)
+// in vertex-grid order traverses (top-left → top-right → bottom-right)
+// in NDC = clockwise. WebGL's default front-face is CCW, so if a
+// caller ever enables CULL_FACE these would all cull. Use CCW order
+// (top-left → bottom-right → top-right) to be safe regardless of
+// culling state.
 function buildIndices(): Uint16Array {
   const idx = new Uint16Array(GRID_W * GRID_H * 6);
   let i = 0;
@@ -84,8 +92,9 @@ function buildIndices(): Uint16Array {
       const v10 = v00 + 1;
       const v01 = v00 + VERT_W;
       const v11 = v01 + 1;
-      idx[i++] = v00; idx[i++] = v10; idx[i++] = v11;
-      idx[i++] = v00; idx[i++] = v11; idx[i++] = v01;
+      // CCW: v00, v11, v10  and  v00, v01, v11
+      idx[i++] = v00; idx[i++] = v11; idx[i++] = v10;
+      idx[i++] = v00; idx[i++] = v01; idx[i++] = v11;
     }
   }
   return idx;
@@ -121,6 +130,12 @@ export class MeshRenderer {
     gl.attachShader(prog, vs);
     gl.attachShader(prog, fs);
     gl.linkProgram(prog);
+    // Detach + delete shaders after link succeeds — they're no longer
+    // needed and the GL spec lets the driver free them once unattached.
+    gl.detachShader(prog, vs);
+    gl.detachShader(prog, fs);
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
       throw new Error("Mesh shader link failed: " + gl.getProgramInfoLog(prog));
     }
@@ -167,6 +182,12 @@ export class MeshRenderer {
     return sh;
   }
 
+  // Track texture allocation so we can use texSubImage2D (cheaper
+  // — re-uses GPU storage) after the first allocation, and re-allocate
+  // when the source dimensions change.
+  private texW = 0;
+  private texH = 0;
+
   resize(width: number, height: number) {
     if (this.canvas.width !== width) this.canvas.width = width;
     if (this.canvas.height !== height) this.canvas.height = height;
@@ -174,19 +195,60 @@ export class MeshRenderer {
 
   uploadSource(source: TexImageSource) {
     const gl = this.gl;
+    // HTMLVideoElement between seeks reports videoWidth=0 momentarily
+    // — texImage2D throws INVALID_VALUE then. Skip the upload; the
+    // previous frame's texture will render again until the next valid
+    // frame arrives.
+    let w = 0;
+    let h = 0;
+    if (source instanceof HTMLVideoElement) {
+      w = source.videoWidth;
+      h = source.videoHeight;
+    } else if (source instanceof HTMLImageElement) {
+      w = source.naturalWidth;
+      h = source.naturalHeight;
+    } else if (source instanceof HTMLCanvasElement || source instanceof ImageBitmap) {
+      w = source.width;
+      h = source.height;
+    } else if (source instanceof OffscreenCanvas) {
+      w = source.width;
+      h = source.height;
+    }
+    if (w === 0 || h === 0) return;
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    if (w !== this.texW || h !== this.texH) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      this.texW = w;
+      this.texH = h;
+    } else {
+      // Same dims as last upload — texSubImage2D re-uses the existing
+      // GPU storage, ~free vs the per-frame realloc texImage2D does.
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    }
   }
 
   // Replace per-vertex UVs (length = VERT_COUNT * 2; row-major, y-outer).
+  // Soft-fail on length mismatch — throwing inside a render loop would
+  // freeze the canvas with no recovery; warn and keep the previous
+  // frame's UVs instead.
   setVertexUVs(uvs: Float32Array) {
     if (uvs.length !== VERT_COUNT * 2) {
-      throw new Error(`Expected ${VERT_COUNT * 2} UV floats, got ${uvs.length}`);
+      console.warn(`MeshRenderer.setVertexUVs: expected ${VERT_COUNT * 2} floats, got ${uvs.length}`);
+      return;
     }
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.uvBuffer);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, uvs);
+  }
+
+  dispose() {
+    const gl = this.gl;
+    try { gl.deleteProgram(this.program); } catch { /* ignore */ }
+    try { gl.deleteTexture(this.texture); } catch { /* ignore */ }
+    try { gl.deleteBuffer(this.posBuffer); } catch { /* ignore */ }
+    try { gl.deleteBuffer(this.uvBuffer); } catch { /* ignore */ }
+    try { gl.deleteBuffer(this.indexBuffer); } catch { /* ignore */ }
   }
 
   render() {

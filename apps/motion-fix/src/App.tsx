@@ -222,9 +222,11 @@ export default function App() {
   // ~120 ms gives the slider a chance to settle without making the
   // first single-step interaction feel laggy.
   useEffect(() => {
-    if (!analysisRef.current) return;
+    // Old guard `if (!analysisRef.current) return;` made mesh-mode
+    // slider drags no-op — analysisRef stays null when the active
+    // path is mesh (its result lives in meshAnalysisRef).
+    if (!analysisRef.current && !meshAnalysisRef.current) return;
     const id = setTimeout(() => {
-      // Re-smooth whichever analysis path the user is on.
       const meshA = meshAnalysisRef.current;
       if (qualityRef.current === "mesh" && meshA) {
         meshSmoothRef.current = smoothMeshPath(meshA, smoothing, crop);
@@ -644,9 +646,15 @@ export default function App() {
   }
 
   async function recordVideoInner() {
-    const canvas = canvasRef.current;
+    // Capture from whichever canvas is currently driving the visible
+    // output: mesh mode renders to meshCanvasRef (WebGL), Fast/Better
+    // render to canvasRef (canvas2d). Recording the wrong one would
+    // produce a blank file because the hidden canvas is never drawn to.
+    const useMesh = qualityRef.current === "mesh";
+    const canvas = useMesh ? meshCanvasRef.current : canvasRef.current;
     const video = videoRef.current as VideoWithRVFC | null;
-    if (!canvas || !video || !analysisRef.current) return;
+    const analysisOk = useMesh ? !!meshAnalysisRef.current : !!analysisRef.current;
+    if (!canvas || !video || !analysisOk) return;
     const candidate = pickRecorderMime();
     if (!candidate) {
       setError("This browser can't encode video. Try the latest Safari or Chrome.");
@@ -921,15 +929,16 @@ export default function App() {
   }
 
   // Cached path: load silently (no dialog, no progress bar) and switch
-  // straight to Better. Decoding ~9 MB from cache + the ort runtime
-  // initialise takes a fraction of a second.
-  async function loadOpenCVFromCacheAndSwitch() {
+  // to the requested quality. Parameterised so the Mesh card can ask
+  // for "mesh"; otherwise the await would resolve and clobber back to
+  // "better" after the caller's local setQuality("mesh") attempt.
+  async function loadOpenCVFromCacheAndSwitch(target: Quality = "better") {
     if (opencvLoadingRef.current) return;
     opencvLoadingRef.current = true;
     try {
       await loadOpenCV();
       setOpencvReady(true);
-      setQuality("better");
+      setQuality(target);
     } catch (e) {
       setError("Couldn't load OpenCV: " + (e instanceof Error ? e.message : String(e)));
     } finally {
@@ -1129,7 +1138,7 @@ export default function App() {
           />
         )}
         {mode === "video" && isPaused && !recording && <PlayOverlay />}
-        {mode === "video" && analysisReady && !recording && (
+        {mode === "video" && analysisReady && !recording && quality !== "mesh" && (
           <CompareWipe
             active={compareActive}
             value={compareSplit}
@@ -1225,9 +1234,7 @@ export default function App() {
                     }
                     if (opencvDownloadPct !== null) return;
                     if (opencvCached) {
-                      loadOpenCVFromCacheAndSwitch();
-                      // setQuality runs after opencv loads; force it here too
-                      setTimeout(() => setQuality("mesh"), 0);
+                      loadOpenCVFromCacheAndSwitch("mesh");
                       return;
                     }
                     setShowCvPrompt(true);
