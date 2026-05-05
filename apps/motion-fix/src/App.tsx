@@ -282,8 +282,10 @@ export default function App() {
     renderer.resize(v.videoWidth, v.videoHeight);
     renderer.uploadSource(v);
     const cropAmt = cropRef.current;
-    const effCrop = Math.max(0.015, cropAmt);
-    const scaleUp = 1 / (1 - 2 * effCrop);
+    // crop = 0 means user explicitly wants identity pass-through (no
+    // zoom); previously we floored at 0.015 and forced ~3% zoom no
+    // matter what.
+    const scaleUp = cropAmt <= 0 ? 1 : 1 / (1 - 2 * Math.max(0.015, cropAmt));
     meshUVsAtTime(analysis, smooth, v.currentTime, scaleUp, scratch);
     renderer.setVertexUVs(scratch);
     renderer.render();

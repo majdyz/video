@@ -36,13 +36,15 @@ precision highp float;
 uniform sampler2D u_image;
 varying vec2 v_uv;
 void main() {
-  // Sampling outside [0, 1] would wrap or clamp depending on texture
-  // wrap mode. We use CLAMP_TO_EDGE so out-of-range UVs read the edge
-  // pixel — which becomes visible black bands when stabilisation
-  // demands more crop than the user's budget. Better to show the band
-  // than to repeat content.
-  vec4 c = texture2D(u_image, v_uv);
-  gl_FragColor = c;
+  // Out-of-range UVs (smoother demanded more crop than budget) get an
+  // explicit black bar rather than the CLAMP_TO_EDGE smear of the
+  // edge pixel — corner-pixel-coloured bands were much more
+  // distracting than honest black bars.
+  if (v_uv.x < 0.0 || v_uv.x > 1.0 || v_uv.y < 0.0 || v_uv.y > 1.0) {
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+  gl_FragColor = texture2D(u_image, v_uv);
 }
 `;
 

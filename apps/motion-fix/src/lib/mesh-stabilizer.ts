@@ -169,6 +169,16 @@ export async function analyzeVideoMesh(
   const motionXFrames: Float32Array[] = [];
   const motionYFrames: Float32Array[] = [];
   const times: number[] = [];
+  // Pre-allocated track scratch — reused per frame to avoid GC churn.
+  // MAX_FEATURES caps how many can be live at once.
+  const trackSx = new Float32Array(MAX_FEATURES);
+  const trackSy = new Float32Array(MAX_FEATURES);
+  const trackDx = new Float32Array(MAX_FEATURES);
+  const trackDy = new Float32Array(MAX_FEATURES);
+  // Per-vertex sample collection scratch — sized to hold all tracks
+  // worst-case (every track within a vertex's neighbourhood).
+  const sampleXs = new Float64Array(MAX_FEATURES);
+  const sampleYs = new Float64Array(MAX_FEATURES);
   // First frame: zero motion (no previous to compare). Time is set on
   // the first processFrame call to the actual mediaTime — leaving it
   // at 0 here would create a fake (0, 0)→(realT0, m0) interpolation
@@ -188,7 +198,6 @@ export async function analyzeVideoMesh(
   const ryBase = VERTEX_RADIUS_FRAC * cellHah;
   const scaleBackX = srcW / aw;
   const scaleBackY = srcH / ah;
-  const sampleScratch: number[] = [];
 
   return new Promise<MeshAnalysis>((resolve, reject) => {
     let finished = false;
@@ -221,13 +230,23 @@ export async function analyzeVideoMesh(
       restore();
       onProgress(1);
       const n = motionXFrames.length;
+      // Reject if no real frames decoded — only the placeholder
+      // entry exists, with NaN time and zero motion. Returning that
+      // would leave NaN UVs everywhere (black frame).
+      if (n <= 1 || Number.isNaN(times[0])) {
+        reject(new Error("Mesh analysis: no frames could be decoded"));
+        return;
+      }
       const flatX = new Float32Array(n * VERT_COUNT);
       const flatY = new Float32Array(n * VERT_COUNT);
       for (let i = 0; i < n; i++) {
         flatX.set(motionXFrames[i], i * VERT_COUNT);
         flatY.set(motionYFrames[i], i * VERT_COUNT);
       }
-      const detectedRate = duration > 0 ? n / duration : 30;
+      // Derive fps from the actual sampled mediaTime span — duration
+      // overestimates if a watchdog or `ended` cut analysis early.
+      const span = times[n - 1] - times[0];
+      const detectedRate = span > 0 ? (n - 1) / span : (duration > 0 ? n / duration : 30);
       resolve({
         motionX: flatX,
         motionY: flatY,
@@ -287,35 +306,32 @@ export async function analyzeVideoMesh(
             prevGray, currGray, prevPts, nextPts, status, err,
             winSize, 3, lkCriteria,
           );
-          // Collect inlier tracks: (sx, sy, dx, dy)
-          const tracks: { sx: number; sy: number; dx: number; dy: number }[] = [];
-          const n = prevPts.rows;
-          for (let i = 0; i < n; i++) {
+          // Collect inlier tracks into preallocated typed scratch
+          // (avoids per-frame Array<{sx,sy,dx,dy}> allocations — was
+          // ~3000 small object allocations per analysis run).
+          let trackCount = 0;
+          const nPrev = prevPts.rows;
+          for (let i = 0; i < nPrev; i++) {
             if (status.data[i] !== 1) continue;
+            if (trackCount >= MAX_FEATURES) break;
             const sx = prevPts.data32F[i * 2];
             const sy = prevPts.data32F[i * 2 + 1];
             const ex = nextPts.data32F[i * 2];
             const ey = nextPts.data32F[i * 2 + 1];
             const dx = ex - sx;
             const dy = ey - sy;
-            // Drop wild tracks (>25% of frame in one step → tracker fail)
             if (Math.abs(dx) > aw * 0.25 || Math.abs(dy) > ah * 0.25) continue;
-            tracks.push({ sx, sy, dx, dy });
+            trackSx[trackCount] = sx;
+            trackSy[trackCount] = sy;
+            trackDx[trackCount] = dx;
+            trackDy[trackCount] = dy;
+            trackCount++;
           }
 
-          // For each vertex, gather tracks within radius and take
-          // median dx, median dy. Vertices with fewer than 3 nearby
-          // tracks get NaN (filled in by temporal smoother / spatial
-          // median later).
           for (let vy = 0; vy < VERT_H; vy++) {
             for (let vx = 0; vx < VERT_W; vx++) {
               const px = vx * cellWaw;
               const py = vy * cellHah;
-              // Boundary vertices see tracks in only ½ (edge) or ¼
-              // (corner) of the surrounding area. Widen the search
-              // radius on the missing side(s) so they get comparable
-              // sample counts to interior vertices and don't fall to
-              // NaN → 0 → mesh tear at corners.
               const onLeft = vx === 0;
               const onRight = vx === VERT_W - 1;
               const onTop = vy === 0;
@@ -323,43 +339,49 @@ export async function analyzeVideoMesh(
               const rx = (onLeft || onRight) ? rxBase * 1.6 : rxBase;
               const ry = (onTop || onBottom) ? ryBase * 1.6 : ryBase;
               const minSamples = (onLeft || onRight || onTop || onBottom) ? 2 : 3;
-              sampleScratch.length = 0;
-              for (let k = 0; k < tracks.length; k++) {
-                const t = tracks[k];
-                const ddx = (t.sx - px) / rx;
-                const ddy = (t.sy - py) / ry;
+              let cnt = 0;
+              for (let k = 0; k < trackCount; k++) {
+                const ddx = (trackSx[k] - px) / rx;
+                const ddy = (trackSy[k] - py) / ry;
                 if (ddx * ddx + ddy * ddy <= 1) {
-                  sampleScratch.push(k);
+                  sampleXs[cnt] = trackDx[k];
+                  sampleYs[cnt] = trackDy[k];
+                  cnt++;
                 }
               }
               const idx = vy * VERT_W + vx;
-              if (sampleScratch.length < minSamples) {
+              if (cnt < minSamples) {
                 motionX[idx] = NaN;
                 motionY[idx] = NaN;
               } else {
-                const xs: number[] = [];
-                const ys: number[] = [];
-                for (const k of sampleScratch) {
-                  xs.push(tracks[k].dx);
-                  ys.push(tracks[k].dy);
-                }
-                xs.sort((a, b) => a - b);
-                ys.sort((a, b) => a - b);
-                const mid = xs.length >> 1;
-                // Convert from analyser-resolution back to source pixels
-                motionX[idx] = xs[mid] * scaleBackX;
-                motionY[idx] = ys[mid] * scaleBackY;
+                // In-place sort via Float64Array view of the prefix.
+                const xView = sampleXs.subarray(0, cnt);
+                const yView = sampleYs.subarray(0, cnt);
+                xView.sort();
+                yView.sort();
+                const mid = cnt >> 1;
+                motionX[idx] = xView[mid] * scaleBackX;
+                motionY[idx] = yView[mid] * scaleBackY;
               }
             }
           }
         }
 
-        // Re-detect features when too few survived.
-        const inlierCount = (status && nextPts)
-          ? Array.from(status.data).filter((s) => s === 1).length
-          : 0;
+        // Re-detect features when too few survived. Count inliers
+        // in-place — Array.from(status.data).filter allocated a full
+        // Array copy of the wasm-heap status buffer every frame.
+        let inlierCount = 0;
+        if (status && nextPts) {
+          for (let i = 0; i < status.data.length; i++) {
+            if (status.data[i] === 1) inlierCount++;
+          }
+        }
         if (prevPts) prevPts.delete();
-        if (inlierCount < 200 || !nextPts || !status) {
+        // Threshold scales with MAX_FEATURES — was hardcoded 200 which
+        // forced re-detection every frame on low-texture footage where
+        // tracker only ever has ~150 confident corners.
+        const refreshBelow = Math.max(60, Math.floor(MAX_FEATURES * 0.4));
+        if (inlierCount < refreshBelow || !nextPts || !status) {
           prevPts = detectFeatures(currGray);
         } else {
           const surviving = new cv.Mat(inlierCount, 1, cv.CV_32FC2);
@@ -476,13 +498,20 @@ export function smoothMeshPath(
     // can rebuild cum if the analysis is ever invalidated.
     const motionX = new Float32Array(analysis.motionX);
     const motionY = new Float32Array(analysis.motionY);
-    // Iterate spatial in-paint a few times to fill larger holes (an
-    // isolated NaN gets neighbours-averaged on pass 1; a 2-cell gap
-    // needs pass 2; rare cases more). Eight passes is safe for any
-    // mesh ≤ 8 vertices wide of contiguous NaN — overkill in practice.
-    for (let pass = 0; pass < 8; pass++) {
-      for (let f = 0; f < n; f++) {
-        const off = f * VERT_COUNT;
+    // Iterate spatial in-paint to fill holes, breaking early per
+    // frame once it's NaN-free. Most frames converge in 1-2 passes;
+    // capping at 12 lets a long contiguous NaN strip still resolve
+    // worst-case while not paying the full cost on healthy frames.
+    // Track the previous frame's per-vertex motion so a frame whose
+    // entire mesh stayed NaN can carry-forward (constant velocity)
+    // instead of falling to 0 — zero-fill on a whole frame would drop
+    // that frame's true camera motion and lag the cum permanently.
+    const prevFrameMotionX = new Float32Array(VERT_COUNT);
+    const prevFrameMotionY = new Float32Array(VERT_COUNT);
+    for (let f = 0; f < n; f++) {
+      const off = f * VERT_COUNT;
+      for (let pass = 0; pass < 12; pass++) {
+        let dirty = false;
         for (let vy = 0; vy < VERT_H; vy++) {
           for (let vx = 0; vx < VERT_W; vx++) {
             const idx = vy * VERT_W + vx;
@@ -506,16 +535,31 @@ export function smoothMeshPath(
             if (cnt > 0) {
               motionX[off + idx] = sumX / cnt;
               motionY[off + idx] = sumY / cnt;
+              dirty = true;
             }
           }
         }
+        if (!dirty) break;
       }
     }
-    // Anything still NaN (e.g. an entire frame had no tracks) → 0
-    // motion. Per-vertex this carries the cum forward unchanged.
-    for (let i = 0; i < motionX.length; i++) {
-      if (Number.isNaN(motionX[i])) motionX[i] = 0;
-      if (Number.isNaN(motionY[i])) motionY[i] = 0;
+    // For each frame, anything still NaN gets the previous frame's
+    // per-vertex motion. This carries the cum forward at the last-
+    // known velocity instead of resetting to 0 (which would drop
+    // the frame's camera motion and shift every subsequent cum).
+    for (let f = 0; f < n; f++) {
+      const off = f * VERT_COUNT;
+      for (let v = 0; v < VERT_COUNT; v++) {
+        if (Number.isNaN(motionX[off + v])) {
+          motionX[off + v] = prevFrameMotionX[v];
+        } else {
+          prevFrameMotionX[v] = motionX[off + v];
+        }
+        if (Number.isNaN(motionY[off + v])) {
+          motionY[off + v] = prevFrameMotionY[v];
+        } else {
+          prevFrameMotionY[v] = motionY[off + v];
+        }
+      }
     }
 
     // Step 2: build cumulative path per vertex.
@@ -544,8 +588,16 @@ export function smoothMeshPath(
   // main thread. Gaussian + median gives most of the benefit at
   // a fraction of the cost.
   const s = Math.max(0, Math.min(1, smoothing));
-  const sigma = 4 + s * 60; // up to ~60 samples wide gaussian
-  const medRadius = Math.min(15, 2 + Math.floor(s * 24));
+  // Cap sigma + medRadius at n/4. Without this, on short clips a wide
+  // Gaussian collapses every output sample to ~the mean (mirror-pad
+  // reflects the same few samples back), so the smoothed path becomes
+  // constant → residual = raw_cum at every frame → mesh saturates the
+  // box clamp constantly → output is just zoomed-cropped raw with no
+  // benefit from the smoother.
+  const sigmaMax = Math.max(2, Math.floor(n / 4));
+  const medMax = Math.max(2, Math.floor(n / 8));
+  const sigma = Math.min(sigmaMax, 4 + s * 60);
+  const medRadius = Math.min(medMax, Math.min(15, 2 + Math.floor(s * 24)));
 
   const smoothX = new Float32Array(n * VERT_COUNT);
   const smoothY = new Float32Array(n * VERT_COUNT);
@@ -570,6 +622,52 @@ export function smoothMeshPath(
     for (let f = 0; f < n; f++) tmpRaw[f] = cumY![f * VERT_COUNT + v];
     medianAndGaussianAndClamp(tmpRaw, tmpOut, sigma, medRadius, boxY);
     for (let f = 0; f < n; f++) smoothY[f * VERT_COUNT + v] = tmpOut[f];
+  }
+
+  // Step 4: spatial smoothing per frame on the smoothed paths. Without
+  // this, adjacent vertices' smoothers can converge to per-vertex
+  // residuals that differ by up to boxX between neighbours, producing
+  // wavy distortion within each cell. A 1-pass 3×3 average over each
+  // frame's smooth grid keeps inter-vertex motion coherent (the eye
+  // is sensitive to *relative* deformation between nearby pixels far
+  // more than to absolute camera motion).
+  const spatialBuf = new Float32Array(VERT_COUNT);
+  for (let f = 0; f < n; f++) {
+    const off = f * VERT_COUNT;
+    // X axis
+    for (let vy = 0; vy < VERT_H; vy++) {
+      for (let vx = 0; vx < VERT_W; vx++) {
+        let sum = 0, cnt = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = vx + dx;
+            const ny = vy + dy;
+            if (nx < 0 || nx >= VERT_W || ny < 0 || ny >= VERT_H) continue;
+            sum += smoothX[off + ny * VERT_W + nx];
+            cnt++;
+          }
+        }
+        spatialBuf[vy * VERT_W + vx] = sum / cnt;
+      }
+    }
+    smoothX.set(spatialBuf, off);
+    // Y axis
+    for (let vy = 0; vy < VERT_H; vy++) {
+      for (let vx = 0; vx < VERT_W; vx++) {
+        let sum = 0, cnt = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = vx + dx;
+            const ny = vy + dy;
+            if (nx < 0 || nx >= VERT_W || ny < 0 || ny >= VERT_H) continue;
+            sum += smoothY[off + ny * VERT_W + nx];
+            cnt++;
+          }
+        }
+        spatialBuf[vy * VERT_W + vx] = sum / cnt;
+      }
+    }
+    smoothY.set(spatialBuf, off);
   }
 
   return { smoothX, smoothY };
