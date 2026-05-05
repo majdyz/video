@@ -1106,7 +1106,7 @@ export default function App() {
                 label="Max crop"
                 value={crop}
                 min={0}
-                max={0.3}
+                max={0.45}
                 step={0.005}
                 onChange={setCrop}
                 disabled={recording}

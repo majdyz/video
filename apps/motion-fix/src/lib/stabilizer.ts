@@ -598,18 +598,22 @@ export function gaussianSmooth(arr: Float32Array, sigma: number): Float32Array {
 }
 
 // L1 path optimisation via ADMM, minus the LP solver.
-//   min |p - c|^2 + lambda1 |D1 p|_1 + lambda2 |D2 p|_1   s.t. |p - c|_inf <= box
+//   min w * |p - c|^2 + lambda1 |D1 p|_1 + lambda2 |D2 p|_1
+//   s.t. |p - c|_inf <= box
+//
+// `w` (devWeight) is new: scaling the deviation cost down lets the
+// smoother actually saturate the box constraint at high lambdas. Without
+// it, the unweighted ||p-c||² term dominated and the L1 path stayed
+// glued to raw — heavy lambdas only flattened the second derivative,
+// not the velocity, so the rendered output still showed the camera
+// pan as residual motion.
 function l1Smooth(
   c: Float32Array,
   lambda1: number,
   lambda2: number,
   box: number,
-  // Bumped from 80 — ADMM converges roughly linearly, and at higher
-  // lambda values (smoothing > 0.7) the path needs more passes to
-  // settle into its piecewise-flat optimum. 200 typically converges
-  // tightly and adds maybe ~30 ms to the total smoothPath call on a
-  // 50 s 60 fps clip — well below the analyser's wallclock cost.
   iterations = 200,
+  devWeight = 1,
 ): Float32Array {
   const n = c.length;
   if (n < 3) return c.slice();
@@ -626,7 +630,7 @@ function l1Smooth(
   const d1 = new Float32Array(n - 1);
   const d2 = new Float32Array(n - 2);
   for (let i = 0; i < n; i++) {
-    let dd0 = 1;
+    let dd0 = devWeight;
     if (i === 0 || i === n - 1) dd0 += rho1; else dd0 += 2 * rho1;
     if (i === 0 || i === n - 1) dd0 += rho2;
     else if (i === 1 || i === n - 2) dd0 += 5 * rho2;
@@ -649,7 +653,7 @@ function l1Smooth(
   const tmp = new Float32Array(n);
 
   for (let iter = 0; iter < iterations; iter++) {
-    for (let i = 0; i < n; i++) rhs[i] = c[i];
+    for (let i = 0; i < n; i++) rhs[i] = devWeight * c[i];
     for (let i = 0; i < n - 1; i++) {
       const v = rho1 * (z1[i] - u1[i]);
       rhs[i] -= v;
@@ -765,10 +769,17 @@ export function smoothPath(
   const tyBox = Math.max(1, height * crop);
   const abBox = 0.04;
 
-  const aL1 = l1Smooth(aMed, w.lambda1Rs, w.lambda2Rs, abBox);
-  const bL1 = l1Smooth(bMed, w.lambda1Rs, w.lambda2Rs, abBox);
-  const txL1 = l1Smooth(txMed, w.lambda1T, w.lambda2T, txBox);
-  const tyL1 = l1Smooth(tyMed, w.lambda1T, w.lambda2T, tyBox);
+  // At high smoothing, scale the deviation cost down so the L1 path
+  // can deviate further from raw and saturate the box constraint.
+  // Without this the smoother kept ||p−c||² close to zero (path
+  // tracked raw within ~22 px) regardless of how high lambda went.
+  const s = Math.max(0, Math.min(1, smoothing));
+  const devWeight = Math.max(0.001, 1 - Math.pow(s, 4));
+
+  const aL1 = l1Smooth(aMed, w.lambda1Rs, w.lambda2Rs, abBox, 200, 1);
+  const bL1 = l1Smooth(bMed, w.lambda1Rs, w.lambda2Rs, abBox, 200, 1);
+  const txL1 = l1Smooth(txMed, w.lambda1T, w.lambda2T, txBox, 200, devWeight);
+  const tyL1 = l1Smooth(tyMed, w.lambda1T, w.lambda2T, tyBox, 200, devWeight);
 
   const gSigma = w.gaussianSigma;
   const smoothA = gaussianSmooth(aL1, gSigma);
@@ -888,20 +899,24 @@ function penaltiesForSmoothing(smoothing: number): {
   gaussianSigma: number;
 } {
   const s = Math.max(0, Math.min(1, smoothing));
-  // Bumped 5× — at the prior weights the L1 path still tracked
-  // sample-rate noise too closely on undersampled (compute-bound
-  // decoder) clips, so the residual carried that noise into the
-  // rendered output. Larger lambdas force the L1 path to be
-  // piecewise-very-flat; the wider Gaussian post-smooth absorbs
-  // residual high-frequency content the L1 left behind.
-  const k = 0.05 + s * s * 1000;
+  // Sextic-in-s ramp: low/mid slider positions stay gentle (typical
+  // 'a little less wobble' use), the high end goes hard. The L1 cost
+  // function balances ||p-c||² (deviation from raw) against
+  // λ·||D¹p||₁ (path velocity). At our previous k_max ≈ 5000 the
+  // smoother still chose deviation < ~100 px because deviation-cost
+  // dominated past that. Bumping to k_max ≈ 100 000 lets the smoother
+  // actually saturate the user's crop budget — the box constraint
+  // becomes the binding term, which is what 'maximum stabilisation'
+  // intuitively means. Wider Gaussian + larger median window absorb
+  // any L1 piecewise-linear corners that remain.
+  const k = 0.05 + Math.pow(s, 6) * 100000;
   return {
     lambda1T: k * 4,
     lambda2T: k * 60,
     lambda1Rs: k * 0.005,
     lambda2Rs: k * 0.08,
-    medianRadius: Math.min(9, 2 + Math.floor(s * 12)),
-    gaussianSigma: 1 + s * 18,
+    medianRadius: Math.min(21, 2 + Math.floor(s * 32)),
+    gaussianSigma: 1 + s * 45,
   };
 }
 
