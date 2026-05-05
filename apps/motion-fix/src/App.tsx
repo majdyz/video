@@ -32,7 +32,7 @@ import {
   analyzeVideo,
   type AnalysisResult,
   frameIndexForTime,
-  residualTransform,
+  residualTransformAtTime,
   smoothPath,
 } from "./lib/stabilizer";
 import { analyzeVideoOpenCV } from "./lib/stabilizer-opencv";
@@ -214,8 +214,14 @@ export default function App() {
       return;
     }
 
+    // Interpolate the residual transform at the exact playback time —
+    // analyser samples are sparse on compute-bound decoders, and using
+    // a discrete nearest-sample residual produced visible jumps every
+    // ~33 ms. The smoothed zoom from the nearest captured frame is
+    // still fine to use directly (it's already heavily Gaussian-
+    // smoothed across ~2 s of context).
     const idx = frameIndexForTime(a, time);
-    const raw = residualTransform(a, sm, idx);
+    const raw = residualTransformAtTime(a, sm, time);
     const targetZoom = sm.zoom[idx] ?? 1;
     const scaleUp = Math.max(1, Math.min(targetZoom, maxScaleUp));
     const cache = clampCacheRef.current;

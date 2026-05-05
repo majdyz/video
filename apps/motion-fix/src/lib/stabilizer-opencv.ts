@@ -119,7 +119,10 @@ export async function analyzeVideoOpenCV(
   video.muted = true;
   video.loop = false;
   try {
-    video.playbackRate = 2;
+    // 1× instead of 2× — the decoder bottleneck under 2× would skip
+    // source frames and produce sparse, jumpy residuals. See the
+    // matching comment in stabilizer.ts.
+    video.playbackRate = 1;
   } catch {
     // ignore
   }

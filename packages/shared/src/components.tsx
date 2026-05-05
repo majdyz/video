@@ -158,14 +158,21 @@ export function FilePickerButton({
 export function PlaceholderDropZone({
   accept,
   onPick,
-  message = "tap to pick a photo or video",
+  message,
+  subMessage,
 }: {
   accept: string;
   onPick: (file: File) => void;
   message?: string;
+  subMessage?: string;
 }) {
+  const isVideoOnly = !accept.includes("image");
+  const title = message ?? (isVideoOnly ? "Drop a video here" : "Drop a photo or video");
+  const sub = subMessage ?? (isVideoOnly
+    ? "or tap to choose from your library"
+    : "or tap to choose from your library — runs entirely on your device");
   return (
-    <label className="placeholder">
+    <label className="placeholder" aria-label={title}>
       <input
         type="file"
         accept={accept}
@@ -176,10 +183,20 @@ export function PlaceholderDropZone({
         }}
       />
       <div className="dropper">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 3l4 5h-3v6h-2V8H8l4-5zM5 18h14v2H5z" fill="currentColor" />
-        </svg>
-        <p>{message}</p>
+        <div className="dropper-iconwrap">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M12 4v12m0-12l-4 4m4-4l4 4M5 18h14"
+              stroke="currentColor"
+              strokeWidth="2"
+              fill="none"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </div>
+        <p className="dropper-title">{title}</p>
+        <p className="dropper-sub">{sub}</p>
       </div>
     </label>
   );

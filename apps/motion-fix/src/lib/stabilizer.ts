@@ -109,7 +109,14 @@ export async function analyzeVideo(
   video.muted = true;
   video.loop = false;
   try {
-    video.playbackRate = 2;
+    // Was previously 2 to halve analysis time, but on compute-bound
+    // decoders (4K phone footage) the decoder can't deliver 2× source
+    // frames per wallclock second — so rVFC fired with mediaTime
+    // gaps of ~0.067s, capturing only 1 of every 4 source frames.
+    // Adjacent captured samples then had large residual deltas that
+    // showed up as visible kicks in the rendered output. Drop to 1×
+    // so the analyser sees every source frame the decoder can deliver.
+    video.playbackRate = 1;
   } catch {
     // ignore
   }
@@ -929,4 +936,47 @@ export function residualTransform(
   const tx = sa * itx - sb * ity + stx;
   const ty = sb * itx + sa * ity + sty;
   return { a, b, tx, ty };
+}
+
+// Interpolate the residual transform between two adjacent captured
+// samples. The analyser captures one sample per decoded frame; on
+// compute-bound 4K decoders that's only a fraction of the source
+// frames. Without interpolation, the residual jumps discretely between
+// captured samples — every ~33 ms (or worse) the rendered output
+// snaps to a new transform, which the eye reads as added shake.
+// Lerping (a, b, tx, ty) linearly is fine for the small rotation
+// deltas between adjacent samples.
+export function residualTransformAtTime(
+  result: AnalysisResult,
+  smooth: SmoothPath,
+  time: number,
+): SimilarityTransform {
+  const t = result.times;
+  const n = result.frameCount;
+  if (!t || t.length === 0 || n < 2) {
+    return residualTransform(result, smooth, frameIndexForTime(result, time));
+  }
+  if (time <= t[0]) return residualTransform(result, smooth, 0);
+  if (time >= t[n - 1]) return residualTransform(result, smooth, n - 1);
+  let lo = 0;
+  let hi = n - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (t[mid] < time) lo = mid + 1;
+    else hi = mid;
+  }
+  const i0 = Math.max(0, lo - 1);
+  const i1 = lo;
+  if (i0 === i1) return residualTransform(result, smooth, i0);
+  const dt = t[i1] - t[i0];
+  if (dt <= 0) return residualTransform(result, smooth, i0);
+  const f = (time - t[i0]) / dt;
+  const r0 = residualTransform(result, smooth, i0);
+  const r1 = residualTransform(result, smooth, i1);
+  return {
+    a: r0.a + (r1.a - r0.a) * f,
+    b: r0.b + (r1.b - r0.b) * f,
+    tx: r0.tx + (r1.tx - r0.tx) * f,
+    ty: r0.ty + (r1.ty - r0.ty) * f,
+  };
 }

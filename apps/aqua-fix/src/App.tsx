@@ -1373,12 +1373,12 @@ export default function App() {
                       e.target.value = "";
                     }}
                   />
-                  <span className="lut-button-label">.cube LUT</span>
                   <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M5 5h14v14H5z M9 9l3-3 3 3M12 6v9" stroke="currentColor"
-                      strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M4 6h16v4H4zM4 12h16v4H4zM4 18h10v2H4z" fill="currentColor" />
                   </svg>
-                  {lutName ? "Replace" : "Load Lightroom preset"}
+                  <span className="lut-button-text">
+                    {lutName ? "Replace LUT" : "Add Lightroom .cube LUT"}
+                  </span>
                 </label>
               </div>
               <Slider label="LUT mix" value={settings.lutMix} min={0} max={1} step={0.01}
