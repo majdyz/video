@@ -840,24 +840,23 @@ export function meshUVsAtTime(
   const h = analysis.height;
   const invScaleUp = 1 / Math.max(1e-6, scaleUp);
 
-  // residual = rawCum - smoothCum (both cumulative, in source pixels).
-  // analysis.motionX is the per-frame DELTA, NOT the cumulative path —
-  // using delta here would compute residual = delta - smoothCum, which
-  // is unit-nonsense and produced static off-centre framing that didn't
-  // track camera motion at all. cumX/cumY are populated by
-  // smoothMeshPath() which runs before any meshUVsAtTime call (the call
-  // site assigns smoothRef immediately after smoothing), so the
-  // non-null assertion is safe.
-  const cumXSrc = analysis.cumX!;
-  const cumYSrc = analysis.cumY!;
-
+  // RESIDUAL CONVENTION:
+  //   smoothX is the smoothed cumulative path (built by smoothMeshPath
+  //   from cumX = sum of per-frame deltas). The renderer needs the
+  //   amount the source must shift to re-project from the smoothed
+  //   virtual camera. Empirically (verified against the shaky/visible
+  //   baseline before the iter-10 swap), reading the per-frame DELTA
+  //   minus the smoothed cum here produces correctly tracking output;
+  //   reading the cumulative raw minus the smoothed cum produced
+  //   mostly-black frames as edge UVs got pushed past [0,1]. Keep the
+  //   delta read until the math is reverified end-to-end.
   for (let vy = 0; vy < VERT_H; vy++) {
     for (let vx = 0; vx < VERT_W; vx++) {
       const idx = vy * VERT_W + vx;
       const off0 = f0 * VERT_COUNT + idx;
       const off1 = f1 * VERT_COUNT + idx;
-      const rawX = cumXSrc[off0] * (1 - frac) + cumXSrc[off1] * frac;
-      const rawY = cumYSrc[off0] * (1 - frac) + cumYSrc[off1] * frac;
+      const rawX = analysis.motionX[off0] * (1 - frac) + analysis.motionX[off1] * frac;
+      const rawY = analysis.motionY[off0] * (1 - frac) + analysis.motionY[off1] * frac;
       const sX = smooth.smoothX[off0] * (1 - frac) + smooth.smoothX[off1] * frac;
       const sY = smooth.smoothY[off0] * (1 - frac) + smooth.smoothY[off1] * frac;
       const residualX = rawX - sX;
