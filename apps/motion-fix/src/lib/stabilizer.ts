@@ -65,7 +65,9 @@ type VideoWithRVFC = HTMLVideoElement & {
 export async function analyzeVideo(
   video: HTMLVideoElement,
   onProgress: (p: number) => void,
+  signal?: AbortSignal,
 ): Promise<AnalysisResult> {
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const duration = video.duration;
   if (!Number.isFinite(duration) || duration <= 0) {
     throw new Error("Video has no usable duration");
@@ -183,9 +185,13 @@ export async function analyzeVideo(
       if (!wasPaused) video.play().catch(() => undefined);
     };
 
+    const onAbort = () => fail(new DOMException("Aborted", "AbortError"));
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+
     const finish = () => {
       if (finished) return;
       finished = true;
+      if (signal) signal.removeEventListener("abort", onAbort);
       if (watchdog !== null) clearInterval(watchdog);
       restore();
       onProgress(1);
@@ -208,6 +214,7 @@ export async function analyzeVideo(
     const fail = (err: Error) => {
       if (finished) return;
       finished = true;
+      if (signal) signal.removeEventListener("abort", onAbort);
       if (watchdog !== null) clearInterval(watchdog);
       restore();
       reject(err);

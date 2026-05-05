@@ -155,6 +155,16 @@ export default function App() {
   // against this and re-run if the desired analyzer differs.
   const lastAnalyzerRef = useRef<"fast" | "better" | "mesh" | null>(null);
   const reanalysingRef = useRef(false);
+  // AbortController for the in-flight analyzer call. Aborting cancels
+  // the analyzer immediately so a Mode click during analysis can switch
+  // to the new mode without waiting for the old one to finish (and so
+  // the explicit Cancel button works during initial load too).
+  // inflightAnalyzerRef records which analyzer the controller is for,
+  // so the [quality] effect can decide "abort iff in-flight is for a
+  // different analyzer" — without it, the effect would abort the
+  // analyzer it just started (busy state change re-runs the effect).
+  const analysisAbortRef = useRef<AbortController | null>(null);
+  const inflightAnalyzerRef = useRef<"fast" | "better" | "mesh" | null>(null);
 
   function desiredAnalyzer(q: Quality, cvReady: boolean): "fast" | "better" | "mesh" {
     if ((q === "mesh" || q === "better") && !cvReady) return "fast";
@@ -171,11 +181,19 @@ export default function App() {
     setAnalysisReady(false);
     const label = desired === "mesh" ? "Mesh" : desired === "better" ? "Better" : "Fast";
     setBusy(`Re-analyzing with ${label} 0%`);
+    // Abort any prior analyzer (the initial handleFile pass, or a
+    // previous reanalyse that hasn't finished its `finally`). This is
+    // what makes a Mode click during analysis instant — without it the
+    // user has to wait for the running analyzer's full pass to complete.
+    if (analysisAbortRef.current) analysisAbortRef.current.abort();
+    const ctrl = new AbortController();
+    analysisAbortRef.current = ctrl;
+    inflightAnalyzerRef.current = desired;
     try {
       if (desired === "mesh") {
         const meshResult = await analyzeVideoMesh(v, (p) => {
           setBusy(`Re-analyzing with Mesh ${Math.floor(p * 100)}%`);
-        });
+        }, ctrl.signal);
         meshAnalysisRef.current = meshResult;
         meshSmoothRef.current = smoothMeshPath(meshResult, smoothing, crop);
         lastAnalyzerRef.current = "mesh";
@@ -184,7 +202,7 @@ export default function App() {
         const analyzer = desired === "better" ? analyzeVideoOpenCV : analyzeVideo;
         const result = await analyzer(v, (p) => {
           setBusy(`Re-analyzing with ${label} ${Math.floor(p * 100)}%`);
-        });
+        }, ctrl.signal);
         analysisRef.current = result;
         lastAnalyzerRef.current = desired;
         smoothRef.current = smoothPath(result, smoothing, crop, v.videoWidth, v.videoHeight);
@@ -194,8 +212,18 @@ export default function App() {
       v.play().catch(() => undefined);
       startPreview();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      // AbortError is expected when the user switches modes mid-flight
+      // — let the next reanalyse take over without surfacing an error.
+      if (!isAbortError(e)) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
+      // Only clear our ref if we still own the controller — a faster
+      // reanalyse may have replaced it before this finally runs.
+      if (analysisAbortRef.current === ctrl) {
+        analysisAbortRef.current = null;
+        inflightAnalyzerRef.current = null;
+      }
       setBusy(null);
       reanalysingRef.current = false;
     }
@@ -207,12 +235,16 @@ export default function App() {
     if (!v || v.readyState < 2) return;
     const desired = desiredAnalyzer(quality, opencvReady);
     if (lastAnalyzerRef.current === desired) return;
-    // Gate while ANY analysis is running — handleFile's initial pass
-    // OR a previous reanalyse. analysisReady is in deps so a mode
-    // click made during the first analysis re-evaluates the moment
-    // that pass completes (analysisReady flips true) and kicks off
-    // the correct analyzer; without this the click was silently
-    // dropped and Mode stayed visually selected but unused.
+    // If an analyzer is in flight for the WRONG mode, abort it. The
+    // analyzer's catch swallows the AbortError, its finally clears
+    // busy/reanalysingRef/inflightAnalyzerRef, and this effect re-fires
+    // — by then there's no in-flight, so the second branch starts the
+    // correct analyzer. Don't abort if the in-flight IS for `desired`
+    // (e.g. busy/analysisReady deps re-ran the effect mid-analysis).
+    if (analysisAbortRef.current && inflightAnalyzerRef.current !== desired) {
+      analysisAbortRef.current.abort();
+      return;
+    }
     if (reanalysingRef.current || busy !== null) return;
     reanalyseWithCurrentQuality();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -546,6 +578,17 @@ export default function App() {
     teardownVideo();
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
     setBusy("Loading video…");
+    // AbortController so the user can cancel the initial analysis via
+    // the Cancel button or by clicking a different Mode mid-analysis.
+    // Declared here (outside the try) so the finally can reference it.
+    if (analysisAbortRef.current) analysisAbortRef.current.abort();
+    const ctrl = new AbortController();
+    analysisAbortRef.current = ctrl;
+    inflightAnalyzerRef.current = quality === "mesh" && opencvReady
+      ? "mesh"
+      : quality === "better" && opencvReady
+        ? "better"
+        : "fast";
     try {
       // Touch the first byte to coax iOS Photos into completing an
       // iCloud download on items from "Recently Saved" / similar before
@@ -588,7 +631,7 @@ export default function App() {
         setBusy("Analyzing per-vertex motion 0%");
         const meshResult = await analyzeVideoMesh(v, (p) => {
           setBusy(`Analyzing per-vertex motion ${Math.floor(p * 100)}%`);
-        });
+        }, ctrl.signal);
         meshAnalysisRef.current = meshResult;
         meshSmoothRef.current = smoothMeshPath(meshResult, smoothing, crop);
         lastAnalyzerRef.current = "mesh";
@@ -598,7 +641,7 @@ export default function App() {
         const analyzer = useBetter ? analyzeVideoOpenCV : analyzeVideo;
         const result = await analyzer(v, (p) => {
           setBusy(`Analyzing motion ${Math.floor(p * 100)}%`);
-        });
+        }, ctrl.signal);
         analysisRef.current = result;
         lastAnalyzerRef.current = useBetter ? "better" : "fast";
         smoothRef.current = smoothPath(result, smoothing, crop, v.videoWidth, v.videoHeight);
@@ -611,10 +654,40 @@ export default function App() {
       v.play().catch(() => undefined);
       startPreview();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      // AbortError is the expected outcome when the user clicks a
+      // different Mode mid-analysis — silently let the [quality] effect
+      // pick up the new mode and start the right analyzer.
+      if (!isAbortError(e)) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
+      if (analysisAbortRef.current === ctrl) {
+        analysisAbortRef.current = null;
+        inflightAnalyzerRef.current = null;
+      }
       setBusy(null);
     }
+  }
+
+  function isAbortError(e: unknown): boolean {
+    return e instanceof DOMException && e.name === "AbortError";
+  }
+
+  function cancelAnalysis() {
+    if (analysisAbortRef.current) {
+      analysisAbortRef.current.abort();
+      analysisAbortRef.current = null;
+      inflightAnalyzerRef.current = null;
+    }
+    // Roll the UI back to idle so the user can pick another file. The
+    // analyzer's restore() puts the video back at its pre-analysis
+    // state; the catch block in handleFile/reanalyse swallows the
+    // AbortError, but mode/state must be reset here.
+    setBusy(null);
+    setAnalysisReady(false);
+    setError(null);
+    setMode("idle");
+    teardownVideo();
   }
 
   function togglePlay() {
@@ -1137,7 +1210,12 @@ export default function App() {
           />
         )}
         {error && <div className="error">{error}</div>}
-        {busy && <BusyOverlay message={busy} />}
+        {busy && (
+          <BusyOverlay
+            message={busy}
+            onCancel={analysisAbortRef.current ? cancelAnalysis : undefined}
+          />
+        )}
         {recording && (
           <RecordingOverlay
             currentTime={recordTime}

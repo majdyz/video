@@ -413,11 +413,22 @@ export function RecordingOverlay({
   );
 }
 
-export function BusyOverlay({ message }: { message: string }) {
+export function BusyOverlay({
+  message,
+  onCancel,
+}: {
+  message: string;
+  onCancel?: () => void;
+}) {
   return (
     <div className="busy">
       <div className="spinner" />
       <span>{message}</span>
+      {onCancel && (
+        <button className="busy-cancel" onClick={onCancel}>
+          Cancel
+        </button>
+      )}
     </div>
   );
 }

@@ -70,7 +70,9 @@ type VideoWithRVFC = HTMLVideoElement & {
 export async function analyzeVideoOpenCV(
   video: HTMLVideoElement,
   onProgress: (p: number) => void,
+  signal?: AbortSignal,
 ): Promise<AnalysisResult> {
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const cv = window.cv as unknown as CV;
   if (!cv || !cv.Mat) throw new Error("OpenCV.js is not initialised");
 
@@ -206,9 +208,13 @@ export async function analyzeVideoOpenCV(
       if (!wasPaused) video.play().catch(() => undefined);
     };
 
+    const onAbort = () => fail(new DOMException("Aborted", "AbortError"));
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+
     const finish = () => {
       if (finished) return;
       finished = true;
+      if (signal) signal.removeEventListener("abort", onAbort);
       if (watchdog !== null) clearInterval(watchdog);
       cleanup();
       restore();
@@ -228,6 +234,7 @@ export async function analyzeVideoOpenCV(
     const fail = (err: Error) => {
       if (finished) return;
       finished = true;
+      if (signal) signal.removeEventListener("abort", onAbort);
       if (watchdog !== null) clearInterval(watchdog);
       cleanup();
       restore();
