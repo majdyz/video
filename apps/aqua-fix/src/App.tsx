@@ -42,9 +42,21 @@ type Quality = "classical" | "ai";
 // Defaults retuned against bornfree/dive-color-corrector's constants
 // (MIN_AVG_RED=60, BLUE_MAGIC_VALUE=1.2, THRESHOLD_RATIO=2000) and the
 // Ancuti 2018 fusion-input recipe (gamma-corrected branch ≈ 0.9–0.95).
-// Previous defaults blew highlights to cyan-white — these match what
-// practitioners use as a Lightroom reef baseline.
-const DEFAULT_SETTINGS: Settings = {
+const SHALLOW_SETTINGS: Settings = {
+  intensity: 0.55,
+  castStrength: 0.35,
+  saturation: 1.10,
+  gamma: 1.00,
+  contrast: 0.20,
+  clahe: 0.15,
+  lutMix: 1.0,
+};
+
+// Reef preset — heavier red-channel push, suitable for typical 5–15 m
+// reef shots where the cyan cast is pronounced but reds aren't fully
+// gone. Used to be the default; Shallow now is, because Reef pushes
+// some shots into oversaturated cyan-white highlights.
+const REEF_SETTINGS: Settings = {
   intensity: 0.85,
   castStrength: 0.65,
   saturation: 1.25,
@@ -53,6 +65,22 @@ const DEFAULT_SETTINGS: Settings = {
   clahe: 0.35,
   lutMix: 1.0,
 };
+
+const DEEP_SETTINGS: Settings = {
+  intensity: 1.00,
+  castStrength: 0.90,
+  saturation: 1.40,
+  gamma: 0.80,
+  contrast: 0.45,
+  clahe: 0.55,
+  lutMix: 1.0,
+};
+
+// Default = Shallow. Most divers shoot in the 0–10 m range where reds
+// are mostly intact, so a light correction gets closer to what the
+// scene looked like in person without the over-corrected cyan-white
+// blowouts the Reef preset can produce on bright shallow shots.
+const DEFAULT_SETTINGS: Settings = SHALLOW_SETTINGS;
 
 const OFF_SETTINGS: Settings = {
   intensity: 0,
@@ -85,14 +113,15 @@ const IDENTITY_STATS: Stats = {
 };
 
 // Shallow / Reef / Deep values from the research synthesis above —
-// Reef matches bornfree's auto-correction defaults; Shallow scales red
-// compensation low (0–10 m, reds mostly intact); Deep pushes near-max
-// cast removal (>15 m, reds largely lost per TDI/SDI guidance).
+// Shallow scales red compensation low (0–10 m, reds mostly intact);
+// Reef matches bornfree's auto-correction defaults (5–15 m); Deep
+// pushes near-max cast removal (>15 m, reds largely lost per TDI/SDI
+// guidance).
 const PRESETS: { label: string; settings: Settings }[] = [
   { label: "Off", settings: OFF_SETTINGS },
-  { label: "Shallow", settings: { intensity: 0.55, castStrength: 0.35, saturation: 1.10, gamma: 1.00, contrast: 0.20, clahe: 0.15, lutMix: 1.0 } },
-  { label: "Reef", settings: DEFAULT_SETTINGS },
-  { label: "Deep", settings: { intensity: 1.00, castStrength: 0.90, saturation: 1.40, gamma: 0.80, contrast: 0.45, clahe: 0.55, lutMix: 1.0 } },
+  { label: "Shallow", settings: SHALLOW_SETTINGS },
+  { label: "Reef", settings: REEF_SETTINGS },
+  { label: "Deep", settings: DEEP_SETTINGS },
 ];
 
 type AudioRouting = ReturnType<typeof attachAudioRouting>;
@@ -160,6 +189,9 @@ export default function App() {
   // and bails if it changed, so completing inferences for a stale file
   // can't clobber the new file's render or stats.
   const fileGenRef = useRef(0);
+  // rAF id for the entry slider animation. Cancel on next file load /
+  // unmount so two animations don't fight for the settings state.
+  const entryAnimRef = useRef<number | null>(null);
   // AbortController for the in-flight model download. Lets the user
   // bail out via the dialog's Cancel button without waiting for the
   // full ~17 MB to finish (especially useful on flaky connections).
@@ -488,6 +520,50 @@ export default function App() {
 
   const pendingFileRef = useRef<File | null>(null);
 
+  // Animate sliders from OFF → current preset over ~700 ms when a new
+  // file is revealed, so the user briefly sees the original frame and
+  // watches the correction ease in. Reads `settingsRef.current` for the
+  // target so a non-default preset (Reef/Deep) the user picked before
+  // loading is honoured. Cancels any in-flight animation first.
+  function animateEntrySettings() {
+    if (entryAnimRef.current !== null) {
+      cancelAnimationFrame(entryAnimRef.current);
+      entryAnimRef.current = null;
+    }
+    const target = { ...settingsRef.current };
+    const off = OFF_SETTINGS;
+    setSettings(off);
+    let start: number | null = null;
+    const tick = (now: number) => {
+      if (start === null) start = now;
+      const t = Math.min(1, (now - start) / 700);
+      // Ease-out cubic — fast at the start (so the original frame isn't
+      // visible for too long) and a soft landing on the target.
+      const e = 1 - Math.pow(1 - t, 3);
+      setSettings({
+        intensity: off.intensity + (target.intensity - off.intensity) * e,
+        castStrength: off.castStrength + (target.castStrength - off.castStrength) * e,
+        saturation: off.saturation + (target.saturation - off.saturation) * e,
+        gamma: off.gamma + (target.gamma - off.gamma) * e,
+        contrast: off.contrast + (target.contrast - off.contrast) * e,
+        clahe: off.clahe + (target.clahe - off.clahe) * e,
+        lutMix: off.lutMix + (target.lutMix - off.lutMix) * e,
+      });
+      if (t < 1) {
+        entryAnimRef.current = requestAnimationFrame(tick);
+      } else {
+        entryAnimRef.current = null;
+      }
+    };
+    entryAnimRef.current = requestAnimationFrame(tick);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (entryAnimRef.current !== null) cancelAnimationFrame(entryAnimRef.current);
+    };
+  }, []);
+
   async function handleFile(file: File) {
     setError(null);
     setRecording(false);
@@ -525,6 +601,7 @@ export default function App() {
       } else {
         await loadImage(file);
       }
+      animateEntrySettings();
     } finally {
       setBusy(null);
     }
@@ -1275,7 +1352,6 @@ export default function App() {
                 onClick={() => setQuality("classical")}
                 aria-pressed={quality === "classical"}
               >
-                {quality === "classical" && <span className="model-check">ON</span>}
                 <span className="model-title">Classical</span>
                 <span className="model-sub">CLAHE + Shades-of-Gray, runs on every device.</span>
               </button>
@@ -1297,7 +1373,6 @@ export default function App() {
                 }}
                 aria-pressed={quality === "ai"}
               >
-                {quality === "ai" && <span className="model-check">ON</span>}
                 <span className="model-title">
                   AI
                   <span className="model-badge model-badge--experimental">Experimental</span>
