@@ -192,6 +192,11 @@ export default function App() {
   // rAF id for the entry slider animation. Cancel on next file load /
   // unmount so two animations don't fight for the settings state.
   const entryAnimRef = useRef<number | null>(null);
+  // Auto-animated split during the entry reveal. When non-null, the
+  // renderer reads this instead of the manual compareSplit, so the
+  // wipe slides without us having to flip compareActive on (which
+  // would block click-to-pause and show the manual handle UI).
+  const entryAnimSplitRef = useRef<number | null>(null);
   // AbortController for the in-flight model download. Lets the user
   // bail out via the dialog's Cancel button without waiting for the
   // full ~17 MB to finish (especially useful on flaky connections).
@@ -235,10 +240,13 @@ export default function App() {
 
   // Push the wipe split into the renderer whenever it changes. Renderer
   // holds the value so per-frame draws (preview + recording) pick it up
-  // without needing to thread it through every render call.
+  // without needing to thread it through every render call. The entry
+  // animation overrides via entryAnimSplitRef.
   useEffect(() => {
     if (rendererRef.current) {
-      rendererRef.current.setSplit(compareActive ? compareSplit : 0);
+      rendererRef.current.setSplit(
+        entryAnimSplitRef.current ?? (compareActive ? compareSplit : 0),
+      );
     }
   }, [compareActive, compareSplit]);
 
@@ -520,49 +528,59 @@ export default function App() {
 
   const pendingFileRef = useRef<File | null>(null);
 
-  // Animate the compare-wipe across the frame on initial reveal so
-  // the user sees a clear before→after slide: full original first
-  // (split=1: every pixel where uv.x < 1, i.e. all pixels, shows
-  // source), wipe sweeps left to reveal the corrected frame, ending
-  // at split=0 (no pixels show source → fully corrected). Hold the
-  // first ~400 ms at full original so the eye registers it before
-  // the slide starts.
+  // Animate the compare-wipe split on initial reveal so the user
+  // sees a clear before→after slide: hold full original (split=1) for
+  // ~400 ms, then sweep split 1 → 0 over 2.2 s (ease-in-out cubic).
+  // Drives the renderer directly via entryAnimSplitRef instead of
+  // flipping compareActive on — the latter would show the manual
+  // wipe handle UI AND block click-to-pause on the stage.
   function animateEntrySettings() {
     if (entryAnimRef.current !== null) {
       cancelAnimationFrame(entryAnimRef.current);
       entryAnimRef.current = null;
     }
-    setCompareActive(true);
-    setCompareSplit(1);
     const HOLD_MS = 400;
     const SLIDE_MS = 2200;
+    const apply = (v: number) => {
+      entryAnimSplitRef.current = v;
+      // Push the value through the renderer immediately. The per-frame
+      // preview loop also reads this on its next tick — but for paused
+      // frames (photos, or video before play()) we need to redraw now.
+      const r = rendererRef.current;
+      if (r) {
+        r.setSplit(v);
+        if (statsRef.current && imageBitmapRef.current && mode === "photo") {
+          r.render(statsRef.current, settingsRef.current);
+        }
+      }
+    };
+    apply(1);
     let start: number | null = null;
     const tick = (now: number) => {
       if (start === null) start = now;
       const elapsed = now - start;
       if (elapsed < HOLD_MS) {
-        // Hold full original.
-        setCompareSplit(1);
+        apply(1);
         entryAnimRef.current = requestAnimationFrame(tick);
         return;
       }
       const t = Math.min(1, (elapsed - HOLD_MS) / SLIDE_MS);
-      // Ease-in-out cubic — accelerate through the middle of the
-      // frame (where the contrast is most visible) and decelerate
-      // at the ends so the start/finish feel intentional.
+      // Ease-in-out cubic — accelerate through the middle of the frame
+      // (where the contrast is most visible) and decelerate at the
+      // ends so start/finish feel intentional.
       const e = t < 0.5
         ? 4 * t * t * t
         : 1 - Math.pow(-2 * t + 2, 3) / 2;
-      setCompareSplit(1 - e);
+      apply(1 - e);
       if (t < 1) {
         entryAnimRef.current = requestAnimationFrame(tick);
       } else {
         entryAnimRef.current = null;
-        // Hand control back to the user — the wipe overlay disappears
-        // and the corrected frame fills the canvas. The compare button
-        // in the toolbar stays available for manual before/after.
-        setCompareActive(false);
-        setCompareSplit(0.5);
+        entryAnimSplitRef.current = null;
+        // Hand control back to the manual compare wipe state.
+        if (rendererRef.current) {
+          rendererRef.current.setSplit(compareActive ? compareSplit : 0);
+        }
       }
     };
     entryAnimRef.current = requestAnimationFrame(tick);
@@ -822,9 +840,11 @@ export default function App() {
       });
     } finally {
       // Restore wipe split so the on-screen view goes back to what
-      // the user had set.
+      // the user had set (or the entry animation if still running).
       void prevSplit;
-      renderer.setSplit(compareActive ? compareSplit : 0);
+      renderer.setSplit(
+        entryAnimSplitRef.current ?? (compareActive ? compareSplit : 0),
+      );
     }
   }
 
