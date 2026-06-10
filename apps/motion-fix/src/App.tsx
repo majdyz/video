@@ -31,11 +31,21 @@ import { MotionFixLogo, MOTION_FIX_BRAND } from "./branding";
 import {
   analyzeVideo,
   type AnalysisResult,
+  createBlockMatchTracker,
   frameIndexForTime,
   residualTransformAtTime,
   smoothPath,
 } from "./lib/stabilizer";
-import { analyzeVideoOpenCV } from "./lib/stabilizer-opencv";
+import { analyzeVideoOpenCV, createOpenCVTracker } from "./lib/stabilizer-opencv";
+import type { VideoSample } from "mediabunny";
+
+// Feature gate for the WebCodecs pipeline. Inlined (instead of imported
+// from codec-pipeline) so the mediabunny chunk is only fetched via
+// dynamic import when analysis/export actually runs — it's ~200 kB gzip
+// that no-WebCodecs browsers and idle sessions shouldn't pay for.
+function isWebCodecsSupported(): boolean {
+  return typeof VideoDecoder !== "undefined" && typeof VideoEncoder !== "undefined";
+}
 import { isOpenCVCached, isOpenCVReady, loadOpenCV, OPENCV_SIZE_MB } from "./lib/opencv-loader";
 import {
   analyzeVideoMesh,
@@ -61,6 +71,10 @@ export default function App() {
   const meshScratchRef = useRef<Float32Array | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileNameRef = useRef<string>(MOTION_FIX_BRAND.filenamePrefix);
+  // The original File, kept for the WebCodecs pipeline — both analysis
+  // and export demux the file directly instead of going through the
+  // <video> element.
+  const fileRef = useRef<File | null>(null);
   // Track the current file's blob URL so we can revoke it on teardown
   // / next load instead of leaking decoded bytes per file.
   const sourceUrlRef = useRef<string | null>(null);
@@ -170,10 +184,40 @@ export default function App() {
   // analyzer it just started (busy state change re-runs the effect).
   const analysisAbortRef = useRef<AbortController | null>(null);
   const inflightAnalyzerRef = useRef<"fast" | "better" | "mesh" | null>(null);
+  // AbortController for an in-flight WebCodecs export. Non-null only
+  // while exporting; the Cancel button routes here instead of the
+  // MediaRecorder teardown when set.
+  const exportAbortRef = useRef<AbortController | null>(null);
 
   function desiredAnalyzer(q: Quality, cvReady: boolean): "fast" | "better" | "mesh" {
     if ((q === "mesh" || q === "better") && !cvReady) return "fast";
     return q;
+  }
+
+  // WebCodecs (exact frames + exact timestamps, VFR-safe) when the
+  // browser supports it; the playback-driven analyser is the fallback,
+  // both for unsupported browsers and for files mediabunny can't demux.
+  // Mesh mode stays on the playback path — its analysis is keyed to the
+  // WebGL warp grid and lives in mesh-stabilizer.ts.
+  async function runSimilarityAnalysis(
+    v: HTMLVideoElement,
+    desired: "fast" | "better",
+    onProgress: (p: number) => void,
+    signal?: AbortSignal,
+  ): Promise<AnalysisResult> {
+    const file = fileRef.current;
+    if (file && isWebCodecsSupported()) {
+      try {
+        const factory = desired === "better" ? createOpenCVTracker : createBlockMatchTracker;
+        const { analyzeWithCodec } = await import("./lib/codec-pipeline");
+        return await analyzeWithCodec(file, factory, onProgress, signal);
+      } catch (e) {
+        if (isAbortError(e)) throw e;
+        console.warn("WebCodecs analysis failed, using playback analysis:", e);
+      }
+    }
+    const analyzer = desired === "better" ? analyzeVideoOpenCV : analyzeVideo;
+    return analyzer(v, onProgress, signal);
   }
 
   async function reanalyseWithCurrentQuality() {
@@ -204,8 +248,7 @@ export default function App() {
         lastAnalyzerRef.current = "mesh";
         sourceFpsRef.current = Math.max(24, meshResult.frameRate || 60);
       } else {
-        const analyzer = desired === "better" ? analyzeVideoOpenCV : analyzeVideo;
-        const result = await analyzer(v, (p) => {
+        const result = await runSimilarityAnalysis(v, desired, (p) => {
           setBusy(`Re-analyzing with ${label} ${Math.floor(p * 100)}%`);
         }, ctrl.signal);
         analysisRef.current = result;
@@ -304,7 +347,8 @@ export default function App() {
   }, [smoothing, crop, analysisReady]);
 
   useEffect(() => {
-    setCanRecord(pickRecorderMime() !== null);
+    // WebCodecs export doesn't need MediaRecorder mime support.
+    setCanRecord(isWebCodecsSupported() || pickRecorderMime() !== null);
     pruneOldRecordings(MOTION_FIX_BRAND.opfsPrefix);
   }, []);
 
@@ -413,9 +457,8 @@ export default function App() {
     // Interpolate the residual transform at the exact playback time —
     // analyser samples are sparse on compute-bound decoders, and using
     // a discrete nearest-sample residual produced visible jumps every
-    // ~33 ms. The smoothed zoom from the nearest captured frame is
-    // still fine to use directly (it's already heavily Gaussian-
-    // smoothed across ~2 s of context).
+    // ~33 ms. The zoom is constant across the clip, so the nearest
+    // captured frame's value is exact.
     const idx = frameIndexForTime(a, time);
     const raw = residualTransformAtTime(a, sm, time);
     const targetZoom = sm.zoom[idx] ?? 1;
@@ -597,6 +640,7 @@ export default function App() {
       return;
     }
     teardownVideo();
+    fileRef.current = file;
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
     setBusy("Loading video…");
     // AbortController so the user can cancel the initial analysis via
@@ -659,8 +703,7 @@ export default function App() {
         detectedRate = meshResult.frameRate;
       } else {
         setBusy("Analyzing motion 0%");
-        const analyzer = useBetter ? analyzeVideoOpenCV : analyzeVideo;
-        const result = await analyzer(v, (p) => {
+        const result = await runSimilarityAnalysis(v, useBetter ? "better" : "fast", (p) => {
           setBusy(`Analyzing motion ${Math.floor(p * 100)}%`);
         }, ctrl.signal);
         analysisRef.current = result;
@@ -729,6 +772,20 @@ export default function App() {
   }
 
   async function recordVideo() {
+    // Offline WebCodecs export when possible: decodes every source frame,
+    // preserves exact timestamps, runs faster than realtime, and copies
+    // the original audio without re-encoding. Mesh mode renders via
+    // WebGL + the playback clock, so it stays on the realtime recorder.
+    if (
+      qualityRef.current !== "mesh" &&
+      isWebCodecsSupported() &&
+      fileRef.current &&
+      analysisRef.current &&
+      smoothRef.current
+    ) {
+      const outcome = await exportVideoWithCodec();
+      if (outcome !== "fallback") return;
+    }
     try {
       await recordVideoInner();
     } catch (e) {
@@ -743,6 +800,113 @@ export default function App() {
       }
       setRecording(false);
       setError("Recording failed: " + (e instanceof Error ? e.message : String(e)));
+      startPreview();
+    }
+  }
+
+  // Draws one decoded frame through the same residual-transform path the
+  // preview uses, but sourced from the WebCodecs sample instead of the
+  // <video> element (which the offline export never plays).
+  function drawCodecExportFrame(frame: VideoSample, timeSec: number) {
+    const c = canvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    const w = frame.displayWidth;
+    const h = frame.displayHeight;
+    if (c.width !== w) c.width = w;
+    if (c.height !== h) c.height = h;
+    ctx.clearRect(0, 0, w, h);
+    applyStabilizedTransform(ctx, w, h, timeSec);
+    // VideoSample.draw composes with the current canvas transform and
+    // applies the container rotation metadata internally.
+    frame.draw(ctx, 0, 0, w, h);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  // Returns "done" when the export finished, errored terminally, or was
+  // cancelled; "fallback" when the codec pipeline itself failed and the
+  // realtime MediaRecorder path should take over.
+  async function exportVideoWithCodec(): Promise<"done" | "fallback"> {
+    const file = fileRef.current;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!file || !video || !canvas) return "fallback";
+    setError(null);
+    // Freeze the live preview — the export loop drives the canvas now.
+    previewActiveRef.current = false;
+    recordingFlagRef.current = true;
+    if (compareActiveRef.current) {
+      compareActiveRef.current = false;
+      setCompareActive(false);
+    }
+    video.pause();
+
+    const ctrl = new AbortController();
+    exportAbortRef.current = ctrl;
+
+    const wakeLockApi = (navigator as Navigator & {
+      wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinel> };
+    }).wakeLock;
+    if (wakeLockApi && typeof wakeLockApi.request === "function") {
+      wakeLockApi
+        .request("screen")
+        .then((lock) => {
+          wakeLockRef.current = lock;
+        })
+        .catch(() => undefined);
+    }
+
+    setRecording(true);
+    setRecordProgress(0);
+    setRecordTime(0);
+    const totalDuration = video.duration || 0;
+    // Throttle progress commits to ~4 Hz — same rationale as the
+    // realtime recorder's renderAndPush.
+    let lastUiPushAt = 0;
+    try {
+      const bitrate = sourceBitrateRef.current
+        ?? pickBitrate(video.videoWidth, video.videoHeight, sourceFpsRef.current);
+      const { exportWithCodec } = await import("./lib/codec-pipeline");
+      const { blob } = await exportWithCodec(file, canvas, drawCodecExportFrame, {
+        bitrate,
+        signal: ctrl.signal,
+        onProgress: (p) => {
+          const now = performance.now();
+          if (now - lastUiPushAt < 250 && p < 1) return;
+          lastUiPushAt = now;
+          setRecordProgress(p);
+          setRecordTime(p * totalDuration);
+        },
+      });
+      try {
+        await shareOrDownload(blob, `${fileNameRef.current}-stabilized.mp4`);
+      } catch (err) {
+        setError("Save failed: " + (err instanceof Error ? err.message : String(err)));
+      }
+      return "done";
+    } catch (e) {
+      if (isAbortError(e)) return "done";
+      console.warn("WebCodecs export failed, falling back to realtime recording:", e);
+      return "fallback";
+    } finally {
+      exportAbortRef.current = null;
+      recordingFlagRef.current = false;
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch(() => undefined);
+        wakeLockRef.current = null;
+      }
+      setRecording(false);
+      setRecordProgress(0);
+      setRecordTime(0);
+      video.loop = true;
+      video.muted = true;
+      try {
+        video.currentTime = 0;
+      } catch {
+        // ignore
+      }
+      video.play().catch(() => undefined);
       startPreview();
     }
   }
@@ -1020,6 +1184,12 @@ export default function App() {
   }
 
   function cancelRecording() {
+    // WebCodecs export in flight: abort it and let exportVideoWithCodec's
+    // finally block restore the preview/UI state.
+    if (exportAbortRef.current) {
+      exportAbortRef.current.abort();
+      return;
+    }
     recordingFlagRef.current = false;
     const v = videoRef.current;
     if (v && onEndedRef.current) {

@@ -10,9 +10,10 @@
     "icons": "node scripts/build-icons.mjs"
   },
   "dependencies": {
+    "@dive-tools/shared": "workspace:*",
+    "mediabunny": "^1.46.0",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5",
-    "@dive-tools/shared": "workspace:*"
+    "react-dom": "^19.2.5"
   },
   "devDependencies": {
     "@types/node": "^24.12.2",

@@ -52,10 +52,55 @@ export type AnalysisResult = {
   // common cause), and the wrong-frame-index bug applied a different
   // moment's residual transform to the rendered pixels — the user-
   // visible result was output that looked *more* shaky than the input.
-  times: Float32Array;
+  // Float64 because the WebCodecs pipeline supplies exact per-frame
+  // container timestamps and we don't want float32 rounding to reorder
+  // adjacent 60 fps samples on long clips.
+  times: Float64Array;
   frameCount: number;
   frameRate: number;
 };
+
+// Stateful frame-pair motion estimator shared by the playback analysers
+// and the WebCodecs pipeline. The caller downscales each frame to
+// (width × height) and feeds the ImageData in decode order; step()
+// returns the source-space similarity mapping the previous frame to
+// this one (identity for the first frame).
+export type PairwiseTracker = {
+  width: number;
+  height: number;
+  step(frame: ImageData): SimilarityTransform;
+  dispose(): void;
+};
+
+export function createBlockMatchTracker(srcW: number, srcH: number): PairwiseTracker {
+  const scaleX = srcW / THUMB_W;
+  const scaleY = srcH / THUMB_H;
+  const features: { x: number; y: number }[] = [];
+  for (let gy = 0; gy < GRID_Y; gy++) {
+    for (let gx = 0; gx < GRID_X; gx++) {
+      features.push({
+        x: Math.round(((gx + 1) * THUMB_W) / (GRID_X + 1)),
+        y: Math.round(((gy + 1) * THUMB_H) / (GRID_Y + 1)),
+      });
+    }
+  }
+  let prev: Uint8Array | null = null;
+  return {
+    width: THUMB_W,
+    height: THUMB_H,
+    step(frame: ImageData): SimilarityTransform {
+      const gray = toGray(frame.data, THUMB_W, THUMB_H);
+      const t = prev
+        ? trackAndFit(prev, gray, features, scaleX, scaleY)
+        : { a: 1, b: 0, tx: 0, ty: 0 };
+      prev = gray;
+      return t;
+    },
+    dispose() {
+      prev = null;
+    },
+  };
+}
 
 type RvfcMetadata = { mediaTime?: number; presentedFrames?: number };
 type VideoWithRVFC = HTMLVideoElement & {
@@ -147,18 +192,7 @@ export async function analyzeVideo(
     await seekToStart(video);
   }
 
-  const scaleX = srcW / THUMB_W;
-  const scaleY = srcH / THUMB_H;
-
-  const features: { x: number; y: number }[] = [];
-  for (let gy = 0; gy < GRID_Y; gy++) {
-    for (let gx = 0; gx < GRID_X; gx++) {
-      features.push({
-        x: Math.round(((gx + 1) * THUMB_W) / (GRID_X + 1)),
-        y: Math.round(((gy + 1) * THUMB_H) / (GRID_Y + 1)),
-      });
-    }
-  }
+  const tracker = createBlockMatchTracker(srcW, srcH);
 
   const cumAArr: number[] = [1];
   const cumBArr: number[] = [0];
@@ -167,7 +201,6 @@ export async function analyzeVideo(
   const timesArr: number[] = [0];
   let lastMediaTime = -1;
   let cumA = 1, cumB = 0, cumTX = 0, cumTY = 0;
-  let prevThumb: Uint8Array | null = null;
 
   const v = video as VideoWithRVFC;
 
@@ -218,7 +251,7 @@ export async function analyzeVideo(
         cumB: Float32Array.from(cumBArr),
         cumTX: Float32Array.from(cumTXArr),
         cumTY: Float32Array.from(cumTYArr),
-        times: Float32Array.from(timesArr),
+        times: Float64Array.from(timesArr),
         frameCount: cumAArr.length,
         frameRate: detectedRate,
       });
@@ -238,25 +271,20 @@ export async function analyzeVideo(
       try {
         thumbCtx.drawImage(video, 0, 0, THUMB_W, THUMB_H);
         const img = thumbCtx.getImageData(0, 0, THUMB_W, THUMB_H);
-        const gray = toGray(img.data, THUMB_W, THUMB_H);
-
-        if (prevThumb) {
-          const t = trackAndFit(prevThumb, gray, features, scaleX, scaleY);
-          const newA = t.a * cumA - t.b * cumB;
-          const newB = t.b * cumA + t.a * cumB;
-          const newTX = t.a * cumTX - t.b * cumTY + t.tx;
-          const newTY = t.b * cumTX + t.a * cumTY + t.ty;
-          cumA = newA;
-          cumB = newB;
-          cumTX = newTX;
-          cumTY = newTY;
-        }
+        const t = tracker.step(img);
+        const newA = t.a * cumA - t.b * cumB;
+        const newB = t.b * cumA + t.a * cumB;
+        const newTX = t.a * cumTX - t.b * cumTY + t.tx;
+        const newTY = t.b * cumTX + t.a * cumTY + t.ty;
+        cumA = newA;
+        cumB = newB;
+        cumTX = newTX;
+        cumTY = newTY;
         cumAArr.push(cumA);
         cumBArr.push(cumB);
         cumTXArr.push(cumTX);
         cumTYArr.push(cumTY);
         timesArr.push(mediaTime);
-        prevThumb = gray;
       } catch {
         cumAArr.push(cumA);
         cumBArr.push(cumB);
@@ -795,10 +823,9 @@ export type SmoothPath = {
   smoothB: Float32Array;
   smoothTX: Float32Array;
   smoothTY: Float32Array;
-  // Per-frame zoom factor used by the renderer. Pre-computed by sweeping
-  // the residual transforms and Gaussian-smoothing the required zoom over
-  // ~2 seconds, so the camera "tracks" motion (zooms in for shaky segments,
-  // zooms out for steady ones) instead of jerking between frames.
+  // Per-frame zoom factor used by the renderer. A single constant for the
+  // whole clip: phones use a fixed crop margin because constant zoom reads
+  // as stable while an adaptive zoom curve "breathes" — itself an artifact.
   zoom: Float32Array;
 };
 
@@ -838,32 +865,21 @@ export function smoothPath(
   const smoothTX = gaussianSmooth(txL1, gSigma);
   const smoothTY = gaussianSmooth(tyL1, gSigma);
 
-  // Compute the per-frame "needed zoom" by sweeping residuals, then
-  // smooth it with a wide Gaussian (~2 seconds) so the renderer's zoom
-  // moves like a slow-cinema crash zoom rather than jerking each frame.
-  // Capped at the user's max zoom; clamping happens in the renderer.
+  // Constant zoom for the whole clip: the 98th-percentile required
+  // scale-up across frames, clamped to the user's crop budget. A
+  // percentile instead of the pure max so a single tracker-glitch frame
+  // can't pin the entire clip at the full crop budget; the ≤2% of
+  // frames above it get pulled toward identity by the renderer's
+  // residual-clamp safety net, which is invisible in practice.
   const maxZoom = 1 / Math.max(0.0001, 1 - 2 * crop);
   const requiredPerFrame = computeRequiredZoomPerFrame(
     result, smoothA, smoothB, smoothTX, smoothTY, width, height,
   );
-  // Clamp to a sane range first so a single-frame estimation outlier
-  // doesn't push the smoothed zoom up.
-  for (let i = 0; i < requiredPerFrame.length; i++) {
-    if (requiredPerFrame[i] > maxZoom * 1.5) requiredPerFrame[i] = maxZoom * 1.5;
-    if (requiredPerFrame[i] < 1) requiredPerFrame[i] = 1;
-  }
-  // Heavy median pre-pass + wide Gaussian. Roughly 1s median window, 2s
-  // Gaussian window — gives the camera time to pre-zoom before bumps.
-  const zoomMed = medianFilter(requiredPerFrame, 15);
-  const zoomSmooth = gaussianSmooth(zoomMed, 60);
-  // Clamp final zoom to user's max — overflow becomes the renderer's job
-  // to handle via residual clamping.
-  for (let i = 0; i < zoomSmooth.length; i++) {
-    if (zoomSmooth[i] > maxZoom) zoomSmooth[i] = maxZoom;
-    if (zoomSmooth[i] < 1) zoomSmooth[i] = 1;
-  }
+  const sorted = Array.from(requiredPerFrame, (r) => Math.min(r, maxZoom)).sort((a, b) => a - b);
+  const constantZoom = Math.max(1, sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.98))] : 1);
+  const zoom = new Float32Array(result.frameCount).fill(constantZoom);
 
-  return { smoothA, smoothB, smoothTX, smoothTY, zoom: zoomSmooth };
+  return { smoothA, smoothB, smoothTX, smoothTY, zoom };
 }
 
 function computeRequiredZoomPerFrame(

@@ -3,8 +3,8 @@
 // downstream smoother + render pipeline.
 //
 // Uses cv.goodFeaturesToTrack (Shi-Tomasi corners) + cv.calcOpticalFlowPyrLK
-// (pyramidal Lucas-Kanade) + cv.estimateAffinePartial2D (RANSAC similarity
-// transform). This is the same recipe used by Premiere Warp Stabilizer's
+// (pyramidal Lucas-Kanade) + cv.estimateAffine2D (RANSAC affine,
+// projected to the nearest similarity). This is the same recipe used by Premiere Warp Stabilizer's
 // 'Subspace' fallback and most academic vision-only stabilisers.
 //
 // Versus our built-in tracker, the win is feature-based vs grid-based:
@@ -12,8 +12,17 @@
 // follows them across pyramid levels (handles large motion), and OpenCV's
 // RANSAC is iteratively-reweighted for genuine robustness against
 // independently-moving content.
+//
+// Tracking hygiene on top of the basic recipe:
+//   - Forward-backward validation: every LK track is re-tracked from the
+//     new frame back to the old one; tracks whose round trip lands more
+//     than 1 px from where they started are drift/occlusion errors and
+//     get rejected before the RANSAC fit ever sees them.
+//   - Grid-bucketed feature detection: detected corners are capped per
+//     cell of an 8×6 grid so the feature set can't cluster on one
+//     high-contrast fish and out-vote the static background.
 
-import type { AnalysisResult } from "./stabilizer";
+import type { AnalysisResult, PairwiseTracker, SimilarityTransform } from "./stabilizer";
 
 const ANALYSIS_W = 640;
 const MAX_FEATURES = 220;
@@ -23,6 +32,19 @@ const MIN_FEATURE_DISTANCE = 8;
 const RANSAC_THRESHOLD_PX = 1.5;
 const MAX_FRAME_ROT = 0.09;
 const MAX_FRAME_SCALE = 0.06;
+// Forward-backward LK round-trip rejection, in analysis pixels. The
+// floor applies to slow scenes; for fast motion the tolerance scales
+// with the track's own displacement — pyramid-interpolation error grows
+// with motion magnitude, and a fixed 1 px gate annihilates virtually
+// every valid track on a hard 30–50 px/frame shake (measured: 150+ LK
+// tracks reduced to 0–5 survivors, which forced identity transforms
+// and disabled stabilization entirely).
+const FB_BASE_ERROR_PX = 1.5;
+const FB_RELATIVE_ERROR = 0.06; // + 6% of the forward displacement
+// Feature-detection bucketing grid: cap corners per cell so they spread
+// across the frame instead of clustering on one textured subject.
+const BUCKET_COLS = 8;
+const BUCKET_ROWS = 6;
 
 type CV = {
   Mat: new (rows?: number, cols?: number, type?: number) => CvMat;
@@ -40,7 +62,7 @@ type CV = {
     status: CvMat, err: CvMat, winSize: unknown, maxLevel: number,
     criteria: unknown,
   ) => void;
-  estimateAffinePartial2D: (
+  estimateAffine2D: (
     src: CvMat, dst: CvMat, inliers: CvMat, method: number,
     ransacReprojThreshold: number,
   ) => CvMat;
@@ -67,14 +89,256 @@ type VideoWithRVFC = HTMLVideoElement & {
   requestVideoFrameCallback?: (cb: (now: number, metadata: RvfcMetadata) => void) => number;
 };
 
+// Stateful frame-pair estimator used by both the playback analyser below
+// and the WebCodecs pipeline (codec-pipeline.ts). Holds the previous gray
+// frame + feature set; step() returns the source-space similarity for the
+// latest frame pair.
+export function createOpenCVTracker(srcW: number, srcH: number): PairwiseTracker {
+  const cv = window.cv as unknown as CV;
+  if (!cv || !cv.Mat) throw new Error("OpenCV.js is not initialised");
+
+  // Run the tracker at 640px wide. OpenCV's pyramid + LK is fast enough
+  // that we don't need to go as small as the block-matching analyser.
+  const aw = Math.min(ANALYSIS_W, srcW);
+  const ah = Math.max(1, Math.round((srcH * aw) / srcW));
+  const scaleBack = srcW / aw;
+
+  // Hoisted once per tracker instead of allocated per frame — OpenCV.js
+  // wraps each `new cv.Size`/`cv.TermCriteria` as a wasm heap entry that
+  // doesn't auto-free, so per-frame alloc leaks thousands of entries on
+  // long clips.
+  const winSize = new cv.Size(15, 15);
+  const lkCriteria = new cv.TermCriteria(
+    cv.TermCriteria_EPS | cv.TermCriteria_COUNT, 10, 0.03,
+  );
+  // Persistent RGBA Mat sized once. matFromImageData allocates a fresh
+  // wasm-heap buffer per frame (~aw*ah*4 bytes), which churns gigabytes
+  // through GC on long clips.
+  const rgba = new cv.Mat(ah, aw, 24 /* CV_8UC4 */);
+  const rgbaData = rgba as unknown as { data: Uint8Array };
+
+  let prevGray: CvMat | null = null;
+  let prevPts: CvMat | null = null;
+  let mask: CvMat | null = null;
+
+  const detectFeatures = (gray: CvMat): CvMat => {
+    const corners = new cv.Mat();
+    if (!mask) mask = new cv.Mat();
+    cv.goodFeaturesToTrack(
+      gray, corners, MAX_FEATURES, FEATURE_QUALITY, MIN_FEATURE_DISTANCE,
+      mask, 3,
+    );
+    // Bucket the corners into an 8×6 grid and cap each cell.
+    // goodFeaturesToTrack returns corners strongest-first, so keeping
+    // the first N per cell keeps the best ones.
+    const capPerCell = Math.ceil(MAX_FEATURES / (BUCKET_COLS * BUCKET_ROWS));
+    const counts = new Uint8Array(BUCKET_COLS * BUCKET_ROWS);
+    const kept: number[] = [];
+    for (let i = 0; i < corners.rows; i++) {
+      const x = corners.data32F[i * 2];
+      const y = corners.data32F[i * 2 + 1];
+      const col = Math.min(BUCKET_COLS - 1, Math.floor((x / aw) * BUCKET_COLS));
+      const row = Math.min(BUCKET_ROWS - 1, Math.floor((y / ah) * BUCKET_ROWS));
+      const cell = row * BUCKET_COLS + col;
+      if (counts[cell] >= capPerCell) continue;
+      counts[cell]++;
+      kept.push(x, y);
+    }
+    corners.delete();
+    if (kept.length === 0) return new cv.Mat();
+    return cv.matFromArray(kept.length / 2, 1, cv.CV_32FC2, kept);
+  };
+
+  const step = (frame: ImageData): SimilarityTransform => {
+    let currGray: CvMat | null = null;
+    let nextPts: CvMat | null = null;
+    let status: CvMat | null = null;
+    let err: CvMat | null = null;
+    let backPts: CvMat | null = null;
+    let backStatus: CvMat | null = null;
+    let backErr: CvMat | null = null;
+    let M: CvMat | null = null;
+    let srcMat: CvMat | null = null;
+    let dstMat: CvMat | null = null;
+    let inliers: CvMat | null = null;
+    let frameA = 1, frameB = 0, frameTX = 0, frameTY = 0;
+    try {
+      rgbaData.data.set(frame.data);
+      currGray = new cv.Mat();
+      cv.cvtColor(rgba, currGray, cv.COLOR_RGBA2GRAY);
+
+      let trackedCount = 0;
+      const srcPts: number[] = [];
+      const dstPts: number[] = [];
+
+      if (prevGray && prevPts && prevPts.rows > 0) {
+        nextPts = new cv.Mat();
+        status = new cv.Mat();
+        err = new cv.Mat();
+        cv.calcOpticalFlowPyrLK(
+          prevGray, currGray, prevPts, nextPts, status, err,
+          winSize, 3, lkCriteria,
+        );
+        // Forward-backward validation: re-track the new positions back
+        // to the previous frame and reject any track whose round trip
+        // misses its starting point by more than 1 px.
+        backPts = new cv.Mat();
+        backStatus = new cv.Mat();
+        backErr = new cv.Mat();
+        cv.calcOpticalFlowPyrLK(
+          currGray, prevGray, nextPts, backPts, backStatus, backErr,
+          winSize, 3, lkCriteria,
+        );
+
+        const n = prevPts.rows;
+        // Tracks that pass plain LK (status=1 both ways) but fail the
+        // round-trip gate. Kept as a fallback pool: feeding RANSAC
+        // unvalidated tracks beats inserting a false "no motion" sample
+        // that the smoother would treat as truth.
+        const looseSrc: number[] = [];
+        const looseDst: number[] = [];
+        for (let i = 0; i < n; i++) {
+          if (status.data[i] !== 1 || backStatus.data[i] !== 1) continue;
+          const px = prevPts.data32F[i * 2];
+          const py = prevPts.data32F[i * 2 + 1];
+          const nx = nextPts.data32F[i * 2];
+          const ny = nextPts.data32F[i * 2 + 1];
+          const bx = backPts.data32F[i * 2];
+          const by = backPts.data32F[i * 2 + 1];
+          looseSrc.push(px, py);
+          looseDst.push(nx, ny);
+          const moved = Math.hypot(nx - px, ny - py);
+          const tol = FB_BASE_ERROR_PX + FB_RELATIVE_ERROR * moved;
+          const fbErr = (bx - px) * (bx - px) + (by - py) * (by - py);
+          if (fbErr > tol * tol) continue;
+          srcPts.push(px, py);
+          dstPts.push(nx, ny);
+        }
+        trackedCount = srcPts.length / 2;
+        if (trackedCount < 6 && looseSrc.length / 2 >= 6) {
+          srcPts.length = 0;
+          dstPts.length = 0;
+          for (let i = 0; i < looseSrc.length; i++) {
+            srcPts.push(looseSrc[i]);
+            dstPts.push(looseDst[i]);
+          }
+          trackedCount = srcPts.length / 2;
+        }
+
+        // Was 4 — bumped to 6 so a noisy LK match on a low-texture
+        // underwater frame doesn't fit a similarity through 4
+        // tracking errors and produce a false motion that propagates
+        // to the smoother as shake.
+        if (trackedCount >= 6) {
+          srcMat = cv.matFromArray(trackedCount, 1, cv.CV_32FC2, srcPts);
+          dstMat = cv.matFromArray(trackedCount, 1, cv.CV_32FC2, dstPts);
+          inliers = new cv.Mat();
+          // The @techstark/opencv-js build ships estimateAffine2D (6-DoF
+          // full affine, RANSAC) but NOT estimateAffinePartial2D — the
+          // original code called the latter, threw on every frame, and
+          // the playback analyser's per-frame catch silently turned every
+          // transform into identity, which disabled Better-mode
+          // stabilization entirely. Fit the full affine instead and
+          // project it to the nearest similarity (Frobenius): that also
+          // strips shear noise the 6-DoF fit picks up from parallax.
+          M = cv.estimateAffine2D(
+            srcMat, dstMat, inliers, cv.RANSAC, RANSAC_THRESHOLD_PX,
+          );
+          if (M && !M.empty()) {
+            // Affine layout [m00 m01 tx; m10 m11 ty]. Nearest similarity:
+            // a = (m00+m11)/2, b = (m10-m01)/2.
+            const a = (M.data64F[0] + M.data64F[4]) / 2;
+            const b = (M.data64F[3] - M.data64F[1]) / 2;
+            const tx = M.data64F[2];
+            const ty = M.data64F[5];
+            const rotMag = Math.abs(Math.atan2(b, a));
+            const scaleMag = Math.abs(Math.sqrt(a * a + b * b) - 1);
+            if (rotMag > MAX_FRAME_ROT || scaleMag > MAX_FRAME_SCALE) {
+              // Spurious rotation/scale — refit translation-only on
+              // RANSAC inliers. The original tx/ty was computed under
+              // the spurious rotation, so it's in the wrong frame and
+              // would accumulate phantom drift across rotated clips.
+              let sumDx = 0;
+              let sumDy = 0;
+              let cnt = 0;
+              for (let i = 0; i < inliers.rows; i++) {
+                if (inliers.data[i] !== 1) continue;
+                const sx = srcMat.data32F[i * 2];
+                const sy = srcMat.data32F[i * 2 + 1];
+                const dx = dstMat.data32F[i * 2];
+                const dy = dstMat.data32F[i * 2 + 1];
+                sumDx += dx - sx;
+                sumDy += dy - sy;
+                cnt++;
+              }
+              if (cnt > 0) {
+                const txOnly = sumDx / cnt;
+                const tyOnly = sumDy / cnt;
+                if (Math.abs(txOnly) > aw * 0.25 || Math.abs(tyOnly) > ah * 0.25) {
+                  frameTX = 0;
+                  frameTY = 0;
+                } else {
+                  frameTX = txOnly * scaleBack;
+                  frameTY = tyOnly * scaleBack;
+                }
+              }
+            } else {
+              frameA = a;
+              frameB = b;
+              frameTX = tx * scaleBack;
+              frameTY = ty * scaleBack;
+            }
+          }
+        }
+      }
+
+      // Re-detect or carry forward the (round-trip-validated) feature set
+      if (prevPts) prevPts.delete();
+      if (trackedCount < REPLENISH_BELOW) {
+        prevPts = detectFeatures(currGray);
+      } else {
+        prevPts = cv.matFromArray(trackedCount, 1, cv.CV_32FC2, dstPts);
+      }
+
+      if (prevGray) prevGray.delete();
+      prevGray = currGray.clone();
+    } finally {
+      try { currGray?.delete(); } catch { /* */ }
+      try { nextPts?.delete(); } catch { /* */ }
+      try { status?.delete(); } catch { /* */ }
+      try { err?.delete(); } catch { /* */ }
+      try { backPts?.delete(); } catch { /* */ }
+      try { backStatus?.delete(); } catch { /* */ }
+      try { backErr?.delete(); } catch { /* */ }
+      try { M?.delete(); } catch { /* */ }
+      try { srcMat?.delete(); } catch { /* */ }
+      try { dstMat?.delete(); } catch { /* */ }
+      try { inliers?.delete(); } catch { /* */ }
+    }
+    return { a: frameA, b: frameB, tx: frameTX, ty: frameTY };
+  };
+
+  const dispose = () => {
+    try { prevGray?.delete(); } catch { /* */ }
+    try { prevPts?.delete(); } catch { /* */ }
+    try { mask?.delete(); } catch { /* */ }
+    try { rgba.delete(); } catch { /* */ }
+    try { (winSize as unknown as { delete?: () => void }).delete?.(); } catch { /* */ }
+    try { (lkCriteria as unknown as { delete?: () => void }).delete?.(); } catch { /* */ }
+    prevGray = null;
+    prevPts = null;
+    mask = null;
+  };
+
+  return { width: aw, height: ah, step, dispose };
+}
+
 export async function analyzeVideoOpenCV(
   video: HTMLVideoElement,
   onProgress: (p: number) => void,
   signal?: AbortSignal,
 ): Promise<AnalysisResult> {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-  const cv = window.cv as unknown as CV;
-  if (!cv || !cv.Mat) throw new Error("OpenCV.js is not initialised");
 
   const duration = video.duration;
   if (!Number.isFinite(duration) || duration <= 0) {
@@ -84,17 +348,18 @@ export async function analyzeVideoOpenCV(
   const srcH = video.videoHeight;
   if (!srcW || !srcH) throw new Error("Video has no usable size");
 
-  // Run the tracker at 640px wide. OpenCV's pyramid + LK is fast enough
-  // that we don't need to go as small as the block-matching analyser.
-  const aw = Math.min(ANALYSIS_W, srcW);
-  const ah = Math.max(1, Math.round((srcH * aw) / srcW));
-  const scaleBack = srcW / aw;
+  const tracker = createOpenCVTracker(srcW, srcH);
+  const aw = tracker.width;
+  const ah = tracker.height;
 
   const canvas = document.createElement("canvas");
   canvas.width = aw;
   canvas.height = ah;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) throw new Error("2D canvas unavailable");
+  if (!ctx) {
+    tracker.dispose();
+    throw new Error("2D canvas unavailable");
+  }
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
 
@@ -124,6 +389,9 @@ export async function analyzeVideoOpenCV(
         video.removeEventListener("error", onErr);
         reject(new Error("Video took too long to load — check the file format and connection"));
       }, 30000);
+    }).catch((e) => {
+      tracker.dispose();
+      throw e;
     });
   }
 
@@ -158,23 +426,6 @@ export async function analyzeVideoOpenCV(
     });
   }
 
-  let prevGray: CvMat | null = null;
-  let prevPts: CvMat | null = null;
-  let mask: CvMat | null = null;
-  // Hoist these once per analyse-call instead of allocating per frame —
-  // OpenCV.js wraps each `new cv.Size`/`cv.TermCriteria` as a wasm
-  // heap entry that doesn't auto-free, so per-frame alloc leaks
-  // thousands of entries on long clips.
-  const winSize = new cv.Size(15, 15);
-  const lkCriteria = new cv.TermCriteria(
-    cv.TermCriteria_EPS | cv.TermCriteria_COUNT, 10, 0.03,
-  );
-  // Persistent RGBA Mat sized once. matFromImageData allocates a fresh
-  // wasm-heap buffer per frame (~aw*ah*4 bytes) — at 60 fps × 2× speed
-  // analysis on a 5-minute clip that's ~36 GB of churn through GC.
-  const persistentRgba = new cv.Mat(ah, aw, 24 /* CV_8UC4 */);
-  const cvImage = persistentRgba as unknown as { data: Uint8Array };
-
   const cumAArr: number[] = [1];
   const cumBArr: number[] = [0];
   const cumTXArr: number[] = [0];
@@ -187,17 +438,6 @@ export async function analyzeVideoOpenCV(
     let finished = false;
     let watchdog: number | null = null;
     let lastWatchdogTime = 0;
-
-    const cleanup = () => {
-      try { prevGray?.delete(); } catch { /* */ }
-      try { prevPts?.delete(); } catch { /* */ }
-      try { mask?.delete(); } catch { /* */ }
-      try { persistentRgba?.delete(); } catch { /* */ }
-      // Free the per-call OpenCV scratch objects too — OpenCV.js wraps
-      // these in wasm-heap allocations that don't get GC'd by JS alone.
-      try { (winSize as unknown as { delete?: () => void }).delete?.(); } catch { /* */ }
-      try { (lkCriteria as unknown as { delete?: () => void }).delete?.(); } catch { /* */ }
-    };
 
     const restore = () => {
       try { video.pause(); } catch { /* */ }
@@ -215,7 +455,7 @@ export async function analyzeVideoOpenCV(
       finished = true;
       if (signal) signal.removeEventListener("abort", onAbort);
       if (watchdog !== null) clearInterval(watchdog);
-      cleanup();
+      tracker.dispose();
       try { video.pause(); } catch { /* */ }
       reject(new DOMException("Aborted", "AbortError"));
     };
@@ -226,7 +466,7 @@ export async function analyzeVideoOpenCV(
       finished = true;
       if (signal) signal.removeEventListener("abort", onAbort);
       if (watchdog !== null) clearInterval(watchdog);
-      cleanup();
+      tracker.dispose();
       restore();
       onProgress(1);
       const detectedRate = duration > 0 ? cumAArr.length / duration : 30;
@@ -235,7 +475,7 @@ export async function analyzeVideoOpenCV(
         cumB: Float32Array.from(cumBArr),
         cumTX: Float32Array.from(cumTXArr),
         cumTY: Float32Array.from(cumTYArr),
-        times: Float32Array.from(timesArr),
+        times: Float64Array.from(timesArr),
         frameCount: cumAArr.length,
         frameRate: detectedRate,
       });
@@ -246,151 +486,25 @@ export async function analyzeVideoOpenCV(
       finished = true;
       if (signal) signal.removeEventListener("abort", onAbort);
       if (watchdog !== null) clearInterval(watchdog);
-      cleanup();
+      tracker.dispose();
       restore();
       reject(err);
     };
 
-    const detectFeatures = (gray: CvMat): CvMat => {
-      const corners = new cv.Mat();
-      if (!mask) mask = new cv.Mat();
-      cv.goodFeaturesToTrack(
-        gray, corners, MAX_FEATURES, FEATURE_QUALITY, MIN_FEATURE_DISTANCE,
-        mask, 3,
-      );
-      return corners;
-    };
-
     const processFrame = (mediaTime: number) => {
       if (video.readyState < 2) return;
-      let currGray: CvMat | null = null;
-      let nextPts: CvMat | null = null;
-      let status: CvMat | null = null;
-      let err: CvMat | null = null;
-      let M: CvMat | null = null;
-      let srcMat: CvMat | null = null;
-      let dstMat: CvMat | null = null;
-      let inliers: CvMat | null = null;
       try {
         ctx.drawImage(video, 0, 0, aw, ah);
         const imageData = ctx.getImageData(0, 0, aw, ah);
-        // Copy into the persistent Mat instead of allocating a fresh
-        // wasm-heap buffer (matFromImageData) every frame.
-        cvImage.data.set(imageData.data);
-        currGray = new cv.Mat();
-        cv.cvtColor(persistentRgba, currGray, cv.COLOR_RGBA2GRAY);
-
-        let frameA = 1, frameB = 0, frameTX = 0, frameTY = 0;
-        let inlierCount = 0;
-
-        if (prevGray && prevPts && prevPts.rows > 0) {
-          nextPts = new cv.Mat();
-          status = new cv.Mat();
-          err = new cv.Mat();
-          cv.calcOpticalFlowPyrLK(
-            prevGray, currGray, prevPts, nextPts, status, err,
-            winSize, 3, lkCriteria,
-          );
-
-          const srcPts: number[] = [];
-          const dstPts: number[] = [];
-          const n = prevPts.rows;
-          for (let i = 0; i < n; i++) {
-            if (status.data[i] === 1) {
-              srcPts.push(prevPts.data32F[i * 2], prevPts.data32F[i * 2 + 1]);
-              dstPts.push(nextPts.data32F[i * 2], nextPts.data32F[i * 2 + 1]);
-            }
-          }
-          inlierCount = srcPts.length / 2;
-
-          // Was 4 — bumped to 6 so a noisy LK match on a low-texture
-          // underwater frame doesn't fit a similarity through 4
-          // tracking errors and produce a false motion that propagates
-          // to the smoother as shake.
-          if (inlierCount >= 6) {
-            srcMat = cv.matFromArray(inlierCount, 1, cv.CV_32FC2, srcPts);
-            dstMat = cv.matFromArray(inlierCount, 1, cv.CV_32FC2, dstPts);
-            inliers = new cv.Mat();
-            M = cv.estimateAffinePartial2D(
-              srcMat, dstMat, inliers, cv.RANSAC, RANSAC_THRESHOLD_PX,
-            );
-            if (M && !M.empty()) {
-              // OpenCV returns [a -b tx; b a ty] where a = cosθ·s, b = sinθ·s
-              const a = M.data64F[0];
-              const b = M.data64F[3];
-              const tx = M.data64F[2];
-              const ty = M.data64F[5];
-              const rotMag = Math.abs(Math.atan2(b, a));
-              const scaleMag = Math.abs(Math.sqrt(a * a + b * b) - 1);
-              if (rotMag > MAX_FRAME_ROT || scaleMag > MAX_FRAME_SCALE) {
-                // Spurious rotation/scale — refit translation-only on
-                // RANSAC inliers. The original tx/ty was computed under
-                // the spurious rotation, so it's in the wrong frame and
-                // would accumulate phantom drift across rotated clips.
-                let sumDx = 0;
-                let sumDy = 0;
-                let cnt = 0;
-                for (let i = 0; i < inliers.rows; i++) {
-                  if (inliers.data[i] !== 1) continue;
-                  const sx = srcMat.data32F[i * 2];
-                  const sy = srcMat.data32F[i * 2 + 1];
-                  const dx = dstMat.data32F[i * 2];
-                  const dy = dstMat.data32F[i * 2 + 1];
-                  sumDx += dx - sx;
-                  sumDy += dy - sy;
-                  cnt++;
-                }
-                if (cnt > 0) {
-                  const txOnly = sumDx / cnt;
-                  const tyOnly = sumDy / cnt;
-                  if (Math.abs(txOnly) > aw * 0.25 || Math.abs(tyOnly) > ah * 0.25) {
-                    frameTX = 0;
-                    frameTY = 0;
-                  } else {
-                    frameTX = txOnly * scaleBack;
-                    frameTY = tyOnly * scaleBack;
-                  }
-                }
-              } else {
-                frameA = a;
-                frameB = b;
-                frameTX = tx * scaleBack;
-                frameTY = ty * scaleBack;
-              }
-            }
-          }
-        }
+        const t = tracker.step(imageData);
 
         // Compose: cum_new = T · cum_old (LEFT multiplication; the per-frame
         // transform maps prev → curr, cum tracks world → frame-N).
-        const newA = frameA * cA - frameB * cB;
-        const newB = frameB * cA + frameA * cB;
-        const newTX = frameA * cTX - frameB * cTY + frameTX;
-        const newTY = frameB * cTX + frameA * cTY + frameTY;
+        const newA = t.a * cA - t.b * cB;
+        const newB = t.b * cA + t.a * cB;
+        const newTX = t.a * cTX - t.b * cTY + t.tx;
+        const newTY = t.b * cTX + t.a * cTY + t.ty;
         cA = newA; cB = newB; cTX = newTX; cTY = newTY;
-
-        // Re-detect or carry forward feature set
-        if (prevPts) prevPts.delete();
-        if (inlierCount < REPLENISH_BELOW) {
-          prevPts = detectFeatures(currGray);
-        } else if (nextPts && status) {
-          // Carry the inlier subset forward as the next prev
-          const surviving = new cv.Mat(inlierCount, 1, cv.CV_32FC2);
-          let j = 0;
-          for (let i = 0; i < nextPts.rows; i++) {
-            if (status.data[i] === 1) {
-              surviving.data32F[j * 2] = nextPts.data32F[i * 2];
-              surviving.data32F[j * 2 + 1] = nextPts.data32F[i * 2 + 1];
-              j++;
-            }
-          }
-          prevPts = surviving;
-        } else {
-          prevPts = detectFeatures(currGray);
-        }
-
-        if (prevGray) prevGray.delete();
-        prevGray = currGray.clone();
       } catch {
         // Swallow — still push the cumulative so frame indexing stays consistent
       } finally {
@@ -399,14 +513,6 @@ export async function analyzeVideoOpenCV(
         cumTXArr.push(cTX);
         cumTYArr.push(cTY);
         timesArr.push(mediaTime);
-        try { currGray?.delete(); } catch { /* */ }
-        try { nextPts?.delete(); } catch { /* */ }
-        try { status?.delete(); } catch { /* */ }
-        try { err?.delete(); } catch { /* */ }
-        try { M?.delete(); } catch { /* */ }
-        try { srcMat?.delete(); } catch { /* */ }
-        try { dstMat?.delete(); } catch { /* */ }
-        try { inliers?.delete(); } catch { /* */ }
       }
       onProgress(Math.min(1, video.currentTime / duration));
     };
