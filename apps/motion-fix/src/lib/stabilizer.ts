@@ -677,10 +677,14 @@ export function gaussianSmooth(arr: Float32Array, sigma: number): Float32Array {
 }
 
 // L1 path optimisation via ADMM, minus the LP solver.
-//   min w * |p - c|^2 + lambda1 |D1 p|_1 + lambda2 |D2 p|_1
+//   min w * |p - c|^2 + lambda1 |D1 p|_1 + lambda2 |D2 p|_1 + lambda3 |D3 p|_1
 //   s.t. |p - c|_inf <= box
 //
-// `w` (devWeight) is new: scaling the deviation cost down lets the
+// All three of Grundmann's derivative penalties: D1 (velocity → static
+// segments), D2 (acceleration → linear pans), and D3 (jerk → piecewise-
+// constant acceleration, the "professional dolly" ease-in/ease-out feel).
+//
+// `w` (devWeight): scaling the deviation cost down lets the
 // smoother actually saturate the box constraint at high lambdas. Without
 // it, the unweighted ||p-c||² term dominated and the L1 path stayed
 // glued to raw — heavy lambdas only flattened the second derivative,
@@ -690,6 +694,7 @@ function l1Smooth(
   c: Float32Array,
   lambda1: number,
   lambda2: number,
+  lambda3: number,
   box: number,
   iterations = 200,
   devWeight = 1,
@@ -698,16 +703,24 @@ function l1Smooth(
   if (n < 3) return c.slice();
 
   const p = new Float32Array(c);
+  const m2 = Math.max(0, n - 2);
+  const m3 = Math.max(0, n - 3);
   const z1 = new Float32Array(n - 1);
   const u1 = new Float32Array(n - 1);
-  const z2 = new Float32Array(Math.max(0, n - 2));
-  const u2 = new Float32Array(Math.max(0, n - 2));
+  const z2 = new Float32Array(m2);
+  const u2 = new Float32Array(m2);
+  const z3 = new Float32Array(m3);
+  const u3 = new Float32Array(m3);
   const rho1 = 1.0;
   const rho2 = 1.0;
+  const rho3 = 1.0;
 
+  // Quadratic subproblem matrix: devWeight·I + ρ1·D1ᵀD1 + ρ2·D2ᵀD2 +
+  // ρ3·D3ᵀD3 — symmetric positive-definite, bandwidth 3.
   const d0 = new Float32Array(n);
   const d1 = new Float32Array(n - 1);
-  const d2 = new Float32Array(n - 2);
+  const d2 = new Float32Array(m2);
+  const d3 = new Float32Array(m3);
   for (let i = 0; i < n; i++) {
     let dd0 = devWeight;
     if (i === 0 || i === n - 1) dd0 += rho1; else dd0 += 2 * rho1;
@@ -721,12 +734,31 @@ function l1Smooth(
     if (i === 0 || i === n - 2) d1[i] += -2 * rho2;
     else d1[i] += -4 * rho2;
   }
-  for (let i = 0; i < n - 2; i++) d2[i] = rho2;
+  for (let i = 0; i < m2; i++) d2[i] = rho2;
+  // ρ3·D3ᵀD3 accumulated directly from the [-1, 3, -3, 1] stencil rows
+  // rather than closed-form bands. Interior values come out to diag 20,
+  // off1 −15, off2 6, off3 −1 with boundary rows diag [1, 10, 19],
+  // off1 [−3, −12], off2 [3]; accumulation keeps those exact for any n
+  // (the closed-form edge cases overlap when n < 7).
+  const s3 = [-1, 3, -3, 1];
+  for (let r = 0; r < m3; r++) {
+    for (let a = 0; a < 4; a++) {
+      for (let b = a; b < 4; b++) {
+        const v = rho3 * s3[a] * s3[b];
+        const off = b - a;
+        if (off === 0) d0[r + a] += v;
+        else if (off === 1) d1[r + a] += v;
+        else if (off === 2) d2[r + a] += v;
+        else d3[r + a] += v;
+      }
+    }
+  }
 
   const L1 = new Float32Array(n - 1);
-  const L2 = new Float32Array(n - 2);
+  const L2 = new Float32Array(m2);
+  const L3 = new Float32Array(m3);
   const D = new Float32Array(n);
-  factorPentadiag(d0, d1, d2, L1, L2, D);
+  factorBanded(d0, d1, d2, d3, L1, L2, L3, D);
 
   const rhs = new Float32Array(n);
   const tmp = new Float32Array(n);
@@ -738,13 +770,21 @@ function l1Smooth(
       rhs[i] -= v;
       rhs[i + 1] += v;
     }
-    for (let i = 0; i < n - 2; i++) {
+    for (let i = 0; i < m2; i++) {
       const v = rho2 * (z2[i] - u2[i]);
       rhs[i] += v;
       rhs[i + 1] -= 2 * v;
       rhs[i + 2] += v;
     }
-    solvePentadiag(L1, L2, D, rhs, p, tmp);
+    for (let i = 0; i < m3; i++) {
+      // D3ᵀ scatter of the [-1, 3, -3, 1] row.
+      const v = rho3 * (z3[i] - u3[i]);
+      rhs[i] -= v;
+      rhs[i + 1] += 3 * v;
+      rhs[i + 2] -= 3 * v;
+      rhs[i + 3] += v;
+    }
+    solveBanded(L1, L2, L3, D, rhs, p, tmp);
 
     if (box > 0 && Number.isFinite(box)) {
       for (let i = 0; i < n; i++) {
@@ -761,22 +801,34 @@ function l1Smooth(
       u1[i] += (p[i + 1] - p[i]) - z1[i];
     }
     const t2 = lambda2 / rho2;
-    for (let i = 0; i < n - 2; i++) {
+    for (let i = 0; i < m2; i++) {
       const v = (p[i + 2] - 2 * p[i + 1] + p[i]) + u2[i];
       z2[i] = v > t2 ? v - t2 : v < -t2 ? v + t2 : 0;
       u2[i] += (p[i + 2] - 2 * p[i + 1] + p[i]) - z2[i];
+    }
+    const t3 = lambda3 / rho3;
+    for (let i = 0; i < m3; i++) {
+      const d = -p[i] + 3 * p[i + 1] - 3 * p[i + 2] + p[i + 3];
+      const v = d + u3[i];
+      z3[i] = v > t3 ? v - t3 : v < -t3 ? v + t3 : 0;
+      u3[i] += d - z3[i];
     }
   }
 
   return p;
 }
 
-function factorPentadiag(
+// LDLᵀ factorisation of a symmetric positive-definite band matrix with
+// three off-diagonals (heptadiagonal). Recurrences follow from
+// A[i+k][i] = Σ L[i+k][j]·D[j]·L[i][j]; storage L1[k] = L[k+1][k] etc.
+function factorBanded(
   d0: Float32Array,
   d1: Float32Array,
   d2: Float32Array,
+  d3: Float32Array,
   L1: Float32Array,
   L2: Float32Array,
+  L3: Float32Array,
   D: Float32Array,
 ): void {
   const n = d0.length;
@@ -784,19 +836,27 @@ function factorPentadiag(
     let di = d0[i];
     if (i >= 1) di -= L1[i - 1] * L1[i - 1] * D[i - 1];
     if (i >= 2) di -= L2[i - 2] * L2[i - 2] * D[i - 2];
+    if (i >= 3) di -= L3[i - 3] * L3[i - 3] * D[i - 3];
     D[i] = di;
     if (i + 1 < n) {
       let v = d1[i];
       if (i >= 1) v -= L2[i - 1] * L1[i - 1] * D[i - 1];
+      if (i >= 2) v -= L3[i - 2] * L2[i - 2] * D[i - 2];
       L1[i] = v / di;
     }
-    if (i + 2 < n) L2[i] = d2[i] / di;
+    if (i + 2 < n) {
+      let v = d2[i];
+      if (i >= 1) v -= L3[i - 1] * L1[i - 1] * D[i - 1];
+      L2[i] = v / di;
+    }
+    if (i + 3 < n) L3[i] = d3[i] / di;
   }
 }
 
-function solvePentadiag(
+function solveBanded(
   L1: Float32Array,
   L2: Float32Array,
+  L3: Float32Array,
   D: Float32Array,
   rhs: Float32Array,
   out: Float32Array,
@@ -807,6 +867,7 @@ function solvePentadiag(
     let v = rhs[i];
     if (i >= 1) v -= L1[i - 1] * tmp[i - 1];
     if (i >= 2) v -= L2[i - 2] * tmp[i - 2];
+    if (i >= 3) v -= L3[i - 3] * tmp[i - 3];
     tmp[i] = v;
   }
   for (let i = 0; i < n; i++) tmp[i] /= D[i];
@@ -814,6 +875,7 @@ function solvePentadiag(
     let v = tmp[i];
     if (i + 1 < n) v -= L1[i] * out[i + 1];
     if (i + 2 < n) v -= L2[i] * out[i + 2];
+    if (i + 3 < n) v -= L3[i] * out[i + 3];
     out[i] = v;
   }
 }
@@ -854,10 +916,10 @@ export function smoothPath(
   const s = Math.max(0, Math.min(1, smoothing));
   const devWeight = Math.max(0.001, 1 - Math.pow(s, 4));
 
-  const aL1 = l1Smooth(aMed, w.lambda1Rs, w.lambda2Rs, abBox, 200, 1);
-  const bL1 = l1Smooth(bMed, w.lambda1Rs, w.lambda2Rs, abBox, 200, 1);
-  const txL1 = l1Smooth(txMed, w.lambda1T, w.lambda2T, txBox, 200, devWeight);
-  const tyL1 = l1Smooth(tyMed, w.lambda1T, w.lambda2T, tyBox, 200, devWeight);
+  const aL1 = l1Smooth(aMed, w.lambda1Rs, w.lambda2Rs, w.lambda3Rs, abBox, 200, 1);
+  const bL1 = l1Smooth(bMed, w.lambda1Rs, w.lambda2Rs, w.lambda3Rs, abBox, 200, 1);
+  const txL1 = l1Smooth(txMed, w.lambda1T, w.lambda2T, w.lambda3T, txBox, 200, devWeight);
+  const tyL1 = l1Smooth(tyMed, w.lambda1T, w.lambda2T, w.lambda3T, tyBox, 200, devWeight);
 
   const gSigma = w.gaussianSigma;
   const smoothA = gaussianSmooth(aL1, gSigma);
@@ -960,8 +1022,10 @@ function requiredScaleUpForResidual(
 function penaltiesForSmoothing(smoothing: number): {
   lambda1T: number;
   lambda2T: number;
+  lambda3T: number;
   lambda1Rs: number;
   lambda2Rs: number;
+  lambda3Rs: number;
   medianRadius: number;
   gaussianSigma: number;
 } {
@@ -977,11 +1041,16 @@ function penaltiesForSmoothing(smoothing: number): {
   // intuitively means. Wider Gaussian + larger median window absorb
   // any L1 piecewise-linear corners that remain.
   const k = 0.05 + Math.pow(s, 6) * 100000;
+  // λ3 = 10× λ2 mirrors Grundmann's w2=1 / w3=100 ratio mapped onto our
+  // existing λ1/λ2 scaling: the jerk penalty dominates so accelerations
+  // become piecewise-constant (dolly-style ease-in/ease-out).
   return {
     lambda1T: k * 4,
     lambda2T: k * 60,
+    lambda3T: k * 600,
     lambda1Rs: k * 0.005,
     lambda2Rs: k * 0.08,
+    lambda3Rs: k * 0.8,
     medianRadius: Math.min(21, 2 + Math.floor(s * 32)),
     gaussianSigma: 1 + s * 45,
   };

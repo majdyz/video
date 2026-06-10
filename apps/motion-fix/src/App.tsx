@@ -57,6 +57,17 @@ import {
 import { MeshRenderer, VERT_COUNT } from "./lib/mesh-renderer";
 import { LoadAbortedError } from "@dive-tools/shared";
 
+// Rolling-shutter render correction. Row y of frame i was captured at
+// t_i + r·(y/H)·Δt where r is the fraction of the frame interval the
+// CMOS sensor spends reading out rows top-to-bottom — 0.72 is a typical
+// value for phone/action-cam sensors. Strips are only engaged when the
+// stabilising transform moves more than RS_EDGE_THRESHOLD_PX at a frame
+// corner within one readout; below that the skew is sub-pixel and a
+// single whole-frame draw is cheaper.
+const ROLLING_SHUTTER_READOUT = 0.72;
+const RS_STRIP_COUNT = 12;
+const RS_EDGE_THRESHOLD_PX = 0.5;
+
 type Mode = "idle" | "video";
 type Quality = "fast" | "better" | "mesh";
 type AudioRouting = ReturnType<typeof attachAudioRouting>;
@@ -411,6 +422,8 @@ export default function App() {
 
     const splitActive = compareActiveRef.current;
     const split = compareSplitRef.current;
+    const drawSource = (dctx: CanvasRenderingContext2D) =>
+      dctx.drawImage(v, 0, 0, c.width, c.height);
     if (splitActive) {
       // Left of split: original passthrough, no transform.
       ctx.save();
@@ -420,39 +433,35 @@ export default function App() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.drawImage(v, 0, 0, c.width, c.height);
       ctx.restore();
-      // Right of split: stabilised draw.
+      // Right of split: stabilised draw. The strip clips inside
+      // drawStabilized nest within this wipe clip (clip() intersects).
       ctx.save();
       ctx.beginPath();
       ctx.rect(c.width * split, 0, c.width * (1 - split), c.height);
       ctx.clip();
-      applyStabilizedTransform(ctx, c.width, c.height, v.currentTime);
-      ctx.drawImage(v, 0, 0, c.width, c.height);
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      drawStabilized(ctx, c.width, c.height, v.currentTime, drawSource);
       ctx.restore();
       return;
     }
 
-    applyStabilizedTransform(ctx, c.width, c.height, v.currentTime);
-    ctx.drawImage(v, 0, 0, c.width, c.height);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    drawStabilized(ctx, c.width, c.height, v.currentTime, drawSource);
   }
 
-  function applyStabilizedTransform(
-    ctx: CanvasRenderingContext2D,
+  type Matrix2D = [number, number, number, number, number, number];
+
+  // Full stabilising canvas matrix (residual ∘ zoom-about-centre) at an
+  // arbitrary source time, or null when no analysis is loaded.
+  function stabilizedMatrixAtTime(
+    time: number,
     w: number,
     h: number,
-    time: number,
-  ) {
+  ): Matrix2D | null {
     const a = analysisRef.current;
     const sm = smoothRef.current;
+    if (!a || !sm) return null;
     const cropAmt = cropRef.current;
     const effCrop = Math.max(0.015, cropAmt);
     const maxScaleUp = 1 / (1 - 2 * effCrop);
-
-    if (!a || !sm) {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      return;
-    }
 
     // Interpolate the residual transform at the exact playback time —
     // analyser samples are sparse on compute-bound decoders, and using
@@ -487,14 +496,99 @@ export default function App() {
     }
     const cx = w * 0.5;
     const cy = h * 0.5;
-    ctx.setTransform(
+    return [
       scaleUp * t.a,
       scaleUp * t.b,
       -scaleUp * t.b,
       scaleUp * t.a,
       scaleUp * t.tx + cx * (1 - scaleUp),
       scaleUp * t.ty + cy * (1 - scaleUp),
-    );
+    ];
+  }
+
+  // Time the source spent scanning out one full frame, for the rolling-
+  // shutter model. Exact inter-sample delta when available; 1/frameRate
+  // otherwise.
+  function frameDeltaAt(a: AnalysisResult, time: number): number {
+    const idx = frameIndexForTime(a, time);
+    const t = a.times;
+    if (t && idx + 1 < t.length) {
+      const dt = t[idx + 1] - t[idx];
+      if (dt > 0) return dt;
+    }
+    return a.frameRate > 0 ? 1 / a.frameRate : 1 / 30;
+  }
+
+  // Worst displacement disagreement between two matrices over the frame
+  // corners — how much the stabilising transform moves during one
+  // readout, measured at the edges where rolling-shutter skew is largest.
+  function maxCornerDelta(m0: Matrix2D, m1: Matrix2D, w: number, h: number): number {
+    let worst = 0;
+    for (const x of [0, w]) {
+      for (const y of [0, h]) {
+        const dx = (m0[0] - m1[0]) * x + (m0[2] - m1[2]) * y + (m0[4] - m1[4]);
+        const dy = (m0[1] - m1[1]) * x + (m0[3] - m1[3]) * y + (m0[5] - m1[5]);
+        const d = Math.hypot(dx, dy);
+        if (d > worst) worst = d;
+      }
+    }
+    return worst;
+  }
+
+  // Rolling-shutter-aware stabilised draw shared by the live preview and
+  // the WebCodecs export. CMOS readout means row y of a frame was
+  // captured at t + r·(y/H)·Δt, so a single whole-frame transform leaves
+  // residual "jello" skew on whip-pans. When the transform changes
+  // meaningfully within one readout, render in horizontal strips, each
+  // warped with the residual evaluated at its own capture time.
+  function drawStabilized(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    time: number,
+    drawSource: (ctx: CanvasRenderingContext2D) => void,
+  ) {
+    const base = stabilizedMatrixAtTime(time, w, h);
+    if (!base) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      drawSource(ctx);
+      return;
+    }
+    const a = analysisRef.current;
+    let stripped = false;
+    if (a) {
+      const dt = frameDeltaAt(a, time);
+      // Gate on the transform delta across one full readout: static or
+      // slow scenes draw single-pass (12 strip draws would be wasted),
+      // fast pans get the per-strip correction.
+      const end = stabilizedMatrixAtTime(time + ROLLING_SHUTTER_READOUT * dt, w, h);
+      if (end && maxCornerDelta(base, end, w, h) > RS_EDGE_THRESHOLD_PX) {
+        stripped = true;
+        for (let k = 0; k < RS_STRIP_COUNT; k++) {
+          const y0 = Math.floor((k * h) / RS_STRIP_COUNT);
+          const y1 = Math.floor(((k + 1) * h) / RS_STRIP_COUNT);
+          if (y1 <= y0) continue;
+          const rowFrac = ((y0 + y1) * 0.5) / h;
+          const m = stabilizedMatrixAtTime(
+            time + ROLLING_SHUTTER_READOUT * rowFrac * dt, w, h,
+          ) ?? base;
+          // save/restore so the strip clip composes with any outer clip
+          // (compare wipe) instead of replacing it.
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, y0, w, y1 - y0);
+          ctx.clip();
+          ctx.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
+          drawSource(ctx);
+          ctx.restore();
+        }
+      }
+    }
+    if (!stripped) {
+      ctx.setTransform(base[0], base[1], base[2], base[3], base[4], base[5]);
+      drawSource(ctx);
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
   // Compute the smallest scale-up that, combined with this residual, would
@@ -817,11 +911,9 @@ export default function App() {
     if (c.width !== w) c.width = w;
     if (c.height !== h) c.height = h;
     ctx.clearRect(0, 0, w, h);
-    applyStabilizedTransform(ctx, w, h, timeSec);
     // VideoSample.draw composes with the current canvas transform and
     // applies the container rotation metadata internally.
-    frame.draw(ctx, 0, 0, w, h);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    drawStabilized(ctx, w, h, timeSec, (dctx) => frame.draw(dctx, 0, 0, w, h));
   }
 
   // Returns "done" when the export finished, errored terminally, or was
@@ -1376,16 +1468,15 @@ export default function App() {
           <li>
             <b>L1-optimal path smoothing</b> — median pre-filter, then ADMM
             optimisation of{" "}
-            <code>min ‖p − c‖² + λ₁‖D¹p‖₁ + λ₂‖D²p‖₁</code> per path
-            component. The L1 penalties on first and second differences
-            produce piecewise-linear paths with smooth accelerations
-            (hold-still / linear-pan / smooth-accel segments) — the same
-            class of "professional camera move" Grundmann-Kwatra-Essa
-            target. The <code>‖p − c‖∞ ≤ box</code> constraint keeps the
-            virtual path within the crop budget. ADMM solves the
-            pentadiagonal system in O(n) per iteration via banded
-            Cholesky (LDLᵀ); 80 iterations are plenty for paths of
-            thousands of frames.
+            <code>min ‖p − c‖² + λ₁‖D¹p‖₁ + λ₂‖D²p‖₁ + λ₃‖D³p‖₁</code> per
+            path component. The L1 penalties on first, second and third
+            differences produce paths built from hold-still / linear-pan /
+            constant-acceleration segments — the same class of
+            "professional camera move" Grundmann-Kwatra-Essa target, with
+            the jerk term supplying the dolly-style ease-in/ease-out. The{" "}
+            <code>‖p − c‖∞ ≤ box</code> constraint keeps the virtual path
+            within the crop budget. ADMM solves the bandwidth-3 system in
+            O(n) per iteration via banded Cholesky (LDLᵀ).
           </li>
           <li>
             <b>Render</b> — residual{" "}
@@ -1397,12 +1488,12 @@ export default function App() {
         </ul>
         <h4>Caveats</h4>
         <p>
-          We use the L1 first- and second-difference penalty (jitter +
-          acceleration). Grundmann's full formulation includes a third
-          derivative (jerk) and explicit constant/linear/parabolic regime
-          weights via linear programming — that's the natural next
-          upgrade. Rolling-shutter wobble (CMOS skew on whip-pans) needs
-          per-row correction and is out of scope.
+          Grundmann's exact formulation solves the path as a linear
+          program; we approximate it with ADMM, which converges to the
+          same piecewise regimes in practice. Rolling-shutter wobble is
+          corrected at render time with a per-strip transform model
+          (12 strips, readout fraction 0.72) rather than a full per-row
+          rectification.
         </p>
         <h4>Papers</h4>
         <ul>

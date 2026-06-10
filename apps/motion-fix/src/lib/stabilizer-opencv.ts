@@ -45,6 +45,18 @@ const FB_RELATIVE_ERROR = 0.06; // + 6% of the forward displacement
 // across the frame instead of clustering on one textured subject.
 const BUCKET_COLS = 8;
 const BUCKET_ROWS = 6;
+// Homography-as-validator: a cheap parallax/foreground detector. After
+// the similarity fit, an 8-DoF homography is fitted to the same tracks;
+// if its implied motion at the frame corners disagrees with the
+// similarity's by more than a few % of frame width, the scene contains
+// two motion layers (strong parallax / large foreground subject) and the
+// loose RANSAC threshold is averaging them. Re-running the similarity
+// fit with a tight threshold locks onto the dominant rigid plane. The
+// homography itself is never propagated downstream — smoothing and
+// rendering stay similarity-based.
+const HOMOGRAPHY_RANSAC_PX = 3.0;
+const PARALLAX_CORNER_DISAGREE_FRAC = 0.03;
+const PARALLAX_TIGHT_RANSAC_PX = 1.0;
 
 type CV = {
   Mat: new (rows?: number, cols?: number, type?: number) => CvMat;
@@ -65,6 +77,9 @@ type CV = {
   estimateAffine2D: (
     src: CvMat, dst: CvMat, inliers: CvMat, method: number,
     ransacReprojThreshold: number,
+  ) => CvMat;
+  findHomography: (
+    src: CvMat, dst: CvMat, method: number, ransacReprojThreshold: number,
   ) => CvMat;
   COLOR_RGBA2GRAY: number;
   CV_32FC2: number;
@@ -88,6 +103,31 @@ type RvfcMetadata = { mediaTime?: number; presentedFrames?: number };
 type VideoWithRVFC = HTMLVideoElement & {
   requestVideoFrameCallback?: (cb: (now: number, metadata: RvfcMetadata) => void) => number;
 };
+
+// Mean Euclidean disagreement between a homography's and a similarity's
+// implied motion at the four frame corners. Returns 0 (no parallax
+// signal) when the homography is degenerate — a near-zero projective
+// denominator means the H fit itself failed and can't be trusted as a
+// detector.
+function meanCornerDisagreement(
+  hm: Float64Array,
+  a: number, b: number, tx: number, ty: number,
+  w: number, h: number,
+): number {
+  let sum = 0;
+  for (const x of [0, w]) {
+    for (const y of [0, h]) {
+      const den = hm[6] * x + hm[7] * y + hm[8];
+      if (Math.abs(den) < 1e-9) return 0;
+      const hx = (hm[0] * x + hm[1] * y + hm[2]) / den;
+      const hy = (hm[3] * x + hm[4] * y + hm[5]) / den;
+      const sx = a * x - b * y + tx;
+      const sy = b * x + a * y + ty;
+      sum += Math.hypot(hx - sx, hy - sy);
+    }
+  }
+  return sum / 4;
+}
 
 // Stateful frame-pair estimator used by both the playback analyser below
 // and the WebCodecs pipeline (codec-pipeline.ts). Holds the previous gray
@@ -161,6 +201,8 @@ export function createOpenCVTracker(srcW: number, srcH: number): PairwiseTracker
     let srcMat: CvMat | null = null;
     let dstMat: CvMat | null = null;
     let inliers: CvMat | null = null;
+    let homog: CvMat | null = null;
+    let tightInliers: CvMat | null = null;
     let frameA = 1, frameB = 0, frameTX = 0, frameTY = 0;
     try {
       rgbaData.data.set(frame.data);
@@ -244,6 +286,38 @@ export function createOpenCVTracker(srcW: number, srcH: number): PairwiseTracker
           M = cv.estimateAffine2D(
             srcMat, dstMat, inliers, cv.RANSAC, RANSAC_THRESHOLD_PX,
           );
+          // Parallax/foreground detector — see the constant block above.
+          // findHomography needs ≥ 4 correspondences; trackedCount ≥ 6
+          // here, but keep the explicit guard in case thresholds change.
+          if (M && !M.empty() && trackedCount >= 4) {
+            homog = cv.findHomography(
+              srcMat, dstMat, cv.RANSAC, HOMOGRAPHY_RANSAC_PX,
+            );
+            if (homog && !homog.empty()) {
+              const simA = (M.data64F[0] + M.data64F[4]) / 2;
+              const simB = (M.data64F[3] - M.data64F[1]) / 2;
+              const disagree = meanCornerDisagreement(
+                homog.data64F, simA, simB, M.data64F[2], M.data64F[5], aw, ah,
+              );
+              if (disagree > PARALLAX_CORNER_DISAGREE_FRAC * aw) {
+                tightInliers = new cv.Mat();
+                const tightM = cv.estimateAffine2D(
+                  srcMat, dstMat, tightInliers, cv.RANSAC, PARALLAX_TIGHT_RANSAC_PX,
+                );
+                if (tightM && !tightM.empty()) {
+                  // Adopt the tight fit (and its inlier mask, which the
+                  // translation-only refit below reads).
+                  M.delete();
+                  M = tightM;
+                  inliers.delete();
+                  inliers = tightInliers;
+                  tightInliers = null;
+                } else {
+                  try { tightM?.delete(); } catch { /* */ }
+                }
+              }
+            }
+          }
           if (M && !M.empty()) {
             // Affine layout [m00 m01 tx; m10 m11 ty]. Nearest similarity:
             // a = (m00+m11)/2, b = (m10-m01)/2.
@@ -314,6 +388,8 @@ export function createOpenCVTracker(srcW: number, srcH: number): PairwiseTracker
       try { srcMat?.delete(); } catch { /* */ }
       try { dstMat?.delete(); } catch { /* */ }
       try { inliers?.delete(); } catch { /* */ }
+      try { homog?.delete(); } catch { /* */ }
+      try { tightInliers?.delete(); } catch { /* */ }
     }
     return { a: frameA, b: frameB, tx: frameTX, ty: frameTY };
   };
