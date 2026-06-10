@@ -29,7 +29,7 @@ import {
   useVideoPlaybackState,
 } from "@dive-tools/shared";
 import "@dive-tools/shared/theme.css";
-import { Renderer, computeStats, type Settings, type Stats } from "./lib/correct";
+import { Renderer, computeStats, lerpStats, isSceneCut, IDENTITY_MATRIX, type Settings, type Stats } from "./lib/correct";
 import { parseCube } from "./lib/lut";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
 import { isFunieCached, isFunieReady, loadFunie, FUNIE_SIZE_MB } from "./lib/funie-loader";
@@ -39,16 +39,18 @@ import { runFunie, lerpTransferToIdentity } from "./lib/funie-runner";
 type Mode = "idle" | "photo" | "video";
 type Quality = "classical" | "ai";
 
-// Defaults retuned against bornfree/dive-color-corrector's constants
-// (MIN_AVG_RED=60, BLUE_MAGIC_VALUE=1.2, THRESHOLD_RATIO=2000) and the
-// Ancuti 2018 fusion-input recipe (gamma-corrected branch ≈ 0.9–0.95).
+// The classical pipeline is now the "blue magic" filter matrix (the
+// dive-color-corrector algorithm): castStrength maps to the target mean
+// red of the depth-adaptive search (0.4 → the canonical MIN_AVG_RED=60),
+// and the matrix performs red reconstruction + white balance + stretch
+// in one affine transform. Post-tone knobs default neutral because the
+// matrix already does the heavy lifting.
 const SHALLOW_SETTINGS: Settings = {
-  intensity: 0.55,
-  castStrength: 0.35,
-  saturation: 1.10,
-  gamma: 1.00,
-  contrast: 0.20,
-  clahe: 0.15,
+  intensity: 0.85,
+  castStrength: 0.3,
+  saturation: 1.0,
+  gamma: 1.0,
+  contrast: 0.0,
   lutMix: 1.0,
 };
 
@@ -57,22 +59,20 @@ const SHALLOW_SETTINGS: Settings = {
 // gone. Used to be the default; Shallow now is, because Reef pushes
 // some shots into oversaturated cyan-white highlights.
 const REEF_SETTINGS: Settings = {
-  intensity: 0.85,
-  castStrength: 0.65,
-  saturation: 1.25,
-  gamma: 0.92,
-  contrast: 0.35,
-  clahe: 0.35,
+  intensity: 1.0,
+  castStrength: 0.4,
+  saturation: 1.0,
+  gamma: 1.0,
+  contrast: 0.05,
   lutMix: 1.0,
 };
 
 const DEEP_SETTINGS: Settings = {
-  intensity: 1.00,
-  castStrength: 0.90,
-  saturation: 1.40,
-  gamma: 0.80,
-  contrast: 0.45,
-  clahe: 0.55,
+  intensity: 1.0,
+  castStrength: 0.7,
+  saturation: 1.05,
+  gamma: 0.98,
+  contrast: 0.1,
   lutMix: 1.0,
 };
 
@@ -88,29 +88,10 @@ const OFF_SETTINGS: Settings = {
   saturation: 1,
   gamma: 1,
   contrast: 0,
-  clahe: 0,
   lutMix: 0,
 };
 
-const IDENTITY_TONE_LUT = (() => {
-  const a = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256; i++) {
-    a[i * 4] = i;
-    a[i * 4 + 1] = i;
-    a[i * 4 + 2] = i;
-    a[i * 4 + 3] = 255;
-  }
-  return a;
-})();
-
-const IDENTITY_STATS: Stats = {
-  mean: [0.5, 0.5, 0.5],
-  wbGain: [1, 1, 1],
-  min: [0, 0, 0],
-  max: [1, 1, 1],
-  alpha: 0,
-  toneLUT: IDENTITY_TONE_LUT,
-};
+const IDENTITY_STATS: Stats = IDENTITY_MATRIX;
 
 // Shallow / Reef / Deep values from the research synthesis above —
 // Shallow scales red compensation low (0–10 m, reds mostly intact);
@@ -454,9 +435,11 @@ export default function App() {
     try {
       const fresh = computeStats(video, video.videoWidth, video.videoHeight, settingsRef.current.castStrength);
       const cur = statsRef.current;
-      if (cur && statsRealRef.current) {
+      if (cur && statsRealRef.current && !isSceneCut(cur, fresh)) {
         statsRef.current = lerpStats(cur, fresh, 0.0375);
       } else {
+        // First refresh or hard scene cut — snap the matrix instead of
+        // EMA-crawling through several seconds of wrong color.
         statsRef.current = fresh;
         statsRealRef.current = true;
       }
@@ -1300,7 +1283,7 @@ export default function App() {
           underwater dataset. It learns the inverse of the underwater
           attenuation directly from data, with no per-image stats to tune. On
           most footage it produces noticeably more natural colour than the
-          classical CLAHE + Shades-of-Gray pipeline, especially on deep / very
+          classical filter-matrix pipeline, especially on deep / very
           green water.
         </p>
         <p>
@@ -1351,62 +1334,47 @@ export default function App() {
         </p>
         <ul>
           <li>
-            <b>Channel compensation</b> — lift the absorbed red and blue
-            channels using the green channel as a guide before any other
-            step. Prevents the purple cast naive white-balance produces on
-            red-deficient images.
+            <b>Depth-adaptive red reconstruction</b> — a 1-D search finds
+            the smallest hue rotation that restores the average red channel
+            to a target level, then red is rebuilt as a weighted mix of R,
+            G and B. Cross-channel mixing re-injects chroma that diagonal
+            white-balance gains mathematically cannot recover once red is
+            gone.
           </li>
           <li>
-            <b>Shades-of-Gray white balance</b> — derive per-channel gains
-            from Minkowski p-norms (p=6) of the compensated image, clamped
-            to a safe range so deep blue scenes can be lifted without
-            blowout.
+            <b>Robust per-channel stretch</b> — instead of fixed
+            percentiles, each channel stretches the dense interval between
+            the largest sparsely-populated histogram gaps; immune to big
+            dark-water or sun-ball regions.
           </li>
           <li>
-            <b>Percentile stretch</b> — bound to <code>[0, 1]</code> with a
-            minimum span floor so flat scenes don't get over-amplified.
-          </li>
-          <li>
-            <b>CLAHE-style luminance equalisation</b> — histogram of the
-            BT.709 luma, clipped at 3% per bin, redistributed; the resulting
-            tone LUT rescales RGB by the <code>L_out / L_in</code> ratio so
-            colour balance is preserved while local contrast comes back.
+            <b>One affine matrix per pixel</b> — the reconstruction and
+            stretch compose into a single 3×3 matrix + offset applied in
+            the shader, so white balance, stretch and saturation happen
+            simultaneously and consistently across the gamut. No per-stage
+            clipping, no halos.
           </li>
           <li>
             <b>Optional Lightroom .cube LUT</b> — packed as a 2D-tiled 3D
             texture, trilinear lookup in the shader.
           </li>
           <li>
-            <b>Adaptive tracking</b> — stats are re-sampled every ~1s and
-            EMA-blended at 15% so cast changes through a clip
-            (descent, scene cuts) are tracked without flicker.
+            <b>Temporal stability</b> — the matrix is re-derived a few
+            times per second and EMA-blended element-wise; hard scene cuts
+            snap instead of crawling.
           </li>
         </ul>
-        <h4>Papers</h4>
+        <h4>References</h4>
         <ul>
           <li>
-            Ancuti, Ancuti, De Vleeschouwer, Bekaert (2018) —{" "}
+            The "blue magic" filter-matrix algorithm:{" "}
             <a
-              href="https://ieeexplore.ieee.org/document/8059845"
+              href="https://github.com/nikolajbech/underwater-image-color-correction"
               target="_blank"
               rel="noopener noreferrer"
             >
-              Color Balance and Fusion for Underwater Image Enhancement (IEEE TIP)
+              nikolajbech/underwater-image-color-correction
             </a>
-          </li>
-          <li>
-            Finlayson & Trezzi (2004) —{" "}
-            <a
-              href="https://ivrl.epfl.ch/wp-content/uploads/2018/08/Finlayson_2004.pdf"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Shades of Gray and Colour Constancy (CIC)
-            </a>
-          </li>
-          <li>
-            Pizer et al. (1987) — Adaptive Histogram Equalization and its
-            Variations (CLAHE)
           </li>
           <li>
             Reference impl that informed defaults:{" "}
@@ -1500,7 +1468,7 @@ export default function App() {
                 aria-pressed={quality === "classical"}
               >
                 <span className="model-title">Classical</span>
-                <span className="model-sub">CLAHE + Shades-of-Gray, runs on every device.</span>
+                <span className="model-sub">Dive+-style color matrix, runs on every device.</span>
               </button>
               <button
                 type="button"
@@ -1623,8 +1591,6 @@ export default function App() {
               </div>
               <Slider label="LUT mix" value={settings.lutMix} min={0} max={1} step={0.01}
                 onChange={(v) => setSettings((s) => ({ ...s, lutMix: v }))} disabled={recording || !lutName} />
-              <Slider label="CLAHE" value={settings.clahe} min={0} max={1} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, clahe: v }))} disabled={recording} />
               <Slider label="Gamma" value={settings.gamma} min={0.5} max={1.5} step={0.01}
                 onChange={(v) => setSettings((s) => ({ ...s, gamma: v }))} disabled={recording} />
               <Slider label="Contrast" value={settings.contrast} min={0} max={1} step={0.01}
@@ -1673,33 +1639,12 @@ export default function App() {
   );
 }
 
-function lerpStats(a: Stats, b: Stats, t: number): Stats {
-  const mix = (x: number, y: number) => x * (1 - t) + y * t;
-  const mix3 = (
-    p: [number, number, number],
-    q: [number, number, number],
-  ): [number, number, number] => [mix(p[0], q[0]), mix(p[1], q[1]), mix(p[2], q[2])];
-  const lutOut = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256 * 4; i++) {
-    lutOut[i] = Math.round(a.toneLUT[i] * (1 - t) + b.toneLUT[i] * t);
-  }
-  return {
-    mean: mix3(a.mean, b.mean),
-    wbGain: mix3(a.wbGain, b.wbGain),
-    min: mix3(a.min, b.min),
-    max: mix3(a.max, b.max),
-    alpha: b.alpha,
-    toneLUT: lutOut,
-  };
-}
-
 function matchesPreset(a: Settings, b: Settings, eps = 0.01) {
   return (
     Math.abs(a.intensity - b.intensity) < eps &&
     Math.abs(a.castStrength - b.castStrength) < eps &&
     Math.abs(a.saturation - b.saturation) < eps &&
     Math.abs(a.gamma - b.gamma) < eps &&
-    Math.abs(a.contrast - b.contrast) < eps &&
-    Math.abs(a.clahe - b.clahe) < eps
+    Math.abs(a.contrast - b.contrast) < eps
   );
 }
