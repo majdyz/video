@@ -113,6 +113,10 @@ export default function App() {
   const rendererRef = useRef<Renderer | null>(null);
   const statsRef = useRef<Stats | null>(null);
   const imageBitmapRef = useRef<ImageBitmap | null>(null);
+  // Last AI model output for the current photo (mode === "photo", AI
+  // quality). Cached so the compare-wipe / paused repaints can re-draw
+  // it without re-running inference on every drag tick.
+  const aiPhotoCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileNameRef = useRef<string>(AQUA_FIX_BRAND.filenamePrefix);
   // URL.createObjectURL of the current source file. Tracked so we can
   // revoke it on teardown / next load instead of leaking blob URLs (and
@@ -229,16 +233,21 @@ export default function App() {
     settingsRef.current = settings;
   }, [settings]);
 
-  // Push the wipe split into the renderer whenever it changes. Renderer
-  // holds the value so per-frame draws (preview + recording) pick it up
-  // without needing to thread it through every render call. The entry
-  // animation overrides via entryAnimSplitRef.
+  // Push the wipe split into the renderer whenever it changes, then
+  // repaint the current still frame. On a paused video or a photo there
+  // is no render loop running, so without the repaint the split value
+  // updates internally but the canvas never redraws — the wipe handle
+  // (a DOM element) slides while the image stays frozen. That was the
+  // "drag does nothing" bug. The entry animation overrides via
+  // entryAnimSplitRef.
   useEffect(() => {
     if (rendererRef.current) {
       rendererRef.current.setSplit(
         entryAnimSplitRef.current ?? (compareActive ? compareSplit : 0),
       );
+      repaintStillFrame();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [compareActive, compareSplit]);
 
   useEffect(() => {
@@ -288,6 +297,7 @@ export default function App() {
         .then((res) => {
           if (myGen !== fileGenRef.current) return;
           if (!rendererRef.current) return;
+          aiPhotoCanvasRef.current = res.canvas;
           rendererRef.current.uploadSource(res.canvas, bitmap.width, bitmap.height);
           rendererRef.current.render(IDENTITY_STATS, OFF_SETTINGS);
         })
@@ -318,6 +328,37 @@ export default function App() {
   });
   const aiTransferInitialisedRef = useRef(false);
   const AI_TRANSFER_SMOOTH = 0.25;
+
+  // Repaint the current still frame (paused video or photo) without
+  // advancing the clock or kicking a new AI inference — used for instant
+  // feedback while dragging the compare wipe. The playing-video render
+  // loop already redraws every frame, so this is a no-op there.
+  function repaintStillFrame() {
+    const r = rendererRef.current;
+    if (!r) return;
+    if (mode === "photo" && imageBitmapRef.current) {
+      const bmp = imageBitmapRef.current;
+      if (qualityRef.current === "ai" && funieReadyRef.current && aiPhotoCanvasRef.current) {
+        r.uploadSource(aiPhotoCanvasRef.current, bmp.width, bmp.height);
+        r.render(IDENTITY_STATS, OFF_SETTINGS);
+      } else if (statsRef.current) {
+        r.uploadSource(bmp, bmp.width, bmp.height);
+        r.render(statsRef.current, settingsRef.current);
+      }
+      return;
+    }
+    const v = videoRef.current;
+    if (mode === "video" && v && v.paused && v.readyState >= 2 && statsRef.current) {
+      if (qualityRef.current === "ai" && funieReadyRef.current) {
+        r.uploadSource(v, v.videoWidth, v.videoHeight);
+        const t = lerpTransferToIdentity(aiTransferRef.current, aiStrengthRef.current);
+        r.renderAi(t.gain, t.bias);
+      } else {
+        r.uploadSource(v, v.videoWidth, v.videoHeight);
+        r.render(statsRef.current, settingsRef.current);
+      }
+    }
+  }
 
   function renderFrameSync(v: HTMLVideoElement) {
     if (!rendererRef.current || !statsRef.current) return;
