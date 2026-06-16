@@ -57,6 +57,9 @@ uniform float u_intensity;
 uniform float u_saturation;
 uniform float u_gamma;
 uniform float u_contrast;
+uniform float u_dehaze;       // 0..1 luminance auto-levels strength
+uniform float u_dehazeLow;    // robust black point (0..1) from analysis frame
+uniform float u_dehazeHigh;   // robust white point (0..1) from analysis frame
 uniform float u_lutSize;
 uniform float u_lutMix;
 uniform float u_splitX;  // Compare-wipe split: pixels with uv.x < splitX show source.
@@ -65,6 +68,20 @@ varying vec2 v_uv;
 vec3 sCurve(vec3 c, float k) {
   vec3 s = c * c * (3.0 - 2.0 * c);
   return mix(c, s, k);
+}
+
+// Dehaze / auto-levels: underwater scattering leaves the frame milky and
+// low-contrast even once the colour is restored. We stretch luminance
+// between robust black/white points (measured per-frame on the analysis
+// downscale, ~0.5% tail clip) and re-apply the ratio to rgb so hue is
+// preserved. Subtle, off when u_dehaze == 0.
+vec3 dehaze(vec3 c) {
+  float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  float range = max(0.2, u_dehazeHigh - u_dehazeLow);
+  float stretched = clamp((lum - u_dehazeLow) / range, 0.0, 1.0);
+  float lumNew = mix(lum, stretched, u_dehaze);
+  float ratio = lum > 0.001 ? lumNew / lum : 1.0;
+  return clamp(c * ratio, 0.0, 1.0);
 }
 
 // 3D LUT laid out as width = size*size, height = size. Each B slice tiles
@@ -107,6 +124,10 @@ void main() {
   float lum = dot(corrected, vec3(0.2126, 0.7152, 0.0722));
   corrected = mix(vec3(lum), corrected, u_saturation);
 
+  // Haze removal runs after colour/tone so it operates on the restored
+  // luminance, not the milky cast.
+  corrected = dehaze(corrected);
+
   // Optional Lightroom .cube LUT overlay
   if (u_lutMix > 0.001 && u_lutSize > 0.5) {
     vec3 graded = sampleLUT(corrected, u_lutSize);
@@ -128,6 +149,10 @@ export type Stats = {
   // Mean of the analysis frame (0..1) — used for scene-cut detection so
   // hard cuts snap the matrix instead of EMA-crawling through wrong color.
   mean: [number, number, number];
+  // Robust post-correction luminance black/white points (0..1) for the
+  // dehaze auto-levels stretch, measured on the analysis frame.
+  dehazeLow: number;
+  dehazeHigh: number;
 };
 
 export type Settings = {
@@ -136,6 +161,7 @@ export type Settings = {
   saturation: number;
   gamma: number;
   contrast: number;
+  dehaze: number;
   lutMix: number;
 };
 
@@ -143,6 +169,8 @@ export const IDENTITY_MATRIX: Stats = {
   matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1],
   offset: [0, 0, 0],
   mean: [0.5, 0.5, 0.5],
+  dehazeLow: 0,
+  dehazeHigh: 1,
 };
 
 function compileShader(gl: WebGLRenderingContext, type: number, source: string) {
@@ -184,6 +212,9 @@ export class Renderer {
     saturation: WebGLUniformLocation;
     gamma: WebGLUniformLocation;
     contrast: WebGLUniformLocation;
+    dehaze: WebGLUniformLocation;
+    dehazeLow: WebGLUniformLocation;
+    dehazeHigh: WebGLUniformLocation;
     lutSize: WebGLUniformLocation;
     lutMix: WebGLUniformLocation;
     splitX: WebGLUniformLocation;
@@ -262,6 +293,9 @@ export class Renderer {
       saturation: gl.getUniformLocation(prog, "u_saturation")!,
       gamma: gl.getUniformLocation(prog, "u_gamma")!,
       contrast: gl.getUniformLocation(prog, "u_contrast")!,
+      dehaze: gl.getUniformLocation(prog, "u_dehaze")!,
+      dehazeLow: gl.getUniformLocation(prog, "u_dehazeLow")!,
+      dehazeHigh: gl.getUniformLocation(prog, "u_dehazeHigh")!,
       lutSize: gl.getUniformLocation(prog, "u_lutSize")!,
       lutMix: gl.getUniformLocation(prog, "u_lutMix")!,
       splitX: gl.getUniformLocation(prog, "u_splitX")!,
@@ -327,6 +361,9 @@ export class Renderer {
     gl.uniform1f(this.locs.saturation, settings.saturation);
     gl.uniform1f(this.locs.gamma, settings.gamma);
     gl.uniform1f(this.locs.contrast, settings.contrast);
+    gl.uniform1f(this.locs.dehaze, settings.dehaze);
+    gl.uniform1f(this.locs.dehazeLow, stats.dehazeLow);
+    gl.uniform1f(this.locs.dehazeHigh, stats.dehazeHigh);
     gl.uniform1f(this.locs.lutSize, this.lutSize);
     gl.uniform1f(this.locs.lutMix, this.lutSize > 0 ? settings.lutMix : 0);
     gl.uniform1f(this.locs.splitX, this.splitX);
@@ -365,11 +402,34 @@ export class Renderer {
 // Constants from the reference implementations.
 const ANALYSIS_SIZE = 256;
 const THRESHOLD_RATIO = 2000; // sparse-bin threshold = numPixels / 2000
-const MAX_HUE_SHIFT = 120; // degrees
+// Hue rotation is capped LOW on purpose. The YUV red-row rotation conserves
+// luminance, so on blue-dominant footage (its blue coefficient goes
+// negative) pushing it far actually *lowers* reconstructed red and
+// desaturates highlights into cyan-white. We use it only as a gentle chroma
+// re-injection and let the gray-world balance below carry the red lift.
+const MAX_HUE_SHIFT = 20; // degrees
 const BLUE_MAGIC_VALUE = 1.2; // extra blue→red weight
 const MIN_GAP = 32; // hardening: stretch interval ≥ 32/256 → gain ≤ 8
 const MAX_CHANNEL_GAIN = 8;
+// Green/blue keep a near-unity stretch so their cap reduction (white balance)
+// isn't undone by an independent per-channel contrast stretch.
+const MAX_GB_GAIN = 1.15;
 const MIN_CHANNEL_GAIN = 0.5;
+// Only remove this fraction of each channel's black point. Slamming the
+// dense-low all the way to 0 on three channels at once crushes shadow
+// detail to pure black; keeping part of it preserves the toe.
+const BLACK_LIFT = 0.5;
+// Cap the gray-world red lift so red near the noise floor can't blow to
+// magenta. 1 + RED_LIFT_MAX * castStrength.
+const RED_LIFT_MAX = 1.6;
+// Hard cap on the combined red-row scale (gray-world balance × histogram
+// gain). Keeps a deep cast from over-reddening midtones / washing sky.
+const MAX_RED_SCALE = 4.0;
+// Scale of the (negative) blue→red term on blue-dominant footage. <1 keeps a
+// very blue sky from over-darkening its red into cyan, while still removing
+// the cast in the midtones.
+const NEG_BLUE_TO_RED = 0.7;
+const DEHAZE_CLIP = 0.005; // luminance tail fraction clipped each end
 
 // Red-row coefficients of the standard YUV hue-rotation matrix. At h=0
 // this returns (1, 0, 0) — identity. As h grows, green and blue feed
@@ -408,8 +468,11 @@ function denseInterval(hist: Uint32Array, sparseThresh: number): [number, number
   return [bestLow, bestHigh];
 }
 
-// castStrength 0..1 → target mean red 40..90 (0–255 scale). 0.4 lands on
-// the canonical MIN_AVG_RED = 60 from the reference implementations.
+// castStrength 0..1 scales how hard we push the red lift and blue-cast
+// reduction. Red is restored toward the GREEN channel (the most reliable
+// mid channel underwater — least attenuated, least cast) rather than an
+// absolute number a bright scene already clears, so the default visibly
+// corrects a typical cast instead of stalling at identity.
 export function computeStats(
   source: CanvasImageSource,
   srcWidth: number,
@@ -418,7 +481,7 @@ export function computeStats(
 ): Stats {
   void srcWidth;
   void srcHeight;
-  const minAvgRed = 40 + Math.max(0, Math.min(1, castStrength)) * 50;
+  const cs = Math.max(0, Math.min(1, castStrength));
 
   const c = scratchCanvas();
   const ctx = c.getContext("2d", { willReadFrequently: true })!;
@@ -438,33 +501,64 @@ export function computeStats(
   const avgG = sumG / total;
   const avgB = sumB / total;
 
-  // Depth-adaptive search: smallest hue shift that restores average red
-  // to the target. Shallow water exits at h=0 (identity).
+  // Bounded hue rotation: smallest shift (capped at MAX_HUE_SHIFT) that
+  // re-injects chroma into red toward the green level. Small by design —
+  // see MAX_HUE_SHIFT note.
+  const redTarget = Math.max(35, avgG);
   let h = 0;
   let coef = hueShiftRed(0);
   while (h <= MAX_HUE_SHIFT) {
     coef = hueShiftRed(h);
     const newR = coef[0] * avgR + coef[1] * avgG + coef[2] * avgB;
-    if (newR >= minAvgRed) break;
+    if (newR >= redTarget) break;
     h += 1;
   }
   const [a, b, cb] = coef;
 
-  // Histograms: R from the reconstructed red, G and B raw.
+  // Gray-world red balance: the rotation rarely reaches green on its own, so
+  // multiply the red row to lift the rotated mean the rest of the way.
+  // Scaled by castStrength and capped (RED_LIFT_MAX) so deep footage gets a
+  // strong lift while shallow stays gentle and red can't blow to magenta.
+  const rotR = a * avgR + b * avgG + cb * avgB;
+  const redBalanceFull = rotR > 1 ? avgG / rotR : 1;
+  const redBalance = Math.max(
+    1,
+    Math.min(1 + RED_LIFT_MAX * cs, 1 + (redBalanceFull - 1) * (0.6 + 0.4 * cs)),
+  );
+
+  // Blue-cast reduction toward green (gray-world on the blue channel). Pulls
+  // the over-bright blue down so water reads as water, not saturated blue.
+  // Stronger than the old build (which left blue dominant) but bounded so it
+  // can't invert to a yellow cast.
+  const blueBalance = Math.max(
+    0.55,
+    avgB > 1 ? 1 + (avgG / avgB - 1) * (0.7 + 0.3 * cs) : 1,
+  );
+
+  // Histograms: R from the balanced reconstructed red, B from the balanced
+  // blue, G raw. Driving the stretch off the post-balance values keeps the
+  // black/white points consistent with the matrix that ships.
   const histR = new Uint32Array(256);
   const histG = new Uint32Array(256);
   const histB = new Uint32Array(256);
   for (let i = 0; i < data.length; i += 4) {
-    const rNew = a * data[i] + b * data[i + 1] + cb * data[i + 2];
+    const rNew = redBalance * (a * data[i] + b * data[i + 1] + cb * data[i + 2]);
+    const bNew = blueBalance * data[i + 2];
     histR[Math.max(0, Math.min(255, rNew | 0))]++;
     histG[data[i + 1]]++;
-    histB[data[i + 2]]++;
+    histB[Math.max(0, Math.min(255, bNew | 0))]++;
   }
 
   const sparseThresh = total / THRESHOLD_RATIO;
   const gains: number[] = [];
   const offsets: number[] = [];
-  for (const hist of [histR, histG, histB]) {
+  // Red gets the wide stretch (it lost contrast underwater); green/blue get a
+  // tight cap so the per-channel stretch can't re-inflate the very blue/green
+  // cast the white balance just pulled out (the dehaze stage handles global
+  // contrast for all channels coherently instead).
+  const maxGains = [MAX_CHANNEL_GAIN, MAX_GB_GAIN, MAX_GB_GAIN];
+  for (let ch = 0; ch < 3; ch++) {
+    const hist = [histR, histG, histB][ch];
     let [low, high] = denseInterval(hist, sparseThresh);
     if (high - low < MIN_GAP) {
       // Degenerate histogram (near-uniform frame) — widen around center.
@@ -473,24 +567,93 @@ export function computeStats(
       high = Math.min(255, low + MIN_GAP);
     }
     let gain = 256 / (high - low);
-    gain = Math.max(MIN_CHANNEL_GAIN, Math.min(MAX_CHANNEL_GAIN, gain));
+    gain = Math.max(MIN_CHANNEL_GAIN, Math.min(maxGains[ch], gain));
     gains.push(gain);
-    offsets.push((-low / 256) * gain);
+    // Soften the black-point removal to protect shadow detail.
+    offsets.push((-low * BLACK_LIFT / 256) * gain);
   }
 
-  // Assemble the matrix. Only the red row has cross-channel terms —
-  // exactly why output stays natural while red returns. Column-major
-  // for uniformMatrix3fv.
+  // Assemble the matrix. Red row carries rotation + red balance; blue row
+  // carries the blue-cast reduction. Column-major for uniformMatrix3fv.
+  //
+  // BLUE_MAGIC amplifies blue→red ONLY when that term is positive (its
+  // original green-water purpose). On blue-dominant footage the rotation's
+  // blue coefficient goes negative; amplifying that subtraction would over-
+  // darken red wherever blue is high and leave it warm where blue is low,
+  // splitting the frame into a cyan sky / red foreground. Keep the negative
+  // term unamplified so the cast is removed evenly.
+  const blueToRed = cb > 0 ? cb * BLUE_MAGIC_VALUE : cb * NEG_BLUE_TO_RED;
   const [gainR, gainG, gainB] = gains;
+  // redBalance (gray-world mean lift) and gainR (histogram contrast stretch)
+  // both push red up, so on a deep cast they compound into a runaway red row
+  // that over-reds the midtones and washes bright sky toward magenta. Cap the
+  // combined red scale; the rotation coefficients keep their ratios so hue is
+  // preserved, just bounded.
+  const redScale = Math.min(MAX_RED_SCALE, redBalance * gainR);
+  const matrix: Stats["matrix"] = [
+    a * redScale, 0, 0,
+    b * redScale, gainG, 0,
+    blueToRed * redScale, 0, blueBalance * gainB,
+  ];
+  const offset: Stats["offset"] = [offsets[0], offsets[1], offsets[2]];
+
+  const [dehazeLow, dehazeHigh] = dehazeLevels(data, matrix, offset);
+
   return {
-    matrix: [
-      a * gainR, 0, 0,
-      b * gainR, gainG, 0,
-      cb * gainR * BLUE_MAGIC_VALUE, 0, gainB,
-    ],
-    offset: [offsets[0], offsets[1], offsets[2]],
+    matrix,
+    offset,
     mean: [avgR / 255, avgG / 255, avgB / 255],
+    dehazeLow,
+    dehazeHigh,
   };
+}
+
+// Robust luminance black/white points for the dehaze stretch. Applies the
+// shipped matrix+offset to the analysis frame, builds a luminance histogram
+// and clips DEHAZE_CLIP of the population off each tail. Done on CPU because
+// the shader can't histogram; the points are stable across the frame.
+function dehazeLevels(
+  data: Uint8ClampedArray,
+  m: Stats["matrix"],
+  o: Stats["offset"],
+): [number, number] {
+  const hist = new Uint32Array(256);
+  let n = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i] / 255;
+    const g = data[i + 1] / 255;
+    const b = data[i + 2] / 255;
+    const cr = clamp01(m[0] * r + m[3] * g + m[6] * b + o[0]);
+    const cg = clamp01(m[1] * r + m[4] * g + m[7] * b + o[1]);
+    const cb = clamp01(m[2] * r + m[5] * g + m[8] * b + o[2]);
+    const lum = 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
+    hist[Math.max(0, Math.min(255, (lum * 255) | 0))]++;
+    n++;
+  }
+  const clip = n * DEHAZE_CLIP;
+  let lo = 0;
+  let hi = 255;
+  let acc = 0;
+  for (let i = 0; i < 256; i++) {
+    acc += hist[i];
+    if (acc >= clip) {
+      lo = i;
+      break;
+    }
+  }
+  acc = 0;
+  for (let i = 255; i >= 0; i--) {
+    acc += hist[i];
+    if (acc >= clip) {
+      hi = i;
+      break;
+    }
+  }
+  return [lo / 255, hi / 255];
+}
+
+function clamp01(x: number): number {
+  return x < 0 ? 0 : x > 1 ? 1 : x;
 }
 
 let scratch: HTMLCanvasElement | null = null;
@@ -520,6 +683,8 @@ export function lerpStats(p: Stats, q: Stats, t: number): Stats {
       mix(p.mean[1], q.mean[1]),
       mix(p.mean[2], q.mean[2]),
     ],
+    dehazeLow: mix(p.dehazeLow, q.dehazeLow),
+    dehazeHigh: mix(p.dehazeHigh, q.dehazeHigh),
   };
 }
 

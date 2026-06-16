@@ -46,40 +46,42 @@ type Quality = "classical" | "ai";
 // in one affine transform. Post-tone knobs default neutral because the
 // matrix already does the heavy lifting.
 const SHALLOW_SETTINGS: Settings = {
-  intensity: 0.85,
-  castStrength: 0.3,
-  saturation: 1.0,
+  intensity: 0.8,
+  castStrength: 0.45,
+  saturation: 1.04,
   gamma: 1.0,
-  contrast: 0.0,
+  contrast: 0.05,
+  dehaze: 0.28,
   lutMix: 1.0,
 };
 
 // Reef preset — heavier red-channel push, suitable for typical 5–15 m
 // reef shots where the cyan cast is pronounced but reds aren't fully
-// gone. Used to be the default; Shallow now is, because Reef pushes
-// some shots into oversaturated cyan-white highlights.
+// gone.
 const REEF_SETTINGS: Settings = {
   intensity: 1.0,
-  castStrength: 0.4,
-  saturation: 1.0,
-  gamma: 1.0,
-  contrast: 0.05,
+  castStrength: 0.6,
+  saturation: 1.07,
+  gamma: 0.99,
+  contrast: 0.08,
+  dehaze: 0.36,
   lutMix: 1.0,
 };
 
 const DEEP_SETTINGS: Settings = {
   intensity: 1.0,
-  castStrength: 0.7,
-  saturation: 1.05,
+  castStrength: 0.78,
+  saturation: 1.1,
   gamma: 0.98,
   contrast: 0.1,
+  dehaze: 0.44,
   lutMix: 1.0,
 };
 
-// Default = Shallow. Most divers shoot in the 0–10 m range where reds
-// are mostly intact, so a light correction gets closer to what the
-// scene looked like in person without the over-corrected cyan-white
-// blowouts the Reef preset can produce on bright shallow shots.
+// Default = Shallow, retuned. The gray-world red restoration now visibly
+// corrects a typical mid-depth cast (red lifted toward green, blue cast
+// pulled down, mild dehaze for clarity) instead of sitting near identity,
+// while staying gentle enough that bright shallow shots don't over-cook.
 const DEFAULT_SETTINGS: Settings = SHALLOW_SETTINGS;
 
 const OFF_SETTINGS: Settings = {
@@ -88,6 +90,7 @@ const OFF_SETTINGS: Settings = {
   saturation: 1,
   gamma: 1,
   contrast: 0,
+  dehaze: 0,
   lutMix: 0,
 };
 
@@ -1636,6 +1639,8 @@ export default function App() {
                 onChange={(v) => setSettings((s) => ({ ...s, gamma: v }))} disabled={recording} />
               <Slider label="Contrast" value={settings.contrast} min={0} max={1} step={0.01}
                 onChange={(v) => setSettings((s) => ({ ...s, contrast: v }))} disabled={recording} />
+              <Slider label="Clarity" value={settings.dehaze} min={0} max={1} step={0.01}
+                onChange={(v) => setSettings((s) => ({ ...s, dehaze: v }))} disabled={recording} />
             </AdvancedDisclosure>
             )}
 
@@ -1686,6 +1691,7 @@ function matchesPreset(a: Settings, b: Settings, eps = 0.01) {
     Math.abs(a.castStrength - b.castStrength) < eps &&
     Math.abs(a.saturation - b.saturation) < eps &&
     Math.abs(a.gamma - b.gamma) < eps &&
-    Math.abs(a.contrast - b.contrast) < eps
+    Math.abs(a.contrast - b.contrast) < eps &&
+    Math.abs(a.dehaze - b.dehaze) < eps
   );
 }
