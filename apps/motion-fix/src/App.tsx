@@ -831,6 +831,17 @@ export default function App() {
     return e instanceof DOMException && e.name === "AbortError";
   }
 
+  // Release the screen wake lock on every recording exit path. Without
+  // this, the early-return error paths in recordVideoInner (MediaRecorder
+  // ctor failure, play() rejection) leaked the lock acquired moments
+  // earlier and kept the screen awake indefinitely after a failed save.
+  function releaseWakeLock() {
+    if (wakeLockRef.current) {
+      wakeLockRef.current.release().catch(() => undefined);
+      wakeLockRef.current = null;
+    }
+  }
+
   function cancelAnalysis() {
     if (analysisAbortRef.current) {
       analysisAbortRef.current.abort();
@@ -1089,6 +1100,7 @@ export default function App() {
     } catch (e) {
       audioCapture.cleanup();
       recordingFlagRef.current = false;
+      releaseWakeLock();
       setError("Recording failed: " + (e instanceof Error ? e.message : String(e)));
       startPreview();
       return;
@@ -1265,6 +1277,7 @@ export default function App() {
         // ignore
       }
       sinkRef.current = null;
+      releaseWakeLock();
       setRecording(false);
       setError("Couldn't start playback for recording: " + (e instanceof Error ? e.message : String(e)));
       startPreview();

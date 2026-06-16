@@ -724,22 +724,28 @@ function l1Smooth(
   for (let i = 0; i < n; i++) {
     let dd0 = devWeight;
     if (i === 0 || i === n - 1) dd0 += rho1; else dd0 += 2 * rho1;
-    if (i === 0 || i === n - 1) dd0 += rho2;
-    else if (i === 1 || i === n - 2) dd0 += 5 * rho2;
-    else dd0 += 6 * rho2;
     d0[i] = dd0;
   }
-  for (let i = 0; i < n - 1; i++) {
-    d1[i] = -rho1;
-    if (i === 0 || i === n - 2) d1[i] += -2 * rho2;
-    else d1[i] += -4 * rho2;
+  for (let i = 0; i < n - 1; i++) d1[i] = -rho1;
+  // ρ2·D2ᵀD2 and ρ3·D3ᵀD3 accumulated directly from their stencil rows
+  // ([1,−2,1] and [-1,3,-3,1]) rather than closed-form bands. The
+  // closed-form D2 diagonal (5·ρ2 at rows 1 / n−2) was wrong at n===3,
+  // where index 1 is simultaneously row 1 AND row n−2 yet is touched by
+  // only ONE D2 row, not two — it produced 5·ρ2 instead of the correct
+  // 4·ρ2, corrupting the smoother on exactly-3-frame clips. Stencil
+  // accumulation keeps every boundary row exact for any n.
+  const s2 = [1, -2, 1];
+  for (let r = 0; r < m2; r++) {
+    for (let a = 0; a < 3; a++) {
+      for (let b = a; b < 3; b++) {
+        const v = rho2 * s2[a] * s2[b];
+        const off = b - a;
+        if (off === 0) d0[r + a] += v;
+        else if (off === 1) d1[r + a] += v;
+        else d2[r + a] += v;
+      }
+    }
   }
-  for (let i = 0; i < m2; i++) d2[i] = rho2;
-  // ρ3·D3ᵀD3 accumulated directly from the [-1, 3, -3, 1] stencil rows
-  // rather than closed-form bands. Interior values come out to diag 20,
-  // off1 −15, off2 6, off3 −1 with boundary rows diag [1, 10, 19],
-  // off1 [−3, −12], off2 [3]; accumulation keeps those exact for any n
-  // (the closed-form edge cases overlap when n < 7).
   const s3 = [-1, 3, -3, 1];
   for (let r = 0; r < m3; r++) {
     for (let a = 0; a < 4; a++) {

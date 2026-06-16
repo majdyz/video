@@ -220,11 +220,15 @@ export async function exportWithCodec(
           timestamp: sample.timestamp,
           duration: sample.duration,
         });
-        // Awaiting add() is the encoder backpressure mechanism — without
-        // it the decode loop outruns the encoder and buffers raw 4K
-        // frames until the tab dies.
-        await videoSource.add(rendered);
-        rendered.close();
+        // close() in finally so a rejecting add() (encoder error) can't
+        // leak this frame's backing buffer. Awaiting add() is the encoder
+        // backpressure mechanism — without it the decode loop outruns the
+        // encoder and buffers raw 4K frames until the tab dies.
+        try {
+          await videoSource.add(rendered);
+        } finally {
+          rendered.close();
+        }
         if (duration > 0) onProgress(Math.min(1, sample.timestamp / duration));
       } finally {
         sample.close();
