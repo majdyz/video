@@ -78,11 +78,13 @@ const DEEP_SETTINGS: Settings = {
   lutMix: 1.0,
 };
 
-// Default = Shallow, retuned. The gray-world red restoration now visibly
-// corrects a typical mid-depth cast (red lifted toward green, blue cast
-// pulled down, mild dehaze for clarity) instead of sitting near identity,
-// while staying gentle enough that bright shallow shots don't over-cook.
-const DEFAULT_SETTINGS: Settings = SHALLOW_SETTINGS;
+// Default = Reef (the mid preset), not Shallow. Real dive footage is
+// typically shot deep enough that the cast is pronounced, and repeated
+// user feedback was that the gentle Shallow default still under-delivered
+// on first impression. Reef's stronger gray-world lift + dehaze makes the
+// out-of-the-box result clearly corrected; Shallow stays available for
+// bright near-surface shots that would otherwise over-cook.
+const DEFAULT_SETTINGS: Settings = REEF_SETTINGS;
 
 const OFF_SETTINGS: Settings = {
   intensity: 0,
