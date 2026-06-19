@@ -1473,6 +1473,13 @@ export default function App() {
             active={compareActive}
             value={compareSplit}
             onChange={setCompareSplit}
+            onLiveChange={(v) => {
+              // Drive the split + repaint synchronously during the drag —
+              // no setState, so the image tracks the finger frame-for-frame
+              // and can't lag behind the handle.
+              rendererRef.current?.setSplit(v);
+              repaintStillFrame();
+            }}
             onToggle={() => setCompareActive((a) => !a)}
             canvasRef={canvasRef}
           />

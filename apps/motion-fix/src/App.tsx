@@ -1590,6 +1590,13 @@ export default function App() {
             active={compareActive}
             value={compareSplit}
             onChange={setCompareSplit}
+            onLiveChange={(v) => {
+              // Push straight to the ref the draw loop reads + redraw the
+              // current frame synchronously, so the wipe tracks the finger
+              // without a React render per move.
+              compareSplitRef.current = v;
+              drawStabilizedFrame();
+            }}
             onToggle={() => setCompareActive((a) => !a)}
             canvasRef={canvasRef}
           />

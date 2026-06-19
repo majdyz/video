@@ -280,17 +280,31 @@ export function CompareWipe({
   active,
   value,
   onChange,
+  onLiveChange,
   onToggle,
   canvasRef,
 }: {
   active: boolean;
   value: number;
+  // Commit a new split (called once, on pointer release) — drives React state.
   onChange: (v: number) => void;
+  // Live split during a drag (called on every pointer move). The consumer
+  // should push it straight to the renderer + repaint SYNCHRONOUSLY here,
+  // bypassing React state, so the image tracks the finger with zero lag and
+  // can't desync from the handle.
+  onLiveChange?: (v: number) => void;
   onToggle: () => void;
   canvasRef?: React.RefObject<HTMLCanvasElement | null>;
 }) {
   const [rect, setRect] = useState<Rect>({ left: 0, top: 0, width: 0, height: 0 });
   const overlayRef = useRef<HTMLDivElement | null>(null);
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const handleRef = useRef<HTMLDivElement | null>(null);
+  // Drag state lives in refs, not React state — a pointermove must not
+  // trigger a re-render (that was the source of the clunky, laggy feel).
+  const draggingRef = useRef(false);
+  const dragRectRef = useRef<DOMRect | null>(null);
+  const liveValueRef = useRef(value);
 
   // Recompute the canvas's visible content rect on resize and whenever
   // the wipe is toggled on. We only need this when the wipe is active.
@@ -308,18 +322,32 @@ export function CompareWipe({
     };
   }, [active, canvasRef]);
 
-  function pickFromEvent(clientX: number) {
-    const overlay = overlayRef.current;
-    if (!overlay) return;
-    const r = overlay.getBoundingClientRect();
-    if (r.width <= 0) return;
-    const v = (clientX - r.left) / r.width;
-    onChange(Math.max(0, Math.min(1, v)));
+  // Keep the handle/bar DOM in sync with the controlled `value` when NOT
+  // dragging (external changes: entry animation end, programmatic set).
+  // During a drag we position them imperatively instead (see pick()).
+  useEffect(() => {
+    liveValueRef.current = value;
+    if (!draggingRef.current) positionHandle(value);
+  }, [value, rect, active]);
+
+  function positionHandle(v: number) {
+    const pct = `${v * 100}%`;
+    if (barRef.current) barRef.current.style.left = pct;
+    if (handleRef.current) handleRef.current.style.left = pct;
   }
 
-  // Position the overlay over the canvas's actual visible content area
-  // when canvasRef is provided. Without it, fall back to filling the
-  // parent (legacy behavior for callers that don't pass a ref).
+  // Synchronous: move the handle DOM AND drive the renderer split from the
+  // SAME value in the SAME tick, so the line and the image can never drift
+  // apart and there's no React render in the hot path.
+  function pick(clientX: number) {
+    const r = dragRectRef.current ?? overlayRef.current?.getBoundingClientRect();
+    if (!r || r.width <= 0) return;
+    const v = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+    liveValueRef.current = v;
+    positionHandle(v);
+    onLiveChange?.(v);
+  }
+
   const overlayStyle: React.CSSProperties = canvasRef
     ? {
         position: "absolute",
@@ -364,20 +392,34 @@ export function CompareWipe({
             // play/pause) doesn't fire when the user finishes a drag.
             e.stopPropagation();
             (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-            pickFromEvent(e.clientX);
+            draggingRef.current = true;
+            // Cache the overlay rect once for the whole drag — avoids a
+            // layout read per move and keeps the mapping stable.
+            dragRectRef.current = (e.currentTarget as HTMLElement).getBoundingClientRect();
+            pick(e.clientX);
           }}
           onPointerMove={(e) => {
-            if (!(e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId)) return;
-            pickFromEvent(e.clientX);
+            if (!draggingRef.current) return;
+            pick(e.clientX);
           }}
           onPointerUp={(e) => {
             e.stopPropagation();
             (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+            draggingRef.current = false;
+            dragRectRef.current = null;
+            // Commit the final value to React state once, on release.
+            onChange(liveValueRef.current);
+          }}
+          onPointerCancel={(e) => {
+            (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+            draggingRef.current = false;
+            dragRectRef.current = null;
+            onChange(liveValueRef.current);
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="compare-wipe-bar" style={{ left: `${value * 100}%` }} />
-          <div className="compare-wipe-handle" style={{ left: `${value * 100}%` }}>
+          <div className="compare-wipe-bar" ref={barRef} style={{ left: `${value * 100}%` }} />
+          <div className="compare-wipe-handle" ref={handleRef} style={{ left: `${value * 100}%` }}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M9 6l-4 6 4 6M15 6l4 6-4 6" stroke="currentColor" strokeWidth="2"
                 fill="none" strokeLinecap="round" strokeLinejoin="round" />
