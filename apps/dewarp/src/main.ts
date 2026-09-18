@@ -4,7 +4,7 @@ declare const __BUILD__: string;
 import { warpUniforms, type WarpUniforms } from "./fisheye";
 import { Warper } from "./gpu";
 
-import { exportClip, probe, type ProbeResult } from "./pipeline";
+import { decodeFrameAt, exportClip, probe, type ProbeResult } from "./pipeline";
 import { DEFAULT_PROFILE, PROFILES } from "./profiles";
 
 const app = document.getElementById("app")!;
@@ -69,13 +69,23 @@ async function main() {
   window.addEventListener("unhandledrejection", e => log(`rejected: ${(e.reason as Error)?.message ?? String(e.reason)}`));
   log(`build ${__BUILD__} · ${navigator.userAgent}`);
 
-  const video = el("video", { class: "hidden", playsinline: "", muted: "", preload: "auto" }) as HTMLVideoElement;
-  const before = el("canvas", { class: "before" }) as HTMLCanvasElement;
-  const after = el("canvas", { class: "after" }) as HTMLCanvasElement;
+  const before = el("canvas") as HTMLCanvasElement;
+  const after = el("canvas") as HTMLCanvasElement;
+  const beforeWrap = el("div", { class: "layer before" }, before);
+  const afterWrap = el("div", { class: "layer after" }, after);
   const wipeLine = el("div", { class: "wipe-line" });
-  // The video stays in the document (hidden) so every browser actually loads it.
-  const preview = el("div", { class: "preview" }, video, before, after, wipeLine,
+  const preview = el("div", { class: "preview" }, beforeWrap, afterWrap, wipeLine,
     el("span", { class: "tag before" }, "Before"), el("span", { class: "tag after" }, "After"));
+  // A rotated clip is drawn in its coded orientation and turned upright with CSS, like a player does.
+  const orientPreview = (width: number, height: number, rotation: number) => {
+    const turned = rotation === 90 || rotation === 270;
+    preview.style.aspectRatio = turned ? `${height} / ${width}` : `${width} / ${height}`;
+    for (const c of [before, after]) {
+      c.style.cssText = turned
+        ? `width: calc(100% * ${width} / ${height}); height: auto; aspect-ratio: ${width} / ${height}; left: 50%; top: 50%; transform: translate(-50%, -50%) rotate(${rotation}deg);`
+        : "";
+    }
+  };
   const wipe = slider("Compare", 0, 100, 1, 50, v => `${v}%`);
   const scrub = slider("Frame at", 0, 1, 0.1, 0, fmtTime);
 
@@ -151,11 +161,14 @@ async function main() {
     });
 
   let modeReady = false;
+  // The frame on screen, decoded from the file at the scrub time; sliders repaint it, a scrub replaces it.
+  let previewFrame: VideoFrame | undefined;
+  let previewSeq = 0;
   const makeTarget = (canvas: HTMLCanvasElement, capture: "canvas" | "readback"): PreviewTarget =>
     capture === "canvas"
       ? { kind: "gpu", ctx: warper!.configureCanvas(canvas) }
       : { kind: "2d", ctx: canvas.getContext("2d")! };
-  const paint = async (target: PreviewTarget, source: VideoFrame | HTMLVideoElement, u: WarpUniforms) => {
+  const paint = async (target: PreviewTarget, source: VideoFrame, u: WarpUniforms) => {
     if (target.kind === "gpu") {
       warper!.render(target.ctx, source, u);
       return;
@@ -168,20 +181,15 @@ async function main() {
     }
   };
   let painting = false;
+  let repaintWanted = false;
   const renderPreview = async () => {
-    if (!info || video.readyState < 2 || painting) return;
+    if (!info || !previewFrame) return;
+    if (painting) { repaintWanted = true; return; }
     await gpuReady;
     if (!warper) return;
     painting = true;
+    const source = previewFrame;
     const u = currentUniforms();
-    // A VideoFrame is what the export renders from, so the preview takes the same path.
-    let frame: VideoFrame | undefined;
-    try {
-      frame = new VideoFrame(video);
-    } catch {
-      frame = undefined;
-    }
-    const source = frame ?? video;
     try {
       if (!modeReady) {
         // The first frame decides whether this device can import video into WebGPU and present it.
@@ -199,10 +207,27 @@ async function main() {
     } catch (e) {
       log(`preview failed: ${(e as Error).message}`);
     } finally {
-      frame?.close();
       painting = false;
+      if (repaintWanted) { repaintWanted = false; void renderPreview(); }
     }
   };
+  const loadPreview = async (seconds: number) => {
+    if (!file) return;
+    const seq = ++previewSeq;
+    try {
+      const frame = await decodeFrameAt(file, seconds, log);
+      if (seq !== previewSeq) { frame.close(); return; }
+      previewFrame?.close();
+      previewFrame = frame;
+      await renderPreview();
+    } catch (e) {
+      if (seq !== previewSeq) return;
+      log(`preview decode failed: ${(e as Error).message}`);
+      status.className = "status error";
+      status.textContent = `Could not decode a preview frame: ${(e as Error).message}`;
+    }
+  };
+  let scrubTimer: number | undefined;
 
   const setWipe = () => {
     preview.style.setProperty("--wipe", `${wipe.input.valueAsNumber}%`);
@@ -217,9 +242,10 @@ async function main() {
     k1.input.value = String(p.k1);
     k1.input.dispatchEvent(new Event("input"));
   });
-  scrub.input.addEventListener("input", () => { video.currentTime = scrub.input.valueAsNumber; });
-  video.addEventListener("seeked", renderPreview);
-  video.addEventListener("loadeddata", renderPreview);
+  scrub.input.addEventListener("input", () => {
+    window.clearTimeout(scrubTimer);
+    scrubTimer = window.setTimeout(() => void loadPreview(scrub.input.valueAsNumber), 250);
+  });
 
   fileInput.addEventListener("change", async () => {
     file = fileInput.files?.[0];
@@ -229,6 +255,9 @@ async function main() {
     status.textContent = "";
     exportBtn.disabled = true;
     modeReady = false;
+    previewSeq += 1;
+    previewFrame?.close();
+    previewFrame = undefined;
     meta.textContent = "Reading…";
     try {
       info = await probe(file, log);
@@ -243,7 +272,7 @@ async function main() {
     if (beforeTarget?.kind === "gpu") beforeTarget = { kind: "gpu", ctx: warper!.configureCanvas(before) };
     if (afterTarget?.kind === "gpu") afterTarget = { kind: "gpu", ctx: warper!.configureCanvas(after) };
     if (warper && modeReady) warper.prepareOutput(info.width, info.height);
-    preview.style.aspectRatio = `${info.width} / ${info.height}`;
+    orientPreview(info.width, info.height, info.rotation);
     meta.textContent = `${info.width}×${info.height}, ${info.fps.toFixed(2)} fps, ${fmtTime(info.durationS)}, ${info.codec}${info.hasAudio ? ", audio" : ", no audio"}${info.rotation ? `, rotated ${info.rotation}°` : ""}`;
     scrub.input.max = String(Math.max(0.1, info.durationS - 0.1));
     scrub.input.value = String(Math.min(1, info.durationS / 2));
@@ -252,14 +281,10 @@ async function main() {
       status.textContent = "This is a 10-bit (D-Log M) clip. Version 1 only handles 8-bit; shoot in Normal colour or convert first.";
       return;
     }
-    video.src = URL.createObjectURL(file);
-    video.currentTime = scrub.input.valueAsNumber;
     // Export opens once the first preview frame has settled the GPU path.
     exportBtn.disabled = !modeReady;
-    log("video element loading for the preview");
+    void loadPreview(scrub.input.valueAsNumber);
   });
-  video.addEventListener("error", () => log(`video element error: ${video.error?.message ?? video.error?.code ?? "unknown"}`));
-  video.addEventListener("loadedmetadata", () => log(`video metadata ${video.videoWidth}x${video.videoHeight}, ${video.duration.toFixed(1)} s`));
 
   exportBtn.addEventListener("click", async () => {
     if (!file || !info || !warper) return;

@@ -205,6 +205,103 @@ async function pickEncoderConfig(width: number, height: number, fps: number): Pr
   throw new Error("This browser cannot encode HEVC or H.264 at this size.");
 }
 
+const PREVIEW_MAX_SAMPLES = 240;
+
+/**
+ * Decodes the frame at (or just before) `seconds` without touching the rest of the file: the
+ * sample table says which sync sample to start from, and only that stretch of mdat is read.
+ * Replaces the <video> element for previews, which iOS never fills without playback.
+ */
+export async function decodeFrameAt(file: File, seconds: number, log: (line: string) => void = () => {}): Promise<VideoFrame> {
+  const boxes = await indexTopLevelBoxes(file);
+  const mp4 = createFile();
+  const wantedUs = Math.max(0, seconds) * 1e6;
+  let best: VideoFrame | undefined;
+  let decoder: VideoDecoder | undefined;
+  let failure: Error | undefined;
+  let samplesSeen = 0;
+  let reachedTarget = false;
+  let startOffset = 0;
+  let ready = false;
+
+  const fail = (e: unknown) => { failure ??= e instanceof Error ? e : new Error(String(e)); };
+  const take = (frame: VideoFrame) => {
+    if (frame.timestamp <= wantedUs + 1 || !best) {
+      best?.close();
+      best = frame;
+    } else {
+      frame.close();
+    }
+  };
+
+  const readyPromise = new Promise<void>((resolve, reject) => {
+    mp4.onError = (module: string, message: string) => reject(new Error(`${module}: ${message}`));
+    mp4.onReady = async (info: Movie) => {
+      try {
+        const vt = videoTrack(info);
+        const description = codecDescription(sampleEntry(mp4, vt.id));
+        const config = await firstSupported<VideoDecoderConfig>(
+          ["prefer-hardware", "no-preference"].map(hardwareAcceleration => ({
+            codec: vt.codec,
+            codedWidth: vt.track_width,
+            codedHeight: vt.track_height,
+            ...(description ? { description } : {}),
+            hardwareAcceleration: hardwareAcceleration as HardwareAcceleration,
+          })),
+          c => VideoDecoder.isConfigSupported(c)
+        );
+        if (!config) throw new Error(`This browser cannot decode ${vt.codec}.`);
+        decoder = new VideoDecoder({ output: take, error: fail });
+        decoder.configure(config);
+        mp4.setExtractionOptions(vt.id, "video", { nbSamples: 1 });
+        const seek = mp4.seek(Math.max(0, seconds), true);
+        startOffset = seek.offset;
+        mp4.start();
+        ready = true;
+        resolve();
+      } catch (e) {
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
+    };
+  });
+  mp4.onSamples = (_id: number, _user: unknown, samples: Array<Sample>) => {
+    for (const s of samples) {
+      if (!s.data || reachedTarget || failure) continue;
+      const timestamp = Math.round((s.cts * 1e6) / s.timescale);
+      try {
+        decoder!.decode(new EncodedVideoChunk({ type: s.is_sync ? "key" : "delta", timestamp, duration: Math.round((s.duration * 1e6) / s.timescale), data: s.data }));
+      } catch (e) {
+        fail(e);
+      }
+      samplesSeen += 1;
+      if (timestamp >= wantedUs || samplesSeen >= PREVIEW_MAX_SAMPLES) reachedTarget = true;
+    }
+  };
+
+  try {
+    await feed(file, feedOrder(boxes, false), mp4, () => true, () => Promise.resolve(), () => ready);
+    await readyPromise;
+    // Read the media from the seek point onward, in file order, until the target sample went in.
+    const bodies = feedOrder(boxes, true).filter(b => b.type === "mdat");
+    const fromSeek = bodies
+      .filter(b => b.start + b.size > startOffset)
+      .map(b => (b.start < startOffset ? { ...b, start: startOffset, size: b.start + b.size - startOffset } : b));
+    await feed(file, fromSeek, mp4, () => true, () => Promise.resolve(), () => reachedTarget || failure !== undefined);
+    if (failure) throw failure;
+    if (!decoder) throw new Error("The clip ended before its codec was set up.");
+    await decoder.flush();
+    if (failure) throw failure;
+    if (!best) throw new Error(`No frame decoded near ${seconds.toFixed(1)} s (${samplesSeen} samples read).`);
+    log(`preview frame at ${(best.timestamp / 1e6).toFixed(2)} s from ${samplesSeen} samples`);
+    return best;
+  } catch (e) {
+    best?.close();
+    throw e;
+  } finally {
+    if (decoder && decoder.state !== "closed") decoder.close();
+  }
+}
+
 /** Full export: demux, decode, warp on the GPU, encode, mux. Resolves with the finished MP4. */
 export async function exportClip(opts: ExportOptions): Promise<Blob> {
   const { file, warper, uniforms, passthrough = false, onProgress, signal } = opts;
