@@ -193,10 +193,12 @@ async function main() {
     try {
       if (!modeReady) {
         // The first frame decides whether this device can import video into WebGPU and present it.
-        const { mode, capture } = await warper.ensureModes(source, u);
+        const { mode, capture } = await warper.ensureModes(source, u, log);
         warper.prepareOutput(info.width, info.height);
-        beforeTarget = makeTarget(before, capture);
-        afterTarget = makeTarget(after, capture);
+        // The visible preview presents through the canvas when the device can, else through the export's own frames.
+        const previewKind = capture === "readback" ? "readback" : "canvas";
+        beforeTarget = makeTarget(before, previewKind);
+        afterTarget = makeTarget(after, previewKind);
         modeReady = true;
         log(`GPU paths: input ${mode}, output ${capture}`);
         if (mode === "copy" || capture === "readback") meta.textContent += ` · GPU ${mode}/${capture}`;

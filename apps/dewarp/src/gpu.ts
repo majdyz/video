@@ -3,9 +3,11 @@ import { WARP_WGSL } from "./warp-shader";
 
 export type WarpSource = HTMLVideoElement | VideoFrame;
 export type WarpMode = "external" | "copy";
-export type CaptureMode = "canvas" | "readback";
+/** How a warped frame reaches the encoder: straight from the canvas, via an ImageBitmap, or a texture readback. */
+export type CaptureMode = "canvas" | "bitmap" | "readback";
 
 const PROBE_SIZE = 64;
+const BENCH_FRAMES = 3;
 
 function sourceSize(source: WarpSource): [number, number] {
   return source instanceof VideoFrame
@@ -28,15 +30,18 @@ function frameIsLit(frame: VideoFrame): boolean {
 
 /**
  * One full-screen triangle that resamples a video frame through the fisheye inverse map.
- * Two decisions are made once, on the first frame, by rendering and reading pixels back,
- * because a failed video import or canvas capture does not surface as a catchable error:
- * how a frame gets in ("external" zero-copy import, or "copy" through a 2D canvas) and how
- * the result gets out ("canvas" capture into a VideoFrame, or a texture "readback").
+ * The input path (zero-copy "external" import, or "copy" through a 2D canvas) and the output
+ * path (which CaptureMode) are chosen once on the first frame by rendering and reading pixels
+ * back, since a failed import or capture does not surface as an error, and the capture modes
+ * differ by 10x between browsers, so the fastest lit one wins.
  */
 export class Warper {
   readonly device: GPUDevice;
   mode: WarpMode = "external";
   capture: CaptureMode = "canvas";
+  /** Milliseconds spent in the last renderToFrame, split for the pipeline's timing report. */
+  lastDrawMs = 0;
+  lastCaptureMs = 0;
   private readonly external: GPURenderPipeline;
   private readonly copy: GPURenderPipeline;
   private readonly sampler: GPUSampler;
@@ -49,6 +54,7 @@ export class Warper {
   private outBuffer: GPUBuffer | undefined;
   private outBytesPerRow = 0;
   private decided = false;
+  private deciding: Promise<{ mode: WarpMode; capture: CaptureMode }> | undefined;
 
   private constructor(device: GPUDevice, external: GPURenderPipeline, copy: GPURenderPipeline, sampler: GPUSampler, uniforms: GPUBuffer) {
     this.device = device;
@@ -91,11 +97,11 @@ export class Warper {
     return ctx;
   }
 
-  /** Decides the input and output paths from one frame. A frame that is genuinely black keeps the defaults. */
-  async ensureModes(source: WarpSource, u: WarpUniforms): Promise<{ mode: WarpMode; capture: CaptureMode }> {
+  /** Decides the input and output paths from one frame. Safe to call repeatedly and concurrently. */
+  async ensureModes(source: WarpSource, u: WarpUniforms, log: (line: string) => void = () => {}): Promise<{ mode: WarpMode; capture: CaptureMode }> {
     if (this.decided) return { mode: this.mode, capture: this.capture };
     if (this.deciding) return this.deciding;
-    this.deciding = this.decideModes(source, u);
+    this.deciding = this.decideModes(source, u, log);
     try {
       return await this.deciding;
     } finally {
@@ -103,25 +109,36 @@ export class Warper {
     }
   }
 
-  private deciding: Promise<{ mode: WarpMode; capture: CaptureMode }> | undefined;
-
-  private async decideModes(source: WarpSource, u: WarpUniforms): Promise<{ mode: WarpMode; capture: CaptureMode }> {
+  private async decideModes(source: WarpSource, u: WarpUniforms, log: (line: string) => void): Promise<{ mode: WarpMode; capture: CaptureMode }> {
     const identity = { ...u, strength: 0, zoom: 1 };
     const externalLit = await this.probeInput(source, identity, "external");
     const copyLit = externalLit ? undefined : await this.probeInput(source, identity, "copy");
     if (!externalLit && copyLit) this.mode = "copy";
     const [width, height] = sourceSize(source);
     this.prepareOutput(width, height);
-    let canvasLit = false;
-    try {
-      const f = await this.renderToFrame(source, identity, 0, undefined, "canvas");
-      canvasLit = frameIsLit(f);
-      f.close();
-    } catch (e) {
-      console.warn("Canvas capture failed:", (e as Error).message);
+
+    // Time each capture mode at the real output size; the fastest one that produces a picture wins.
+    const results: string[] = [];
+    let best: { capture: CaptureMode; ms: number } | undefined;
+    for (const capture of ["canvas", "bitmap", "readback"] as CaptureMode[]) {
+      try {
+        let lit = false;
+        const t0 = performance.now();
+        for (let i = 0; i < BENCH_FRAMES; i++) {
+          const f = await this.renderToFrame(source, identity, 0, undefined, capture);
+          if (i === BENCH_FRAMES - 1) lit = frameIsLit(f);
+          f.close();
+        }
+        const ms = (performance.now() - t0) / BENCH_FRAMES;
+        results.push(`${capture} ${ms.toFixed(0)} ms${lit ? "" : " (black)"}`);
+        if (lit && (!best || ms < best.ms)) best = { capture, ms };
+      } catch (e) {
+        results.push(`${capture} failed (${(e as Error).message.split("\n")[0].slice(0, 60)})`);
+      }
     }
-    if (!canvasLit && (externalLit || copyLit)) this.capture = "readback";
-    console.warn(`WebGPU probe: external=${externalLit} copy=${copyLit ?? "skipped"} canvasCapture=${canvasLit} -> ${this.mode}/${this.capture}`);
+    if (best) this.capture = best.capture;
+    log(`capture bench at ${width}x${height}: ${results.join(", ")} -> ${this.capture}`);
+    log(`GPU probe: external=${externalLit} copy=${copyLit ?? "skipped"} -> ${this.mode}/${this.capture}`);
     this.decided = true;
     return { mode: this.mode, capture: this.capture };
   }
@@ -153,18 +170,34 @@ export class Warper {
   /** Warps one frame and hands back a VideoFrame for the encoder. Call prepareOutput first. */
   async renderToFrame(source: WarpSource, u: WarpUniforms, timestamp: number, duration: number | undefined, capture = this.capture): Promise<VideoFrame> {
     if (!this.outCanvas || !this.outCtx || !this.outTexture || !this.outBuffer) throw new Error("prepareOutput was not called");
-    if (capture === "canvas") {
+    const t0 = performance.now();
+    if (capture === "canvas" || capture === "bitmap") {
       this.draw(this.outCtx.getCurrentTexture().createView(), source, u, this.mode);
-      return new VideoFrame(this.outCanvas, { timestamp, duration });
+      const t1 = performance.now();
+      let frame: VideoFrame;
+      if (capture === "canvas") {
+        frame = new VideoFrame(this.outCanvas, { timestamp, duration });
+      } else {
+        const bitmap = this.outCanvas.transferToImageBitmap();
+        try {
+          frame = new VideoFrame(bitmap, { timestamp, duration });
+        } finally {
+          bitmap.close();
+        }
+      }
+      this.lastDrawMs = t1 - t0;
+      this.lastCaptureMs = performance.now() - t1;
+      return frame;
     }
     const { width, height } = this.outTexture;
     this.draw(this.outTexture.createView(), source, u, this.mode);
     const encoder = this.device.createCommandEncoder();
     encoder.copyTextureToBuffer({ texture: this.outTexture }, { buffer: this.outBuffer, bytesPerRow: this.outBytesPerRow }, [width, height]);
     this.device.queue.submit([encoder.finish()]);
+    const t1 = performance.now();
     await this.outBuffer.mapAsync(GPUMapMode.READ);
     try {
-      return new VideoFrame(this.outBuffer.getMappedRange(), {
+      const frame = new VideoFrame(this.outBuffer.getMappedRange(), {
         format: "RGBX",
         codedWidth: width,
         codedHeight: height,
@@ -172,6 +205,9 @@ export class Warper {
         duration,
         layout: [{ offset: 0, stride: this.outBytesPerRow }],
       });
+      this.lastDrawMs = t1 - t0;
+      this.lastCaptureMs = performance.now() - t1;
+      return frame;
     } finally {
       this.outBuffer.unmap();
     }

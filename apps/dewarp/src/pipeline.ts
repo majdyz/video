@@ -313,11 +313,11 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
   const { file, warper, uniforms, passthrough = false, onProgress, log = () => {}, signal } = opts;
   const started = performance.now();
   // Where the time goes, summed per stage and reported every 120 frames.
-  const timing = { warp: 0, encodeCall: 0, roomWait: 0, read: 0, frames: 0, lastReport: 0 };
+  const timing = { draw: 0, capture: 0, encodeCall: 0, roomWait: 0, read: 0, frames: 0, lastReport: 0 };
   const report = () => {
     const n = Math.max(1, timing.frames - timing.lastReport);
-    log(`stages per frame: warp+capture ${(timing.warp / n).toFixed(1)} ms, encode() ${(timing.encodeCall / n).toFixed(1)} ms, waiting for room ${(timing.roomWait / n).toFixed(1)} ms, file read ${(timing.read / n).toFixed(1)} ms, decode queue ${decoder?.decodeQueueSize ?? 0}, encode queue ${encoder?.encodeQueueSize ?? 0}`);
-    timing.warp = timing.encodeCall = timing.roomWait = timing.read = 0;
+    log(`stages per frame (${warper.mode}/${warper.capture}): draw ${(timing.draw / n).toFixed(1)} ms, capture ${(timing.capture / n).toFixed(1)} ms, encode() ${(timing.encodeCall / n).toFixed(1)} ms, waiting for room ${(timing.roomWait / n).toFixed(1)} ms, file read ${(timing.read / n).toFixed(1)} ms, decode queue ${decoder?.decodeQueueSize ?? 0}, encode queue ${encoder?.encodeQueueSize ?? 0}`);
+    timing.draw = timing.capture = timing.encodeCall = timing.roomWait = timing.read = 0;
     timing.lastReport = timing.frames;
   };
   const parts: { position: number; data: Uint8Array<ArrayBuffer> }[] = [];
@@ -372,13 +372,13 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
             timing.encodeCall += performance.now() - t0;
             frame.close();
           } else {
-            const t0 = performance.now();
             const warped = await warper.renderToFrame(frame, uniforms, frame.timestamp, frame.duration ?? undefined);
             frame.close();
+            timing.draw += warper.lastDrawMs;
+            timing.capture += warper.lastCaptureMs;
             const t1 = performance.now();
             encoder!.encode(warped, { keyFrame: decodedFrames % 120 === 0 });
             timing.encodeCall += performance.now() - t1;
-            timing.warp += t1 - t0;
             warped.close();
           }
           decodedFrames += 1;
