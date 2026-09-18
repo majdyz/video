@@ -55,6 +55,16 @@ async function main() {
   const fileInput = el("input", { type: "file", accept: "video/*" }) as HTMLInputElement;
   const fileLabel = el("label", { class: "file" }, fileInput, el("strong", {}, "Pick a clip"), " from the Osmo, MP4 or MOV");
   const meta = el("div", { class: "meta" }, "Nothing loaded.");
+  const logBox = el("pre", { class: "log" });
+  const logPanel = el("details", { class: "logpanel" }, el("summary", {}, "Log"), logBox);
+  const log = (line: string) => {
+    const t = (performance.now() / 1000).toFixed(1).padStart(6);
+    logBox.textContent += `${t}s ${line}\n`;
+    console.log("[dewarp]", line);
+  };
+  window.addEventListener("error", e => log(`error: ${e.message}`));
+  window.addEventListener("unhandledrejection", e => log(`rejected: ${(e.reason as Error)?.message ?? String(e.reason)}`));
+  log(`${navigator.userAgent}`);
 
   const video = el("video", { class: "hidden", playsinline: "", muted: "", preload: "auto" }) as HTMLVideoElement;
   const before = el("canvas", { class: "before" }) as HTMLCanvasElement;
@@ -87,7 +97,7 @@ async function main() {
     el("div", { class: "wrap" },
       el("header", {}, el("h1", {}, "Dewarp ", el("span", {}, "Wide → straight")),
         el("p", {}, "Straightens DJI Osmo Action Wide clips on this device. Nothing is uploaded. Strength around 70% keeps corners natural; 100% is full rectilinear.")),
-      el("div", { class: "card" }, fileLabel, meta),
+      el("div", { class: "card" }, fileLabel, meta, logPanel),
       el("div", { class: "card" }, el("h2", {}, "Preview one frame"), preview, wipe.row, scrub.row),
       el("div", { class: "card" }, el("h2", {}, "Correction"),
         el("div", { class: "row" }, el("span", {}, "Camera"), profileSelect, el("span")),
@@ -104,9 +114,11 @@ async function main() {
   let warper: Warper;
   try {
     warper = await Warper.create();
+    log("WebGPU device ready");
   } catch (e) {
     status.className = "status error";
     status.textContent = `WebGPU failed to start: ${(e as Error).message}`;
+    log(`WebGPU failed: ${(e as Error).message}`);
     return;
   }
   const beforeCtx = warper.configureCanvas(before);
@@ -147,6 +159,7 @@ async function main() {
         // The first frame decides whether this device can import video into WebGPU.
         const { mode, capture } = await warper.ensureModes(source, u);
         modeReady = true;
+        log(`GPU paths: input ${mode}, output ${capture}`);
         if (mode === "copy" || capture === "readback") meta.textContent += ` · GPU ${mode}/${capture}`;
         exportBtn.disabled = !file || !info || info.tenBit;
       }
@@ -176,15 +189,19 @@ async function main() {
 
   fileInput.addEventListener("change", async () => {
     file = fileInput.files?.[0];
-    if (!file) return;
+    if (!file) { log("picker returned no file"); return; }
+    log(`picked "${file.name}" ${file.type || "no type"} ${(file.size / 1e6).toFixed(1)} MB`);
     status.className = "status";
     status.textContent = "";
     exportBtn.disabled = true;
+    modeReady = false;
     meta.textContent = "Reading…";
     try {
-      info = await probe(file);
+      info = await probe(file, log);
+      log(`probe ok: ${info.width}x${info.height} ${info.codec} ${info.frames} frames${info.rotation ? ` rotation ${info.rotation}` : ""}`);
     } catch (e) {
       meta.textContent = `Could not read this file: ${(e as Error).message}`;
+      log(`probe failed: ${(e as Error).message}`);
       return;
     }
     before.width = after.width = info.width;
@@ -202,7 +219,10 @@ async function main() {
     video.currentTime = scrub.input.valueAsNumber;
     // Export opens once the first preview frame has settled the GPU path.
     exportBtn.disabled = !modeReady;
+    log("video element loading for the preview");
   });
+  video.addEventListener("error", () => log(`video element error: ${video.error?.message ?? video.error?.code ?? "unknown"}`));
+  video.addEventListener("loadedmetadata", () => log(`video metadata ${video.videoWidth}x${video.videoHeight}, ${video.duration.toFixed(1)} s`));
 
   exportBtn.addEventListener("click", async () => {
     if (!file || !info) return;
@@ -238,6 +258,7 @@ async function main() {
       const err = e as Error;
       status.className = "status error";
       status.textContent = err.name === "AbortError" ? "Cancelled." : `Export failed: ${err.message}`;
+      log(`export failed: ${err.message}`);
     } finally {
       await keepAwake?.release().catch(() => undefined);
       exportBtn.disabled = false;

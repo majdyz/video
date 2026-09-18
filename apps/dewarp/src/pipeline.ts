@@ -115,8 +115,9 @@ function feedOrder(boxes: BoxRange[], withMedia: boolean): BoxRange[] {
 }
 
 /** Reads the box table and the moov box and reports what the clip is. */
-export async function probe(file: File): Promise<ProbeResult> {
+export async function probe(file: File, log: (line: string) => void = () => {}): Promise<ProbeResult> {
   const boxes = await indexTopLevelBoxes(file);
+  log(`boxes: ${describeBoxes(boxes)}`);
   const mp4 = createFile();
   let ready = false;
   const info = await new Promise<Movie>((resolve, reject) => {
