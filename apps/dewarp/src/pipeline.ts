@@ -191,9 +191,10 @@ async function firstSupported<C>(configs: C[], check: (c: C) => Promise<{ suppor
 async function pickEncoderConfig(width: number, height: number, fps: number): Promise<{ config: VideoEncoderConfig; muxCodec: "hevc" | "avc" }> {
   // About 0.09 bits per pixel per frame, so 4K60 lands near 45 Mbps and 1080p30 near 6 Mbps.
   const bitrate = Math.min(60_000_000, Math.max(6_000_000, Math.round(width * height * fps * 0.09)));
+  // H.264 first: every player opens it and every encoder hands over its avcC header. HEVC is the fallback for sizes H.264 cannot take.
   const candidates: { codec: string; muxCodec: "hevc" | "avc" }[] = [
-    { codec: "hvc1.1.6.L153.B0", muxCodec: "hevc" },
     { codec: "avc1.640034", muxCodec: "avc" },
+    { codec: "hvc1.1.6.L153.B0", muxCodec: "hevc" },
   ];
   for (const c of candidates) {
     const config = await firstSupported<VideoEncoderConfig>(
@@ -492,6 +493,10 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
 
         encoder = new VideoEncoder({
           output: (chunk, meta) => {
+            if (encodedFrames === 0) {
+              const d = meta?.decoderConfig;
+              log(`first encoded chunk: ${chunk.type} ${chunk.byteLength} bytes, decoderConfig ${d ? `${d.codec}, description ${d.description ? (d.description as ArrayBuffer).byteLength ?? "?" : "MISSING"} bytes` : "MISSING"}`);
+            }
             muxer!.addVideoChunk(chunk, meta);
             encodedFrames += 1;
             onProgress({ frames: encodedFrames, totalFrames, elapsedMs: performance.now() - started });
