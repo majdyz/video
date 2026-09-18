@@ -60,7 +60,8 @@ async function main() {
   const before = el("canvas", { class: "before" }) as HTMLCanvasElement;
   const after = el("canvas", { class: "after" }) as HTMLCanvasElement;
   const wipeLine = el("div", { class: "wipe-line" });
-  const preview = el("div", { class: "preview" }, before, after, wipeLine,
+  // The video stays in the document (hidden) so every browser actually loads it.
+  const preview = el("div", { class: "preview" }, video, before, after, wipeLine,
     el("span", { class: "tag before" }, "Before"), el("span", { class: "tag after" }, "After"));
   const wipe = slider("Compare", 0, 100, 1, 50, v => `${v}%`);
   const scrub = slider("Frame at", 0, 1, 0.1, 0, fmtTime);
@@ -110,6 +111,10 @@ async function main() {
   }
   const beforeCtx = warper.configureCanvas(before);
   const afterCtx = warper.configureCanvas(after);
+  warper.device.addEventListener("uncapturederror", e => {
+    status.className = "status error";
+    status.textContent = `GPU error: ${(e as GPUUncapturedErrorEvent).error.message.split("\n")[0]}`;
+  });
 
   let file: File | undefined;
   let info: ProbeResult | undefined;
@@ -125,11 +130,31 @@ async function main() {
       zoom: zoom.input.valueAsNumber / 100,
     });
 
-  const renderPreview = () => {
+  let modeReady = false;
+  const renderPreview = async () => {
     if (!info || video.readyState < 2) return;
     const u = currentUniforms();
-    warper.render(beforeCtx, video, { ...u, strength: 0, zoom: 1 });
-    warper.render(afterCtx, video, u);
+    // A VideoFrame is what the export renders from, so the preview takes the same path.
+    let frame: VideoFrame | undefined;
+    try {
+      frame = new VideoFrame(video);
+    } catch {
+      frame = undefined;
+    }
+    const source = frame ?? video;
+    try {
+      if (!modeReady) {
+        // The first frame decides whether this device can import video into WebGPU.
+        const { mode, capture } = await warper.ensureModes(source, u);
+        modeReady = true;
+        if (mode === "copy" || capture === "readback") meta.textContent += ` · GPU ${mode}/${capture}`;
+        exportBtn.disabled = !file || !info || info.tenBit;
+      }
+      warper.render(beforeCtx, source, { ...u, strength: 0, zoom: 1 });
+      warper.render(afterCtx, source, u);
+    } finally {
+      frame?.close();
+    }
   };
 
   const setWipe = () => {
@@ -175,7 +200,8 @@ async function main() {
     }
     video.src = URL.createObjectURL(file);
     video.currentTime = scrub.input.valueAsNumber;
-    exportBtn.disabled = false;
+    // Export opens once the first preview frame has settled the GPU path.
+    exportBtn.disabled = !modeReady;
   });
 
   exportBtn.addEventListener("click", async () => {
@@ -194,6 +220,8 @@ async function main() {
         file,
         warper,
         uniforms: currentUniforms(),
+        // ?debug=passthrough re-encodes without the GPU, to tell a codec problem from a warp problem.
+        passthrough: new URLSearchParams(location.search).get("debug") === "passthrough",
         signal: abort.signal,
         onProgress: p => {
           progress.value = p.totalFrames ? p.frames / p.totalFrames : 0;

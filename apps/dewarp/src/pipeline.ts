@@ -9,6 +9,8 @@ export type ExportOptions = {
   file: File;
   warper: Warper;
   uniforms: WarpUniforms;
+  /** Skip the GPU and re-encode the decoded frames as they are. */
+  passthrough?: boolean;
   onProgress: (p: ExportProgress) => void;
   signal: AbortSignal;
 };
@@ -31,6 +33,7 @@ type SampleEntry = Record<string, unknown> & { avcC?: Box; hvcC?: Box; esds?: { 
 const READ_CHUNK = 2 * 1024 * 1024;
 const MAX_DECODE_QUEUE = 12;
 const MAX_ENCODE_QUEUE = 8;
+const MAX_PENDING_FRAMES = 4;
 
 function videoTrack(info: Movie) {
   const t = info.videoTracks[0];
@@ -48,8 +51,8 @@ function codecDescription(entry: SampleEntry): Uint8Array<ArrayBuffer> | undefin
   if (!box) return undefined;
   const stream = new DataStream(undefined, 0, Endianness.BIG_ENDIAN);
   box.write(stream);
-  // Skip the 8 byte box header, the decoder wants the payload only.
-  return new Uint8Array(stream.buffer.slice(8));
+  // Skip the 8 byte box header, the decoder wants the payload only, and only the written bytes.
+  return new Uint8Array(stream.buffer.slice(8, stream.byteLength));
 }
 
 function audioSpecificConfig(entry: SampleEntry): Uint8Array | undefined {
@@ -67,7 +70,7 @@ function rotationFromMatrix(matrix: ArrayLike<number> | undefined): 0 | 90 | 180
   return 0;
 }
 
-type BoxRange = { type: string; start: number; size: number };
+type BoxRange = { type: string; start: number; size: number; headerLen: number };
 
 /** Top-level box table, read from the headers only. Cameras put moov after a multi-gigabyte mdat. */
 async function indexTopLevelBoxes(file: File): Promise<BoxRange[]> {
@@ -85,17 +88,30 @@ async function indexTopLevelBoxes(file: File): Promise<BoxRange[]> {
       size = file.size - offset;
     }
     if (size < headerLen) throw new Error(`Corrupt box "${type}" at ${offset}.`);
-    boxes.push({ type, start: offset, size });
+    boxes.push({ type, start: offset, size, headerLen });
     offset += size;
   }
-  if (!boxes.some(b => b.type === "moov")) throw new Error("No moov box found, is this an MP4?");
+  if (!boxes.some(b => b.type === "moov")) throw new Error(`No moov box found, is this an MP4? Boxes: ${describeBoxes(boxes)}`);
   return boxes;
 }
 
-/** Everything but mdat first (so mp4box sees moov before any media), then the mdat boxes in file order. */
+function describeBoxes(boxes: BoxRange[]): string {
+  return boxes.map(b => `${b.type}@${b.start}+${b.size}${b.headerLen === 16 ? "L" : ""}`).join(" ");
+}
+
+/**
+ * mp4box parses boxes in file order and skips an mdat once it has seen its header, so the
+ * headers go in with the other boxes first (which lets a trailing moov parse without the media),
+ * and the mdat bodies follow in file order only when the media is wanted. The header slice is
+ * exactly the box header: a sample that straddles two appended buffers is never served.
+ */
 function feedOrder(boxes: BoxRange[], withMedia: boolean): BoxRange[] {
-  const head = boxes.filter(b => b.type !== "mdat");
-  return withMedia ? [...head, ...boxes.filter(b => b.type === "mdat")] : head;
+  const skeleton = boxes.map(b => (b.type === "mdat" ? { ...b, size: b.headerLen } : b));
+  if (!withMedia) return skeleton;
+  const bodies = boxes
+    .filter(b => b.type === "mdat" && b.size > b.headerLen)
+    .map(b => ({ ...b, start: b.start + b.headerLen, size: b.size - b.headerLen }));
+  return [...skeleton, ...bodies];
 }
 
 /** Reads the box table and the moov box and reports what the clip is. */
@@ -107,7 +123,7 @@ export async function probe(file: File): Promise<ProbeResult> {
     mp4.onError = (module: string, message: string) => reject(new Error(`${module}: ${message}`));
     mp4.onReady = (m: Movie) => { ready = true; resolve(m); };
     void feed(file, feedOrder(boxes, false), mp4, () => true, () => Promise.resolve(), () => ready)
-      .then(() => { if (!ready) reject(new Error("The moov box could not be parsed.")); })
+      .then(() => { if (!ready) reject(new Error(`The moov box could not be parsed. Boxes: ${describeBoxes(boxes)}`)); })
       .catch(reject);
   });
   const t = videoTrack(info);
@@ -155,6 +171,14 @@ async function feed(
   mp4.flush();
 }
 
+/** First config the browser accepts. Chrome answers false to prefer-hardware when it has no hardware codec, so a plain config follows each. */
+async function firstSupported<C>(configs: C[], check: (c: C) => Promise<{ supported?: boolean }>): Promise<C | undefined> {
+  for (const c of configs) {
+    if ((await check(c)).supported) return c;
+  }
+  return undefined;
+}
+
 async function pickEncoderConfig(width: number, height: number, fps: number): Promise<{ config: VideoEncoderConfig; muxCodec: "hevc" | "avc" }> {
   // About 0.09 bits per pixel per frame, so 4K60 lands near 45 Mbps and 1080p30 near 6 Mbps.
   const bitrate = Math.min(60_000_000, Math.max(6_000_000, Math.round(width * height * fps * 0.09)));
@@ -163,24 +187,26 @@ async function pickEncoderConfig(width: number, height: number, fps: number): Pr
     { codec: "avc1.640034", muxCodec: "avc" },
   ];
   for (const c of candidates) {
-    const config: VideoEncoderConfig = {
-      codec: c.codec,
-      width,
-      height,
-      bitrate,
-      framerate: fps,
-      hardwareAcceleration: "prefer-hardware",
-      latencyMode: "quality",
-    };
-    const support = await VideoEncoder.isConfigSupported(config);
-    if (support.supported) return { config, muxCodec: c.muxCodec };
+    const config = await firstSupported<VideoEncoderConfig>(
+      ["prefer-hardware", "no-preference"].map(hardwareAcceleration => ({
+        codec: c.codec,
+        width,
+        height,
+        bitrate,
+        framerate: fps,
+        hardwareAcceleration: hardwareAcceleration as HardwareAcceleration,
+        latencyMode: "quality",
+      })),
+      cfg => VideoEncoder.isConfigSupported(cfg)
+    );
+    if (config) return { config, muxCodec: c.muxCodec };
   }
   throw new Error("This browser cannot encode HEVC or H.264 at this size.");
 }
 
 /** Full export: demux, decode, warp on the GPU, encode, mux. Resolves with the finished MP4. */
 export async function exportClip(opts: ExportOptions): Promise<Blob> {
-  const { file, warper, uniforms, onProgress, signal } = opts;
+  const { file, warper, uniforms, passthrough = false, onProgress, signal } = opts;
   const started = performance.now();
   const parts: { position: number; data: Uint8Array<ArrayBuffer> }[] = [];
   const boxes = await indexTopLevelBoxes(file);
@@ -189,8 +215,6 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
   let decoder: VideoDecoder | undefined;
   let encoder: VideoEncoder | undefined;
   let muxer: Muxer<StreamTarget> | undefined;
-  let canvas: OffscreenCanvas | undefined;
-  let ctx: GPUCanvasContext | undefined;
   let totalFrames = 0;
   let encodedFrames = 0;
   let decodedFrames = 0;
@@ -209,13 +233,51 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
     roomWaiters = [];
     for (const r of w) r();
   };
+  // Decoded frames wait here and are warped one at a time, in order, since a readback is async.
+  const pending: VideoFrame[] = [];
+  let pumping = false;
+  let drainWaiters: (() => void)[] = [];
   const hasRoom = () =>
     !configuring &&
+    pending.length < MAX_PENDING_FRAMES &&
     (decoder?.decodeQueueSize ?? 0) < MAX_DECODE_QUEUE &&
     (encoder?.encodeQueueSize ?? 0) < MAX_ENCODE_QUEUE;
   const waitForRoom = () => new Promise<void>(resolve => { roomWaiters.push(resolve); });
   const stop = () => failure !== undefined || signal.aborted;
   signal.addEventListener("abort", wakeRoom);
+
+  const pump = async () => {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (pending.length > 0) {
+        const frame = pending.shift()!;
+        if (stop()) { frame.close(); continue; }
+        try {
+          if (passthrough) {
+            encoder!.encode(frame, { keyFrame: decodedFrames % 120 === 0 });
+            frame.close();
+          } else {
+            const warped = await warper.renderToFrame(frame, uniforms, frame.timestamp, frame.duration ?? undefined);
+            frame.close();
+            encoder!.encode(warped, { keyFrame: decodedFrames % 120 === 0 });
+            warped.close();
+          }
+          decodedFrames += 1;
+        } catch (e) {
+          frame.close();
+          fail(e);
+        }
+        wakeRoom();
+      }
+    } finally {
+      pumping = false;
+      const w = drainWaiters;
+      drainWaiters = [];
+      for (const r of w) r();
+    }
+  };
+  const drained = () => (pumping || pending.length > 0 ? new Promise<void>(resolve => { drainWaiters.push(resolve); }) : Promise.resolve());
 
   mp4.onError = (module: string, message: string) => fail(new Error(`${module}: ${message}`));
 
@@ -228,15 +290,17 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
         const entry = sampleEntry(mp4, vt.id);
 
         const description = codecDescription(entry);
-        const decoderConfig: VideoDecoderConfig = {
-          codec: vt.codec,
-          codedWidth: vt.track_width,
-          codedHeight: vt.track_height,
-          ...(description ? { description } : {}),
-          hardwareAcceleration: "prefer-hardware",
-        };
-        const decSupport = await VideoDecoder.isConfigSupported(decoderConfig);
-        if (!decSupport.supported) throw new Error(`This browser cannot decode ${vt.codec}.`);
+        const decoderConfig = await firstSupported<VideoDecoderConfig>(
+          ["prefer-hardware", "no-preference"].map(hardwareAcceleration => ({
+            codec: vt.codec,
+            codedWidth: vt.track_width,
+            codedHeight: vt.track_height,
+            ...(description ? { description } : {}),
+            hardwareAcceleration: hardwareAcceleration as HardwareAcceleration,
+          })),
+          c => VideoDecoder.isConfigSupported(c)
+        );
+        if (!decoderConfig) throw new Error(`This browser cannot decode ${vt.codec}.`);
 
         const { config: encoderConfig, muxCodec } = await pickEncoderConfig(vt.track_width, vt.track_height, fps);
 
@@ -270,8 +334,7 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
           firstTimestampBehavior: "offset",
         });
 
-        canvas = new OffscreenCanvas(vt.track_width, vt.track_height);
-        ctx = warper.configureCanvas(canvas);
+        warper.prepareOutput(vt.track_width, vt.track_height);
 
         encoder = new VideoEncoder({
           output: (chunk, meta) => {
@@ -286,18 +349,9 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
 
         decoder = new VideoDecoder({
           output: frame => {
-            try {
-              if (stop()) { frame.close(); return; }
-              warper.render(ctx!, frame, uniforms);
-              const warped = new VideoFrame(canvas!, { timestamp: frame.timestamp, duration: frame.duration ?? undefined });
-              frame.close();
-              encoder!.encode(warped, { keyFrame: decodedFrames % 120 === 0 });
-              warped.close();
-              decodedFrames += 1;
-            } catch (e) {
-              frame.close();
-              fail(e);
-            }
+            if (stop()) { frame.close(); return; }
+            pending.push(frame);
+            void pump();
           },
           error: fail,
         });
@@ -340,9 +394,10 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
     if (stop()) throw failure ?? new DOMException("Export cancelled", "AbortError");
     if (!decoder || !encoder || !muxer) throw new Error("The clip ended before its codecs were set up.");
     await decoder.flush();
+    await drained();
     await encoder.flush();
     if (failure) throw failure;
-    if (encodedFrames === 0) throw new Error("No frames came out of the encoder.");
+    if (encodedFrames === 0) throw new Error(`No frames came out of the encoder (decoded ${decodedFrames} of ${totalFrames}, encoder ${encoder.state}).`);
     muxer.finalize();
   } finally {
     signal.removeEventListener("abort", wakeRoom);
