@@ -28,9 +28,9 @@ export function warpUniforms(p: WarpParams): WarpUniforms {
   const halfDiag = Math.hypot(p.srcWidth, p.srcHeight) / 2;
   const halfFov = (p.fovDeg * Math.PI) / 360;
   const fFish = halfDiag / halfFov;
-  // The output keeps the source's horizontal angle of view, clamped so tan() stays finite.
-  const thetaH = Math.min((p.srcWidth / 2) / fFish, (85 * Math.PI) / 180);
-  const fOut = (p.srcWidth / 2) / Math.tan(thetaH);
+  // The output keeps the center magnification, like the camera's own Standard mode: straight
+  // lines, the edges of the fisheye view fall outside the frame instead of being stretched into it.
+  const fOut = fFish;
   return {
     srcSize: [p.srcWidth, p.srcHeight],
     fFish,

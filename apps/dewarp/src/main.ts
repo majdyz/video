@@ -94,7 +94,7 @@ async function main() {
   profileSelect.value = DEFAULT_PROFILE;
 
   const strength = slider("Strength", 0, 100, 1, 70, v => `${v}%`);
-  const zoom = slider("Zoom", 100, 160, 1, 100, v => `${(v / 100).toFixed(2)}x`);
+  const zoom = slider("Zoom", 60, 160, 1, 100, v => `${(v / 100).toFixed(2)}x`);
   const fov = slider("Source FOV", 100, 180, 1, PROFILES[DEFAULT_PROFILE].fovDeg, v => `${v}°`);
   const k1 = slider("Edge tweak", -0.3, 0.3, 0.01, 0, v => v.toFixed(2));
 
@@ -109,7 +109,7 @@ async function main() {
   app.append(
     el("div", { class: "wrap" },
       el("header", {}, el("h1", {}, "Dewarp ", el("span", {}, "Wide → straight")),
-        el("p", {}, "Straightens DJI Osmo Action Wide clips on this device. Nothing is uploaded. Strength around 70% keeps corners natural; 100% is full rectilinear.")),
+        el("p", {}, "Straightens DJI Osmo Action Wide clips on this device. Nothing is uploaded. Like the camera's Standard mode it keeps the center and crops the edges; Zoom below 1x brings more of the view back, Strength below 100% keeps some of the curve.")),
       el("div", { class: "card" }, fileLabel, meta, logPanel),
       el("div", { class: "card" }, el("h2", {}, "Preview one frame"), preview, wipe.row, scrub.row),
       el("div", { class: "card" }, el("h2", {}, "Correction"),

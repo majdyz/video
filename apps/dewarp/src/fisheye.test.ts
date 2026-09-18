@@ -30,11 +30,15 @@ describe("fisheye inverse map", () => {
     expect(by).toBeCloseTo(2160 - ay, 6);
   });
 
-  it("maps the edge of the frame to the edge of the source at full strength", () => {
-    // The output keeps the source's horizontal angle, so the middle of the right edge lands on the source's right edge.
+  it("keeps the center magnification at full strength, so the frame edge samples inside the source", () => {
     const u = warpUniforms({ ...base, strength: 1 });
+    // Near the center a pixel step maps to a pixel step.
+    const [ax] = samplePoint(u, 1920 + 10, 1080);
+    expect(ax - 1920).toBeCloseTo(10, 1);
+    // The right edge of the output shows content from inside the source: the fisheye's outer view is cropped, not stretched.
     const [sx] = samplePoint(u, 3840, 1080);
-    expect(sx).toBeCloseTo(3840, 3);
+    expect(sx).toBeLessThan(3840);
+    expect(sx).toBeGreaterThan(1920);
   });
 
   it("zoom crops toward the centre", () => {
