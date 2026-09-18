@@ -70,10 +70,14 @@ function rotationFromMatrix(matrix: ArrayLike<number> | undefined): 0 | 90 | 180
 /** Reads enough of the file for the moov box and reports what the clip is. */
 export async function probe(file: File): Promise<ProbeResult> {
   const mp4 = createFile();
+  let ready = false;
   const info = await new Promise<Movie>((resolve, reject) => {
     mp4.onError = (module: string, message: string) => reject(new Error(`${module}: ${message}`));
-    mp4.onReady = resolve;
-    void feed(file, mp4, () => true, () => Promise.resolve(), () => false).catch(reject);
+    mp4.onReady = (m: Movie) => { ready = true; resolve(m); };
+    // Reading stops as soon as the moov box has been parsed, so a long clip is not pulled through.
+    void feed(file, mp4, () => true, () => Promise.resolve(), () => ready)
+      .then(() => { if (!ready) reject(new Error("No moov box found, is this an MP4?")); })
+      .catch(reject);
   });
   const t = videoTrack(info);
   // HEVC Main 10 is "hvc1.2.4.…", H.264 High 10 is profile 0x6e.
@@ -156,6 +160,8 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
   let pendingAudioConfig: { codec: string; description?: Uint8Array; numberOfChannels: number; sampleRate: number } | undefined;
   let failure: Error | undefined;
   let roomWaiters: (() => void)[] = [];
+  // The reader pauses while the codecs are being configured, so no sample arrives before its decoder exists.
+  let configuring = false;
 
   const fail = (e: unknown) => {
     failure ??= e instanceof Error ? e : new Error(String(e));
@@ -167,15 +173,17 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
     for (const r of w) r();
   };
   const hasRoom = () =>
-    (decoder?.decodeQueueSize ?? 0) < MAX_DECODE_QUEUE && (encoder?.encodeQueueSize ?? 0) < MAX_ENCODE_QUEUE;
+    !configuring &&
+    (decoder?.decodeQueueSize ?? 0) < MAX_DECODE_QUEUE &&
+    (encoder?.encodeQueueSize ?? 0) < MAX_ENCODE_QUEUE;
   const waitForRoom = () => new Promise<void>(resolve => { roomWaiters.push(resolve); });
   const stop = () => failure !== undefined || signal.aborted;
   signal.addEventListener("abort", wakeRoom);
 
-  const done = new Promise<void>((resolve, reject) => {
-    mp4.onError = (module: string, message: string) => reject(new Error(`${module}: ${message}`));
+  mp4.onError = (module: string, message: string) => fail(new Error(`${module}: ${message}`));
 
-    mp4.onReady = async (info: Movie) => {
+  mp4.onReady = async (info: Movie) => {
+      configuring = true;
       try {
         const vt = videoTrack(info);
         totalFrames = vt.nb_samples;
@@ -233,7 +241,6 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
             muxer!.addVideoChunk(chunk, meta);
             encodedFrames += 1;
             onProgress({ frames: encodedFrames, totalFrames, elapsedMs: performance.now() - started });
-            if (encodedFrames === totalFrames) resolve();
           },
           error: fail,
         });
@@ -265,11 +272,13 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
         mp4.start();
       } catch (e) {
         fail(e);
-        reject(failure);
+      } finally {
+        configuring = false;
+        wakeRoom();
       }
-    };
+  };
 
-    mp4.onSamples = (_id: number, user: unknown, samples: Array<Sample>) => {
+  mp4.onSamples = (_id: number, user: unknown, samples: Array<Sample>) => {
       if (stop()) return;
       try {
         for (const s of samples) {
@@ -286,29 +295,24 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
         }
       } catch (e) {
         fail(e);
-        reject(failure);
       }
-    };
-  });
+  };
 
   try {
     await feed(file, mp4, hasRoom, waitForRoom, stop);
     if (stop()) throw failure ?? new DOMException("Export cancelled", "AbortError");
-    await decoder!.flush();
-    await encoder!.flush();
-    if (encodedFrames < totalFrames) {
-      // The encoder can drop the last frames under flush on some drivers, take what we have.
-      totalFrames = encodedFrames;
-    }
+    if (!decoder || !encoder || !muxer) throw new Error("The clip ended before its codecs were set up.");
+    await decoder.flush();
+    await encoder.flush();
     if (failure) throw failure;
-    muxer!.finalize();
+    if (encodedFrames === 0) throw new Error("No frames came out of the encoder.");
+    muxer.finalize();
   } finally {
     signal.removeEventListener("abort", wakeRoom);
-    decoder?.close();
-    encoder?.close();
+    if (decoder?.state !== "closed") decoder?.close();
+    if (encoder?.state !== "closed") encoder?.close();
   }
 
-  await done.catch(() => undefined);
   parts.sort((a, b) => a.position - b.position);
   return new Blob(parts.map(p => p.data), { type: "video/mp4" });
 }
