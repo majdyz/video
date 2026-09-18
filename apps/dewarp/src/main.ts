@@ -111,22 +111,26 @@ async function main() {
     )
   );
 
-  let warper: Warper;
-  try {
-    warper = await Warper.create();
-    log("WebGPU device ready");
-  } catch (e) {
-    status.className = "status error";
-    status.textContent = `WebGPU failed to start: ${(e as Error).message}`;
-    log(`WebGPU failed: ${(e as Error).message}`);
-    return;
-  }
-  const beforeCtx = warper.configureCanvas(before);
-  const afterCtx = warper.configureCanvas(after);
-  warper.device.addEventListener("uncapturederror", e => {
-    status.className = "status error";
-    status.textContent = `GPU error: ${(e as GPUUncapturedErrorEvent).error.message.split("\n")[0]}`;
-  });
+  // The GPU comes up in the background so picking and probing a file works (and logs) even if it fails.
+  let warper: Warper | undefined;
+  let beforeCtx: GPUCanvasContext | undefined;
+  let afterCtx: GPUCanvasContext | undefined;
+  const gpuReady = (async () => {
+    try {
+      warper = await Warper.create();
+      beforeCtx = warper.configureCanvas(before);
+      afterCtx = warper.configureCanvas(after);
+      warper.device.addEventListener("uncapturederror", e => {
+        status.className = "status error";
+        status.textContent = `GPU error: ${(e as GPUUncapturedErrorEvent).error.message.split("\n")[0]}`;
+      });
+      log("WebGPU device ready");
+    } catch (e) {
+      status.className = "status error";
+      status.textContent = `WebGPU failed to start: ${(e as Error).message}`;
+      log(`WebGPU failed: ${(e as Error).message}`);
+    }
+  })();
 
   let file: File | undefined;
   let info: ProbeResult | undefined;
@@ -145,6 +149,8 @@ async function main() {
   let modeReady = false;
   const renderPreview = async () => {
     if (!info || video.readyState < 2) return;
+    await gpuReady;
+    if (!warper || !beforeCtx || !afterCtx) return;
     const u = currentUniforms();
     // A VideoFrame is what the export renders from, so the preview takes the same path.
     let frame: VideoFrame | undefined;
@@ -225,7 +231,7 @@ async function main() {
   video.addEventListener("loadedmetadata", () => log(`video metadata ${video.videoWidth}x${video.videoHeight}, ${video.duration.toFixed(1)} s`));
 
   exportBtn.addEventListener("click", async () => {
-    if (!file || !info) return;
+    if (!file || !info || !warper) return;
     abort = new AbortController();
     exportBtn.disabled = true;
     cancelBtn.hidden = false;
