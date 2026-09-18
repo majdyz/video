@@ -327,8 +327,7 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
             codec: muxCodec,
             width: vt.track_width,
             height: vt.track_height,
-            // mp4-muxer wants a whole number here and only uses it as a timescale hint; timestamps carry the real rate.
-            frameRate: Math.max(1, Math.round(fps)),
+            // No frameRate: mp4-muxer would use it as the track timescale, and 59.94 has no whole number. Its default 57600 rounds each frame from the absolute timestamp, so nothing drifts.
             rotation: rotationFromMatrix((vt as unknown as { matrix?: ArrayLike<number> }).matrix),
           },
           audio: audio ? { codec: "aac", numberOfChannels: audio.channel_count, sampleRate: audio.sample_rate } : undefined,
