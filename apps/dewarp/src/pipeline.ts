@@ -76,7 +76,7 @@ function rotationFromMatrix(matrix: ArrayLike<number> | undefined): 0 | 90 | 180
 type BoxRange = { type: string; start: number; size: number; headerLen: number };
 
 /** Top-level box table, read from the headers only. Cameras put moov after a multi-gigabyte mdat. */
-async function indexTopLevelBoxes(file: File): Promise<BoxRange[]> {
+export async function indexTopLevelBoxes(file: Blob): Promise<BoxRange[]> {
   const boxes: BoxRange[] = [];
   let offset = 0;
   while (offset + 8 <= file.size) {
@@ -98,7 +98,7 @@ async function indexTopLevelBoxes(file: File): Promise<BoxRange[]> {
   return boxes;
 }
 
-function describeBoxes(boxes: BoxRange[]): string {
+export function describeBoxes(boxes: BoxRange[]): string {
   return boxes.map(b => `${b.type}@${b.start}+${b.size}${b.headerLen === 16 ? "L" : ""}`).join(" ");
 }
 
@@ -316,7 +316,14 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
   const { file, warper, uniforms, passthrough = false, onProgress, log = () => {}, signal } = opts;
   const started = performance.now();
   const sink: OutputSink = (await FileSink.open()) ?? new MemorySink();
-  log(`output goes to ${sink.kind === "file" ? "private on-device storage" : "memory (no private storage here)"}`);
+  let quota = "";
+  try {
+    const est = await navigator.storage.estimate();
+    quota = `, quota ${Math.round((est.quota ?? 0) / 1e6)} MB, used ${Math.round((est.usage ?? 0) / 1e6)} MB`;
+  } catch {
+    quota = "";
+  }
+  log(`output goes to ${sink.kind === "file" ? "private on-device storage" : "memory (no private storage here)"}${quota}`);
   // Where the time goes, summed per stage and reported every 120 frames.
   const timing = { draw: 0, capture: 0, encodeCall: 0, roomWait: 0, read: 0, frames: 0, lastReport: 0 };
   const report = () => {

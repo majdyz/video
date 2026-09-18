@@ -4,7 +4,7 @@ declare const __BUILD__: string;
 import { warpUniforms, type WarpUniforms } from "./fisheye";
 import { Warper } from "./gpu";
 
-import { decodeFrameAt, exportClip, probe, type ProbeResult } from "./pipeline";
+import { decodeFrameAt, describeBoxes, exportClip, indexTopLevelBoxes, probe, type ProbeResult } from "./pipeline";
 import { DEFAULT_PROFILE, PROFILES } from "./profiles";
 
 const app = document.getElementById("app")!;
@@ -117,6 +117,19 @@ async function main() {
 
   const exportBtn = el("button", {}, "Export") as HTMLButtonElement;
   const cancelBtn = el("button", { class: "secondary" }, "Cancel") as HTMLButtonElement;
+  // iOS: the share sheet saves straight to Photos and skips the blob download, which Safari handles badly for big files.
+  const shareBtn = el("button", { class: "secondary" }, "Save to Photos") as HTMLButtonElement;
+  shareBtn.hidden = true;
+  let result: File | undefined;
+  shareBtn.addEventListener("click", async () => {
+    if (!result) return;
+    try {
+      await navigator.share({ files: [result], title: result.name });
+      log("shared through the system sheet");
+    } catch (e) {
+      log(`share failed: ${(e as Error).message}`);
+    }
+  });
   const progress = el("progress", { max: "1", value: "0" }) as HTMLProgressElement;
   const status = el("div", { class: "status" });
   exportBtn.disabled = true;
@@ -135,7 +148,7 @@ async function main() {
         el("details", {}, el("summary", {}, "Advanced"), fov.row, k1.row)),
       el("div", { class: "card" }, el("h2", {}, "Export"),
         el("p", {}, "Same size and frame rate, audio copied through. The file lands in Downloads; save it to Photos from there. Keep this page in front the whole time: switching apps or locking the phone stops the export, and it cannot resume."),
-        el("div", { class: "actions" }, exportBtn, cancelBtn), progress, status),
+        el("div", { class: "actions" }, exportBtn, cancelBtn, shareBtn), progress, status),
       el("p", {}, "Runs entirely in the browser with WebCodecs and WebGPU. Source on ",
         el("a", { href: "https://github.com/majdyz/video", target: "_blank", rel: "noopener" }, "GitHub"), `. Build ${__BUILD__}.`)
     )
@@ -310,6 +323,8 @@ async function main() {
     abort = new AbortController();
     exportBtn.disabled = true;
     cancelBtn.hidden = false;
+    shareBtn.hidden = true;
+    result = undefined;
     progress.hidden = false;
     progress.value = 0;
     status.className = "status";
@@ -342,11 +357,21 @@ async function main() {
         },
       });
       const name = file.name.replace(/\.[^.]+$/, "") + "-dewarp.mp4";
+      // A look at the finished file's own structure, so a bad file and a bad download can be told apart.
+      try {
+        const boxes = await indexTopLevelBoxes(blob);
+        log(`output ${(blob.size / 1e6).toFixed(1)} MB, boxes: ${describeBoxes(boxes)}`);
+      } catch (e) {
+        log(`output ${(blob.size / 1e6).toFixed(1)} MB, structure check failed: ${(e as Error).message}`);
+      }
+      result = new File([blob], name, { type: "video/mp4" });
+      const canShare = typeof navigator.share === "function" && typeof navigator.canShare === "function" && navigator.canShare({ files: [result] });
+      shareBtn.hidden = !canShare;
       const url = URL.createObjectURL(blob);
       const a = el("a", { href: url, download: name }, name);
-      a.click();
+      if (!canShare) a.click();
       status.textContent = "";
-      status.append("Done. If nothing downloaded, tap ", a, ".");
+      status.append(canShare ? "Done. Tap Save to Photos, or download " : "Done. If nothing downloaded, tap ", a, ".");
     } catch (e) {
       const err = e as Error;
       status.className = "status error";

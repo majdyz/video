@@ -23,7 +23,11 @@ self.onmessage = async (e: MessageEvent<Msg>) => {
       self.postMessage({ type: "opened" });
     } else if (msg.type === "write") {
       if (!handle) throw new Error("not open");
-      handle.write(new Uint8Array(msg.data), { at: msg.position });
+      const written = handle.write(new Uint8Array(msg.data), { at: msg.position });
+      // A short write is how a storage quota shows up; a silently truncated file is worse than a failed export.
+      if (written !== msg.data.byteLength) {
+        throw new Error(`storage wrote ${written} of ${msg.data.byteLength} bytes at ${msg.position} (out of space?)`);
+      }
       size = Math.max(size, msg.position + msg.data.byteLength);
       self.postMessage({ type: "written", position: msg.position });
     } else if (msg.type === "close") {
