@@ -117,7 +117,7 @@ async function main() {
         strength.row, zoom.row,
         el("details", {}, el("summary", {}, "Advanced"), fov.row, k1.row)),
       el("div", { class: "card" }, el("h2", {}, "Export"),
-        el("p", {}, "Same size and frame rate, audio copied through. The file lands in Downloads; save it to Photos from there. Keep this tab in front while it runs."),
+        el("p", {}, "Same size and frame rate, audio copied through. The file lands in Downloads; save it to Photos from there. Keep this page in front the whole time: switching apps or locking the phone stops the export, and it cannot resume."),
         el("div", { class: "actions" }, exportBtn, cancelBtn), progress, status),
       el("p", {}, "Runs entirely in the browser with WebCodecs and WebGPU. Source on ",
         el("a", { href: "https://github.com/majdyz/video", target: "_blank", rel: "noopener" }, "GitHub"), `. Build ${__BUILD__}.`)
@@ -297,6 +297,16 @@ async function main() {
     status.textContent = "Starting…";
     const keepAwake = await (navigator as Navigator & { wakeLock?: { request(t: "screen"): Promise<{ release(): Promise<void> }> } })
       .wakeLock?.request("screen").catch(() => undefined);
+    log(`export start, wake lock ${keepAwake ? "held" : "unavailable"}`);
+    // iOS suspends the codecs and the GPU when the page leaves the front, which kills the export.
+    let wentHidden = false;
+    const onVisibility = () => {
+      if (document.hidden) {
+        wentHidden = true;
+        log("page went to the background during export");
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     try {
       const blob = await exportClip({
         file,
@@ -307,7 +317,8 @@ async function main() {
         signal: abort.signal,
         onProgress: p => {
           progress.value = p.totalFrames ? p.frames / p.totalFrames : 0;
-          status.textContent = `${p.frames} of ${p.totalFrames} frames, ${fmtTime(p.elapsedMs / 1000)} elapsed`;
+          const fps = p.elapsedMs > 0 ? (p.frames / (p.elapsedMs / 1000)).toFixed(1) : "…";
+          status.textContent = `${p.frames} of ${p.totalFrames} frames, ${fps} fps, ${fmtTime(p.elapsedMs / 1000)} elapsed`;
         },
       });
       const name = file.name.replace(/\.[^.]+$/, "") + "-dewarp.mp4";
@@ -319,9 +330,14 @@ async function main() {
     } catch (e) {
       const err = e as Error;
       status.className = "status error";
-      status.textContent = err.name === "AbortError" ? "Cancelled." : `Export failed: ${err.message}`;
+      status.textContent = err.name === "AbortError"
+        ? "Cancelled."
+        : wentHidden
+          ? `Export stopped when the page went to the background (${err.message}). Keep it in front and tap Export again.`
+          : `Export failed: ${err.message}`;
       log(`export failed: ${err.message}`);
     } finally {
+      document.removeEventListener("visibilitychange", onVisibility);
       await keepAwake?.release().catch(() => undefined);
       exportBtn.disabled = false;
       cancelBtn.hidden = true;

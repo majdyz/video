@@ -13,14 +13,15 @@ function sourceSize(source: WarpSource): [number, number] {
     : [source.videoWidth, source.videoHeight];
 }
 
-async function frameIsLit(frame: VideoFrame): Promise<boolean> {
-  const buf = new Uint8Array(frame.allocationSize());
-  const layout = await frame.copyTo(buf);
-  const stride = layout[0]?.stride ?? frame.codedWidth * 4;
-  // Sample a few rows of the first plane; any signal above black counts.
-  for (let y = 0; y < frame.codedHeight; y += Math.max(1, frame.codedHeight >> 5)) {
-    const row = (layout[0]?.offset ?? 0) + y * stride;
-    for (let x = 0; x < stride; x += 7) if (buf[row + x] > 24) return true;
+/** Draws the frame small into a 2D canvas and looks for anything above black. Works where copyTo() does not. */
+function frameIsLit(frame: VideoFrame): boolean {
+  const c = new OffscreenCanvas(32, 32);
+  const ctx = c.getContext("2d");
+  if (!ctx) return false;
+  ctx.drawImage(frame, 0, 0, 32, 32);
+  const px = ctx.getImageData(0, 0, 32, 32).data;
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i] > 24 || px[i + 1] > 24 || px[i + 2] > 24) return true;
   }
   return false;
 }
@@ -114,7 +115,7 @@ export class Warper {
     let canvasLit = false;
     try {
       const f = await this.renderToFrame(source, identity, 0, undefined, "canvas");
-      canvasLit = await frameIsLit(f);
+      canvasLit = frameIsLit(f);
       f.close();
     } catch (e) {
       console.warn("Canvas capture failed:", (e as Error).message);
