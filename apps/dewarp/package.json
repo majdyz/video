@@ -1,0 +1,22 @@
+{
+  "name": "dewarp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.app.json && vite build",
+    "test": "vitest run",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "mp4-muxer": "5.2.2",
+    "mp4box": "2.4.1"
+  },
+  "devDependencies": {
+    "@webgpu/types": "0.1.72",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.10",
+    "vitest": "5.0.1"
+  }
+}

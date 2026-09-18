@@ -24,6 +24,13 @@ if (existsSync(motionSrc)) {
   cpSync(motionSrc, motionDst, { recursive: true });
 }
 
+const dewarpSrc = resolve(root, "apps/dewarp/dist");
+const dewarpDst = resolve(dist, "dewarp");
+if (existsSync(dewarpSrc)) {
+  mkdirSync(dewarpDst, { recursive: true });
+  cpSync(dewarpSrc, dewarpDst, { recursive: true });
+}
+
 // Landing page at /video/ that links both apps
 writeFileSync(
   resolve(dist, "index.html"),
@@ -48,6 +55,7 @@ writeFileSync(
   a.card .arrow { float: right; opacity: 0.5; }
   .aqua h2 { color: #5fd0ff; }
   .motion h2 { color: #ff8b4a; }
+  .dewarp h2 { color: #b6ffe2; }
   footer { margin-top: auto; color: #4f7088; font-size: 12px; text-align: center; }
 </style>
 </head>
@@ -67,6 +75,11 @@ writeFileSync(
       <span class="arrow">→</span>
       <h2>Motion Fix</h2>
       <p>Stabilize shaky clips. Block-matching translation tracker with Gaussian path smoothing.</p>
+    </a>
+    <a class="card dewarp" href="./dewarp/">
+      <span class="arrow">→</span>
+      <h2>Dewarp</h2>
+      <p>Straighten Osmo Action Wide clips. Fisheye to rectilinear with a strength slider, audio kept, on-device.</p>
     </a>
   </nav>
   <footer>Source: github.com/majdyz/video</footer>
