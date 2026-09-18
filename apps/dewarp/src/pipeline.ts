@@ -67,16 +67,47 @@ function rotationFromMatrix(matrix: ArrayLike<number> | undefined): 0 | 90 | 180
   return 0;
 }
 
-/** Reads enough of the file for the moov box and reports what the clip is. */
+type BoxRange = { type: string; start: number; size: number };
+
+/** Top-level box table, read from the headers only. Cameras put moov after a multi-gigabyte mdat. */
+async function indexTopLevelBoxes(file: File): Promise<BoxRange[]> {
+  const boxes: BoxRange[] = [];
+  let offset = 0;
+  while (offset + 8 <= file.size) {
+    const head = new DataView(await file.slice(offset, Math.min(offset + 16, file.size)).arrayBuffer());
+    let size = head.getUint32(0);
+    const type = String.fromCharCode(head.getUint8(4), head.getUint8(5), head.getUint8(6), head.getUint8(7));
+    let headerLen = 8;
+    if (size === 1 && head.byteLength >= 16) {
+      size = Number(head.getBigUint64(8));
+      headerLen = 16;
+    } else if (size === 0) {
+      size = file.size - offset;
+    }
+    if (size < headerLen) throw new Error(`Corrupt box "${type}" at ${offset}.`);
+    boxes.push({ type, start: offset, size });
+    offset += size;
+  }
+  if (!boxes.some(b => b.type === "moov")) throw new Error("No moov box found, is this an MP4?");
+  return boxes;
+}
+
+/** Everything but mdat first (so mp4box sees moov before any media), then the mdat boxes in file order. */
+function feedOrder(boxes: BoxRange[], withMedia: boolean): BoxRange[] {
+  const head = boxes.filter(b => b.type !== "mdat");
+  return withMedia ? [...head, ...boxes.filter(b => b.type === "mdat")] : head;
+}
+
+/** Reads the box table and the moov box and reports what the clip is. */
 export async function probe(file: File): Promise<ProbeResult> {
+  const boxes = await indexTopLevelBoxes(file);
   const mp4 = createFile();
   let ready = false;
   const info = await new Promise<Movie>((resolve, reject) => {
     mp4.onError = (module: string, message: string) => reject(new Error(`${module}: ${message}`));
     mp4.onReady = (m: Movie) => { ready = true; resolve(m); };
-    // Reading stops as soon as the moov box has been parsed, so a long clip is not pulled through.
-    void feed(file, mp4, () => true, () => Promise.resolve(), () => ready)
-      .then(() => { if (!ready) reject(new Error("No moov box found, is this an MP4?")); })
+    void feed(file, feedOrder(boxes, false), mp4, () => true, () => Promise.resolve(), () => ready)
+      .then(() => { if (!ready) reject(new Error("The moov box could not be parsed.")); })
       .catch(reject);
   });
   const t = videoTrack(info);
@@ -97,26 +128,31 @@ export async function probe(file: File): Promise<ProbeResult> {
 }
 
 /**
- * Streams the file into mp4box in slices, pausing while `hasRoom` is false so the
+ * Streams the given byte ranges into mp4box in slices, pausing while `hasRoom` is false so the
  * decoder and encoder queues stay short. `stop` ends the read early (probe, cancel).
  */
 async function feed(
   file: File,
+  ranges: BoxRange[],
   mp4: ISOFile,
   hasRoom: () => boolean,
   waitForRoom: () => Promise<void>,
   stop: () => boolean
 ): Promise<void> {
-  let offset = 0;
-  while (offset < file.size && !stop()) {
-    while (!hasRoom() && !stop()) await waitForRoom();
-    if (stop()) break;
-    const buf = (await file.slice(offset, offset + READ_CHUNK).arrayBuffer()) as ArrayBuffer & { fileStart: number };
-    buf.fileStart = offset;
-    offset += buf.byteLength;
-    mp4.appendBuffer(buf);
+  for (const range of ranges) {
+    let offset = range.start;
+    const end = range.start + range.size;
+    while (offset < end && !stop()) {
+      while (!hasRoom() && !stop()) await waitForRoom();
+      if (stop()) return;
+      const buf = (await file.slice(offset, Math.min(offset + READ_CHUNK, end)).arrayBuffer()) as ArrayBuffer & { fileStart: number };
+      buf.fileStart = offset;
+      offset += buf.byteLength;
+      mp4.appendBuffer(buf);
+    }
+    if (stop()) return;
   }
-  if (!stop()) mp4.flush();
+  mp4.flush();
 }
 
 async function pickEncoderConfig(width: number, height: number, fps: number): Promise<{ config: VideoEncoderConfig; muxCodec: "hevc" | "avc" }> {
@@ -147,6 +183,7 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
   const { file, warper, uniforms, onProgress, signal } = opts;
   const started = performance.now();
   const parts: { position: number; data: Uint8Array<ArrayBuffer> }[] = [];
+  const boxes = await indexTopLevelBoxes(file);
   const mp4 = createFile();
 
   let decoder: VideoDecoder | undefined;
@@ -299,7 +336,7 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
   };
 
   try {
-    await feed(file, mp4, hasRoom, waitForRoom, stop);
+    await feed(file, feedOrder(boxes, true), mp4, hasRoom, waitForRoom, stop);
     if (stop()) throw failure ?? new DOMException("Export cancelled", "AbortError");
     if (!decoder || !encoder || !muxer) throw new Error("The clip ended before its codecs were set up.");
     await decoder.flush();

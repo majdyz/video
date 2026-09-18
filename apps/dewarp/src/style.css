@@ -44,10 +44,13 @@ label.file strong { color: var(--accent); }
 .preview .tag.after { right: 8px; }
 video.hidden { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
-.row { display: grid; grid-template-columns: 110px 1fr 56px; align-items: center; gap: 10px; font-size: 14px; }
+.row { display: grid; grid-template-columns: 92px minmax(0, 1fr) 52px; align-items: center; gap: 10px; font-size: 14px; }
+.row > * { min-width: 0; }
 .row output { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; }
-input[type="range"] { width: 100%; accent-color: var(--accent); }
-select { background: var(--bg-2); color: var(--text); border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px; font-size: 14px; }
+input[type="range"] { width: 100%; min-width: 0; accent-color: var(--accent); }
+select { width: 100%; min-width: 0; max-width: 100%; background: var(--bg-2); color: var(--text); border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px; font-size: 14px; text-overflow: ellipsis; }
+.wrap, .card { min-width: 0; max-width: 100%; }
+.card { overflow: hidden; }
 
 details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 details .row { margin-top: 10px; }

@@ -52,7 +52,7 @@ if (missing.length > 0) {
 }
 
 async function main() {
-  const fileInput = el("input", { type: "file", accept: "video/mp4,video/quicktime,.mp4,.mov" }) as HTMLInputElement;
+  const fileInput = el("input", { type: "file", accept: "video/*" }) as HTMLInputElement;
   const fileLabel = el("label", { class: "file" }, fileInput, el("strong", {}, "Pick a clip"), " from the Osmo, MP4 or MOV");
   const meta = el("div", { class: "meta" }, "Nothing loaded.");
 
