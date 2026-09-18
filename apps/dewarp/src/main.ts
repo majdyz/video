@@ -60,9 +60,26 @@ async function main() {
   const meta = el("div", { class: "meta" }, "Nothing loaded.");
   const logBox = el("pre", { class: "log" });
   const logPanel = el("details", { class: "logpanel" }, el("summary", {}, "Log"), logBox);
+  // The log also lives in sessionStorage so a tab the OS reloads still shows what happened.
+  const LOG_KEY = "dewarp-log";
+  let previous = "";
+  try {
+    previous = sessionStorage.getItem(LOG_KEY) ?? "";
+  } catch {
+    previous = "";
+  }
+  if (previous) logBox.textContent = `--- before the page reloaded ---\n${previous}--- this load ---\n`;
+  let stored = "";
   const log = (line: string) => {
     const t = (performance.now() / 1000).toFixed(1).padStart(6);
-    logBox.textContent += `${t}s ${line}\n`;
+    const text = `${t}s ${line}\n`;
+    logBox.textContent += text;
+    stored += text;
+    try {
+      sessionStorage.setItem(LOG_KEY, stored.slice(-12000));
+    } catch {
+      // Storage full or blocked, the on-screen log still works.
+    }
     console.log("[dewarp]", line);
   };
   window.addEventListener("error", e => log(`error: ${e.message}`));

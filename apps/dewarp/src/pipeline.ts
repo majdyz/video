@@ -2,6 +2,7 @@ import { createFile, DataStream, Endianness, type ISOFile, type Movie, type Samp
 import { Muxer, StreamTarget } from "mp4-muxer";
 import type { WarpUniforms } from "./fisheye";
 import type { Warper } from "./gpu";
+import { FileSink, MemorySink, type OutputSink } from "./output-sink";
 
 export type ExportProgress = { frames: number; totalFrames: number; elapsedMs: number };
 
@@ -35,6 +36,7 @@ const READ_CHUNK = 2 * 1024 * 1024;
 const MAX_DECODE_QUEUE = 12;
 const MAX_ENCODE_QUEUE = 8;
 const MAX_PENDING_FRAMES = 4;
+const MAX_SINK_BACKLOG = 32;
 
 function videoTrack(info: Movie) {
   const t = info.videoTracks[0];
@@ -312,6 +314,8 @@ export async function decodeFrameAt(file: File, seconds: number, log: (line: str
 export async function exportClip(opts: ExportOptions): Promise<Blob> {
   const { file, warper, uniforms, passthrough = false, onProgress, log = () => {}, signal } = opts;
   const started = performance.now();
+  const sink: OutputSink = (await FileSink.open()) ?? new MemorySink();
+  log(`output goes to ${sink.kind === "file" ? "private on-device storage" : "memory (no private storage here)"}`);
   // Where the time goes, summed per stage and reported every 120 frames.
   const timing = { draw: 0, capture: 0, encodeCall: 0, roomWait: 0, read: 0, frames: 0, lastReport: 0 };
   const report = () => {
@@ -320,7 +324,6 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
     timing.draw = timing.capture = timing.encodeCall = timing.roomWait = timing.read = 0;
     timing.lastReport = timing.frames;
   };
-  const parts: { position: number; data: Uint8Array<ArrayBuffer> }[] = [];
   const boxes = await indexTopLevelBoxes(file);
   const mp4 = createFile();
 
@@ -351,6 +354,7 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
   let drainWaiters: (() => void)[] = [];
   const hasRoom = () =>
     !configuring &&
+    (sink instanceof FileSink ? sink.backlog() < MAX_SINK_BACKLOG : true) &&
     pending.length < MAX_PENDING_FRAMES &&
     (decoder?.decodeQueueSize ?? 0) < MAX_DECODE_QUEUE &&
     (encoder?.encodeQueueSize ?? 0) < MAX_ENCODE_QUEUE;
@@ -392,8 +396,14 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
               timing.frames += 1;
               if (timing.frames % 120 === 0) report();
             } else {
-              const promise = warper.renderToFrame(frame, uniforms, frame.timestamp, frame.duration ?? undefined);
-              // The frame is only read inside the draw, which has already been issued.
+              // A readback that fails mid-run (Safari can refuse a map) retries the same frame on the bitmap path,
+              // which never maps, instead of failing the export.
+              const promise = warper.renderToFrame(frame, uniforms, frame.timestamp, frame.duration ?? undefined).catch(async (e: Error) => {
+                if (warper.capture !== "readback") throw e;
+                log(`readback failed (${e.message}), switching to the bitmap path`);
+                warper.capture = "bitmap";
+                return warper.renderToFrame(frame, uniforms, frame.timestamp, frame.duration ?? undefined);
+              });
               promise.finally(() => frame.close()).catch(() => undefined);
               inflight.push({ promise, keyFrame });
             }
@@ -463,7 +473,7 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
 
         muxer = new Muxer({
           target: new StreamTarget({
-            onData: (data, position) => { parts.push({ position, data: new Uint8Array(data) }); },
+            onData: (data, position) => { sink.write(data, position); },
             chunked: true,
           }),
           video: {
@@ -544,12 +554,14 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
     if (failure) throw failure;
     if (encodedFrames === 0) throw new Error(`No frames came out of the encoder (decoded ${decodedFrames} of ${totalFrames}, encoder ${encoder.state}).`);
     muxer.finalize();
+  } catch (e) {
+    await sink.discard();
+    throw e;
   } finally {
     signal.removeEventListener("abort", wakeRoom);
     if (decoder?.state !== "closed") decoder?.close();
     if (encoder?.state !== "closed") encoder?.close();
   }
 
-  parts.sort((a, b) => a.position - b.position);
-  return new Blob(parts.map(p => p.data), { type: "video/mp4" });
+  return sink.finish();
 }

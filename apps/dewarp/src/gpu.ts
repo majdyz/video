@@ -9,7 +9,7 @@ export type CaptureMode = "canvas" | "bitmap" | "webgl" | "readback";
 
 const PROBE_SIZE = 64;
 const BENCH_FRAMES = 6;
-const READBACK_RING = 4;
+const READBACK_RING = 3;
 
 function sourceSize(source: WarpSource): [number, number] {
   return source instanceof VideoFrame
