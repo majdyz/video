@@ -1,10 +1,11 @@
 import { packUniforms, type WarpUniforms } from "./fisheye";
 import { WARP_WGSL } from "./warp-shader";
+import { GlWarper } from "./webgl";
 
 export type WarpSource = HTMLVideoElement | VideoFrame;
 export type WarpMode = "external" | "copy";
-/** How a warped frame reaches the encoder: straight from the canvas, via an ImageBitmap, or a texture readback. */
-export type CaptureMode = "canvas" | "bitmap" | "readback";
+/** How a warped frame reaches the encoder: straight from the WebGPU canvas, via an ImageBitmap, from a WebGL2 canvas, or a texture readback. */
+export type CaptureMode = "canvas" | "bitmap" | "webgl" | "readback";
 
 const PROBE_SIZE = 64;
 const BENCH_FRAMES = 3;
@@ -53,6 +54,7 @@ export class Warper {
   private outTexture: GPUTexture | undefined;
   private outBuffer: GPUBuffer | undefined;
   private outBytesPerRow = 0;
+  private gl: GlWarper | undefined;
   private decided = false;
   private deciding: Promise<{ mode: WarpMode; capture: CaptureMode }> | undefined;
 
@@ -120,7 +122,7 @@ export class Warper {
     // Time each capture mode at the real output size; the fastest one that produces a picture wins.
     const results: string[] = [];
     let best: { capture: CaptureMode; ms: number } | undefined;
-    for (const capture of ["canvas", "bitmap", "readback"] as CaptureMode[]) {
+    for (const capture of ["canvas", "bitmap", "webgl", "readback"] as CaptureMode[]) {
       try {
         let lit = false;
         const t0 = performance.now();
@@ -171,6 +173,17 @@ export class Warper {
   async renderToFrame(source: WarpSource, u: WarpUniforms, timestamp: number, duration: number | undefined, capture = this.capture): Promise<VideoFrame> {
     if (!this.outCanvas || !this.outCtx || !this.outTexture || !this.outBuffer) throw new Error("prepareOutput was not called");
     const t0 = performance.now();
+    if (capture === "webgl") {
+      if (!this.gl || this.gl.canvas.width !== this.outCanvas.width || this.gl.canvas.height !== this.outCanvas.height) {
+        this.gl = new GlWarper(this.outCanvas.width, this.outCanvas.height);
+      }
+      this.gl.render(source, u);
+      const t1 = performance.now();
+      const frame = new VideoFrame(this.gl.canvas, { timestamp, duration });
+      this.lastDrawMs = t1 - t0;
+      this.lastCaptureMs = performance.now() - t1;
+      return frame;
+    }
     if (capture === "canvas" || capture === "bitmap") {
       this.draw(this.outCtx.getCurrentTexture().createView(), source, u, this.mode);
       const t1 = performance.now();
