@@ -1,6 +1,9 @@
 import "./style.css";
+
+declare const __BUILD__: string;
 import { warpUniforms, type WarpUniforms } from "./fisheye";
 import { Warper } from "./gpu";
+
 import { exportClip, probe, type ProbeResult } from "./pipeline";
 import { DEFAULT_PROFILE, PROFILES } from "./profiles";
 
@@ -64,7 +67,7 @@ async function main() {
   };
   window.addEventListener("error", e => log(`error: ${e.message}`));
   window.addEventListener("unhandledrejection", e => log(`rejected: ${(e.reason as Error)?.message ?? String(e.reason)}`));
-  log(`${navigator.userAgent}`);
+  log(`build ${__BUILD__} · ${navigator.userAgent}`);
 
   const video = el("video", { class: "hidden", playsinline: "", muted: "", preload: "auto" }) as HTMLVideoElement;
   const before = el("canvas", { class: "before" }) as HTMLCanvasElement;
@@ -107,19 +110,20 @@ async function main() {
         el("p", {}, "Same size and frame rate, audio copied through. The file lands in Downloads; save it to Photos from there. Keep this tab in front while it runs."),
         el("div", { class: "actions" }, exportBtn, cancelBtn), progress, status),
       el("p", {}, "Runs entirely in the browser with WebCodecs and WebGPU. Source on ",
-        el("a", { href: "https://github.com/majdyz/video", target: "_blank", rel: "noopener" }, "GitHub"), ".")
+        el("a", { href: "https://github.com/majdyz/video", target: "_blank", rel: "noopener" }, "GitHub"), `. Build ${__BUILD__}.`)
     )
   );
 
   // The GPU comes up in the background so picking and probing a file works (and logs) even if it fails.
   let warper: Warper | undefined;
-  let beforeCtx: GPUCanvasContext | undefined;
-  let afterCtx: GPUCanvasContext | undefined;
+  // Preview targets are created once the GPU paths are known: WebGPU canvases when the device can
+  // present, otherwise 2D canvases fed by the same readback the export uses.
+  type PreviewTarget = { kind: "gpu"; ctx: GPUCanvasContext } | { kind: "2d"; ctx: CanvasRenderingContext2D };
+  let beforeTarget: PreviewTarget | undefined;
+  let afterTarget: PreviewTarget | undefined;
   const gpuReady = (async () => {
     try {
       warper = await Warper.create();
-      beforeCtx = warper.configureCanvas(before);
-      afterCtx = warper.configureCanvas(after);
       warper.device.addEventListener("uncapturederror", e => {
         status.className = "status error";
         status.textContent = `GPU error: ${(e as GPUUncapturedErrorEvent).error.message.split("\n")[0]}`;
@@ -147,10 +151,28 @@ async function main() {
     });
 
   let modeReady = false;
+  const makeTarget = (canvas: HTMLCanvasElement, capture: "canvas" | "readback"): PreviewTarget =>
+    capture === "canvas"
+      ? { kind: "gpu", ctx: warper!.configureCanvas(canvas) }
+      : { kind: "2d", ctx: canvas.getContext("2d")! };
+  const paint = async (target: PreviewTarget, source: VideoFrame | HTMLVideoElement, u: WarpUniforms) => {
+    if (target.kind === "gpu") {
+      warper!.render(target.ctx, source, u);
+      return;
+    }
+    const frame = await warper!.renderToFrame(source, u, 0, undefined);
+    try {
+      target.ctx.drawImage(frame, 0, 0);
+    } finally {
+      frame.close();
+    }
+  };
+  let painting = false;
   const renderPreview = async () => {
-    if (!info || video.readyState < 2) return;
+    if (!info || video.readyState < 2 || painting) return;
     await gpuReady;
-    if (!warper || !beforeCtx || !afterCtx) return;
+    if (!warper) return;
+    painting = true;
     const u = currentUniforms();
     // A VideoFrame is what the export renders from, so the preview takes the same path.
     let frame: VideoFrame | undefined;
@@ -162,17 +184,23 @@ async function main() {
     const source = frame ?? video;
     try {
       if (!modeReady) {
-        // The first frame decides whether this device can import video into WebGPU.
+        // The first frame decides whether this device can import video into WebGPU and present it.
         const { mode, capture } = await warper.ensureModes(source, u);
+        warper.prepareOutput(info.width, info.height);
+        beforeTarget = makeTarget(before, capture);
+        afterTarget = makeTarget(after, capture);
         modeReady = true;
         log(`GPU paths: input ${mode}, output ${capture}`);
         if (mode === "copy" || capture === "readback") meta.textContent += ` · GPU ${mode}/${capture}`;
         exportBtn.disabled = !file || !info || info.tenBit;
       }
-      warper.render(beforeCtx, source, { ...u, strength: 0, zoom: 1 });
-      warper.render(afterCtx, source, u);
+      await paint(beforeTarget!, source, { ...u, strength: 0, zoom: 1 });
+      await paint(afterTarget!, source, u);
+    } catch (e) {
+      log(`preview failed: ${(e as Error).message}`);
     } finally {
       frame?.close();
+      painting = false;
     }
   };
 
@@ -212,6 +240,9 @@ async function main() {
     }
     before.width = after.width = info.width;
     before.height = after.height = info.height;
+    if (beforeTarget?.kind === "gpu") beforeTarget = { kind: "gpu", ctx: warper!.configureCanvas(before) };
+    if (afterTarget?.kind === "gpu") afterTarget = { kind: "gpu", ctx: warper!.configureCanvas(after) };
+    if (warper && modeReady) warper.prepareOutput(info.width, info.height);
     preview.style.aspectRatio = `${info.width} / ${info.height}`;
     meta.textContent = `${info.width}×${info.height}, ${info.fps.toFixed(2)} fps, ${fmtTime(info.durationS)}, ${info.codec}${info.hasAudio ? ", audio" : ", no audio"}${info.rotation ? `, rotated ${info.rotation}°` : ""}`;
     scrub.input.max = String(Math.max(0.1, info.durationS - 0.1));
