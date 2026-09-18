@@ -314,6 +314,7 @@ async function main() {
         uniforms: currentUniforms(),
         // ?debug=passthrough re-encodes without the GPU, to tell a codec problem from a warp problem.
         passthrough: new URLSearchParams(location.search).get("debug") === "passthrough",
+        log,
         signal: abort.signal,
         onProgress: p => {
           progress.value = p.totalFrames ? p.frames / p.totalFrames : 0;

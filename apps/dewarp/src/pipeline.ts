@@ -12,6 +12,7 @@ export type ExportOptions = {
   /** Skip the GPU and re-encode the decoded frames as they are. */
   passthrough?: boolean;
   onProgress: (p: ExportProgress) => void;
+  log?: (line: string) => void;
   signal: AbortSignal;
 };
 
@@ -154,18 +155,23 @@ async function feed(
   mp4: ISOFile,
   hasRoom: () => boolean,
   waitForRoom: () => Promise<void>,
-  stop: () => boolean
+  stop: () => boolean,
+  onTiming?: (stage: "roomWait" | "read", ms: number) => void
 ): Promise<void> {
   for (const range of ranges) {
     let offset = range.start;
     const end = range.start + range.size;
     while (offset < end && !stop()) {
+      const w0 = performance.now();
       while (!hasRoom() && !stop()) await waitForRoom();
+      onTiming?.("roomWait", performance.now() - w0);
       if (stop()) return;
+      const r0 = performance.now();
       const buf = (await file.slice(offset, Math.min(offset + READ_CHUNK, end)).arrayBuffer()) as ArrayBuffer & { fileStart: number };
       buf.fileStart = offset;
       offset += buf.byteLength;
       mp4.appendBuffer(buf);
+      onTiming?.("read", performance.now() - r0);
     }
     if (stop()) return;
   }
@@ -304,8 +310,16 @@ export async function decodeFrameAt(file: File, seconds: number, log: (line: str
 
 /** Full export: demux, decode, warp on the GPU, encode, mux. Resolves with the finished MP4. */
 export async function exportClip(opts: ExportOptions): Promise<Blob> {
-  const { file, warper, uniforms, passthrough = false, onProgress, signal } = opts;
+  const { file, warper, uniforms, passthrough = false, onProgress, log = () => {}, signal } = opts;
   const started = performance.now();
+  // Where the time goes, summed per stage and reported every 120 frames.
+  const timing = { warp: 0, encodeCall: 0, roomWait: 0, read: 0, frames: 0, lastReport: 0 };
+  const report = () => {
+    const n = Math.max(1, timing.frames - timing.lastReport);
+    log(`stages per frame: warp+capture ${(timing.warp / n).toFixed(1)} ms, encode() ${(timing.encodeCall / n).toFixed(1)} ms, waiting for room ${(timing.roomWait / n).toFixed(1)} ms, file read ${(timing.read / n).toFixed(1)} ms, decode queue ${decoder?.decodeQueueSize ?? 0}, encode queue ${encoder?.encodeQueueSize ?? 0}`);
+    timing.warp = timing.encodeCall = timing.roomWait = timing.read = 0;
+    timing.lastReport = timing.frames;
+  };
   const parts: { position: number; data: Uint8Array<ArrayBuffer> }[] = [];
   const boxes = await indexTopLevelBoxes(file);
   const mp4 = createFile();
@@ -353,15 +367,23 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
         if (stop()) { frame.close(); continue; }
         try {
           if (passthrough) {
+            const t0 = performance.now();
             encoder!.encode(frame, { keyFrame: decodedFrames % 120 === 0 });
+            timing.encodeCall += performance.now() - t0;
             frame.close();
           } else {
+            const t0 = performance.now();
             const warped = await warper.renderToFrame(frame, uniforms, frame.timestamp, frame.duration ?? undefined);
             frame.close();
+            const t1 = performance.now();
             encoder!.encode(warped, { keyFrame: decodedFrames % 120 === 0 });
+            timing.encodeCall += performance.now() - t1;
+            timing.warp += t1 - t0;
             warped.close();
           }
           decodedFrames += 1;
+          timing.frames += 1;
+          if (timing.frames % 120 === 0) report();
         } catch (e) {
           frame.close();
           fail(e);
@@ -401,6 +423,7 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
         if (!decoderConfig) throw new Error(`This browser cannot decode ${vt.codec}.`);
 
         const { config: encoderConfig, muxCodec } = await pickEncoderConfig(vt.track_width, vt.track_height, fps);
+        log(`decoder ${decoderConfig.codec} (${decoderConfig.hardwareAcceleration}), encoder ${encoderConfig.codec} (${encoderConfig.hardwareAcceleration}) ${Math.round((encoderConfig.bitrate ?? 0) / 1e6)} Mbps`);
 
         const at = info.audioTracks[0];
         const audio = at?.audio && /mp4a/.test(at.codec) ? at.audio : undefined;
@@ -488,7 +511,8 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
   };
 
   try {
-    await feed(file, feedOrder(boxes, true), mp4, hasRoom, waitForRoom, stop);
+    await feed(file, feedOrder(boxes, true), mp4, hasRoom, waitForRoom, stop, (stage, ms) => { timing[stage] += ms; });
+    report();
     if (stop()) throw failure ?? new DOMException("Export cancelled", "AbortError");
     if (!decoder || !encoder || !muxer) throw new Error("The clip ended before its codecs were set up.");
     await decoder.flush();
