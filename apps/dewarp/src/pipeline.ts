@@ -358,34 +358,57 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
   const stop = () => failure !== undefined || signal.aborted;
   signal.addEventListener("abort", wakeRoom);
 
+  // Warps in flight, awaited in order so the encoder sees frames in sequence; the readback path
+  // lets several GPU copies overlap, the canvas paths resolve one at a time.
+  const inflight: { promise: Promise<VideoFrame>; keyFrame: boolean }[] = [];
+  const encodeNext = async () => {
+    const { promise, keyFrame } = inflight.shift()!;
+    const warped = await promise;
+    timing.draw += warper.lastDrawMs;
+    timing.capture += warper.lastCaptureMs;
+    const t1 = performance.now();
+    encoder!.encode(warped, { keyFrame });
+    timing.encodeCall += performance.now() - t1;
+    warped.close();
+    decodedFrames += 1;
+    timing.frames += 1;
+    if (timing.frames % 120 === 0) report();
+  };
   const pump = async () => {
     if (pumping) return;
     pumping = true;
     try {
-      while (pending.length > 0) {
-        const frame = pending.shift()!;
-        if (stop()) { frame.close(); continue; }
+      while (pending.length > 0 || inflight.length > 0) {
         try {
-          if (passthrough) {
-            const t0 = performance.now();
-            encoder!.encode(frame, { keyFrame: decodedFrames % 120 === 0 });
-            timing.encodeCall += performance.now() - t0;
-            frame.close();
+          if (pending.length > 0 && inflight.length < warper.inflightDepth() && !stop()) {
+            const frame = pending.shift()!;
+            const keyFrame = (decodedFrames + inflight.length) % 120 === 0;
+            if (passthrough) {
+              const t0 = performance.now();
+              encoder!.encode(frame, { keyFrame });
+              timing.encodeCall += performance.now() - t0;
+              frame.close();
+              decodedFrames += 1;
+              timing.frames += 1;
+              if (timing.frames % 120 === 0) report();
+            } else {
+              const promise = warper.renderToFrame(frame, uniforms, frame.timestamp, frame.duration ?? undefined);
+              // The frame is only read inside the draw, which has already been issued.
+              promise.finally(() => frame.close()).catch(() => undefined);
+              inflight.push({ promise, keyFrame });
+            }
+          } else if (inflight.length > 0) {
+            if (stop()) {
+              const { promise } = inflight.shift()!;
+              promise.then(f => f.close()).catch(() => undefined);
+            } else {
+              await encodeNext();
+            }
           } else {
-            const warped = await warper.renderToFrame(frame, uniforms, frame.timestamp, frame.duration ?? undefined);
+            const frame = pending.shift()!;
             frame.close();
-            timing.draw += warper.lastDrawMs;
-            timing.capture += warper.lastCaptureMs;
-            const t1 = performance.now();
-            encoder!.encode(warped, { keyFrame: decodedFrames % 120 === 0 });
-            timing.encodeCall += performance.now() - t1;
-            warped.close();
           }
-          decodedFrames += 1;
-          timing.frames += 1;
-          if (timing.frames % 120 === 0) report();
         } catch (e) {
-          frame.close();
           fail(e);
         }
         wakeRoom();
@@ -397,7 +420,7 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
       for (const r of w) r();
     }
   };
-  const drained = () => (pumping || pending.length > 0 ? new Promise<void>(resolve => { drainWaiters.push(resolve); }) : Promise.resolve());
+  const drained = () => (pumping || pending.length > 0 || inflight.length > 0 ? new Promise<void>(resolve => { drainWaiters.push(resolve); }) : Promise.resolve());
 
   mp4.onError = (module: string, message: string) => fail(new Error(`${module}: ${message}`));
 

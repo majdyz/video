@@ -8,7 +8,8 @@ export type WarpMode = "external" | "copy";
 export type CaptureMode = "canvas" | "bitmap" | "webgl" | "readback";
 
 const PROBE_SIZE = 64;
-const BENCH_FRAMES = 3;
+const BENCH_FRAMES = 6;
+const READBACK_RING = 4;
 
 function sourceSize(source: WarpSource): [number, number] {
   return source instanceof VideoFrame
@@ -52,10 +53,12 @@ export class Warper {
   private outCanvas: OffscreenCanvas | undefined;
   private outCtx: GPUCanvasContext | undefined;
   private outTexture: GPUTexture | undefined;
-  private outBuffer: GPUBuffer | undefined;
   private outBytesPerRow = 0;
+  /** Readback ring: several frames can be on their way back from the GPU while the encoder works. */
+  private outBuffers: { buffer: GPUBuffer; busy: boolean }[] = [];
   private gl: GlWarper | undefined;
-  private decided = false;
+  /** The decision is per output size; a 720p pick must not decide for a 4K clip. */
+  private decidedFor = "";
   private deciding: Promise<{ mode: WarpMode; capture: CaptureMode }> | undefined;
 
   private constructor(device: GPUDevice, external: GPURenderPipeline, copy: GPURenderPipeline, sampler: GPUSampler, uniforms: GPUBuffer) {
@@ -101,7 +104,8 @@ export class Warper {
 
   /** Decides the input and output paths from one frame. Safe to call repeatedly and concurrently. */
   async ensureModes(source: WarpSource, u: WarpUniforms, log: (line: string) => void = () => {}): Promise<{ mode: WarpMode; capture: CaptureMode }> {
-    if (this.decided) return { mode: this.mode, capture: this.capture };
+    const key = sourceSize(source).join("x");
+    if (this.decidedFor === key) return { mode: this.mode, capture: this.capture };
     if (this.deciding) return this.deciding;
     this.deciding = this.decideModes(source, u, log);
     try {
@@ -119,16 +123,27 @@ export class Warper {
     const [width, height] = sourceSize(source);
     this.prepareOutput(width, height);
 
-    // Time each capture mode at the real output size; the fastest one that produces a picture wins.
+    // Time each capture mode at the real output size, as throughput with frames in flight where the
+    // mode allows it; the fastest one that produces a picture wins.
     const results: string[] = [];
     let best: { capture: CaptureMode; ms: number } | undefined;
     for (const capture of ["canvas", "bitmap", "webgl", "readback"] as CaptureMode[]) {
       try {
         let lit = false;
         const t0 = performance.now();
+        const inflight: Promise<VideoFrame>[] = [];
+        const depth = this.inflightDepth(capture);
         for (let i = 0; i < BENCH_FRAMES; i++) {
-          const f = await this.renderToFrame(source, identity, 0, undefined, capture);
-          if (i === BENCH_FRAMES - 1) lit = frameIsLit(f);
+          inflight.push(this.renderToFrame(source, identity, 0, undefined, capture));
+          if (inflight.length >= depth) {
+            const f = await inflight.shift()!;
+            lit = frameIsLit(f) || lit;
+            f.close();
+          }
+        }
+        for (const p of inflight) {
+          const f = await p;
+          lit = frameIsLit(f) || lit;
           f.close();
         }
         const ms = (performance.now() - t0) / BENCH_FRAMES;
@@ -141,8 +156,13 @@ export class Warper {
     if (best) this.capture = best.capture;
     log(`capture bench at ${width}x${height}: ${results.join(", ")} -> ${this.capture}`);
     log(`GPU probe: external=${externalLit} copy=${copyLit ?? "skipped"} -> ${this.mode}/${this.capture}`);
-    this.decided = true;
+    this.decidedFor = `${width}x${height}`;
     return { mode: this.mode, capture: this.capture };
+  }
+
+  /** How many renderToFrame calls may overlap: the readback ring allows several, the canvas paths are serial. */
+  inflightDepth(capture = this.capture): number {
+    return capture === "readback" ? READBACK_RING - 1 : 1;
   }
 
   /** Renders one frame into a visible canvas. The source must stay alive until this returns. */
@@ -162,16 +182,24 @@ export class Warper {
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
     this.outBytesPerRow = Math.ceil((width * 4) / 256) * 256;
-    this.outBuffer?.destroy();
-    this.outBuffer = this.device.createBuffer({
-      size: this.outBytesPerRow * height,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
+    for (const b of this.outBuffers) b.buffer.destroy();
+    this.outBuffers = Array.from({ length: READBACK_RING }, () => ({
+      buffer: this.device.createBuffer({
+        size: this.outBytesPerRow * height,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      }),
+      busy: false,
+    }));
   }
 
   /** Warps one frame and hands back a VideoFrame for the encoder. Call prepareOutput first. */
+  /**
+   * Warps one frame and hands back a VideoFrame for the encoder. Call prepareOutput first.
+   * In readback mode the draw and the GPU copy are issued before the first await, so several
+   * calls can be in flight (up to inflightDepth()) and the awaits resolve in call order.
+   */
   async renderToFrame(source: WarpSource, u: WarpUniforms, timestamp: number, duration: number | undefined, capture = this.capture): Promise<VideoFrame> {
-    if (!this.outCanvas || !this.outCtx || !this.outTexture || !this.outBuffer) throw new Error("prepareOutput was not called");
+    if (!this.outCanvas || !this.outCtx || !this.outTexture || this.outBuffers.length === 0) throw new Error("prepareOutput was not called");
     const t0 = performance.now();
     if (capture === "webgl") {
       if (!this.gl || this.gl.canvas.width !== this.outCanvas.width || this.gl.canvas.height !== this.outCanvas.height) {
@@ -203,26 +231,34 @@ export class Warper {
       return frame;
     }
     const { width, height } = this.outTexture;
+    const slot = this.outBuffers.find(b => !b.busy);
+    if (!slot) throw new Error(`More than ${READBACK_RING - 1} readbacks in flight`);
+    slot.busy = true;
+    // The render target is shared, so the copy is queued right behind the draw before anything else draws.
     this.draw(this.outTexture.createView(), source, u, this.mode);
     const encoder = this.device.createCommandEncoder();
-    encoder.copyTextureToBuffer({ texture: this.outTexture }, { buffer: this.outBuffer, bytesPerRow: this.outBytesPerRow }, [width, height]);
+    encoder.copyTextureToBuffer({ texture: this.outTexture }, { buffer: slot.buffer, bytesPerRow: this.outBytesPerRow }, [width, height]);
     this.device.queue.submit([encoder.finish()]);
     const t1 = performance.now();
-    await this.outBuffer.mapAsync(GPUMapMode.READ);
     try {
-      const frame = new VideoFrame(this.outBuffer.getMappedRange(), {
-        format: "RGBX",
-        codedWidth: width,
-        codedHeight: height,
-        timestamp,
-        duration,
-        layout: [{ offset: 0, stride: this.outBytesPerRow }],
-      });
-      this.lastDrawMs = t1 - t0;
-      this.lastCaptureMs = performance.now() - t1;
-      return frame;
+      await slot.buffer.mapAsync(GPUMapMode.READ);
+      try {
+        const frame = new VideoFrame(slot.buffer.getMappedRange(), {
+          format: "RGBX",
+          codedWidth: width,
+          codedHeight: height,
+          timestamp,
+          duration,
+          layout: [{ offset: 0, stride: this.outBytesPerRow }],
+        });
+        this.lastDrawMs = t1 - t0;
+        this.lastCaptureMs = performance.now() - t1;
+        return frame;
+      } finally {
+        slot.buffer.unmap();
+      }
     } finally {
-      this.outBuffer.unmap();
+      slot.busy = false;
     }
   }
 
