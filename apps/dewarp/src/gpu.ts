@@ -17,6 +17,25 @@ function sourceSize(source: WarpSource): [number, number] {
     : [source.videoWidth, source.videoHeight];
 }
 
+function isLit(px: Uint8Array | undefined): boolean {
+  if (!px) return false;
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i]! > 8 || px[i + 1]! > 8 || px[i + 2]! > 8) return true;
+  }
+  return false;
+}
+
+/** True when more than a tenth of the pixels differ by more than 40 in some channel, well past filtering noise. */
+export function differs(a: Uint8Array, b: Uint8Array): boolean {
+  const n = Math.min(a.length, b.length) / 4;
+  let off = 0;
+  for (let i = 0; i < n * 4; i += 4) {
+    const d = Math.max(Math.abs(a[i]! - b[i]!), Math.abs(a[i + 1]! - b[i + 1]!), Math.abs(a[i + 2]! - b[i + 2]!));
+    if (d > 40) off += 1;
+  }
+  return off > n / 10;
+}
+
 /** Draws the frame small into a 2D canvas and looks for anything above black. Works where copyTo() does not. */
 function frameIsLit(frame: VideoFrame): boolean {
   const c = new OffscreenCanvas(32, 32);
@@ -117,9 +136,16 @@ export class Warper {
 
   private async decideModes(source: WarpSource, u: WarpUniforms, log: (line: string) => void): Promise<{ mode: WarpMode; capture: CaptureMode }> {
     const identity = { ...u, strength: 0, zoom: 1 };
-    const externalLit = await this.probeInput(source, identity, "external");
-    const copyLit = externalLit ? undefined : await this.probeInput(source, identity, "copy");
-    if (!externalLit && copyLit) this.mode = "copy";
+    const external = await this.probeInput(source, identity, "external");
+    const copy = await this.probeInput(source, identity, "copy");
+    const externalLit = isLit(external);
+    const copyLit = isLit(copy);
+    // A frame can import lit and still be wrong: Safari reads a stride padded 4K frame through the
+    // zero copy path with every row shifted, and brightness alone cannot see that. The canvas copy
+    // goes through the compositor and lays the rows out right, so when the two disagree it wins.
+    const disagree = externalLit && copyLit && external && copy && differs(external, copy);
+    if ((!externalLit && copyLit) || disagree) this.mode = "copy";
+    log(`GPU probe: external=${externalLit} copy=${copyLit} agree=${disagree ? "no" : "yes"} -> ${this.mode}`);
     const [width, height] = sourceSize(source);
     this.prepareOutput(width, height);
 
@@ -155,7 +181,7 @@ export class Warper {
     }
     if (best) this.capture = best.capture;
     log(`capture bench at ${width}x${height}: ${results.join(", ")} -> ${this.capture}`);
-    log(`GPU probe: external=${externalLit} copy=${copyLit ?? "skipped"} -> ${this.mode}/${this.capture}`);
+    log(`GPU modes -> ${this.mode}/${this.capture}`);
     this.decidedFor = `${width}x${height}`;
     return { mode: this.mode, capture: this.capture };
   }
@@ -262,7 +288,8 @@ export class Warper {
     }
   }
 
-  private async probeInput(source: WarpSource, u: WarpUniforms, mode: WarpMode): Promise<boolean> {
+  /** The 64x64 identity render through one input path, or undefined when that path fails. */
+  private async probeInput(source: WarpSource, u: WarpUniforms, mode: WarpMode): Promise<Uint8Array | undefined> {
     const texture = this.device.createTexture({
       size: [PROBE_SIZE, PROBE_SIZE],
       format: "rgba8unorm",
@@ -276,16 +303,12 @@ export class Warper {
       encoder.copyTextureToBuffer({ texture }, { buffer: readback, bytesPerRow }, [PROBE_SIZE, PROBE_SIZE]);
       this.device.queue.submit([encoder.finish()]);
       await readback.mapAsync(GPUMapMode.READ);
-      const px = new Uint8Array(readback.getMappedRange());
-      let lit = false;
-      for (let i = 0; i < px.length; i += 4) {
-        if (px[i] > 8 || px[i + 1] > 8 || px[i + 2] > 8) { lit = true; break; }
-      }
+      const px = new Uint8Array(readback.getMappedRange()).slice();
       readback.unmap();
-      return lit;
+      return px;
     } catch (e) {
       console.warn(`WebGPU ${mode} probe failed:`, (e as Error).message);
-      return false;
+      return undefined;
     } finally {
       readback.destroy();
       texture.destroy();
