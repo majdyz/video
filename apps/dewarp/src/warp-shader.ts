@@ -6,7 +6,7 @@ struct Params {
   k1: f32,
   strength: f32,
   zoom: f32,
-  pad: f32,
+  projection: f32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -36,7 +36,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   if (r < 0.5) {
     return textureSampleBaseClampToEdge(src, samp, c / params.srcSize);
   }
-  let theta = atan(r / params.fOut);
+  let theta = select(atan(r / params.fOut), 2.0 * atan(r / (2.0 * params.fOut)), params.projection > 0.5);
   let thetaD = theta * (1.0 + params.k1 * theta * theta);
   let rFish = params.fFish * thetaD;
   let rs = r + (rFish - r) * params.strength;

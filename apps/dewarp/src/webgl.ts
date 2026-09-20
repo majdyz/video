@@ -18,6 +18,7 @@ uniform float fOut;
 uniform float k1;
 uniform float strength;
 uniform float zoom;
+uniform float projection;
 in vec2 uv;
 out vec4 color;
 void main() {
@@ -25,7 +26,7 @@ void main() {
   vec2 p = (uv * srcSize - c) / zoom;
   float r = length(p);
   if (r < 0.5) { color = texture(src, c / srcSize); return; }
-  float theta = atan(r / fOut);
+  float theta = projection > 0.5 ? 2.0 * atan(r / (2.0 * fOut)) : atan(r / fOut);
   float thetaD = theta * (1.0 + k1 * theta * theta);
   float rFish = fFish * thetaD;
   float rs = r + (rFish - r) * strength;
@@ -41,7 +42,7 @@ export class GlWarper {
   private readonly gl: WebGL2RenderingContext;
   private readonly program: WebGLProgram;
   private readonly texture: WebGLTexture;
-  private readonly loc: Record<"srcSize" | "fFish" | "fOut" | "k1" | "strength" | "zoom", WebGLUniformLocation | null>;
+  private readonly loc: Record<"srcSize" | "fFish" | "fOut" | "k1" | "strength" | "zoom" | "projection", WebGLUniformLocation | null>;
 
   constructor(width: number, height: number) {
     this.canvas = new OffscreenCanvas(width, height);
@@ -76,6 +77,7 @@ export class GlWarper {
       k1: gl.getUniformLocation(program, "k1"),
       strength: gl.getUniformLocation(program, "strength"),
       zoom: gl.getUniformLocation(program, "zoom"),
+      projection: gl.getUniformLocation(program, "projection"),
     };
     gl.viewport(0, 0, width, height);
   }
@@ -94,6 +96,7 @@ export class GlWarper {
     gl.uniform1f(this.loc.k1, u.k1);
     gl.uniform1f(this.loc.strength, u.strength);
     gl.uniform1f(this.loc.zoom, u.zoom);
+    gl.uniform1f(this.loc.projection, u.projection);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 }

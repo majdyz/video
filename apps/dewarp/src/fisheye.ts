@@ -4,13 +4,17 @@
  * extra radial term, which is what the shader evaluates per pixel. Kept pure
  * so the tests and the uniform packing share one definition.
  */
+export type Projection = "rectilinear" | "stereographic";
+
 export type WarpParams = {
   srcWidth: number;
   srcHeight: number;
   fovDeg: number;
   k1: number;
-  /** 0 leaves the picture untouched, 1 is full rectilinear. */
+  /** 0 leaves the picture untouched, 1 is the full correction, below 0 adds barrel instead. */
   strength: number;
+  /** Straight lines everywhere, or natural shapes with a little bend left in the lines. */
+  projection: Projection;
   /** 1 keeps the full frame, above 1 crops into the middle. */
   zoom: number;
 };
@@ -22,6 +26,8 @@ export type WarpUniforms = {
   k1: number;
   strength: number;
   zoom: number;
+  /** 0 rectilinear, 1 stereographic, as the shader reads it. */
+  projection: number;
 };
 
 export function warpUniforms(p: WarpParams): WarpUniforms {
@@ -38,6 +44,7 @@ export function warpUniforms(p: WarpParams): WarpUniforms {
     k1: p.k1,
     strength: p.strength,
     zoom: p.zoom,
+    projection: p.projection === "stereographic" ? 1 : 0,
   };
 }
 
@@ -49,14 +56,15 @@ export function samplePoint(u: WarpUniforms, outX: number, outY: number): [numbe
   const py = (outY - cy) / u.zoom;
   const r = Math.hypot(px, py);
   if (r === 0) return [cx, cy];
-  const theta = Math.atan(r / u.fOut);
+  // Stereographic keeps local shapes, so a face at the edge stays a face, at the cost of a little bend in the lines.
+  const theta = u.projection === 1 ? 2 * Math.atan(r / (2 * u.fOut)) : Math.atan(r / u.fOut);
   const thetaD = theta * (1 + u.k1 * theta * theta);
   const rFish = u.fFish * thetaD;
   const rs = r + (rFish - r) * u.strength;
   return [cx + (px / r) * rs, cy + (py / r) * rs];
 }
 
-/** Float32 layout the shader reads: srcSize.xy, fFish, fOut, k1, strength, zoom, pad. */
+/** Float32 layout the shader reads: srcSize.xy, fFish, fOut, k1, strength, zoom, projection. */
 export function packUniforms(u: WarpUniforms): Float32Array {
-  return new Float32Array([u.srcSize[0], u.srcSize[1], u.fFish, u.fOut, u.k1, u.strength, u.zoom, 0]);
+  return new Float32Array([u.srcSize[0], u.srcSize[1], u.fFish, u.fOut, u.k1, u.strength, u.zoom, u.projection]);
 }

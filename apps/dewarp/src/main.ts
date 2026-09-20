@@ -1,7 +1,7 @@
 import "./style.css";
 
 declare const __BUILD__: string;
-import { warpUniforms, type WarpUniforms } from "./fisheye";
+import { warpUniforms, type WarpUniforms, type Projection } from "./fisheye";
 import { Warper } from "./gpu";
 
 import { decodeFrameAt, describeBoxes, exportClip, indexTopLevelBoxes, probe, type ProbeResult } from "./pipeline";
@@ -110,7 +110,9 @@ async function main() {
   for (const [id, p] of Object.entries(PROFILES)) profileSelect.append(el("option", { value: id }, p.label));
   profileSelect.value = DEFAULT_PROFILE;
 
-  const strength = slider("Strength", 0, 100, 1, 70, v => `${v}%`);
+  const projectionSelect = el("select") as HTMLSelectElement;
+  projectionSelect.append(el("option", { value: "stereographic" }, "Natural shapes"), el("option", { value: "rectilinear" }, "Straight lines"));
+  const strength = slider("Strength", -100, 100, 1, 70, v => `${v}%`);
   const zoom = slider("Zoom", 60, 160, 1, 100, v => `${(v / 100).toFixed(2)}x`);
   const fov = slider("Source FOV", 100, 180, 1, PROFILES[DEFAULT_PROFILE].fovDeg, v => `${v}°`);
   const k1 = slider("Edge tweak", -0.3, 0.3, 0.01, 0, v => v.toFixed(2));
@@ -144,6 +146,7 @@ async function main() {
       el("div", { class: "card" }, el("h2", {}, "Preview one frame"), preview, wipe.row, scrub.row),
       el("div", { class: "card" }, el("h2", {}, "Correction"),
         el("div", { class: "row" }, el("span", {}, "Camera"), profileSelect, el("span")),
+        el("div", { class: "row" }, el("span", {}, "Projection"), projectionSelect, el("span")),
         strength.row, zoom.row,
         el("details", {}, el("summary", {}, "Advanced"), fov.row, k1.row)),
       el("div", { class: "card" }, el("h2", {}, "Export"),
@@ -187,6 +190,7 @@ async function main() {
       fovDeg: fov.input.valueAsNumber,
       k1: k1.input.valueAsNumber,
       strength: strength.input.valueAsNumber / 100,
+      projection: projectionSelect.value as Projection,
       zoom: zoom.input.valueAsNumber / 100,
     });
 
@@ -267,6 +271,7 @@ async function main() {
   setWipe();
   wipe.input.addEventListener("input", setWipe);
   for (const s of [strength, zoom, fov, k1]) s.input.addEventListener("input", renderPreview);
+  projectionSelect.addEventListener("change", renderPreview);
   profileSelect.addEventListener("change", () => {
     const p = PROFILES[profileSelect.value];
     fov.input.value = String(p.fovDeg);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { packUniforms, samplePoint, warpUniforms } from "./fisheye";
 
-const base = { srcWidth: 3840, srcHeight: 2160, fovDeg: 155, k1: 0, zoom: 1 };
+const base = { srcWidth: 3840, srcHeight: 2160, fovDeg: 155, k1: 0, zoom: 1, projection: "rectilinear" as const };
 
 describe("fisheye inverse map", () => {
   it("leaves every pixel where it is at strength 0", () => {
@@ -45,6 +45,22 @@ describe("fisheye inverse map", () => {
     const wide = warpUniforms({ ...base, strength: 1, zoom: 1 });
     const tight = warpUniforms({ ...base, strength: 1, zoom: 1.3 });
     expect(samplePoint(tight, 0, 0)[0]).toBeGreaterThan(samplePoint(wide, 0, 0)[0]);
+  });
+
+  it("stereographic keeps the centre and pulls the corner in less than straight lines do", () => {
+    const straight = warpUniforms({ ...base, strength: 1 });
+    const natural = warpUniforms({ ...base, strength: 1, projection: "stereographic" });
+    expect(samplePoint(natural, 1920, 1080)).toEqual([1920, 1080]);
+    const [sxS] = samplePoint(straight, 0, 1080);
+    const [sxN] = samplePoint(natural, 0, 1080);
+    expect(sxN).toBeGreaterThan(0);
+    expect(sxN).toBeLessThan(sxS);
+  });
+
+  it("negative strength samples outward, adding barrel instead of removing it", () => {
+    const u = warpUniforms({ ...base, strength: -0.5 });
+    const [sx] = samplePoint(u, 0, 1080);
+    expect(sx).toBeLessThan(0);
   });
 
   it("packs eight floats in shader order", () => {
