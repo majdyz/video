@@ -2,6 +2,7 @@ import { createFile, DataStream, Endianness, type ISOFile, type Movie, type Samp
 import { Muxer, StreamTarget } from "mp4-muxer";
 import type { WarpUniforms } from "./fisheye";
 import type { Warper } from "./gpu";
+import { applyMetadata, readSourceMetadata } from "./metadata";
 import { FileSink, MemorySink, type OutputSink } from "./output-sink";
 
 export type ExportProgress = { frames: number; totalFrames: number; elapsedMs: number };
@@ -575,5 +576,23 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
     if (encoder?.state !== "closed") encoder?.close();
   }
 
-  return sink.finish();
+  const blob = await sink.finish();
+  return retagged(blob, file, boxes, log);
+}
+
+/** Carries the source's creation time and udta onto the export, so Photos files it by capture date. */
+async function retagged(blob: Blob, file: File, sourceBoxes: BoxRange[], log: (line: string) => void): Promise<Blob> {
+  try {
+    const sourceMoov = sourceBoxes.find(b => b.type === "moov");
+    const meta = sourceMoov && (await readSourceMetadata(file, sourceMoov));
+    if (!meta) return blob;
+    const moov = (await indexTopLevelBoxes(blob)).find(b => b.type === "moov");
+    if (!moov) return blob;
+    const tagged = await applyMetadata(blob, moov, meta);
+    log(`metadata: creation time ${new Date((meta.creationTime - 2082844800) * 1000).toISOString()}${meta.tags.length ? `, tags ${meta.tags.map(t => t.length).join(" and ")} bytes` : ", no tag boxes on the source"}`);
+    return tagged;
+  } catch (e) {
+    log(`metadata not carried over: ${(e as Error).message}`);
+    return blob;
+  }
 }
