@@ -108,6 +108,9 @@ export async function applyMetadata(out: Blob, moov: BoxSpan, meta: SourceMetada
 
   const last = moov.start + moov.size === out.size;
   const missing = last ? meta.tags.filter(t => !find(top, tagType(t))) : [];
+  // A 4K export is a file backed blob of several hundred megabytes. Rebuilding it for no change
+  // risks pulling it into page memory on Safari, which is the thing the file sink exists to avoid.
+  if (!when && missing.length === 0) return out;
   const moved = missing.length ? concat(buf, ...missing) : buf;
   if (missing.length) {
     const view = new DataView(moved.buffer, moved.byteOffset, moved.byteLength);

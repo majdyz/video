@@ -135,3 +135,17 @@ describe("a source with no creation time", () => {
     expect(tagged.size).toBe(blob.size + udta.length);
   });
 });
+
+describe("leaving the export alone", () => {
+  it("returns the same blob when there is nothing to write", async () => {
+    const { blob, moov } = file(movie(MUXER_TIME));
+    const tagged = await applyMetadata(blob, moov, { creationTime: undefined, tags: [] });
+    expect(tagged).toBe(blob);
+  });
+
+  it("still returns a new blob when there is a time to write", async () => {
+    const { blob, moov } = file(movie(MUXER_TIME));
+    const tagged = await applyMetadata(blob, moov, { creationTime: SOURCE_TIME, tags: [] });
+    expect(tagged).not.toBe(blob);
+  });
+});
