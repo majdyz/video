@@ -17,6 +17,13 @@ function sourceSize(source: WarpSource): [number, number] {
     : [source.videoWidth, source.videoHeight];
 }
 
+/** Copies `height` rows of `width * 4` bytes out of a buffer whose rows are `stride` bytes apart. */
+export function tightenRows(src: Uint8Array, width: number, height: number, stride: number, into: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  const rowBytes = width * 4;
+  for (let y = 0; y < height; y++) into.set(src.subarray(y * stride, y * stride + rowBytes), y * rowBytes);
+  return into;
+}
+
 function isLit(px: Uint8Array | undefined): boolean {
   if (!px) return false;
   for (let i = 0; i < px.length; i += 4) {
@@ -73,6 +80,13 @@ export class Warper {
   private outCtx: GPUCanvasContext | undefined;
   private outTexture: GPUTexture | undefined;
   private outBytesPerRow = 0;
+  private tightBuffer: Uint8Array<ArrayBuffer> | undefined;
+
+  private tightRows(width: number, height: number): Uint8Array<ArrayBuffer> {
+    const size = width * 4 * height;
+    if (!this.tightBuffer || this.tightBuffer.length !== size) this.tightBuffer = new Uint8Array(size);
+    return this.tightBuffer;
+  }
   /** Readback ring: several frames can be on their way back from the GPU while the encoder works. */
   private outBuffers: { buffer: GPUBuffer; busy: boolean }[] = [];
   private gl: GlWarper | undefined;
@@ -181,7 +195,8 @@ export class Warper {
     }
     if (best) this.capture = best.capture;
     log(`capture bench at ${width}x${height}: ${results.join(", ")} -> ${this.capture}`);
-    log(`GPU modes -> ${this.mode}/${this.capture}`);
+    const padded = this.outBytesPerRow !== width * 4;
+    log(`GPU modes -> ${this.mode}/${this.capture}, readback rows ${padded ? `padded ${this.outBytesPerRow} for ${width * 4}, repacked` : "tight"}`);
     this.decidedFor = `${width}x${height}`;
     return { mode: this.mode, capture: this.capture };
   }
@@ -269,13 +284,17 @@ export class Warper {
     try {
       await slot.buffer.mapAsync(GPUMapMode.READ);
       try {
-        const frame = new VideoFrame(slot.buffer.getMappedRange(), {
+        // WebGPU pads readback rows to 256 bytes. Declaring that stride through `layout` is correct
+        // by spec, but Safari renders such a frame with every row shifted, which is the striped 4K
+        // preview and export. Tight rows need no layout at all, so padded rows are repacked first.
+        const mapped = new Uint8Array(slot.buffer.getMappedRange());
+        const tight = this.outBytesPerRow === width * 4 ? mapped : tightenRows(mapped, width, height, this.outBytesPerRow, this.tightRows(width, height));
+        const frame = new VideoFrame(tight, {
           format: "RGBX",
           codedWidth: width,
           codedHeight: height,
           timestamp,
           duration,
-          layout: [{ offset: 0, stride: this.outBytesPerRow }],
         });
         this.lastDrawMs = t1 - t0;
         this.lastCaptureMs = performance.now() - t1;

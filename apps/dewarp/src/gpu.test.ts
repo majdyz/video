@@ -19,3 +19,22 @@ describe("differs", () => {
     expect(differs(a, b)).toBe(true);
   });
 });
+
+import { tightenRows } from "./gpu";
+
+describe("tightenRows", () => {
+  it("drops the 256 byte padding WebGPU adds to each readback row", () => {
+    const width = 3, height = 2, stride = 256;
+    const src = new Uint8Array(stride * height);
+    for (let y = 0; y < height; y++) for (let i = 0; i < width * 4; i++) src[y * stride + i] = y * 100 + i;
+    src[width * 4] = 255; // padding, must not leak
+    const out = tightenRows(src, width, height, stride, new Uint8Array(width * 4 * height));
+    expect(Array.from(out)).toEqual([...Array.from({ length: 12 }, (_, i) => i), ...Array.from({ length: 12 }, (_, i) => 100 + i)]);
+  });
+  it("is the identity when rows are already tight", () => {
+    const width = 4, height = 3, stride = width * 4;
+    const src = Uint8Array.from({ length: stride * height }, (_, i) => i & 255);
+    const out = tightenRows(src, width, height, stride, new Uint8Array(stride * height));
+    expect(Array.from(out)).toEqual(Array.from(src));
+  });
+});
