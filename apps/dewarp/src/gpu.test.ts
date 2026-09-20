@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { differs } from "./gpu";
+import { differs, tightenRows } from "./gpu";
 
 function frame(fill: (x: number, y: number) => number): Uint8Array {
   const px = new Uint8Array(64 * 64 * 4);
@@ -20,7 +20,6 @@ describe("differs", () => {
   });
 });
 
-import { tightenRows } from "./gpu";
 
 describe("tightenRows", () => {
   it("drops the 256 byte padding WebGPU adds to each readback row", () => {
