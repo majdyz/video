@@ -2,6 +2,7 @@ import { createFile, DataStream, Endianness, type ISOFile, type Movie, type Samp
 import { Muxer, StreamTarget } from "mp4-muxer";
 import type { WarpUniforms } from "./fisheye";
 import type { Warper } from "./gpu";
+import { applyMetadata, readSourceMetadata } from "./metadata";
 import { FileSink, MemorySink, type OutputSink } from "./output-sink";
 
 export type ExportProgress = { frames: number; totalFrames: number; elapsedMs: number };
@@ -575,6 +576,36 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
     if (encoder?.state !== "closed") encoder?.close();
   }
 
-  return sink.finish();
+  const blob = await sink.finish();
+  return retagged(blob, file, boxes, log);
+}
+
+/**
+ * Carries the source's creation time and tag boxes onto the export so Photos files it by capture
+ * date. The rewrite touches a finished MP4, so the result is re-parsed before it is handed back and
+ * the muxer's own output wins on any doubt.
+ */
+async function retagged(blob: Blob, file: File, sourceBoxes: BoxRange[], log: (line: string) => void): Promise<Blob> {
+  try {
+    const sourceMoov = sourceBoxes.find(b => b.type === "moov");
+    const meta = sourceMoov && (await readSourceMetadata(file, sourceMoov));
+    if (!meta) return blob;
+    const moov = (await indexTopLevelBoxes(blob)).find(b => b.type === "moov");
+    if (!moov) return blob;
+    const tagged = await applyMetadata(blob, moov, meta);
+    if (tagged === blob) return blob;
+    const after = await indexTopLevelBoxes(tagged);
+    const last = after[after.length - 1];
+    if (!last || last.start + last.size !== tagged.size) {
+      log(`metadata dropped: the rewritten file does not end on a box boundary (${describeBoxes(after)})`);
+      return blob;
+    }
+    const when = meta.creationTime;
+    log(`metadata: creation time ${when ? new Date((when - 2082844800) * 1000).toISOString() : "none on the source, the export keeps its own"}${meta.tags.length ? `, tags ${meta.tags.map(t => t.length).join(" and ")} bytes` : ", no tag boxes on the source"}`);
+    return tagged;
+  } catch (e) {
+    log(`metadata not carried over: ${(e as Error).message}`);
+    return blob;
+  }
 }
 
