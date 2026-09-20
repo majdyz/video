@@ -253,8 +253,8 @@ export async function decodeFrameAt(file: File, seconds: number, log: (line: str
         const config = await firstSupported<VideoDecoderConfig>(
           ["prefer-hardware", "no-preference"].map(hardwareAcceleration => ({
             codec: vt.codec,
-            codedWidth: vt.track_width,
-            codedHeight: vt.track_height,
+            // No codedWidth or codedHeight: the track header holds the display size, and H.264 codes
+            // a 360 wide clip at 368. Safari honours the hint and shears every row, Chrome ignores it.
             ...(description ? { description } : {}),
             hardwareAcceleration: hardwareAcceleration as HardwareAcceleration,
           })),
@@ -455,8 +455,8 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
         const decoderConfig = await firstSupported<VideoDecoderConfig>(
           ["prefer-hardware", "no-preference"].map(hardwareAcceleration => ({
             codec: vt.codec,
-            codedWidth: vt.track_width,
-            codedHeight: vt.track_height,
+            // No codedWidth or codedHeight: the track header holds the display size, and H.264 codes
+            // a 360 wide clip at 368. Safari honours the hint and shears every row, Chrome ignores it.
             ...(description ? { description } : {}),
             hardwareAcceleration: hardwareAcceleration as HardwareAcceleration,
           })),
