@@ -7,8 +7,9 @@
 export type BoxSpan = { start: number; size: number };
 
 export type SourceMetadata = {
-  /** Seconds since 1904, the form the file stores, so nothing is lost converting to a Date and back. */
-  creationTime: number;
+  /** Seconds since 1904, the form the file stores, so nothing is lost converting to a Date and back. A
+   *  re-muxed clip often carries 0, and stamping that on the export would file it under 1904. */
+  creationTime: number | undefined;
   /** Movie level udta and meta, which carry GPS, camera make and model, the DJI block, and on iPhone clips the capture date. */
   tags: Uint8Array[];
 };
@@ -76,8 +77,9 @@ export async function readSourceMetadata(file: Blob, moov: BoxSpan): Promise<Sou
   const mvhd = find(top, "mvhd");
   if (!mvhd) return undefined;
   const carried = top.filter(c => CARRIED.includes(c.type));
+  const creationTime = readTime(buf, mvhd);
   return {
-    creationTime: readTime(buf, mvhd),
+    creationTime: creationTime > 0 ? creationTime : undefined,
     tags: carried.map(c => buf.slice(c.start, c.start + c.size)),
   };
 }
@@ -91,14 +93,17 @@ export async function applyMetadata(out: Blob, moov: BoxSpan, meta: SourceMetada
   const top = contents(buf, { start: 0, size: buf.length });
   const mvhd = find(top, "mvhd");
   if (!mvhd) return out;
-  writeTime(buf, mvhd, meta.creationTime);
-  for (const trak of top.filter(c => c.type === "trak")) {
-    const inTrak = contents(buf, trak);
-    const tkhd = find(inTrak, "tkhd");
-    if (tkhd) writeTime(buf, tkhd, meta.creationTime);
-    const mdia = find(inTrak, "mdia");
-    const mdhd = mdia && find(contents(buf, mdia), "mdhd");
-    if (mdhd) writeTime(buf, mdhd, meta.creationTime);
+  const when = meta.creationTime;
+  if (when) {
+    writeTime(buf, mvhd, when);
+    for (const trak of top.filter(c => c.type === "trak")) {
+      const inTrak = contents(buf, trak);
+      const tkhd = find(inTrak, "tkhd");
+      if (tkhd) writeTime(buf, tkhd, when);
+      const mdia = find(inTrak, "mdia");
+      const mdhd = mdia && find(contents(buf, mdia), "mdhd");
+      if (mdhd) writeTime(buf, mdhd, when);
+    }
   }
 
   const last = moov.start + moov.size === out.size;

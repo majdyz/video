@@ -589,7 +589,8 @@ async function retagged(blob: Blob, file: File, sourceBoxes: BoxRange[], log: (l
     const moov = (await indexTopLevelBoxes(blob)).find(b => b.type === "moov");
     if (!moov) return blob;
     const tagged = await applyMetadata(blob, moov, meta);
-    log(`metadata: creation time ${new Date((meta.creationTime - 2082844800) * 1000).toISOString()}${meta.tags.length ? `, tags ${meta.tags.map(t => t.length).join(" and ")} bytes` : ", no tag boxes on the source"}`);
+    const when = meta.creationTime ? new Date((meta.creationTime - 2082844800) * 1000).toISOString() : "none on the source, the export keeps its own";
+    log(`metadata: creation time ${when}${meta.tags.length ? `, tags ${meta.tags.map(t => t.length).join(" and ")} bytes` : ", no tag boxes on the source"}`);
     return tagged;
   } catch (e) {
     log(`metadata not carried over: ${(e as Error).message}`);

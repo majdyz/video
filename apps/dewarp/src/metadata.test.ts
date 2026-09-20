@@ -112,3 +112,26 @@ describe("iPhone style tags", () => {
     expect(bytes.slice(bytes.length - meta.length)).toEqual(meta);
   });
 });
+
+describe("a source with no creation time", () => {
+  it("reports none rather than 1904", async () => {
+    const { blob, moov } = file(movie(0));
+    expect((await readSourceMetadata(blob, moov))?.creationTime).toBeUndefined();
+  });
+
+  it("leaves the export's own time alone", async () => {
+    const { blob, moov } = file(movie(MUXER_TIME));
+    const tagged = await applyMetadata(blob, moov, { creationTime: undefined, tags: [] });
+    expect(times(new Uint8Array(await tagged.arrayBuffer()), "mvhd")).toEqual([
+      MUXER_TIME,
+      MUXER_TIME,
+    ]);
+  });
+
+  it("still carries the tag boxes over", async () => {
+    const udta = box("udta", enc.encode("gps"));
+    const { blob, moov } = file(movie(MUXER_TIME));
+    const tagged = await applyMetadata(blob, moov, { creationTime: undefined, tags: [udta] });
+    expect(tagged.size).toBe(blob.size + udta.length);
+  });
+});
