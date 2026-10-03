@@ -135,19 +135,6 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
     const water = src[c] * p.waterWb[c] * ew;
     out[c] = water + (full[c] * p.exposure - water) * conf;
   }
-  // Shadow floor (never darker than shadowFloor × the source) and highlight
-  // shoulder (luminance above the knee rolls off toward 1); hue kept.
-  {
-    const yo = luminance(out[0], out[1], out[2]);
-    const yMin = shadowFloorAt(lumI, p.shadowFloor) * lumI * ew;
-    let yt = Math.max(yo, yMin);
-    if (yt > p.knee) yt = p.knee + (1 - p.knee) * (1 - Math.exp(-(yt - p.knee) / (1 - p.knee)));
-    if (yo > 1e-6 && yt !== yo) {
-      const sc = yt / yo;
-      out[0] *= sc; out[1] *= sc; out[2] *= sc;
-    }
-  }
-
   // Levels on luminance, ratio-preserving.
   let Y = luminance(out[0], out[1], out[2]);
   const Ylv = Y + ((Y - p.black) / (p.white - p.black) - Y) * p.levelsMix;
@@ -163,6 +150,19 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
     const Ynew = srgbToLinear(clamp(encNew, 0, 1));
     ratio = Y > 1e-5 ? Ynew / Y : 1;
     for (let c = 0; c < 3; c++) out[c] *= ratio;
+  }
+
+  // Shadow floor (never darker than the luminance-dependent fraction of the
+  // source) and highlight shoulder — last, so levels/CLAHE can't undo them.
+  {
+    const yo = luminance(out[0], out[1], out[2]);
+    const yMin = shadowFloorAt(lumI, p.shadowFloor) * lumI * ew;
+    let yt = Math.max(yo, yMin);
+    if (yt > p.knee) yt = p.knee + (1 - p.knee) * (1 - Math.exp(-(yt - p.knee) / (1 - p.knee)));
+    if (yo > 1e-6 && yt !== yo) {
+      const sc = yt / yo;
+      out[0] *= sc; out[1] *= sc; out[2] *= sc;
+    }
   }
 
   // Chroma control in Oklab: ceiling relative to the source chroma, then

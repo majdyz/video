@@ -170,15 +170,6 @@ vec3 grade(vec3 src, vec2 uv) {
   float ew = pow(exposure, waterExposure);
   vec3 water = lin * waterWb * ew;
   vec3 o = water + (full * exposure - water) * conf;
-  // Shadow floor and highlight shoulder, hue kept.
-  {
-    float yo = lum(o);
-    float sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
-    float yt = max(yo, sf * lumI * ew);
-    if (yt > knee) yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee)));
-    if (yo > 1e-6) o *= yt / yo;
-  }
-
   // Levels on luminance, ratio-preserving.
   float Y = lum(o);
   float Ylv = Y + ((Y - black) / (white - black) - Y) * levelsMix;
@@ -194,6 +185,15 @@ vec3 grade(vec3 src, vec2 uv) {
     float Ynew = srgbToLinear(vec3(encNew)).x;
     ratio = Y > 1e-5 ? Ynew / Y : 1.0;
     o *= ratio;
+  }
+
+  // Shadow floor and highlight shoulder — last, so levels/CLAHE can't undo them.
+  {
+    float yo = lum(o);
+    float sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
+    float yt = max(yo, sf * lumI * ew);
+    if (yt > knee) yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee)));
+    if (yo > 1e-6) o *= yt / yo;
   }
 
   // Chroma ceiling relative to the source, then saturation.
@@ -361,14 +361,6 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let ew = pow(exposure, waterExposure);
   let water = lin * waterWb * ew;
   var o = water + (full * exposure - water) * conf;
-  {
-    let yo = lum(o);
-    let sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
-    var yt = max(yo, sf * lumI * ew);
-    if (yt > knee) { yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee))); }
-    if (yo > 1e-6) { o *= yt / yo; }
-  }
-
   var Y = lum(o);
   let Ylv = Y + ((Y - black) / (white - black) - Y) * levelsMix;
   var ratio = select(1.0, max(0.0, Ylv) / Y, Y > 1e-5);
@@ -384,6 +376,13 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     o *= ratio;
   }
 
+  {
+    let yo = lum(o);
+    let sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
+    var yt = max(yo, sf * lumI * ew);
+    if (yt > knee) { yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee))); }
+    if (yo > 1e-6) { o *= yt / yo; }
+  }
   let cSrc = length(lab0.yz);
   let lab = linearToOklab(max(o, vec3(0.0)));
   let C = length(lab.yz);

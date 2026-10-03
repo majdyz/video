@@ -305,7 +305,9 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     for (let i = 0; i < n; i++) Y[i] = mixY(i, exposure);
   }
   const [black, white] = percentiles(Y, [0.004, 0.996]);
-  const blackPt = Math.min(black, 0.06);
+  // A black point is a crush by definition; keep it tiny so a frame that
+  // darkens under a smoothed, brighter-frame black point loses nothing.
+  const blackPt = Math.min(black, 0.015);
   // Never stretch more than ~1.8×: a dim clip should stay dim-ish rather
   // than have its brighter patches shoved to white.
   const whitePt = Math.min(1.0, Math.max(white, blackPt + 0.2, LEVELS_WHITE_MIN));
