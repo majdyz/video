@@ -108,8 +108,10 @@ export const IDENTITY_PARAMS: GradeParams = {
 
 /**
  * Low-res per-pixel fields the shader upsamples with a joint bilateral
- * filter: `fields` holds (z, conf, dSmooth) per texel, `guide` the linear
- * RGB of the same texel (the range kernel compares the full-res pixel to it).
+ * filter: `fields` holds (z, conf, dSmooth, veilScale) per texel, `guide`
+ * the linear RGB of the same texel (the range kernel compares the full-res
+ * pixel to it). veilScale multiplies the veiling light: it is brighter
+ * toward the sunlit surface than the single B∞ fit says.
  */
 export type DepthMap = { width: number; height: number; fields: Float32Array; guide: Float32Array };
 
@@ -180,15 +182,9 @@ export function packUniforms(
   return u;
 }
 
-/** RGBA32F texel data for the fields map (R = z, G = conf, B = smoothed d). */
+/** RGBA32F texel data for the fields map (R = z, G = conf, B = smoothed d, A = veil scale). */
 export function fieldsTexture(d: DepthMap): Float32Array {
-  const out = new Float32Array(d.width * d.height * 4);
-  for (let i = 0; i < d.width * d.height; i++) {
-    out[i * 4] = d.fields[i * 3];
-    out[i * 4 + 1] = d.fields[i * 3 + 1];
-    out[i * 4 + 2] = d.fields[i * 3 + 2];
-  }
-  return out;
+  return new Float32Array(d.fields);
 }
 
 /** RGBA32F texel data for the guide map (linear RGB). */

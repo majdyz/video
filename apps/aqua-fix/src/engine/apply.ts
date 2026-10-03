@@ -19,15 +19,15 @@ export type ApplyContext = {
  * region, sharp at edges, no halos.
  */
 export const JBU_SIGMA = 0.14;
-function sampleFields(d: DepthMap, u: number, v: number, r: number, g: number, b: number): [number, number, number] {
+function sampleFields(d: DepthMap, u: number, v: number, r: number, g: number, b: number): [number, number, number, number] {
   const fx = Math.min(Math.max(u * d.width - 0.5, 0), d.width - 1);
   const fy = Math.min(Math.max(v * d.height - 0.5, 0), d.height - 1);
   const x0 = Math.floor(fx), y0 = Math.floor(fy);
   const x1 = Math.min(x0 + 1, d.width - 1), y1 = Math.min(y0 + 1, d.height - 1);
   const tx = fx - x0, ty = fy - y0;
   const cn = Math.hypot(r, g, b) + 0.02;
-  let sz = 0, sc = 0, sd = 0, sw = 0;
-  let bz = 0, bc = 0, bd = 0;
+  let sz = 0, sc = 0, sd = 0, sv = 0, sw = 0;
+  let bz = 0, bc = 0, bd = 0, bv = 0;
   const taps: [number, number, number][] = [[x0, y0, (1 - tx) * (1 - ty)], [x1, y0, tx * (1 - ty)], [x0, y1, (1 - tx) * ty], [x1, y1, tx * ty]];
   for (const [x, y, ws] of taps) {
     const i = y * d.width + x;
@@ -35,13 +35,14 @@ function sampleFields(d: DepthMap, u: number, v: number, r: number, g: number, b
     const diff = Math.hypot(r - gr, g - gg, b - gb) / (cn + Math.hypot(gr, gg, gb));
     const wr = Math.exp(-(diff * diff) / (2 * JBU_SIGMA * JBU_SIGMA));
     const wgt = ws * wr;
-    sz += wgt * d.fields[i * 3]; sc += wgt * d.fields[i * 3 + 1]; sd += wgt * d.fields[i * 3 + 2]; sw += wgt;
-    bz += ws * d.fields[i * 3]; bc += ws * d.fields[i * 3 + 1]; bd += ws * d.fields[i * 3 + 2];
+    const f = i * 4;
+    sz += wgt * d.fields[f]; sc += wgt * d.fields[f + 1]; sd += wgt * d.fields[f + 2]; sv += wgt * d.fields[f + 3]; sw += wgt;
+    bz += ws * d.fields[f]; bc += ws * d.fields[f + 1]; bd += ws * d.fields[f + 2]; bv += ws * d.fields[f + 3];
   }
   // Mix toward plain bilinear when no neighbour resembles the pixel.
   const k = Math.min(1, sw / 0.05);
-  if (sw < 1e-6) return [bz, bc, bd];
-  return [sz / sw * k + bz * (1 - k), sc / sw * k + bc * (1 - k), sd / sw * k + bd * (1 - k)];
+  if (sw < 1e-6) return [bz, bc, bd, bv];
+  return [sz / sw * k + bz * (1 - k), sc / sw * k + bc * (1 - k), sd / sw * k + bd * (1 - k), sv / sw * k + bv * (1 - k)];
 }
 
 /**
@@ -76,7 +77,7 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
 
   // Range proxy: coarse map plus guided per-pixel detail from the prior.
   const dPix = ULAP.mu0 + ULAP.mu1 * Math.max(sg, sb) + ULAP.mu2 * sr;
-  const [zc, confMap, dc] = sampleFields(ctx.depth, u, v, r0, g0, b0);
+  const [zc, confMap, dc, veilScale] = sampleFields(ctx.depth, u, v, r0, g0, b0);
   const zRange = Math.max(0.02, p.zHi - p.zLo);
   const z = clamp(zc + clamp((p.depthGuide * (dPix - dc)) / zRange, -0.25, 0.25), 0, 1.15);
 
@@ -87,7 +88,7 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
   let dl = 0;
   for (let c = 0; c < 3; c++) {
     const I = src[c];
-    const B = s.veil * p.binf[c] * (1 - Math.exp(-(p.betaB[c] * z + p.cB[c])));
+    const B = s.veil * veilScale * p.binf[c] * (1 - Math.exp(-(p.betaB[c] * z + p.cB[c])));
     const D = Math.max(I - B, I * p.floorFrac);
     dl += D * (c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722);
     const rangeGain = Math.min(p.gainCap, Math.max(1 / p.gainCap, Math.exp(p.attn[c] * (z - p.zMean))));

@@ -53,19 +53,19 @@ vec3 compressToGamut(vec3 c) {
   return vec3(Y) + t * (c - vec3(Y));
 }
 // Joint bilateral upsample of (z, conf, d) guided by the pixel's linear colour.
-vec3 sampleFields(vec2 uv, vec3 c) {
+vec4 sampleFields(vec2 uv, vec3 c) {
   ivec2 size = textureSize(u_data0, 0);
   vec2 f = clamp(uv * vec2(size) - 0.5, vec2(0.0), vec2(size) - 1.0);
   ivec2 i0 = ivec2(floor(f));
   ivec2 i1 = min(i0 + 1, size - 1);
   vec2 t = f - vec2(i0);
   float cn = length(c) + 0.02;
-  vec3 sum = vec3(0.0), bil = vec3(0.0);
+  vec4 sum = vec4(0.0), bil = vec4(0.0);
   float sw = 0.0;
   for (int k = 0; k < 4; k++) {
     ivec2 ij = ivec2(k == 1 || k == 3 ? i1.x : i0.x, k >= 2 ? i1.y : i0.y);
     float ws = (k == 1 || k == 3 ? t.x : 1.0 - t.x) * (k >= 2 ? t.y : 1.0 - t.y);
-    vec3 fld = texelFetch(u_data0, ij, 0).xyz;
+    vec4 fld = texelFetch(u_data0, ij, 0);
     vec3 g = texelFetch(u_data2, ij, 0).xyz;
     float diff = length(c - g) / (cn + length(g));
     float wr = exp(-(diff * diff) / (2.0 * JBU_SIGMA * JBU_SIGMA));
@@ -118,13 +118,13 @@ vec3 grade(vec3 src, vec2 uv) {
   vec3 lin = srgbToLinear(src);
   // Range proxy: joint-bilateral fields plus guided per-pixel detail.
   float dPix = mu.x + mu.y * max(src.g, src.b) + mu.z * src.r;
-  vec3 fld = sampleFields(uv, lin);
+  vec4 fld = sampleFields(uv, lin);
   float zRange = max(0.02, zHi - zLo);
   float z = clamp(fld.x + clamp(depthGuide * (dPix - fld.z) / zRange, -0.25, 0.25), 0.0, 1.15);
   float conf = clamp(fld.y, 0.0, 1.0);
 
   // De-scatter, range-adaptive compensation, white balance.
-  vec3 B = veil * binf * (1.0 - exp(-(betaB * z + cB)));
+  vec3 B = veil * fld.w * binf * (1.0 - exp(-(betaB * z + cB)));
   vec3 D = max(lin - B, lin * floorFrac);
   vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   vec3 full = D * rangeGain * wb;
@@ -209,20 +209,20 @@ fn compressToGamut(c: vec3<f32>) -> vec3<f32> {
   t = max(0.0, t);
   return vec3(Y) + t * (c - vec3(Y));
 }
-fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> vec3<f32> {
+fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> vec4<f32> {
   let size = vec2<i32>(textureDimensions(u_data0, 0));
   let f = clamp(uv * vec2<f32>(size) - 0.5, vec2(0.0), vec2<f32>(size) - 1.0);
   let i0 = vec2<i32>(floor(f));
   let i1 = min(i0 + 1, size - 1);
   let t = f - vec2<f32>(i0);
   let cn = length(c) + 0.02;
-  var sum = vec3(0.0); var bil = vec3(0.0); var sw = 0.0;
+  var sum = vec4(0.0); var bil = vec4(0.0); var sw = 0.0;
   for (var k = 0; k < 4; k++) {
     let right = (k == 1 || k == 3);
     let bottom = (k >= 2);
     let ij = vec2<i32>(select(i0.x, i1.x, right), select(i0.y, i1.y, bottom));
     let ws = select(1.0 - t.x, t.x, right) * select(1.0 - t.y, t.y, bottom);
-    let fld = textureLoad(u_data0, ij, 0).xyz;
+    let fld = textureLoad(u_data0, ij, 0);
     let g = textureLoad(u_data2, ij, 0).xyz;
     let diff = length(c - g) / (cn + length(g));
     let wr = exp(-(diff * diff) / (2.0 * JBU_SIGMA * JBU_SIGMA));
@@ -278,7 +278,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let z = clamp(fld.x + clamp(depthGuide * (dPix - fld.z) / zRange, -0.25, 0.25), 0.0, 1.15);
   let conf = clamp(fld.y, 0.0, 1.0);
 
-  let B = veil * binf * (1.0 - exp(-(betaB * z + cB)));
+  let B = veil * fld.w * binf * (1.0 - exp(-(betaB * z + cB)));
   let D = max(lin - B, lin * floorFrac);
   let rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   let full = D * rangeGain * wb;

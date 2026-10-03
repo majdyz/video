@@ -47,8 +47,16 @@ const CONF_HI = 0.4;
 // Water shares the veil's hue whatever its brightness; below HUE_LO it is
 // water, above HUE_HI an object. Achromatic pixels (dark wetsuits, white
 // sand) have no usable hue and always count as objects.
-const HUE_LO = 6 * Math.PI / 180;
-const HUE_HI = 14 * Math.PI / 180;
+const HUE_LO = 10 * Math.PI / 180;
+const HUE_HI = 26 * Math.PI / 180;
+// Spatial veil: per cell, the median brightness of water-hued pixels
+// relative to the global veil fit. Sunlit upper water sits well above the
+// fit; without this it would read as a bright object and go white.
+const VEIL_CELLS_X = 16;
+const VEIL_CELLS_Y = 9;
+const VEIL_SCALE_MIN = 0.6;
+const VEIL_SCALE_MAX = 2.2;
+const VEIL_MIN_SAMPLES = 6;
 const ACHROMA = 0.025;
 // The water path keeps most of its original brightness.
 const WATER_EXPOSURE = 0.35;
@@ -56,7 +64,8 @@ const WATER_EXPOSURE = 0.35;
 const WATER_WB_POWER = 0.35;
 // White balance limits (linear gains relative to green).
 const WB_R_MAX = 3.5;
-const WB_B_MIN = 0.45;
+const WB_R_MIN = 0.65;
+const WB_B_MIN = 0.55;
 const WB_B_MAX = 2.6;
 // Below this share of confident pixels the scene is mostly water and the
 // gray-world assumption is weak: shrink the balance toward identity.
@@ -170,6 +179,14 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   let zSum = 0;
   for (let i = 0; i < n; i++) zSum += z[i];
   const zMean = zSum / n;
+
+  // Spatial veil scale from water-hued pixels (see VEIL_CELLS_*).
+  const hueObj = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const [, pa, pb] = linearToOklab(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
+    hueObj[i] = hueConfidence(pa, pb, veilHue, HUE_LO, HUE_HI, ACHROMA);
+  }
+  const veilScale = veilScaleMap(lin, z, hueObj, binf, betaB, cB, w, h);
   const J = new Float32Array(n * 3);
   const conf = new Float32Array(n);
   for (let i = 0; i < n; i++) {
@@ -177,15 +194,14 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     let dl = 0;
     for (let c = 0; c < 3; c++) {
       const I = lin[i * 3 + c];
-      const B = binf[c] * (1 - Math.exp(-(betaB[c] * zi + cB[c])));
+      const B = veilScale[i] * binf[c] * (1 - Math.exp(-(betaB[c] * zi + cB[c])));
       const D = Math.max(I - B, I * FLOOR_FRAC);
       dl += D * (c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722);
       J[i * 3 + c] = D;
     }
     void zi;
-    const [, pa, pb] = linearToOklab(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
     const confSignal = smoothstep(CONF_LO, CONF_HI, dl / Math.max(1e-5, lum[i]));
-    conf[i] = Math.min(confSignal, hueConfidence(pa, pb, veilHue, HUE_LO, HUE_HI, ACHROMA));
+    conf[i] = Math.min(confSignal, hueObj[i]);
   }
 
   // 4. Shades-of-Gray white balance (p = 6) on the de-scattered image,
@@ -207,7 +223,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     const er = Math.pow(sr / sw, 1 / P) + 1e-5;
     const eg = Math.pow(sg / sw, 1 / P) + 1e-5;
     const eb = Math.pow(sb / sw, 1 / P) + 1e-5;
-    wb[0] = Math.min(WB_R_MAX, Math.max(0.6, eg / er));
+    wb[0] = Math.min(WB_R_MAX, Math.max(WB_R_MIN, eg / er));
     wb[2] = Math.min(WB_B_MAX, Math.max(WB_B_MIN, eg / eb));
   }
   // Mostly-water scenes: shrink toward identity.
@@ -217,7 +233,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // Memory-colour guardrail.
   for (let step = 0; step < GUARD_STEPS; step++) {
     if (magentaFraction(J, conf, n, wb) <= MAGENTA_MAX_FRACTION) break;
-    wb[0] *= 0.9;
+    wb[0] = Math.max(WB_R_MIN, wb[0] * 0.9);
   }
   const attn: Vec3 = [ATTN_GAMMA * Math.log(wb[0]), 0, ATTN_GAMMA * Math.log(wb[2])];
   for (let i = 0; i < n; i++) {
@@ -284,7 +300,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   }
   const clahe = buildClahe(enc, w, h);
 
-  const depth = buildMaps(z, conf, ds, lin, w, h);
+  const depth = buildMaps(z, conf, ds, veilScale, lin, w, h);
   const params: GradeParams = {
     binf,
     betaB,
@@ -321,6 +337,77 @@ function lum3(lin: Float32Array, i: number): number {
 
 function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
+}
+
+/**
+ * Per-pixel veil scale: in each cell, the median of lum(I) / lum(B_fit(z))
+ * over water-hued pixels; cells without enough water inherit from their
+ * neighbours; the cell grid is bilinearly expanded to the thumbnail.
+ */
+function veilScaleMap(
+  lin: Float32Array, z: Float32Array, hueObj: Float32Array,
+  binf: Vec3, betaB: Vec3, cB: Vec3, w: number, h: number,
+): Float32Array {
+  const cx = VEIL_CELLS_X, cy = VEIL_CELLS_Y;
+  const samples: number[][] = Array.from({ length: cx * cy }, () => []);
+  for (let y = 0; y < h; y++) {
+    const ty = Math.min(cy - 1, Math.floor((y * cy) / h));
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (hueObj[i] > 0.5) continue;
+      let lb = 0;
+      for (let c = 0; c < 3; c++) lb += binf[c] * (1 - Math.exp(-(betaB[c] * z[i] + cB[c]))) * (c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722);
+      if (lb < 1e-3) continue;
+      const li = luminance(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
+      const tx = Math.min(cx - 1, Math.floor((x * cx) / w));
+      samples[ty * cx + tx].push(li / lb);
+    }
+  }
+  const cell = new Float32Array(cx * cy).fill(NaN);
+  for (let k = 0; k < cx * cy; k++) {
+    const sm = samples[k];
+    if (sm.length < VEIL_MIN_SAMPLES) continue;
+    sm.sort((a, b) => a - b);
+    cell[k] = Math.min(VEIL_SCALE_MAX, Math.max(VEIL_SCALE_MIN, sm[sm.length >> 1]));
+  }
+  // Fill holes from neighbours (a few dilation passes), then 1.0.
+  for (let pass = 0; pass < 8; pass++) {
+    let changed = false;
+    const next = new Float32Array(cell);
+    for (let ty = 0; ty < cy; ty++) {
+      for (let tx = 0; tx < cx; tx++) {
+        const k = ty * cx + tx;
+        if (!Number.isNaN(cell[k])) continue;
+        let sum = 0, cnt = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = tx + dx, ny = ty + dy;
+            if (nx < 0 || ny < 0 || nx >= cx || ny >= cy) continue;
+            const v = cell[ny * cx + nx];
+            if (!Number.isNaN(v)) { sum += v; cnt++; }
+          }
+        }
+        if (cnt > 0) { next[k] = sum / cnt; changed = true; }
+      }
+    }
+    cell.set(next);
+    if (!changed) break;
+  }
+  for (let k = 0; k < cx * cy; k++) if (Number.isNaN(cell[k])) cell[k] = 1;
+  // Bilinear expansion to the thumbnail.
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const fy = Math.min(Math.max(((y + 0.5) * cy) / h - 0.5, 0), cy - 1);
+    const y0 = Math.floor(fy), y1 = Math.min(y0 + 1, cy - 1), ty = fy - y0;
+    for (let x = 0; x < w; x++) {
+      const fx = Math.min(Math.max(((x + 0.5) * cx) / w - 0.5, 0), cx - 1);
+      const x0 = Math.floor(fx), x1 = Math.min(x0 + 1, cx - 1), tx = fx - x0;
+      const top = cell[y0 * cx + x0] * (1 - tx) + cell[y0 * cx + x1] * tx;
+      const bot = cell[y1 * cx + x0] * (1 - tx) + cell[y1 * cx + x1] * tx;
+      out[y * w + x] = top * (1 - ty) + bot * ty;
+    }
+  }
+  return out;
 }
 
 /** 1 for objects, 0 for water: hue distance to the veil, achromatic → object. */
@@ -468,10 +555,10 @@ function clampI(i: number, n: number): number {
  * per-pixel decisions can't speckle, plus the linear colour of each texel as
  * the guide for joint bilateral upsampling.
  */
-function buildMaps(z: Float32Array, conf: Float32Array, ds: Float32Array, lin: Float32Array, w: number, h: number): DepthMap {
+function buildMaps(z: Float32Array, conf: Float32Array, ds: Float32Array, veilScale: Float32Array, lin: Float32Array, w: number, h: number): DepthMap {
   const zb = boxBlur(z, w, h, 1);
   const cb = boxBlur(boxBlur(conf, w, h, 1), w, h, 1);
-  const fields = new Float32Array(MAP_W * MAP_H * 3);
+  const fields = new Float32Array(MAP_W * MAP_H * 4);
   const guide = new Float32Array(MAP_W * MAP_H * 3);
   for (let ty = 0; ty < MAP_H; ty++) {
     const y0 = Math.floor((ty * h) / MAP_H);
@@ -479,19 +566,20 @@ function buildMaps(z: Float32Array, conf: Float32Array, ds: Float32Array, lin: F
     for (let tx = 0; tx < MAP_W; tx++) {
       const x0 = Math.floor((tx * w) / MAP_W);
       const x1 = Math.max(x0 + 1, Math.floor(((tx + 1) * w) / MAP_W));
-      let sz = 0, sc = 0, sd = 0, sr = 0, sg = 0, sb = 0, cnt = 0;
+      let sz = 0, sc = 0, sd = 0, sv = 0, sr = 0, sg = 0, sb = 0, cnt = 0;
       for (let y = y0; y < y1; y++) {
         for (let x = x0; x < x1; x++) {
           const i = y * w + x;
-          sz += zb[i]; sc += cb[i]; sd += ds[i];
+          sz += zb[i]; sc += cb[i]; sd += ds[i]; sv += veilScale[i];
           sr += lin[i * 3]; sg += lin[i * 3 + 1]; sb += lin[i * 3 + 2];
           cnt++;
         }
       }
       const o = ty * MAP_W + tx;
-      fields[o * 3] = sz / cnt;
-      fields[o * 3 + 1] = sc / cnt;
-      fields[o * 3 + 2] = sd / cnt;
+      fields[o * 4] = sz / cnt;
+      fields[o * 4 + 1] = sc / cnt;
+      fields[o * 4 + 2] = sd / cnt;
+      fields[o * 4 + 3] = sv / cnt;
       guide[o * 3] = sr / cnt;
       guide[o * 3 + 1] = sg / cnt;
       guide[o * 3 + 2] = sb / cnt;
