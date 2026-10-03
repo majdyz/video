@@ -485,15 +485,15 @@ export default function App() {
             const rot = (info.rotation / 90) as Rotation;
             const t0 = performance.now();
             e.upload(frame, frame.displayWidth, frame.displayHeight, rot);
-            // First frame waits for its analysis so the clip starts graded;
-            // after that the worker runs alongside the encoder and each
-            // result snaps in when it lands (never stalls the pipeline).
-            if (frames === 0) await e.analyzeNow(true);
-            else e.analyzeSoon();
+            // Every export frame is analysed (cheap next to the capture) so
+            // the eased maps track the picture; the first one snaps.
+            await e.analyzeNow(frames === 0);
             e.tick(info.timeSec);
             frames++;
             const t1 = performance.now();
-            const out = await e.renderToFrame(rot, frame.timestamp, frame.duration ?? undefined);
+            // Stamp with the shifted presentation time, never the decoder's raw
+            // timestamp (WebKit emits negative ones; the muxer rejects those).
+            const out = await e.renderToFrame(rot, Math.round(info.timeSec * 1e6), frame.duration ?? undefined);
             const t2 = performance.now();
             stage.upload += t1 - t0;
             stage.render += t2 - t1;

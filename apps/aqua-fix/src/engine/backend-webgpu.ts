@@ -377,10 +377,30 @@ export class WebGPUBackend implements GpuBackend {
       try {
         let lit = false;
         const t0 = performance.now();
-        for (let i = 0; i < N; i++) {
-          const f = await this.captureAs(mode, timestampUs, durationUs);
-          lit = lit || frameIsLit(f);
-          f.close();
+        if (mode === "readback") {
+          // The exporter keeps two renders in flight: score the readback by
+          // its overlapped throughput, not its single-frame latency (a
+          // mapAsync may only resolve at the next vsync).
+          const inflight: Promise<VideoFrame>[] = [];
+          for (let i = 0; i < N; i++) {
+            inflight.push(this.captureAs(mode, timestampUs, durationUs));
+            if (inflight.length >= 2) {
+              const f = await inflight.shift()!;
+              lit = lit || frameIsLit(f);
+              f.close();
+            }
+          }
+          for (const pf of inflight) {
+            const f = await pf;
+            lit = lit || frameIsLit(f);
+            f.close();
+          }
+        } else {
+          for (let i = 0; i < N; i++) {
+            const f = await this.captureAs(mode, timestampUs, durationUs);
+            lit = lit || frameIsLit(f);
+            f.close();
+          }
         }
         const ms = (performance.now() - t0) / N;
         results.push(`${mode} ${ms.toFixed(1)} ms${lit ? "" : " (black)"}`);

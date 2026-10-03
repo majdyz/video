@@ -4,10 +4,8 @@
 //   uniform packing · render / export frames.
 //
 // Global parameters ease in with a ~0.6 s time constant (log domain for the
-// gains) so nothing pulses. The spatial maps (where the water is, the veil
-// level, the local-contrast tiles) snap to every analysis: easing them made
-// the previous frame's layout linger as a dark ghost on moving content.
-// A hard cut snaps the parameters too.
+// gains), the spatial maps over ~0.25 s (see TAU_MAPS_S). A hard cut snaps
+// everything.
 
 import { WebGL2Backend } from "./backend-webgl2.ts";
 import { WebGPUBackend } from "./backend-webgpu.ts";
@@ -31,6 +29,11 @@ import {
 
 export const ANALYSIS_INTERVAL_MS = 70;
 const TAU_PARAMS_S = 0.6;
+// Spatial maps ease over a short window: snapping them pulsed brightness and
+// local contrast on every analysis; easing is safe now because a pixel that
+// no longer matches the map's guide colour is classified on its own in the
+// shader, so a lagging map can't ghost moved content.
+const TAU_MAPS_S = 0.25;
 const SCENE_CUT_MEAN_DIFF = 0.16;
 
 type Packed = { width: number; height: number; data: Float32Array };
@@ -56,6 +59,9 @@ export class GradeEngine {
   private fields: Packed | null = null;
   private guide: Packed | null = null;
   private clahe: Packed | null = null;
+  private fieldsTarget: Packed | null = null;
+  private guideTarget: Packed | null = null;
+  private claheTarget: Packed | null = null;
   private lastMean: Vec3 | null = null;
   private lastTickSec = 0;
   private hasAnalysis = false;
@@ -204,11 +210,9 @@ export class GradeEngine {
       this.snapTo(packet);
     } else {
       this.target = packet.params;
-      // Spatial maps follow the frame immediately.
-      this.fields = packet.fields;
-      this.clahe = packet.clahe;
-      this.guide = packet.guide;
-      this.dirtyData = true;
+      this.fieldsTarget = packet.fields;
+      this.guideTarget = packet.guide;
+      this.claheTarget = packet.clahe;
     }
     this.settle(raw, null);
   }
@@ -219,15 +223,38 @@ export class GradeEngine {
     this.fields = packet.fields;
     this.guide = packet.guide;
     this.clahe = packet.clahe;
+    this.fieldsTarget = null;
+    this.guideTarget = null;
+    this.claheTarget = null;
     this.hasAnalysis = true;
     this.dirtyData = true;
   }
 
   private smooth(dt: number): void {
-    if (!this.target || dt <= 0) return;
-    const a = 1 - Math.exp(-dt / TAU_PARAMS_S);
-    this.current = lerpParams(this.current, this.target, a);
+    if (dt <= 0) return;
+    if (this.target) {
+      const a = 1 - Math.exp(-dt / TAU_PARAMS_S);
+      this.current = lerpParams(this.current, this.target, a);
+    }
+    const am = 1 - Math.exp(-dt / TAU_MAPS_S);
+    const ease = (cur: Packed | null, tgt: Packed | null): Packed | null => {
+      if (!tgt) return cur;
+      if (!cur || cur.width !== tgt.width || cur.height !== tgt.height || cur.data.length !== tgt.data.length) return tgt;
+      // Blend into a private copy so the packet's buffer stays pristine.
+      const out = cur === this.lastEased.get(tgt) ? cur : { ...cur, data: new Float32Array(cur.data) };
+      lerpInto(out.data, tgt.data, am);
+      this.lastEased.set(tgt, out);
+      return out;
+    };
+    const f = ease(this.fields, this.fieldsTarget);
+    const g = ease(this.guide, this.guideTarget);
+    const c = ease(this.clahe, this.claheTarget);
+    if (f !== this.fields || g !== this.guide || c !== this.clahe) this.dirtyData = true;
+    this.fields = f;
+    this.guide = g;
+    this.clahe = c;
   }
+  private lastEased = new WeakMap<Packed, Packed>();
 
   private pushData(): void {
     if (!this.fields || !this.guide || !this.clahe) return;
@@ -243,6 +270,9 @@ export class GradeEngine {
     this.inflight = false;
     this.hasAnalysis = false;
     this.target = null;
+    this.fieldsTarget = null;
+    this.guideTarget = null;
+    this.claheTarget = null;
     this.current = IDENTITY_PARAMS;
     this.lastMean = null;
     this.lastAnalysisAt = -Infinity;
@@ -281,6 +311,10 @@ export class GradeEngine {
     this.worker = null;
     this.backend.dispose();
   }
+}
+
+function lerpInto(dst: Float32Array, src: Float32Array, t: number): void {
+  for (let i = 0; i < dst.length; i++) dst[i] += (src[i] - dst[i]) * t;
 }
 
 function meanDiff(a: Vec3, b: Vec3): number {
