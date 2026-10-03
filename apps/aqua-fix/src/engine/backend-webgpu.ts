@@ -362,6 +362,9 @@ export class WebGPUBackend implements GpuBackend {
    * 10× between browsers. Runs on the copy path so the awaits inside don't
    * outlive an external texture import.
    */
+  /** Human-readable result of the capture benchmark (diagnostics). */
+  captureBench = "";
+
   private async benchmarkCapture(timestampUs: number, durationUs: number | undefined): Promise<void> {
     const ext = this.extSource;
     if (ext) {
@@ -410,6 +413,7 @@ export class WebGPUBackend implements GpuBackend {
       }
     }
     this.capture = best?.mode ?? "readback";
+    this.captureBench = results.join(", ");
     console.info(`WebGPU capture bench: ${results.join(", ")} → ${this.capture}`);
     if (ext) this.extSource = ext;
   }
