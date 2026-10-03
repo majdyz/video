@@ -145,6 +145,19 @@ export async function exportRealtime(
     if (video.duration > 0) onProgress(Math.min(0.98, video.currentTime / video.duration));
   };
   video.addEventListener("timeupdate", onTime);
+  // Backgrounded (tab switch, phone lock): pause playback and the recorder
+  // together so the output has no frozen stretch, resume both on return.
+  const onVisibility = () => {
+    if (recorder.state === "inactive") return;
+    if (document.hidden) {
+      video.pause();
+      if (recorder.state === "recording") recorder.pause();
+    } else {
+      if (recorder.state === "paused") recorder.resume();
+      void video.play().catch(() => undefined);
+    }
+  };
+  document.addEventListener("visibilitychange", onVisibility);
   const ended = new Promise<void>((resolve) => video.addEventListener("ended", () => resolve(), { once: true }));
   try {
     await new Promise<void>((resolve, reject) => {
@@ -167,6 +180,7 @@ export async function exportRealtime(
   } finally {
     signal?.removeEventListener("abort", onAbort);
     video.removeEventListener("timeupdate", onTime);
+    document.removeEventListener("visibilitychange", onVisibility);
     video.muted = wasMuted;
     video.playbackRate = wasRate;
     for (const t of stream.getTracks()) t.stop();
