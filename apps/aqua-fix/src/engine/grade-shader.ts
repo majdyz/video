@@ -36,6 +36,8 @@ const float SKIN_L_HI = ${SKIN.lHi.toFixed(4)};
 const float SKIN_C_LO = ${SKIN.cLo.toFixed(4)};
 const float SKIN_C_HI = ${SKIN.cHi.toFixed(4)};
 const float SKIN_MIX = ${SKIN.mix.toFixed(4)};
+const float SKIN_W_LO = ${SKIN.wLo.toFixed(4)};
+const float SKIN_W_HI = ${SKIN.wHi.toFixed(4)};
 const float SKIN_C_MIN = ${SKIN.cMin.toFixed(4)};
 `;
 const LOOK_CONSTS_WGSL = LOOK_CONSTS_GLSL.replace(/const float (\w+) = ([^;]+);/g, "const $1: f32 = $2;");
@@ -127,7 +129,7 @@ vec2 skinTone(float L, vec2 ab, float person) {
   float h = atan(ab.y, ab.x);
   float d = h - SKIN_BAND_HUE; d -= 6.2831853 * round(d / 6.2831853);
   float inBand = max(1.0 - smoothstepf(SKIN_BAND_IN, SKIN_BAND_OUT, abs(d)), 1.0 - smoothstepf(SKIN_ACHROMA * 0.5, SKIN_ACHROMA, C));
-  float w = person * inBand * smoothstepf(SKIN_L_LO, SKIN_L_HI, L) * (1.0 - smoothstepf(SKIN_C_LO, SKIN_C_HI, C));
+  float w = smoothstepf(SKIN_W_LO, SKIN_W_HI, person) * inBand * smoothstepf(SKIN_L_LO, SKIN_L_HI, L) * (1.0 - smoothstepf(SKIN_C_LO, SKIN_C_HI, C));
   if (w <= 0.0) return ab;
   float dh = SKIN_HUE - h; dh -= 6.2831853 * round(dh / 6.2831853);
   float h2 = h + dh * SKIN_MIX * w;
@@ -370,7 +372,7 @@ fn skinTone(L: f32, ab: vec2<f32>, person: f32) -> vec2<f32> {
   let h = atan2(ab.y, ab.x);
   var d = h - SKIN_BAND_HUE; d -= 6.2831853 * round(d / 6.2831853);
   let inBand = max(1.0 - smoothstepf(SKIN_BAND_IN, SKIN_BAND_OUT, abs(d)), 1.0 - smoothstepf(SKIN_ACHROMA * 0.5, SKIN_ACHROMA, C));
-  let w = person * inBand * smoothstepf(SKIN_L_LO, SKIN_L_HI, L) * (1.0 - smoothstepf(SKIN_C_LO, SKIN_C_HI, C));
+  let w = smoothstepf(SKIN_W_LO, SKIN_W_HI, person) * inBand * smoothstepf(SKIN_L_LO, SKIN_L_HI, L) * (1.0 - smoothstepf(SKIN_C_LO, SKIN_C_HI, C));
   if (w <= 0.0) { return ab; }
   var dh = SKIN_HUE - h; dh -= 6.2831853 * round(dh / 6.2831853);
   let h2 = h + dh * SKIN_MIX * w;

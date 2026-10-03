@@ -252,7 +252,9 @@ export const SKIN = {
   lHi: 0.55,
   cLo: 0.07, // not vivid
   cHi: 0.1,
-  mix: 0.85, // how far the hue moves toward SKIN.hue
+  mix: 0.9, // how far the hue moves toward SKIN.hue
+  wLo: 0.1, // person weight saturates: smoothstep(wLo, wHi, person)
+  wHi: 0.5,
   cMin: 0.045, // chroma floor
 };
 

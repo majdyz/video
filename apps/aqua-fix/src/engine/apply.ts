@@ -228,7 +228,7 @@ export function skinTone(L: number, a: number, b: number, person: number): [numb
   const h = Math.atan2(b, a);
   const wrap = (x: number) => x - 2 * Math.PI * Math.round(x / (2 * Math.PI));
   const inBand = Math.max(1 - smoothstep(SKIN.bandIn, SKIN.bandOut, Math.abs(wrap(h - SKIN.bandHue))), 1 - smoothstep(SKIN.achroma * 0.5, SKIN.achroma, C));
-  const w = person * inBand * smoothstep(SKIN.lLo, SKIN.lHi, L) * (1 - smoothstep(SKIN.cLo, SKIN.cHi, C));
+  const w = smoothstep(SKIN.wLo, SKIN.wHi, person) * inBand * smoothstep(SKIN.lLo, SKIN.lHi, L) * (1 - smoothstep(SKIN.cLo, SKIN.cHi, C));
   if (w <= 0) return [a, b];
   const h2 = h + wrap(SKIN.hue - h) * SKIN.mix * w;
   const C2 = C + Math.max(0, SKIN.cMin - C) * w;
