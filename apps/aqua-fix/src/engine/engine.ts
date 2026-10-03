@@ -33,7 +33,9 @@ const TAU_PARAMS_S = 0.6;
 // local contrast on every analysis; easing is safe now because a pixel that
 // no longer matches the map's guide colour is classified on its own in the
 // shader, so a lagging map can't ghost moved content.
-const TAU_MAPS_S = 0.25;
+const TAU_MAPS_S = 0.4;
+// Local-contrast tiles describe tone, not geometry: they can lag longer.
+const TAU_CLAHE_S = 0.7;
 const SCENE_CUT_MEAN_DIFF = 0.16;
 
 type Packed = { width: number; height: number; data: Float32Array };
@@ -237,18 +239,19 @@ export class GradeEngine {
       this.current = lerpParams(this.current, this.target, a);
     }
     const am = 1 - Math.exp(-dt / TAU_MAPS_S);
-    const ease = (cur: Packed | null, tgt: Packed | null): Packed | null => {
+    const ac = 1 - Math.exp(-dt / TAU_CLAHE_S);
+    const ease = (cur: Packed | null, tgt: Packed | null, rate = am): Packed | null => {
       if (!tgt) return cur;
       if (!cur || cur.width !== tgt.width || cur.height !== tgt.height || cur.data.length !== tgt.data.length) return tgt;
       // Blend into a private copy so the packet's buffer stays pristine.
       const out = cur === this.lastEased.get(tgt) ? cur : { ...cur, data: new Float32Array(cur.data) };
-      lerpInto(out.data, tgt.data, am);
+      lerpInto(out.data, tgt.data, rate);
       this.lastEased.set(tgt, out);
       return out;
     };
     const f = ease(this.fields, this.fieldsTarget);
     const g = ease(this.guide, this.guideTarget);
-    const c = ease(this.clahe, this.claheTarget);
+    const c = ease(this.clahe, this.claheTarget, ac);
     if (f !== this.fields || g !== this.guide || c !== this.clahe) this.dirtyData = true;
     this.fields = f;
     this.guide = g;

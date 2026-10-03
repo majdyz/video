@@ -23,7 +23,7 @@ export type UserSettings = {
 export const DEFAULT_SETTINGS: UserSettings = {
   strength: 1,
   saturation: 1,
-  clarity: 0.35,
+  clarity: 0.25,
   veil: 0.7,
 };
 
