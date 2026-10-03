@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { compressToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { CONF_BRIGHT, LOOK, SKIN, ULAP, boostParams, hazeWeight, lookParams, lookSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, boostParams, hazeWeight, lookParams, lookSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
@@ -145,13 +145,14 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // the map says (see grade-shader.ts).
   // A detected person is an object whatever the colour tests say (the
   // "tiny D" protection via confSignal still applies).
-  const conf = Math.max(clamp(confMap, 0, 1) * k + confPix * (1 - k), person) * confSignal;
+  const personW = person * smoothstep(PERSON_LUM.lo, PERSON_LUM.hi, lumI);
+  const conf = Math.max(clamp(confMap, 0, 1) * k + confPix * (1 - k), personW) * confSignal;
   if (ctx.debug) return [k, confPix, clamp(confMap, 0, 1)];
   const out = [0, 0, 0];
   const ew = Math.pow(p.exposure, p.waterExposure);
   // Water path: own brightness, toned-down balance, optional hue-preserving
   // dehaze (gives up part of the veil fraction; floor keeps pure water lit).
-  const wd = 1 - s.dehaze * Math.min(0.9, lumBs / lumI);
+  const wd = 1 - s.dehaze * Math.min(0.9, lumBs / lumI) * smoothstep(DEHAZE_LUM.lo, DEHAZE_LUM.hi, lumI);
   for (let c = 0; c < 3; c++) {
     const water = src[c] * p.waterWb[c] * ew * wd;
     out[c] = water + (full[c] * p.exposure - water) * conf;
@@ -196,7 +197,9 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   let scale = C > cMax ? cMax / C : 1;
   scale *= s.saturation;
   const skinned = skinTone(L, a * scale, b * scale, person);
-  const looked = deepBlueLook(L, skinned[0], skinned[1], s.look, 1 - conf, hazeWeight(p));
+  // Water-likeness for the look comes from the pixel's own hue (the mask or
+  // the water/object split would cut one garment into differently treated parts).
+  const looked = deepBlueLook(L, skinned[0], skinned[1], s.look, 1 - hueConf(pa, pb, p), hazeWeight(p));
   const [r1, g1, b1] = oklabToLinear(looked[0], looked[1], looked[2]);
   void C;
 
@@ -248,9 +251,10 @@ export function deepBlueLook(L: number, a: number, b: number, look: number, wate
   // in their graded colour inside a blue frame (a halo around people).
   const vivid = smoothstep(LOOK.keepLo, LOOK.keepHi, C);
   const warm = (1 - smoothstep(LOOK.warmIn, LOOK.warmOut, Math.abs(wrap(h - LOOK.warmHue)))) * smoothstep(LOOK.warmLo, LOOK.warmHi, C);
-  const wTint = (1 - vivid) * (1 - warm) * (1 - smoothstep(LOOK.brightLo, LOOK.brightHi, L)) * smoothstep(LOOK.darkLo, LOOK.darkHi, L);
+  const far = smoothstep(LOOK.farLo, LOOK.farHi, Math.abs(wrap(h - LOOK.targetHue)));
+  const wTint = (1 - vivid) * (1 - warm) * (1 - smoothstep(LOOK.brightLo, LOOK.brightHi, L)) * smoothstep(LOOK.darkLo, LOOK.darkHi, L) * (1 - LOOK.farKeep * far);
   const w = wTint * look * LOOK.mix;
-  const L2 = Math.pow(Math.max(0, L), 1 + LOOK.gamma * look) * (1 - LOOK.waterDim * look * water);
+  const L2 = Math.pow(Math.max(0, L), 1 + LOOK.gamma * look) * (1 - LOOK.waterDim * look * water * (1 - hazeW));
   // The tint never desaturates: an already-blue pixel keeps its chroma.
   const Ct = Math.max(C, (LOOK.c0 + LOOK.c1 * L2) * (1 + LOOK.hazeChroma * hazeW));
   // Light near-neutral pixels (sand, white coral) go fully neutral.

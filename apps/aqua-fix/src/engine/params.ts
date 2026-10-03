@@ -61,6 +61,18 @@ export type GradeSettings = {
  * under a cyan cast, yet nothing that bright is water.
  */
 export const CONF_BRIGHT = { lo: 0.55, hi: 0.78 };
+/**
+ * Below this source luminance a detected person no longer forces the object
+ * path: a black wetsuit is mostly veil, and subtracting it leaves black with
+ * a hard edge at the mask boundary (the water path keeps it smooth).
+ */
+export const PERSON_LUM = { lo: 0.06, hi: 0.18 };
+/**
+ * Water-path dehaze fades out on dark pixels: a dark garment is "all veil" to
+ * the model and would be crushed to black with a hard edge where the veil
+ * fraction saturates.
+ */
+export const DEHAZE_LUM = { lo: 0.05, hi: 0.2 };
 
 /** Deep-blue look constants (fitted to a reference grade in Oklab). */
 export const LOOK = {
@@ -68,12 +80,12 @@ export const LOOK = {
   // darker, clear scenes keep their exposure. The dim rides on the exposure
   // uniform, scaled by the frame's haze (see lookParams); gamma is a mild
   // per-pixel shadow crush.
-  gamma: 0.05,
+  gamma: 0.0,
   dim: 0.3,
   hazeDehaze: 0.7, // hazy frames: the look also dehazes the water path …
-  hazeClarity: 0.5, // … adds local contrast …
-  hazeLevels: 0.2, // … and a fuller levels stretch, so the reef comes back
-  waterDim: 0.25, // water-path pixels go darker (deep water reads navy in the references)
+  hazeClarity: 0.15, // … a little local contrast (more crushes dark garments to black) …
+  hazeLevels: 0.1, // … and a slightly fuller levels stretch, so the reef comes back
+  waterDim: 0.25, // in clear frames water-coloured pixels (by hue, never by mask) go darker; hazy frames already dim globally
   hazeLo: 0.05, // lifted-black haze below which nothing dims …
   hazeHi: 0.3, // … and above which the full dim applies
   hazeChroma: 0.8, // water tint chroma target rises with haze (murky refs are more saturated)
@@ -94,9 +106,12 @@ export const LOOK = {
   targetHue: (252 * Math.PI) / 180,
   c0: 0.0, // target chroma = c0 + c1·L: zero at black, so blacks stay black …
   c1: 0.11,
-  darkLo: 0.12, // … and dark pixels take no tint at all below this lightness
-  darkHi: 0.3,
-  mix: 0.9, // how far (a, b) move toward the target
+  darkLo: 0.08, // … and dark pixels (wetsuits, shadows) take no tint below this lightness
+  darkHi: 0.45, // (a wide ramp: one garment must not split into tinted and untinted parts)
+  farLo: (50 * Math.PI) / 180, // hues far from the target (greens, browns) …
+  farHi: (110 * Math.PI) / 180,
+  farKeep: 0.55, // … keep this much of their own hue, so the reef keeps colour variety
+  mix: 0.7, // how far (a, b) move toward the target
 };
 
 /** Push amount above the estimate, 0..1. */

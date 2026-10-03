@@ -5,12 +5,16 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, LOOK, SKIN } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN } from "./params.ts";
 
 // Look constants shared by both shaders, emitted as literals.
 const LOOK_CONSTS_GLSL = `
 const float CONF_BRIGHT_LO = ${CONF_BRIGHT.lo.toFixed(4)};
 const float CONF_BRIGHT_HI = ${CONF_BRIGHT.hi.toFixed(4)};
+const float PERSON_LUM_LO = ${PERSON_LUM.lo.toFixed(4)};
+const float PERSON_LUM_HI = ${PERSON_LUM.hi.toFixed(4)};
+const float DEHAZE_LUM_LO = ${DEHAZE_LUM.lo.toFixed(4)};
+const float DEHAZE_LUM_HI = ${DEHAZE_LUM.hi.toFixed(4)};
 const float LOOK_GAMMA = ${LOOK.gamma.toFixed(4)};
 const float LOOK_WATER_DIM = ${LOOK.waterDim.toFixed(4)};
 const float LOOK_HAZE_CHROMA = ${LOOK.hazeChroma.toFixed(4)};
@@ -27,6 +31,9 @@ const float LOOK_WARM_LO = ${LOOK.warmLo.toFixed(4)};
 const float LOOK_WARM_HI = ${LOOK.warmHi.toFixed(4)};
 const float LOOK_DARK_LO = ${LOOK.darkLo.toFixed(4)};
 const float LOOK_DARK_HI = ${LOOK.darkHi.toFixed(4)};
+const float LOOK_FAR_LO = ${LOOK.farLo.toFixed(6)};
+const float LOOK_FAR_HI = ${LOOK.farHi.toFixed(6)};
+const float LOOK_FAR_KEEP = ${LOOK.farKeep.toFixed(4)};
 const float LOOK_BRIGHT_LO = ${LOOK.brightLo.toFixed(4)};
 const float LOOK_BRIGHT_HI = ${LOOK.brightHi.toFixed(4)};
 const float LOOK_KEEP_LO = ${LOOK.keepLo.toFixed(4)};
@@ -152,9 +159,11 @@ vec3 deepBlueLook(vec3 lab, float look, float water, float hazeW) {
   float vivid = smoothstepf(LOOK_KEEP_LO, LOOK_KEEP_HI, C);
   float dw = h - LOOK_WARM_HUE; dw -= 6.2831853 * round(dw / 6.2831853);
   float warm = (1.0 - smoothstepf(LOOK_WARM_IN, LOOK_WARM_OUT, abs(dw))) * smoothstepf(LOOK_WARM_LO, LOOK_WARM_HI, C);
-  float wTint = (1.0 - vivid) * (1.0 - warm) * (1.0 - smoothstepf(LOOK_BRIGHT_LO, LOOK_BRIGHT_HI, lab.x)) * smoothstepf(LOOK_DARK_LO, LOOK_DARK_HI, lab.x);
+  float df = h - LOOK_TARGET_HUE; df -= 6.2831853 * round(df / 6.2831853);
+  float far = smoothstepf(LOOK_FAR_LO, LOOK_FAR_HI, abs(df));
+  float wTint = (1.0 - vivid) * (1.0 - warm) * (1.0 - smoothstepf(LOOK_BRIGHT_LO, LOOK_BRIGHT_HI, lab.x)) * smoothstepf(LOOK_DARK_LO, LOOK_DARK_HI, lab.x) * (1.0 - LOOK_FAR_KEEP * far);
   float w = wTint * look * LOOK_MIX;
-  float L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look) * (1.0 - LOOK_WATER_DIM * look * water);
+  float L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look) * (1.0 - LOOK_WATER_DIM * look * water * (1.0 - hazeW));
   float Ct = max(C, (LOOK_C0 + LOOK_C1 * L2) * (1.0 + LOOK_HAZE_CHROMA * hazeW));
   vec2 t = Ct * vec2(cos(LOOK_TARGET_HUE), sin(LOOK_TARGET_HUE));
   float ds = 1.0 - look * LOOK_NEUTRAL_DESAT * (1.0 - smoothstepf(LOOK_NEUTRAL_LO, LOOK_NEUTRAL_HI, C)) * smoothstepf(LOOK_NEUTRAL_L_LO, LOOK_NEUTRAL_L_HI, lab.x);
@@ -253,12 +262,12 @@ vec3 grade(vec3 src, vec2 uv) {
   // Whatever the map says, a pixel the veil model would nearly erase
   // (tiny D) must take the water path — the physics path would crush it
   // to black, which is the dark ghost on moving content.
-  float conf = max(mix(confPix, clamp(fld.y, 0.0, 1.0), k), person) * confSignal;
+  float conf = max(mix(confPix, clamp(fld.y, 0.0, 1.0), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal;
   if (p[0].w > 0.5) return vec3(k, confPix, clamp(fld.y, 0.0, 1.0));
   vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   vec3 full = D * rangeGain * wb;
   float ew = pow(exposure, waterExposure);
-  vec3 water = lin * waterWb * ew * (1.0 - dehaze * min(0.9, lumBs / lumI));
+  vec3 water = lin * waterWb * ew * (1.0 - dehaze * min(0.9, lumBs / lumI) * smoothstepf(DEHAZE_LUM_LO, DEHAZE_LUM_HI, lumI));
   vec3 o = water + (full * exposure - water) * conf;
   // Levels on luminance, ratio-preserving.
   float Y = lum(o);
@@ -292,7 +301,7 @@ vec3 grade(vec3 src, vec2 uv) {
   float C = length(lab.yz);
   float cMax = chromaK * cSrc + chromaC0;
   float scale = (C > cMax ? cMax / C : 1.0) * saturation;
-  vec3 o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - conf, p[16].x));
+  vec3 o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x));
   vec3 o2 = compressToGamut(o1);
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
@@ -395,9 +404,11 @@ fn deepBlueLook(lab: vec3<f32>, look: f32, water: f32, hazeW: f32) -> vec3<f32> 
   let vivid = smoothstepf(LOOK_KEEP_LO, LOOK_KEEP_HI, C);
   var dw = h - LOOK_WARM_HUE; dw -= 6.2831853 * round(dw / 6.2831853);
   let warm = (1.0 - smoothstepf(LOOK_WARM_IN, LOOK_WARM_OUT, abs(dw))) * smoothstepf(LOOK_WARM_LO, LOOK_WARM_HI, C);
-  let wTint = (1.0 - vivid) * (1.0 - warm) * (1.0 - smoothstepf(LOOK_BRIGHT_LO, LOOK_BRIGHT_HI, lab.x)) * smoothstepf(LOOK_DARK_LO, LOOK_DARK_HI, lab.x);
+  var df = h - LOOK_TARGET_HUE; df -= 6.2831853 * round(df / 6.2831853);
+  let far = smoothstepf(LOOK_FAR_LO, LOOK_FAR_HI, abs(df));
+  let wTint = (1.0 - vivid) * (1.0 - warm) * (1.0 - smoothstepf(LOOK_BRIGHT_LO, LOOK_BRIGHT_HI, lab.x)) * smoothstepf(LOOK_DARK_LO, LOOK_DARK_HI, lab.x) * (1.0 - LOOK_FAR_KEEP * far);
   let w = wTint * look * LOOK_MIX;
-  let L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look) * (1.0 - LOOK_WATER_DIM * look * water);
+  let L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look) * (1.0 - LOOK_WATER_DIM * look * water * (1.0 - hazeW));
   let Ct = max(C, (LOOK_C0 + LOOK_C1 * L2) * (1.0 + LOOK_HAZE_CHROMA * hazeW));
   let t = Ct * vec2(cos(LOOK_TARGET_HUE), sin(LOOK_TARGET_HUE));
   let ds = 1.0 - look * LOOK_NEUTRAL_DESAT * (1.0 - smoothstepf(LOOK_NEUTRAL_LO, LOOK_NEUTRAL_HI, C)) * smoothstepf(LOOK_NEUTRAL_L_LO, LOOK_NEUTRAL_L_HI, lab.x);
@@ -485,12 +496,12 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let confSignal = smoothstepf(confLo, confHi, sig);
   let confBright = smoothstepf(CONF_BRIGHT_LO, CONF_BRIGHT_HI, sig);
   let confPix = min(confSignal, max(hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), confBright));
-  let conf = max(mix(confPix, clamp(fld.y, 0.0, 1.0), k), person) * confSignal;
+  let conf = max(mix(confPix, clamp(fld.y, 0.0, 1.0), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal;
   if (p[0].w > 0.5) { return vec3(k, confPix, clamp(fld.y, 0.0, 1.0)); }
   let rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   let full = D * rangeGain * wb;
   let ew = pow(exposure, waterExposure);
-  let water = lin * waterWb * ew * (1.0 - dehaze * min(0.9, lumBs / lumI));
+  let water = lin * waterWb * ew * (1.0 - dehaze * min(0.9, lumBs / lumI) * smoothstepf(DEHAZE_LUM_LO, DEHAZE_LUM_HI, lumI));
   var o = water + (full * exposure - water) * conf;
   var Y = lum(o);
   let Ylv = Y + ((Y - black) / (white - black) - Y) * levelsMix;
@@ -519,7 +530,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let C = length(lab.yz);
   let cMax = chromaK * cSrc + chromaC0;
   let scale = select(1.0, cMax / C, C > cMax) * saturation;
-  let o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - conf, p[16].x));
+  let o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x));
   let o2 = compressToGamut(o1);
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);
