@@ -42,9 +42,10 @@ const SCENE_CUT_MEAN_DIFF = 0.16;
 // worker CPU on the same thumbnail the analysis uses).
 const PERSON_EVERY = 2;
 // Mask growth through bright cells (see resampleMask).
-const PERSON_GROW_PASSES = 10;
-const PERSON_GROW_DECAY = 0.93;
+const PERSON_GROW_PASSES = 16;
+const PERSON_GROW_DECAY = 0.95;
 const PERSON_GROW_LUM = 0.2;
+const PERSON_GROW_CONF = 0.3;
 
 type Packed = { width: number; height: number; data: Float32Array };
 /** Analysis packet with the CLAHE LUTs re-shaped to a (bins × tiles) texture. */
@@ -194,7 +195,7 @@ export class GradeEngine {
     this.stats.personMs = p.ms;
     const fw = this.fields?.width ?? 0, fh = this.fields?.height ?? 0;
     if (fw < 4 || fh < 4) return;
-    const map = resampleMask(p.mask, p.width, p.height, fw, fh, this.guide?.data ?? null);
+    const map = resampleMask(p.mask, p.width, p.height, fw, fh, this.guide?.data ?? null, this.fields?.data ?? null);
     let cov = 0;
     for (let i = 0; i < map.length; i++) cov += map[i];
     this.stats.personCoverage = cov / map.length;
@@ -442,7 +443,7 @@ export class GradeEngine {
 }
 
 /** Box-resamples a mask (mw×mh) to the fields' grid (fw×fh), clamped to 0..1. */
-function resampleMask(mask: Float32Array, mw: number, mh: number, fw: number, fh: number, guide: Float32Array | null): Float32Array {
+function resampleMask(mask: Float32Array, mw: number, mh: number, fw: number, fh: number, guide: Float32Array | null, fields: Float32Array | null): Float32Array {
   const out = new Float32Array(fw * fh);
   for (let ty = 0; ty < fh; ty++) {
     const y0 = Math.floor((ty * mh) / fh);
@@ -452,20 +453,24 @@ function resampleMask(mask: Float32Array, mw: number, mh: number, fw: number, fh
       const x1 = Math.max(x0 + 1, Math.floor(((tx + 1) * mw) / fw));
       let sum = 0, n = 0;
       for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { sum += mask[y * mw + x]; n++; }
-      // The selfie model is unsure on limbs (0.3–0.5): sharpen the soft
-      // confidence so partially covered skin still counts.
-      const v = Math.min(1, Math.max(0, sum / n));
-      const t = Math.min(1, Math.max(0, (v - 0.1) / 0.4));
-      out[ty * fw + tx] = t * t * (3 - 2 * t);
+      out[ty * fw + tx] = Math.min(1, Math.max(0, sum / n));
     }
   }
   // The selfie model finds the torso (wetsuit) but stops short of bare limbs
-  // under a cast. Grow the mask a few cells through *bright* cells only
-  // (skin is far lighter than reef around a diver), decaying per step.
+  // under a cast. Grow the mask a few cells through cells that are bright
+  // (skin is far lighter than reef around a diver) and that the analysis
+  // already calls an object (open water next to a diver must not join).
   const bright = new Uint8Array(fw * fh);
   for (let i = 0; i < fw * fh; i++) {
     const lum = guide && guide.length >= i * 4 + 3 ? 0.2126 * guide[i * 4] + 0.7152 * guide[i * 4 + 1] + 0.0722 * guide[i * 4 + 2] : 1;
-    bright[i] = lum > PERSON_GROW_LUM ? 1 : 0;
+    const conf = fields && fields.length >= i * 4 + 2 ? fields[i * 4 + 1] : 1;
+    bright[i] = lum > PERSON_GROW_LUM && conf > PERSON_GROW_CONF ? 1 : 0;
+    // Seed only where the model is confident: it smears a soft halo well
+    // beyond the person (into open water and reef). Limbs it is unsure
+    // about are reached by the growth below.
+    const v = out[i];
+    const t = Math.min(1, Math.max(0, (v - 0.45) / 0.3));
+    out[i] = t * t * (3 - 2 * t);
   }
   let cur = out;
   for (let pass = 0; pass < PERSON_GROW_PASSES; pass++) {
@@ -473,7 +478,7 @@ function resampleMask(mask: Float32Array, mw: number, mh: number, fw: number, fh
     for (let y = 0; y < fh; y++) {
       for (let x = 0; x < fw; x++) {
         const i = y * fw + x;
-        if (!bright[i] && pass > 0) continue;
+        if (!bright[i]) continue;
         let m = 0;
         for (let dy = -1; dy <= 1; dy++) {
           const yy = y + dy; if (yy < 0 || yy >= fh) continue;
