@@ -507,7 +507,7 @@ export default function App() {
             const secs = (performance.now() - rtStart) / 1000;
             if (secs > 0.5) setExportDetail(`real-time · ${(rendered / secs).toFixed(1)} fps rendered · ${e.backend.kind}`);
           },
-          startRendering: () => {
+          startRendering: (onFrame) => {
             let active = true;
             const vv = video as VideoWithRVFC;
             const step = () => {
@@ -518,6 +518,7 @@ export default function App() {
                 else e.analyzeSoon();
                 e.tick(video.currentTime);
                 e.render();
+                onFrame(video.currentTime);
                 rendered++;
               }
               if (typeof vv.requestVideoFrameCallback === "function") vv.requestVideoFrameCallback(step);

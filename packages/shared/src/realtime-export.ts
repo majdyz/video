@@ -73,10 +73,11 @@ export type RealtimeExportOptions = {
   log?: (line: string) => void;
   /**
    * Called when playback starts: start rendering the video element into the
-   * canvas on every frame. Returns a stop function (called when playback ends
-   * or the export is aborted).
+   * canvas on every frame, calling `onFrame(video.currentTime)` after each
+   * render. Returns a stop function (called when playback ends or the export
+   * is aborted).
    */
-  startRendering: () => () => void;
+  startRendering: (onFrame: (timeSec: number) => void) => () => void;
 };
 
 export type RealtimeExportResult = {
@@ -122,6 +123,10 @@ export async function exportRealtime(
   video.loop = false;
   const t0 = performance.now();
   let stopRender: (() => void) | null = null;
+  // The recording's timeline starts at the first captured frame, which is
+  // some way into the clip (decoder spin-up); the audio is shifted to match.
+  let firstFrameSec: number | null = null;
+  const onFrame = (t: number) => { if (firstFrameSec === null) firstFrameSec = t; };
   const stopped = new Promise<void>((resolve, reject) => {
     recorder.onstop = () => resolve();
     recorder.onerror = (ev) => reject((ev as unknown as { error?: Error }).error ?? new Error("MediaRecorder failed"));
@@ -149,7 +154,7 @@ export async function exportRealtime(
       try { video.currentTime = 0; } catch (e) { reject(e as Error); }
       if (video.currentTime === 0 && video.readyState >= 1) { video.removeEventListener("seeked", onSeeked); resolve(); }
     });
-    stopRender = opts.startRendering();
+    stopRender = opts.startRendering(onFrame);
     recorder.start(1000);
     await video.play();
     await ended;
@@ -175,7 +180,8 @@ export async function exportRealtime(
   // Remux: recorded video packets + original audio packets → MP4 (or WebM
   // when the recorded codec can't live in MP4).
   const r0 = performance.now();
-  const { blob, audioIncluded, codec } = await remux(recorded, file, opts.opfsPrefix, signal, log);
+  log(`first rendered frame at ${(firstFrameSec ?? 0).toFixed(3)} s`);
+  const { blob, audioIncluded, codec } = await remux(recorded, file, firstFrameSec ?? 0, opts.opfsPrefix, signal, log);
   onProgress(1);
   return { blob, audioIncluded, codec, recordedMs, remuxMs: performance.now() - r0 };
 }
@@ -183,6 +189,7 @@ export async function exportRealtime(
 async function remux(
   recorded: Blob,
   original: File,
+  audioOffsetSec: number,
   opfsPrefix: string,
   signal: AbortSignal | undefined,
   log: (line: string) => void,
@@ -237,7 +244,7 @@ async function remux(
       const decoderConfig = await aTrack.getDecoderConfig();
       const aSink = new EncodedPacketSink(aTrack);
       const vOrig = await origIn.getPrimaryVideoTrack();
-      const at0 = vOrig ? await vOrig.getFirstTimestamp() : 0;
+      const at0 = (vOrig ? await vOrig.getFirstTimestamp() : 0) + audioOffsetSec;
       let firstA = true;
       for await (const packet of aSink.packets()) {
         throwIfAborted(signal);
