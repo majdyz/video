@@ -16,9 +16,15 @@ export const ULAP = { mu0: 0.53214829, mu1: 0.51309827, mu2: -0.91066194 };
  */
 export type UserSettings = {
   intensity: number;
+  /** Advanced: Oklab chroma multiplier, 0..2 (1 = as corrected). */
+  saturation: number;
+  /** Advanced: local-contrast (CLAHE) mix, 0..1. */
+  clarity: number;
+  /** Advanced: backscatter subtraction amount, 0..1.2 (1 = as fitted). */
+  veil: number;
 };
 
-export const DEFAULT_SETTINGS: UserSettings = { intensity: 1 };
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7 };
 export const INTENSITY_MAX = 2;
 
 /** Internal controls the shader reads, derived from the intensity. */
@@ -33,8 +39,6 @@ export type GradeSettings = {
   veil: number;
 };
 
-const BASE: GradeSettings = { strength: 1, saturation: 1, clarity: 0.25, veil: 0.7 };
-
 /** Push amount above the estimate, 0..1. */
 export function pushOf(s: UserSettings): number {
   return Math.min(1, Math.max(0, s.intensity - 1));
@@ -42,11 +46,12 @@ export function pushOf(s: UserSettings): number {
 
 export function resolveSettings(s: UserSettings): GradeSettings {
   const t = pushOf(s);
+  // The push rides on top of the advanced values.
   return {
     strength: Math.min(1, Math.max(0, s.intensity)),
-    saturation: BASE.saturation + 0.35 * t,
-    clarity: BASE.clarity + 0.25 * t,
-    veil: BASE.veil + 0.3 * t,
+    saturation: s.saturation + 0.35 * t,
+    clarity: s.clarity + 0.25 * t,
+    veil: s.veil + 0.3 * t,
   };
 }
 

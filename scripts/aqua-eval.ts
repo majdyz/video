@@ -18,7 +18,12 @@ const flag = (name: string, def: number) => {
   const i = args.indexOf(`--${name}`);
   return i >= 0 ? parseFloat(args[i + 1]) : def;
 };
-const settings: UserSettings = { intensity: flag("intensity", DEFAULT_SETTINGS.intensity) };
+const settings: UserSettings = {
+  intensity: flag("intensity", DEFAULT_SETTINGS.intensity),
+  saturation: flag("saturation", DEFAULT_SETTINGS.saturation),
+  clarity: flag("clarity", DEFAULT_SETTINGS.clarity),
+  veil: flag("veil", DEFAULT_SETTINGS.veil),
+};
 const maxW = flag("maxw", 1600);
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--")));
 const [outDir, ...images] = positional;

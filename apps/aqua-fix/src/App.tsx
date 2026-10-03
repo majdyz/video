@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  AdvancedDisclosure,
   BusyOverlay,
   CapabilityBanner,
   CompareWipe,
@@ -673,9 +674,17 @@ export default function App() {
             <div className="sliders">
               <Slider label="Intensity" value={settings.intensity} min={0} max={INTENSITY_MAX} step={0.01}
                 format={(v) => `${Math.round((v / INTENSITY_MAX) * 100)}%`}
-                onChange={(v) => setSettings({ intensity: v })} disabled={exporting} />
+                onChange={(v) => setSettings((s) => ({ ...s, intensity: v }))} disabled={exporting} />
               <p className="hint">50% is the estimated correction. Above it the colour split is pushed harder than the estimate.</p>
             </div>
+            <AdvancedDisclosure disabled={exporting}>
+              <Slider label="Saturation" value={settings.saturation} min={0} max={2} step={0.01}
+                onChange={(v) => setSettings((s) => ({ ...s, saturation: v }))} disabled={exporting} />
+              <Slider label="Clarity" value={settings.clarity} min={0} max={1} step={0.01}
+                onChange={(v) => setSettings((s) => ({ ...s, clarity: v }))} disabled={exporting} />
+              <Slider label="Veil removal" value={settings.veil} min={0} max={1.2} step={0.01}
+                onChange={(v) => setSettings((s) => ({ ...s, veil: v }))} disabled={exporting} />
+            </AdvancedDisclosure>
 
             <div className="actions">
               <button className="ghost" onClick={() => setSettings(DEFAULT_SETTINGS)} disabled={exporting}>
