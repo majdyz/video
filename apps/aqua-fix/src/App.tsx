@@ -1,498 +1,144 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AdvancedDisclosure,
-  attachAudioRouting,
-  bitrateFromSource,
-  buildCaptureContext,
   BusyOverlay,
-  captureAudioForRecording,
-  closeAudioRouting,
+  CapabilityBanner,
   CompareWipe,
-  createRecordingSink,
-  detectVideoFps,
   FilePickerButton,
-  touchFile,
-  validateUploadedFile,
   Hero,
   Modal,
   PlaceholderDropZone,
   PlayOverlay,
-  PresetsRow,
-  pickBitrate,
-  pickRecorderMime,
-  pruneOldRecordings,
   RecordingOverlay,
-  type RecordingSink,
   Scrubber,
-  shareOrDownload,
   Slider,
+  bitrateFromSource,
+  exportWithCodec,
+  isWebCodecsSupported,
+  pickBitrate,
+  shareOrDownload,
+  touchFile,
   useVideoPlaybackState,
+  validateUploadedFile,
 } from "@dive-tools/shared";
 import "@dive-tools/shared/theme.css";
-import { Renderer, computeStats, lerpStats, isSceneCut, IDENTITY_MATRIX, type Settings, type Stats } from "./lib/correct";
-import { parseCube } from "./lib/lut";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
-import { isFunieCached, isFunieReady, loadFunie, FUNIE_SIZE_MB } from "./lib/funie-loader";
-import { LoadAbortedError } from "@dive-tools/shared";
-import { runFunie, lerpTransferToIdentity } from "./lib/funie-runner";
+import { GradeEngine } from "./engine/engine";
+import { DEFAULT_SETTINGS, type UserSettings } from "./engine/params";
+import type { Rotation } from "./engine/backend";
 
 type Mode = "idle" | "photo" | "video";
-type Quality = "classical" | "ai";
 
-// The classical pipeline is now the "blue magic" filter matrix (the
-// dive-color-corrector algorithm): castStrength maps to the target mean
-// red of the depth-adaptive search (0.4 → the canonical MIN_AVG_RED=60),
-// and the matrix performs red reconstruction + white balance + stretch
-// in one affine transform. Post-tone knobs default neutral because the
-// matrix already does the heavy lifting.
-const SHALLOW_SETTINGS: Settings = {
-  intensity: 0.8,
-  castStrength: 0.45,
-  saturation: 1.04,
-  gamma: 1.0,
-  contrast: 0.05,
-  dehaze: 0.28,
-  lutMix: 1.0,
-};
-
-// Reef preset — heavier red-channel push, suitable for typical 5–15 m
-// reef shots where the cyan cast is pronounced but reds aren't fully
-// gone.
-const REEF_SETTINGS: Settings = {
-  intensity: 1.0,
-  castStrength: 0.6,
-  saturation: 1.07,
-  gamma: 0.99,
-  contrast: 0.08,
-  dehaze: 0.36,
-  lutMix: 1.0,
-};
-
-const DEEP_SETTINGS: Settings = {
-  intensity: 1.0,
-  castStrength: 0.78,
-  saturation: 1.1,
-  gamma: 0.98,
-  contrast: 0.1,
-  dehaze: 0.44,
-  lutMix: 1.0,
-};
-
-// Default = Reef (the mid preset), not Shallow. Real dive footage is
-// typically shot deep enough that the cast is pronounced, and repeated
-// user feedback was that the gentle Shallow default still under-delivered
-// on first impression. Reef's stronger gray-world lift + dehaze makes the
-// out-of-the-box result clearly corrected; Shallow stays available for
-// bright near-surface shots that would otherwise over-cook.
-const DEFAULT_SETTINGS: Settings = REEF_SETTINGS;
-
-const OFF_SETTINGS: Settings = {
-  intensity: 0,
-  castStrength: 0,
-  saturation: 1,
-  gamma: 1,
-  contrast: 0,
-  dehaze: 0,
-  lutMix: 0,
-};
-
-const IDENTITY_STATS: Stats = IDENTITY_MATRIX;
-
-// Shallow / Reef / Deep values from the research synthesis above —
-// Shallow scales red compensation low (0–10 m, reds mostly intact);
-// Reef matches bornfree's auto-correction defaults (5–15 m); Deep
-// pushes near-max cast removal (>15 m, reds largely lost per TDI/SDI
-// guidance).
-const PRESETS: { label: string; settings: Settings }[] = [
-  { label: "Off", settings: OFF_SETTINGS },
-  { label: "Shallow", settings: SHALLOW_SETTINGS },
-  { label: "Reef", settings: REEF_SETTINGS },
-  { label: "Deep", settings: DEEP_SETTINGS },
-];
-
-type AudioRouting = ReturnType<typeof attachAudioRouting>;
+// The exporter analyses every Nth decoded frame; the smoother carries the
+// grade across the frames in between exactly as it does in the preview.
+const EXPORT_ANALYSIS_STRIDE = 4;
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const rendererRef = useRef<Renderer | null>(null);
-  const statsRef = useRef<Stats | null>(null);
-  const imageBitmapRef = useRef<ImageBitmap | null>(null);
-  // Last AI model output for the current photo (mode === "photo", AI
-  // quality). Cached so the compare-wipe / paused repaints can re-draw
-  // it without re-running inference on every drag tick.
-  const aiPhotoCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const engineRef = useRef<GradeEngine | null>(null);
+  const bitmapRef = useRef<ImageBitmap | null>(null);
+  const fileRef = useRef<File | null>(null);
   const fileNameRef = useRef<string>(AQUA_FIX_BRAND.filenamePrefix);
-  // URL.createObjectURL of the current source file. Tracked so we can
-  // revoke it on teardown / next load instead of leaking blob URLs (and
-  // the underlying decoded bytes) for every video the user opens.
   const sourceUrlRef = useRef<string | null>(null);
-  // Source-video properties detected on load. Used to record at the same
-  // fps + bitrate as the input so we don't lose smoothness or quality.
-  const sourceFpsRef = useRef<number>(60);
-  const sourceBitrateRef = useRef<number | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
   const previewActiveRef = useRef(false);
-  const recordingFlagRef = useRef(false);
-  const settingsRef = useRef<Settings>(DEFAULT_SETTINGS);
-  const audioRoutingRef = useRef<AudioRouting>(null);
-  const audioCleanupRef = useRef<(() => void) | null>(null);
-  const onEndedRef = useRef<(() => void) | null>(null);
-  const sinkRef = useRef<RecordingSink | null>(null);
+  const exportingRef = useRef(false);
+  const exportAbortRef = useRef<AbortController | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
-  const wakeLockListenerRef = useRef<(() => void) | null>(null);
-  const loadCanPlayListenerRef = useRef<(() => void) | null>(null);
-  const lastStatsRefreshRef = useRef(0);
-  // Tracks whether statsRef holds a real (lerped) stat value. Was being
-  // detected via `cur !== IDENTITY_STATS` which only catches the *first*
-  // replacement — subsequent file loads that reset to IDENTITY would not
-  // re-snap because the equality check was on object identity, not on a
-  // reset signal.
-  const statsRealRef = useRef(false);
-  // Dynamic grading: when on, recompute white-balance / mean / min-max
-  // stats per ~250 ms and lerp into the current stats. When off, the
-  // first-frame stats stay frozen for the whole clip — picks the look
-  // from the opening shot and never re-balances. Off by default because
-  // dynamic re-grading can lurch when a fish swims in or the camera
-  // pans into a different colour zone, turning a good frame red. Live
-  // ref so the per-frame loop reads the latest value without rebinding.
-  const dynamicGradeRef = useRef(false);
-  const [dynamicGrade, setDynamicGrade] = useState(false);
-  useEffect(() => { dynamicGradeRef.current = dynamicGrade; }, [dynamicGrade]);
+  const settingsRef = useRef<UserSettings>(DEFAULT_SETTINGS);
+  // Bumped per file so async work for a stale file can't paint the new one.
+  const fileGenRef = useRef(0);
+  const modeRef = useRef<Mode>("idle");
 
   const [mode, setMode] = useState<Mode>("idle");
-  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  // Compare-wipe state. compareActive shows the slider overlay; split is
-  // 0..1 (0 = whole frame original; 1 = whole frame corrected). Split
-  // value is pushed to the renderer per-frame so the WebGL shader can
-  // do the divide.
+  const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
   const [compareActive, setCompareActive] = useState(false);
   const [compareSplit, setCompareSplit] = useState(0.5);
   const [error, setError] = useState<string | null>(null);
-  const [recording, setRecording] = useState(false);
-  const [recordProgress, setRecordProgress] = useState(0);
-  const [recordTime, setRecordTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [canRecord, setCanRecord] = useState(true);
-  const [lutName, setLutName] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportTime, setExportTime] = useState(0);
+  const [duration, setDuration] = useState(0);
   const [showInfo, setShowInfo] = useState(false);
-  // AI is experimental — always start in classical, even if a previous
-  // session had AI selected. The user has to opt in each time, which is
-  // also why the prompt only fires on AI-button click (not on file pick).
-  const [quality, setQuality] = useState<Quality>("classical");
-  const [funieReady, setFunieReady] = useState(isFunieReady());
-  const [funieDownloadPct, setFunieDownloadPct] = useState<number | null>(null);
-  const [showFuniePrompt, setShowFuniePrompt] = useState(false);
-  // Bumped on every file load. Async work in flight (AI inference,
-  // detectVideoFps, runFunie .then callbacks) reads this at the start
-  // and bails if it changed, so completing inferences for a stale file
-  // can't clobber the new file's render or stats.
-  const fileGenRef = useRef(0);
-  // rAF id for the entry slider animation. Cancel on next file load /
-  // unmount so two animations don't fight for the settings state.
-  const entryAnimRef = useRef<number | null>(null);
-  // Auto-animated split during the entry reveal. When non-null, the
-  // renderer reads this instead of the manual compareSplit, so the
-  // wipe slides without us having to flip compareActive on (which
-  // would block click-to-pause and show the manual handle UI).
-  const entryAnimSplitRef = useRef<number | null>(null);
-  // AbortController for the in-flight model download. Lets the user
-  // bail out via the dialog's Cancel button without waiting for the
-  // full ~17 MB to finish (especially useful on flaky connections).
-  const funieAbortRef = useRef<AbortController | null>(null);
-  // True while a load is in flight (cached or downloading). Without
-  // this a fast double-tap on the AI card fires two parallel
-  // loadFunie() calls and races their completions.
-  const funieLoadingRef = useRef(false);
-  // True once we've confirmed the model bytes are in Cache API. Probed
-  // once on mount; if true, clicking the AI card skips the consent
-  // dialog entirely (just decodes from cache and switches mode).
-  const [funieCached, setFunieCached] = useState(false);
+  const [engineKind, setEngineKind] = useState<"webgpu" | "webgl2" | null>(null);
+  const canExport = isWebCodecsSupported();
+
   useEffect(() => {
-    isFunieCached().then(setFunieCached).catch(() => undefined);
-  }, []);
-  // Mirror of funieReady — the play-loop captures its closure once at
-  // startPreview() and never re-binds, so reading the state directly
-  // would forever see the value at preview-start time. Reading via the
-  // ref always sees the latest.
-  const funieReadyRef = useRef(funieReady);
-  useEffect(() => {
-    funieReadyRef.current = funieReady;
-  }, [funieReady]);
-  const [aiStrength, setAiStrength] = useState(() => {
-    const v = parseFloat(localStorage.getItem("aqua-fix:aiStrength") || "1");
-    return isNaN(v) ? 1 : Math.min(1, Math.max(0, v));
-  });
-  const aiStrengthRef = useRef(aiStrength);
-  const qualityRef = useRef<Quality>(quality);
-  useEffect(() => {
-    qualityRef.current = quality;
-  }, [quality]);
-  useEffect(() => {
-    aiStrengthRef.current = aiStrength;
-    localStorage.setItem("aqua-fix:aiStrength", aiStrength.toString());
-  }, [aiStrength]);
+    modeRef.current = mode;
+  }, [mode]);
 
   useEffect(() => {
     settingsRef.current = settings;
+    const e = engineRef.current;
+    if (!e) return;
+    e.settings = settings;
+    repaint();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
-  // Push the wipe split into the renderer whenever it changes, then
-  // repaint the current still frame. On a paused video or a photo there
-  // is no render loop running, so without the repaint the split value
-  // updates internally but the canvas never redraws — the wipe handle
-  // (a DOM element) slides while the image stays frozen. That was the
-  // "drag does nothing" bug. The entry animation overrides via
-  // entryAnimSplitRef.
   useEffect(() => {
-    if (rendererRef.current) {
-      rendererRef.current.setSplit(
-        entryAnimSplitRef.current ?? (compareActive ? compareSplit : 0),
-      );
-      repaintStillFrame();
-    }
+    const e = engineRef.current;
+    if (!e) return;
+    e.split = compareActive ? compareSplit : 0;
+    repaint();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [compareActive, compareSplit]);
 
+  // Engine (WebGPU, else WebGL2) on the stage canvas.
   useEffect(() => {
-    if (!canvasRef.current) return;
     const canvas = canvasRef.current;
-    try {
-      rendererRef.current = new Renderer(canvas);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-    setCanRecord(pickRecorderMime() !== null);
-    pruneOldRecordings(AQUA_FIX_BRAND.opfsPrefix);
-
-    const onLost = (e: Event) => {
-      e.preventDefault();
-      setError("GPU context lost — try a smaller video or reload the page");
-      recordingFlagRef.current = false;
-    };
-    const onRestored = () => {
-      try {
-        rendererRef.current = new Renderer(canvas);
-        setError(null);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    };
-    canvas.addEventListener("webglcontextlost", onLost);
-    canvas.addEventListener("webglcontextrestored", onRestored);
+    if (!canvas) return;
+    let disposed = false;
+    // ?webgl2 forces the fallback backend (debugging on devices / headless).
+    const preferWebGPU = !new URLSearchParams(location.search).has("webgl2");
+    GradeEngine.create(canvas, (e) => setError(e.message), preferWebGPU)
+      .then((engine) => {
+        if (disposed) {
+          engine.dispose();
+          return;
+        }
+        engine.settings = settingsRef.current;
+        engineRef.current = engine;
+        setEngineKind(engine.backend.kind);
+      })
+      .catch((e) => setError("GPU init failed: " + (e instanceof Error ? e.message : String(e))));
     return () => {
-      canvas.removeEventListener("webglcontextlost", onLost);
-      canvas.removeEventListener("webglcontextrestored", onRestored);
+      disposed = true;
+      engineRef.current?.dispose();
+      engineRef.current = null;
     };
   }, []);
 
-  useEffect(() => {
-    if (mode !== "photo" || !rendererRef.current || !imageBitmapRef.current) return;
-    const bitmap = imageBitmapRef.current;
-    statsRef.current = computeStats(bitmap, bitmap.width, bitmap.height, settings.castStrength);
-    if (qualityRef.current === "ai" && funieReady) {
-      // Photos: run AI once at full quality, draw the model output
-      // directly. Capture the file generation now and bail if a new
-      // file has been picked by the time inference completes — without
-      // this guard the stale inference's then() would clobber the new
-      // file's already-rendered frame.
-      const myGen = fileGenRef.current;
-      runFunie(bitmap, aiStrengthRef.current)
-        .then((res) => {
-          if (myGen !== fileGenRef.current) return;
-          if (!rendererRef.current) return;
-          aiPhotoCanvasRef.current = res.canvas;
-          rendererRef.current.uploadSource(res.canvas, bitmap.width, bitmap.height);
-          rendererRef.current.render(IDENTITY_STATS, OFF_SETTINGS);
-        })
-        .catch((e) => setError("AI inference failed: " + (e instanceof Error ? e.message : String(e))));
-      return;
-    }
-    rendererRef.current.uploadSource(bitmap, bitmap.width, bitmap.height);
-    rendererRef.current.render(statsRef.current, settings);
-  }, [settings, mode, funieReady, quality, aiStrength]);
-
-  useEffect(() => {
-    if (mode !== "video" || !videoRef.current || videoRef.current.readyState < 2) return;
-    const v = videoRef.current;
-    statsRef.current = computeStats(v, v.videoWidth, v.videoHeight, settings.castStrength);
-  }, [settings.castStrength, mode]);
-
-  const aiInflightRef = useRef(false);
-  // Cached colour transfer (gain * src + bias) from the most recent FUnIE
-  // inference. Each inference EMA-blends into this ref instead of
-  // replacing it — without smoothing the model fits new gain/bias to
-  // every frame's content (particles, scene movement) and the wholesale
-  // swap shows up as visible flicker / flaring at 5–10 fps. 25% per
-  // inference settles in ~4 inferences while still tracking real scene
-  // changes within a fraction of a second.
-  const aiTransferRef = useRef<{ gain: [number, number, number]; bias: [number, number, number] }>({
-    gain: [1, 1, 1],
-    bias: [0, 0, 0],
-  });
-  const aiTransferInitialisedRef = useRef(false);
-  const AI_TRANSFER_SMOOTH = 0.25;
-
-  // Repaint the current still frame (paused video or photo) without
-  // advancing the clock or kicking a new AI inference — used for instant
-  // feedback while dragging the compare wipe. The playing-video render
-  // loop already redraws every frame, so this is a no-op there.
-  function repaintStillFrame() {
-    const r = rendererRef.current;
-    if (!r) return;
-    if (mode === "photo" && imageBitmapRef.current) {
-      const bmp = imageBitmapRef.current;
-      if (qualityRef.current === "ai" && funieReadyRef.current && aiPhotoCanvasRef.current) {
-        r.uploadSource(aiPhotoCanvasRef.current, bmp.width, bmp.height);
-        r.render(IDENTITY_STATS, OFF_SETTINGS);
-      } else if (statsRef.current) {
-        r.uploadSource(bmp, bmp.width, bmp.height);
-        r.render(statsRef.current, settingsRef.current);
-      }
+  // Paint the current still (photo, or paused video) with the current grade.
+  function repaint() {
+    const e = engineRef.current;
+    if (!e) return;
+    if (modeRef.current === "photo" && bitmapRef.current) {
+      const b = bitmapRef.current;
+      e.upload(b, b.width, b.height, 0);
+      e.render();
       return;
     }
     const v = videoRef.current;
-    if (mode === "video" && v && v.paused && v.readyState >= 2 && statsRef.current) {
-      if (qualityRef.current === "ai" && funieReadyRef.current) {
-        r.uploadSource(v, v.videoWidth, v.videoHeight);
-        const t = lerpTransferToIdentity(aiTransferRef.current, aiStrengthRef.current);
-        r.renderAi(t.gain, t.bias);
-      } else {
-        r.uploadSource(v, v.videoWidth, v.videoHeight);
-        r.render(statsRef.current, settingsRef.current);
-      }
+    if (modeRef.current === "video" && v && v.paused && v.readyState >= 2 && !exportingRef.current) {
+      e.upload(v, v.videoWidth, v.videoHeight, 0);
+      e.render();
     }
-  }
-
-  function renderFrameSync(v: HTMLVideoElement) {
-    if (!rendererRef.current || !statsRef.current) return;
-    if (qualityRef.current === "ai" && funieReadyRef.current) {
-      // Always upload the current frame and apply the cached AI transfer at
-      // full FPS. The model runs in the background — no render-frame is
-      // gated on inference, so playback stays smooth even when inference
-      // takes 100+ ms per frame. Strength is lerped toward identity at
-      // render time so the slider takes effect on the very next render
-      // (no need to wait for the next inference).
-      rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
-      const t = lerpTransferToIdentity(aiTransferRef.current, aiStrengthRef.current);
-      rendererRef.current.renderAi(t.gain, t.bias);
-      // Kick off a fresh inference if none in flight — refreshes the
-      // transfer from the current frame's content.
-      if (!aiInflightRef.current) {
-        aiInflightRef.current = true;
-        const myGen = fileGenRef.current;
-        runFunie(v, aiStrengthRef.current)
-          .then((res) => {
-            // Bail if a new file replaced this one mid-inference —
-            // otherwise the stale transfer EMA-blends into the new
-            // file's cache.
-            if (myGen !== fileGenRef.current) return;
-            const prev = aiTransferRef.current;
-            const init = aiTransferInitialisedRef.current;
-            // First inference snaps in; subsequent inferences EMA-blend
-            // so transient particle-driven jitter doesn't show up as
-            // visible flicker.
-            const a = init ? AI_TRANSFER_SMOOTH : 1;
-            aiTransferRef.current = {
-              gain: [
-                prev.gain[0] + (res.transfer.gain[0] - prev.gain[0]) * a,
-                prev.gain[1] + (res.transfer.gain[1] - prev.gain[1]) * a,
-                prev.gain[2] + (res.transfer.gain[2] - prev.gain[2]) * a,
-              ],
-              bias: [
-                prev.bias[0] + (res.transfer.bias[0] - prev.bias[0]) * a,
-                prev.bias[1] + (res.transfer.bias[1] - prev.bias[1]) * a,
-                prev.bias[2] + (res.transfer.bias[2] - prev.bias[2]) * a,
-              ],
-            };
-            aiTransferInitialisedRef.current = true;
-            // On paused video the play loop isn't redrawing — force a
-            // re-render here so the just-computed transfer is visible
-            // immediately. Without this, switching Classical→AI on a
-            // paused frame would show identity (the initial transfer)
-            // forever until the user pressed play.
-            const vv = videoRef.current;
-            if (vv && vv.paused && rendererRef.current && qualityRef.current === "ai") {
-              rendererRef.current.uploadSource(vv, vv.videoWidth, vv.videoHeight);
-              const tt = lerpTransferToIdentity(aiTransferRef.current, aiStrengthRef.current);
-              rendererRef.current.renderAi(tt.gain, tt.bias);
-            }
-          })
-          .catch(() => undefined)
-          .finally(() => {
-            aiInflightRef.current = false;
-          });
-      }
-      return;
-    }
-    rendererRef.current.uploadSource(v, v.videoWidth, v.videoHeight);
-    rendererRef.current.render(statsRef.current, settingsRef.current);
   }
 
   const { currentTime, isPaused } = useVideoPlaybackState(videoRef, mode === "video", () => {
     const v = videoRef.current;
     if (!v || v.readyState < 2) return;
-    renderFrameSync(v);
+    renderVideoFrame(v);
   });
 
-  // Repaint the frozen frame when settings change while paused.
-  useEffect(() => {
-    if (mode !== "video") return;
-    const v = videoRef.current;
-    if (!v || v.readyState < 2) return;
-    if (!v.paused) return;
-    renderFrameSync(v);
-  }, [settings, isPaused, mode, funieReady, quality, aiStrength]);
-
-  function togglePlay() {
-    const v = videoRef.current;
-    if (!v || recording) return;
-    if (v.paused) v.play().catch(() => undefined);
-    else v.pause();
-  }
-
-  function seekTo(t: number) {
-    const v = videoRef.current;
-    if (!v || recording) return;
-    try {
-      v.currentTime = Math.min(Math.max(0, t), v.duration || 0);
-    } catch {
-      // ignore
-    }
-  }
-
-  function maybeRefreshStats(video: HTMLVideoElement) {
-    // Dynamic grading off → keep the first-frame stats frozen for
-    // the whole clip. statsRef is set once in loadVideo and we just
-    // leave it alone here. Also force-skip during recording: each
-    // refresh does a full source-resolution ImageData read (~33 MB
-    // at 4K) which competes with the encoder for memory/CPU budget
-    // and was implicated in long-record freezes.
-    if (!dynamicGradeRef.current || recordingFlagRef.current) return;
-    const now = performance.now();
-    // Refresh 4× per second instead of 1× — combined with a per-step
-    // lerp 4× smaller, the effective time constant matches the previous
-    // 1 Hz × 15% setup, but each visible step is 4× smaller. Eliminates
-    // the once-per-second pulse that showed as a flicker, especially on
-    // footage with drifting particles where stats wobble slightly.
-    if (now - lastStatsRefreshRef.current < 250) return;
-    if (video.readyState < 2) return;
-    try {
-      const fresh = computeStats(video, video.videoWidth, video.videoHeight, settingsRef.current.castStrength);
-      const cur = statsRef.current;
-      if (cur && statsRealRef.current && !isSceneCut(cur, fresh)) {
-        statsRef.current = lerpStats(cur, fresh, 0.0375);
-      } else {
-        // First refresh or hard scene cut — snap the matrix instead of
-        // EMA-crawling through several seconds of wrong color.
-        statsRef.current = fresh;
-        statsRealRef.current = true;
-      }
-      lastStatsRefreshRef.current = now;
-    } catch {
-      // ignore
-    }
+  function renderVideoFrame(v: HTMLVideoElement) {
+    const e = engineRef.current;
+    if (!e) return;
+    e.upload(v, v.videoWidth, v.videoHeight, 0);
+    e.tick(v.currentTime);
+    e.render();
   }
 
   type VideoWithRVFC = HTMLVideoElement & {
@@ -503,958 +149,340 @@ export default function App() {
     const video = videoRef.current as VideoWithRVFC | null;
     if (!video) return;
     previewActiveRef.current = true;
-    lastStatsRefreshRef.current = 0;
-
-    const renderFromVideo = () => {
+    const draw = () => {
       const v = videoRef.current;
       if (!v || v.readyState < 2) return;
-      maybeRefreshStats(v);
-      renderFrameSync(v);
+      renderVideoFrame(v);
     };
-
     if (typeof video.requestVideoFrameCallback === "function") {
       const onFrame = () => {
-        if (!previewActiveRef.current || recordingFlagRef.current) return;
-        renderFromVideo();
+        if (!previewActiveRef.current || exportingRef.current) return;
+        draw();
         const v = videoRef.current as VideoWithRVFC | null;
-        if (v && previewActiveRef.current && !recordingFlagRef.current) {
-          v.requestVideoFrameCallback?.(onFrame);
-        }
+        if (v && previewActiveRef.current && !exportingRef.current) v.requestVideoFrameCallback?.(onFrame);
       };
       video.requestVideoFrameCallback(onFrame);
     } else {
       const loop = () => {
-        if (!previewActiveRef.current || recordingFlagRef.current) return;
-        renderFromVideo();
+        if (!previewActiveRef.current || exportingRef.current) return;
+        draw();
         requestAnimationFrame(loop);
       };
       requestAnimationFrame(loop);
     }
   }
 
-  function teardownVideo() {
+  function teardown() {
     previewActiveRef.current = false;
-    if (recorderRef.current && recorderRef.current.state !== "inactive") {
-      recorderRef.current.ondataavailable = null;
-      recorderRef.current.onstop = null;
-      try {
-        recorderRef.current.stop();
-      } catch {
-        // ignore
-      }
+    exportAbortRef.current?.abort();
+    const v = videoRef.current;
+    if (v) {
+      v.pause();
+      v.removeAttribute("src");
+      v.load();
     }
-    recorderRef.current = null;
-    recordingFlagRef.current = false;
-    if (videoRef.current) {
-      videoRef.current.pause();
-      // Remove the canplay listener if it never fired — otherwise it'd
-      // attach to the next file's load and run a stale closure.
-      if (loadCanPlayListenerRef.current) {
-        videoRef.current.removeEventListener("canplay", loadCanPlayListenerRef.current);
-        loadCanPlayListenerRef.current = null;
-      }
-      videoRef.current.removeAttribute("src");
-      videoRef.current.load();
-    }
-    // Revoke the previous file's blob URL — without this every uploaded
-    // file leaked its decoded bytes for the rest of the session.
     if (sourceUrlRef.current) {
       try { URL.revokeObjectURL(sourceUrlRef.current); } catch { /* ignore */ }
       sourceUrlRef.current = null;
     }
-    // Tear down the audio routing attached to the previous video element.
-    // iOS Safari throws on the second createMediaElementSource for the
-    // same element, and the AudioContext leaked across files even where
-    // it didn't throw.
-    if (audioRoutingRef.current) {
-      closeAudioRouting(audioRoutingRef.current);
-      audioRoutingRef.current = null;
+    if (bitmapRef.current) {
+      try { bitmapRef.current.close(); } catch { /* ignore */ }
+      bitmapRef.current = null;
     }
+    engineRef.current?.reset();
   }
-
-  const pendingFileRef = useRef<File | null>(null);
-
-  // Animate the compare-wipe split on initial reveal so the user
-  // sees a clear before→after slide: hold full original (split=1) for
-  // ~400 ms, then sweep split 1 → 0 over 2.2 s (ease-in-out cubic).
-  // Drives the renderer directly via entryAnimSplitRef instead of
-  // flipping compareActive on — the latter would show the manual
-  // wipe handle UI AND block click-to-pause on the stage.
-  function animateEntrySettings() {
-    if (entryAnimRef.current !== null) {
-      cancelAnimationFrame(entryAnimRef.current);
-      entryAnimRef.current = null;
-    }
-    const HOLD_MS = 800;
-    const SLIDE_MS = 4400;
-    const apply = (v: number) => {
-      entryAnimSplitRef.current = v;
-      // Push the value through the renderer immediately. The per-frame
-      // preview loop also reads this on its next tick — but for paused
-      // frames (photos, or video before play()) we need to redraw now.
-      const r = rendererRef.current;
-      if (r) {
-        r.setSplit(v);
-        if (statsRef.current && imageBitmapRef.current && mode === "photo") {
-          r.render(statsRef.current, settingsRef.current);
-        }
-      }
-    };
-    apply(1);
-    let start: number | null = null;
-    const tick = (now: number) => {
-      if (start === null) start = now;
-      const elapsed = now - start;
-      if (elapsed < HOLD_MS) {
-        apply(1);
-        entryAnimRef.current = requestAnimationFrame(tick);
-        return;
-      }
-      const t = Math.min(1, (elapsed - HOLD_MS) / SLIDE_MS);
-      // Ease-in-out cubic — accelerate through the middle of the frame
-      // (where the contrast is most visible) and decelerate at the
-      // ends so start/finish feel intentional.
-      const e = t < 0.5
-        ? 4 * t * t * t
-        : 1 - Math.pow(-2 * t + 2, 3) / 2;
-      apply(1 - e);
-      if (t < 1) {
-        entryAnimRef.current = requestAnimationFrame(tick);
-      } else {
-        entryAnimRef.current = null;
-        entryAnimSplitRef.current = null;
-        // Hand control back to the manual compare wipe state.
-        if (rendererRef.current) {
-          rendererRef.current.setSplit(compareActive ? compareSplit : 0);
-        }
-      }
-    };
-    entryAnimRef.current = requestAnimationFrame(tick);
-  }
-
-  useEffect(() => {
-    return () => {
-      if (entryAnimRef.current !== null) cancelAnimationFrame(entryAnimRef.current);
-    };
-  }, []);
 
   async function handleFile(file: File) {
     setError(null);
-    setRecording(false);
-    setRecordProgress(0);
     const isVideo = file.type.startsWith("video/") || /\.(mp4|mov|m4v|webm)$/i.test(file.name);
     const validation = validateUploadedFile(file, isVideo ? "video" : "image");
     if (!validation.ok) {
       setError(validation.message);
       return;
     }
-    teardownVideo();
+    if (!engineRef.current) {
+      setError("The GPU engine isn't ready yet — try again in a moment.");
+      return;
+    }
+    teardown();
     fileGenRef.current++;
+    fileRef.current = file;
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
-    sourceFpsRef.current = 60;
-    sourceBitrateRef.current = null;
-    // Reset the AI transfer cache so the new file's first inference
-    // snaps in (instead of EMA-blending from the previous video's
-    // colour stats, which would look wrong for several seconds).
-    aiTransferRef.current = { gain: [1, 1, 1], bias: [0, 0, 0] };
-    aiTransferInitialisedRef.current = false;
-    // Same idea for the classical stats: force the first refresh to
-    // snap in instead of lerping from the previous file's mean/wbGain.
-    statsRealRef.current = false;
+    setCompareActive(false);
     setBusy(isVideo ? "Loading video…" : "Loading photo…");
     try {
-      // Touch the file's first byte before we hand it to <video> /
-      // createImageBitmap. On iOS, items from "Recently Saved" can be
-      // iCloud placeholders that the picker hands over before the bytes
-      // are local — touching here either coaxes the download or surfaces
-      // a clean error before the heavier load path swallows it.
       await touchFile(file);
-      if (isVideo) {
-        sourceBitrateRef.current = bitrateFromSource(file.size, 0);
-        await loadVideo(file);
-      } else {
-        await loadImage(file);
-      }
-      animateEntrySettings();
+      if (isVideo) await loadVideo(file);
+      else await loadImage(file);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
   }
 
-  async function confirmFunieDownloadAndProceed() {
-    setShowFuniePrompt(false);
-    setFunieDownloadPct(0);
-    const ctrl = new AbortController();
-    funieAbortRef.current = ctrl;
-    try {
-      await loadFunie((pct) => setFunieDownloadPct(pct), ctrl.signal);
-      setFunieReady(true);
-      setFunieCached(true);
-      setFunieDownloadPct(null);
-      setQuality("ai");
-    } catch (e) {
-      setFunieDownloadPct(null);
-      if (!(e instanceof LoadAbortedError)) {
-        setError("Couldn't load AI model: " + (e instanceof Error ? e.message : String(e)));
-      }
-    } finally {
-      funieAbortRef.current = null;
-    }
-  }
-
-  function cancelFunieDownload() {
-    funieAbortRef.current?.abort();
-  }
-
-  // Cached path: load silently (no dialog, no progress bar) and switch
-  // straight to AI. Decoding 17 MB from the local cache + building the
-  // ort session takes a handful of frames at most.
-  async function loadFunieFromCacheAndSwitch() {
-    if (funieLoadingRef.current) return;
-    funieLoadingRef.current = true;
-    try {
-      await loadFunie();
-      setFunieReady(true);
-      setQuality("ai");
-    } catch (e) {
-      setError("Couldn't load AI model: " + (e instanceof Error ? e.message : String(e)));
-    } finally {
-      funieLoadingRef.current = false;
-    }
-  }
-
-  async function handleLUTFile(file: File) {
-    setError(null);
-    try {
-      const text = await file.text();
-      const parsed = parseCube(text);
-      if (rendererRef.current) {
-        rendererRef.current.uploadLUT(parsed.data, parsed.size);
-      }
-      setLutName(file.name);
-      if (mode === "photo" && rendererRef.current && imageBitmapRef.current && statsRef.current) {
-        rendererRef.current.uploadSource(imageBitmapRef.current, imageBitmapRef.current.width, imageBitmapRef.current.height);
-        rendererRef.current.render(statsRef.current, settings);
-      }
-    } catch (e) {
-      setError("LUT load failed: " + (e instanceof Error ? e.message : String(e)));
-    }
-  }
-
-  function clearLUT() {
-    if (rendererRef.current) rendererRef.current.clearLUT();
-    setLutName(null);
-    if (mode === "photo" && rendererRef.current && imageBitmapRef.current && statsRef.current) {
-      rendererRef.current.uploadSource(imageBitmapRef.current, imageBitmapRef.current.width, imageBitmapRef.current.height);
-      rendererRef.current.render(statsRef.current, settings);
-    }
-  }
-
   async function loadImage(file: File) {
-    try {
-      // imageOrientation: "from-image" honours the JPEG's EXIF
-      // Orientation tag. Without it iOS Safari renders portrait iPhone
-      // photos rotated 90° (the camera shoots in landscape but tags
-      // them with the rotation in EXIF). Some older browsers ignore
-      // the option silently, which is fine — they were already
-      // rendering whatever orientation they pleased.
-      const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
-      imageBitmapRef.current = bitmap;
-      const stats = computeStats(bitmap, bitmap.width, bitmap.height, settingsRef.current.castStrength);
-      statsRef.current = stats;
-      setMode("photo");
-      requestAnimationFrame(() => {
-        if (!rendererRef.current) return;
-        rendererRef.current.uploadSource(bitmap, bitmap.width, bitmap.height);
-        rendererRef.current.render(stats, settingsRef.current);
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+    const e = engineRef.current!;
+    const myGen = fileGenRef.current;
+    // "from-image" honours EXIF orientation (portrait iPhone photos).
+    const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    if (myGen !== fileGenRef.current) {
+      bitmap.close();
+      return;
     }
+    bitmapRef.current = bitmap;
+    modeRef.current = "photo";
+    setMode("photo");
+    e.upload(bitmap, bitmap.width, bitmap.height, 0);
+    await e.analyzeNow(true);
+    if (myGen !== fileGenRef.current) return;
+    e.render();
   }
 
   async function loadVideo(file: File) {
-    if (!videoRef.current || !rendererRef.current) return;
+    const e = engineRef.current!;
+    const video = videoRef.current;
+    if (!video) return;
+    const myGen = fileGenRef.current;
     const url = URL.createObjectURL(file);
     sourceUrlRef.current = url;
-    const video = videoRef.current;
     video.src = url;
     video.muted = true;
     video.playsInline = true;
     video.loop = true;
     video.preload = "auto";
-
-    try {
-      if (video.readyState < 1) {
-        await new Promise<void>((resolve, reject) => {
-          const onMeta = () => {
-            video.removeEventListener("loadedmetadata", onMeta);
-            video.removeEventListener("error", onErr);
-            resolve();
-          };
-          const onErr = () => {
-            video.removeEventListener("loadedmetadata", onMeta);
-            video.removeEventListener("error", onErr);
-            reject(new Error("Could not decode video"));
-          };
-          video.addEventListener("loadedmetadata", onMeta);
-          video.addEventListener("error", onErr);
-        });
-      }
-
-      video.play().catch(() => undefined);
-      statsRef.current = IDENTITY_STATS;
-      setDuration(video.duration || 0);
-      setMode("video");
-      startPreview();
-
-      // Recompute the source bitrate now that we have a reliable duration,
-      // and detect fps from the actual frame stream. Both are used by the
-      // recording flow so the saved file matches the input's smoothness
-      // and quality ceiling.
-      sourceBitrateRef.current = bitrateFromSource(file.size, video.duration || 0);
-      const myGen = fileGenRef.current;
-      detectVideoFps(video).then((fps) => {
-        if (myGen !== fileGenRef.current) return;
-        sourceFpsRef.current = Math.max(24, fps);
-      }).catch(() => undefined);
-
-      const computeOnce = () => {
-        const v = videoRef.current;
-        if (!v || v.readyState < 2) return;
-        try {
-          statsRef.current = computeStats(v, v.videoWidth, v.videoHeight, settingsRef.current.castStrength);
-        } catch {
-          // ignore
-        }
+    await new Promise<void>((resolve, reject) => {
+      const onReady = () => {
+        cleanup();
+        resolve();
       };
-      if (video.readyState >= 2) computeOnce();
-      else {
-        const onCanPlay = () => {
-          video.removeEventListener("canplay", onCanPlay);
-          loadCanPlayListenerRef.current = null;
-          computeOnce();
-        };
-        // Track the listener so teardownVideo can remove it. Without
-        // this, a teardown-before-canplay leaves the old listener
-        // attached and the next file's first canplay fires the stale
-        // closure.
-        if (loadCanPlayListenerRef.current) {
-          video.removeEventListener("canplay", loadCanPlayListenerRef.current);
-        }
-        loadCanPlayListenerRef.current = onCanPlay;
-        video.addEventListener("canplay", onCanPlay);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const onErr = () => {
+        cleanup();
+        reject(new Error("Could not decode this video"));
+      };
+      const cleanup = () => {
+        video.removeEventListener("loadeddata", onReady);
+        video.removeEventListener("error", onErr);
+      };
+      video.addEventListener("loadeddata", onReady);
+      video.addEventListener("error", onErr);
+      if (video.readyState >= 2) onReady();
+    });
+    if (myGen !== fileGenRef.current) return;
+    setDuration(video.duration || 0);
+    modeRef.current = "video";
+    setMode("video");
+    // First frame: analyse and snap before anything is shown, so the clip
+    // never flashes uncorrected.
+    e.upload(video, video.videoWidth, video.videoHeight, 0);
+    await e.analyzeNow(true);
+    if (myGen !== fileGenRef.current) return;
+    e.render();
+    await video.play().catch(() => undefined);
+    startPreview();
+  }
+
+  function togglePlay() {
+    const v = videoRef.current;
+    if (!v || exporting) return;
+    if (v.paused) v.play().catch(() => undefined);
+    else v.pause();
+  }
+
+  function seekTo(t: number) {
+    const v = videoRef.current;
+    if (!v || exporting) return;
+    try {
+      v.currentTime = Math.min(Math.max(0, t), v.duration || 0);
+    } catch {
+      // ignore
     }
   }
 
   async function savePhoto() {
-    const canvas = canvasRef.current;
-    const renderer = rendererRef.current;
-    const bitmap = imageBitmapRef.current;
-    if (!canvas || !renderer || !bitmap) return;
-    // Disable the wipe for the saved file even if it's currently on.
-    const prevSplit = renderer;
-    renderer.setSplit(0);
+    const e = engineRef.current;
+    const bitmap = bitmapRef.current;
+    if (!e || !bitmap) return;
     try {
-      // Re-render synchronously before toBlob — the WebGL context is
-      // created without preserveDrawingBuffer so the backbuffer may have
-      // been cleared since the last paint.
-      if (qualityRef.current === "ai" && funieReadyRef.current) {
-        // Critical: the previous version of this function always called
-        // the classical render even in AI mode, so the saved photo
-        // showed a *different* result from what the user was seeing on
-        // screen. Run the model and render its output.
-        const res = await runFunie(bitmap, aiStrengthRef.current);
-        renderer.uploadSource(res.canvas, bitmap.width, bitmap.height);
-        renderer.render(IDENTITY_STATS, OFF_SETTINGS);
-      } else if (statsRef.current) {
-        renderer.uploadSource(bitmap, bitmap.width, bitmap.height);
-        renderer.render(statsRef.current, settings);
-      }
-      await new Promise<void>((resolve) => {
-        canvas.toBlob(
-          (blob) => {
-            if (blob) shareOrDownload(blob, `${fileNameRef.current}-aqua.jpg`).catch(() => undefined);
-            resolve();
-          },
-          "image/jpeg",
-          0.95,
-        );
-      });
+      e.upload(bitmap, bitmap.width, bitmap.height, 0);
+      const frame = await e.renderToFrame(0, 0, undefined);
+      const out = document.createElement("canvas");
+      out.width = bitmap.width;
+      out.height = bitmap.height;
+      out.getContext("2d")!.drawImage(frame, 0, 0);
+      frame.close();
+      const blob = await new Promise<Blob | null>((resolve) => out.toBlob(resolve, "image/jpeg", 0.95));
+      if (blob) await shareOrDownload(blob, `${fileNameRef.current}-aqua.jpg`);
+    } catch (err) {
+      setError("Save failed: " + (err instanceof Error ? err.message : String(err)));
     } finally {
-      // Restore wipe split so the on-screen view goes back to what
-      // the user had set (or the entry animation if still running).
-      void prevSplit;
-      renderer.setSplit(
-        entryAnimSplitRef.current ?? (compareActive ? compareSplit : 0),
-      );
+      repaint();
     }
   }
 
-  async function recordVideo() {
-    try {
-      await recordVideoInner();
-    } catch (e) {
-      recordingFlagRef.current = false;
-      if (audioCleanupRef.current) {
-        audioCleanupRef.current();
-        audioCleanupRef.current = null;
-      }
-      if (sinkRef.current) {
-        sinkRef.current.cleanup().catch(() => undefined);
-        sinkRef.current = null;
-      }
-      // Wake lock was acquired in recordVideoInner before this throw —
-      // the success/cancel paths release it but the outer catch was
-      // missing the call, leaking the lock for the rest of the session.
-      if (wakeLockRef.current) {
-        wakeLockRef.current.release().catch(() => undefined);
-        wakeLockRef.current = null;
-        if (wakeLockListenerRef.current) {
-          document.removeEventListener("visibilitychange", wakeLockListenerRef.current);
-          wakeLockListenerRef.current = null;
-        }
-      }
-      setRecording(false);
-      setError("Recording failed: " + (e instanceof Error ? e.message : String(e)));
-      startPreview();
-    }
+  function releaseWakeLock() {
+    wakeLockRef.current?.release().catch(() => undefined);
+    wakeLockRef.current = null;
   }
 
-  async function recordVideoInner() {
-    const canvas = canvasRef.current;
-    const video = videoRef.current as VideoWithRVFC | null;
-    if (!canvas || !video || !statsRef.current) return;
-    const candidate = pickRecorderMime();
-    if (!candidate) {
-      setError("This browser can't encode video. Try the latest Safari or Chrome.");
+  async function saveVideo() {
+    const e = engineRef.current;
+    const file = fileRef.current;
+    const video = videoRef.current;
+    if (!e || !file || !video) return;
+    if (!canExport) {
+      setError("Saving video needs WebCodecs — update to the latest Safari or Chrome.");
       return;
     }
     setError(null);
     previewActiveRef.current = false;
-    recordingFlagRef.current = true;
-    // Strip optional work to maximise free memory for the encoder /
-    // decoder. iOS Safari's MediaRecorder budget is tight at 4K + 60
-    // fps; freeing every MB we can pushes the freeze point further
-    // down the timeline.
-    // - Cancel the entry-wipe rAF (likely already done but defensive).
-    // - Drop the photo bitmap (large; not needed for video record).
-    // - Stop dynamic grading recompute even if the user enabled it
-    //   (the per-250-ms computeStats off the source frame is ~aw·ah
-    //   ImageData reads, which on a 4K source is ~33 MB churn per
-    //   refresh — pure encoder competition during recording).
-    if (entryAnimRef.current !== null) {
-      cancelAnimationFrame(entryAnimRef.current);
-      entryAnimRef.current = null;
-      entryAnimSplitRef.current = null;
-    }
-    if (mode === "video" && imageBitmapRef.current) {
-      try { imageBitmapRef.current.close(); } catch { /* ignore */ }
-      imageBitmapRef.current = null;
-    }
-    // Disable the compare wipe before recording — otherwise the saved
-    // file is split (original on left, corrected on right) which is
-    // never what the user wants in their final video.
-    if (compareActive) {
-      setCompareActive(false);
-      rendererRef.current?.setSplit(0);
-    }
-
+    exportingRef.current = true;
+    setCompareActive(false);
     video.pause();
-    video.loop = false;
-    video.muted = false;
-    if (video.currentTime > 0.01) {
-      await new Promise<void>((resolve) => {
-        const onSeeked = () => {
-          video.removeEventListener("seeked", onSeeked);
-          resolve();
-        };
-        video.addEventListener("seeked", onSeeked);
-        try {
-          video.currentTime = 0;
-        } catch {
-          video.removeEventListener("seeked", onSeeked);
-          resolve();
-        }
-      });
-    }
-
-    const wakeLockApi = (navigator as Navigator & {
-      wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinel> };
-    }).wakeLock;
-    const requestWakeLock = () => {
-      if (!wakeLockApi || typeof wakeLockApi.request !== "function") return;
-      wakeLockApi
-        .request("screen")
-        .then((lock) => {
-          // Late-arrival guard: if the recording already finished or
-          // was cancelled before the promise resolved, release the
-          // lock immediately so it doesn't leak for the rest of the
-          // session.
-          if (!recordingFlagRef.current) {
-            lock.release().catch(() => undefined);
-            return;
-          }
-          wakeLockRef.current = lock;
-        })
-        .catch(() => undefined);
-    };
-    requestWakeLock();
-    // iOS auto-releases the wake-lock sentinel when the tab is
-    // backgrounded; re-request on visibility return so a long
-    // recording resumed from lock screen still keeps the screen on.
-    const onVisibility = () => {
-      if (document.visibilityState === "visible" && recordingFlagRef.current && !wakeLockRef.current) {
-        requestWakeLock();
-      }
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    wakeLockListenerRef.current = onVisibility;
-
-    if (rendererRef.current) {
-      rendererRef.current.uploadSource(video, video.videoWidth, video.videoHeight);
-      rendererRef.current.render(statsRef.current, settingsRef.current);
-    }
-
-    const fps = sourceFpsRef.current;
-    const captureCtx = buildCaptureContext(canvas, fps);
-    // ``CanvasCaptureMediaStreamTrack.requestFrame`` published a fresh
-    // captured frame on demand. The cast is safe — captureStream always
-    // returns this subclass for canvas-sourced tracks; we feature-check
-    // before each call so older Safari builds without it fall back to
-    // the sampler-clock behaviour.
-    const captureVideoTrack = captureCtx.videoTrack as MediaStreamTrack & {
-      requestFrame?: () => void;
-    };
-    if (!audioRoutingRef.current) audioRoutingRef.current = attachAudioRouting(video);
-    const audioCapture = await captureAudioForRecording(audioRoutingRef.current);
-    const stream = new MediaStream([
-      ...captureCtx.videoStream.getVideoTracks(),
-      ...audioCapture.tracks,
-    ]);
-    // Match the source bitrate when we can; otherwise fall back to a
-    // pixel/fps formula that still hits visually-lossless quality.
-    const bitrate = sourceBitrateRef.current
-      ?? pickBitrate(video.videoWidth, video.videoHeight, fps);
-
-    let recorder: MediaRecorder;
+    const ctrl = new AbortController();
+    exportAbortRef.current = ctrl;
+    const wakeLockApi = (navigator as Navigator & { wakeLock?: { request: (t: "screen") => Promise<WakeLockSentinel> } }).wakeLock;
+    wakeLockApi?.request("screen").then((l) => { wakeLockRef.current = l; }).catch(() => undefined);
+    setExporting(true);
+    setExportProgress(0);
+    setExportTime(0);
+    const total = video.duration || 0;
+    const bitrate = bitrateFromSource(file.size, total) ?? pickBitrate(video.videoWidth, video.videoHeight, 30);
+    // Export has its own temporal state: start clean so the first frame
+    // snaps to its own analysis instead of inheriting the preview's.
+    e.reset();
+    let frames = 0;
     try {
-      recorder = new MediaRecorder(stream, {
-        mimeType: candidate.mime || undefined,
-        videoBitsPerSecond: bitrate,
-      });
-    } catch (e) {
-      audioCapture.cleanup();
-      recordingFlagRef.current = false;
-      setError("Recording failed: " + (e instanceof Error ? e.message : String(e)));
-      startPreview();
-      return;
-    }
-
-    recorderRef.current = recorder;
-    audioCleanupRef.current = audioCapture.cleanup;
-    const sink = await createRecordingSink(AQUA_FIX_BRAND.opfsPrefix);
-    sinkRef.current = sink;
-    let writeQueue: Promise<void> = Promise.resolve();
-    recorder.ondataavailable = (e) => {
-      if (!e.data || !e.data.size) return;
-      writeQueue = writeQueue.then(() => sink.write(e.data)).catch(() => undefined);
-    };
-    recorder.onerror = (e: Event) => {
-      const evt = e as Event & { error?: unknown };
-      const msg = evt.error instanceof Error ? evt.error.message : "encoder error";
-      setError("Recording error: " + msg);
-    };
-
-    lastStatsRefreshRef.current = 0;
-    let lastUiPushAt = 0;
-    const renderAndPush = () => {
-      if (!recordingFlagRef.current || !videoRef.current) return;
-      const v = videoRef.current;
-      maybeRefreshStats(v);
-      renderFrameSync(v);
-      // Phase-lock the captured frame to this render. captureStream's
-      // own sampler runs on an independent clock and can land between
-      // renders (stale-canvas dup) or beat the renderer (skipped
-      // render). ``requestFrame`` publishes the *current* backbuffer
-      // as the next captured frame so exactly one capture corresponds
-      // to one rVFC render — no dups, no drops.
-      captureVideoTrack.requestFrame?.();
-      // Throttle React state updates to ~4 Hz; the rAF loop fires
-      // ~60 Hz but the recording overlay only needs to tick on a
-      // human-readable cadence. Avoids re-committing the component
-      // and re-running effects every frame during a long recording.
-      const now = performance.now();
-      if (now - lastUiPushAt > 250) {
-        lastUiPushAt = now;
-        setRecordTime(v.currentTime);
-        if (Number.isFinite(v.duration) && v.duration > 0) setRecordProgress(v.currentTime / v.duration);
-      }
-    };
-
-    // Drive renders from requestVideoFrameCallback when available so
-    // we capture exactly one canvas frame per decoded video frame.
-    // The previous rAF loop ran at display refresh (~60Hz) regardless
-    // of whether the video advanced — heavy 4K clips produced saved
-    // files with stretches of frozen video. rAF fallback for browsers
-    // without rVFC. The chain is restartable so the stall watchdog
-    // can re-register it after a play() resume (rVFC chain dies when
-    // the video pauses, since the last callback never fires).
-    const useRvfc = typeof video.requestVideoFrameCallback === "function";
-    let rvfcChainAlive = false;
-    const startRvfcChain = () => {
-      if (!useRvfc || rvfcChainAlive) return;
-      rvfcChainAlive = true;
-      const onFrame = () => {
-        rvfcChainAlive = true;
-        if (!recordingFlagRef.current) return;
-        renderAndPush();
-        if (!video.ended && recordingFlagRef.current) {
-          video.requestVideoFrameCallback?.(onFrame);
-        } else {
-          rvfcChainAlive = false;
-        }
-      };
-      video.requestVideoFrameCallback?.(onFrame);
-    };
-    if (useRvfc) {
-      startRvfcChain();
-    } else {
-      const loop = () => {
-        if (!recordingFlagRef.current) return;
-        renderAndPush();
-        if (!video.ended && recordingFlagRef.current) requestAnimationFrame(loop);
-      };
-      requestAnimationFrame(loop);
-    }
-
-    // Stall detector: 5 s polling, single-strike — try a play() resume
-    // immediately and re-arm the rVFC chain. Surfaces an error only if
-    // play() rejects (truly dead decoder). Aggressive cadence because
-    // the prior 10 s × 2-strike (20 s effective) was longer than the
-    // user's tolerance — they reported a freeze at 28 s and the
-    // saved file kept duplicating that frame for many seconds before
-    // anything noticed.
-    let recordingStallLastTime = 0;
-    const stallWatchdog = window.setInterval(() => {
-      if (!recordingFlagRef.current) {
-        clearInterval(stallWatchdog);
-        return;
-      }
-      if (document.visibilityState !== "visible") {
-        recordingStallLastTime = video.currentTime;
-        return;
-      }
-      if (video.currentTime <= recordingStallLastTime + 0.1 && !video.ended) {
-        // Stalled — try resume.
-        console.warn(`[record] video stalled at ${video.currentTime.toFixed(2)}s — attempting play()`);
-        video.play().then(() => {
-          // Re-arm rVFC since the old chain died when the video paused.
-          rvfcChainAlive = false;
-          startRvfcChain();
-        }).catch(() => {
-          setError("Recording stalled — exported video may be incomplete.");
-        });
-      }
-      recordingStallLastTime = video.currentTime;
-    }, 5000);
-
-    const stopAndDownload = () =>
-      new Promise<void>((resolve) => {
-        recorder.onstop = async () => {
-          audioCapture.cleanup();
-          audioCleanupRef.current = null;
+      const result = await exportWithCodec(
+        file,
+        async (sample, info) => {
+          const frame = sample.toVideoFrame();
           try {
-            await writeQueue;
-            const blob = await sink.finalize(candidate.mime || "video/webm");
-            await shareOrDownload(blob, `${fileNameRef.current}-aqua.${candidate.ext}`);
-          } catch (err) {
-            setError("Save failed: " + (err instanceof Error ? err.message : String(err)));
+            const rot = (info.rotation / 90) as Rotation;
+            e.upload(frame, frame.displayWidth, frame.displayHeight, rot);
+            if (frames % EXPORT_ANALYSIS_STRIDE === 0) await e.analyzeNow(frames === 0);
+            e.tick(info.timeSec);
+            frames++;
+            return await e.renderToFrame(rot, frame.timestamp, frame.duration ?? undefined);
           } finally {
-            await sink.cleanup();
-            sinkRef.current = null;
-            resolve();
+            frame.close();
           }
-        };
-        try {
-          recorder.stop();
-        } catch {
-          audioCapture.cleanup();
-          audioCleanupRef.current = null;
-          sink.cleanup().finally(() => {
-            sinkRef.current = null;
-            resolve();
-          });
-        }
-      });
-
-    const onEnded = async () => {
-      recordingFlagRef.current = false;
-      onEndedRef.current = null;
-      video.removeEventListener("ended", onEnded);
-      await stopAndDownload();
-      if (wakeLockRef.current) {
-        try {
-          await wakeLockRef.current.release();
-        } catch {
-          // ignore
-        }
-        wakeLockRef.current = null;
+        },
+        {
+          bitrate,
+          opfsPrefix: AQUA_FIX_BRAND.opfsPrefix,
+          signal: ctrl.signal,
+          onProgress: (p) => {
+            setExportProgress(p);
+            setExportTime(p * total);
+          },
+        },
+      );
+      await shareOrDownload(result.blob, `${fileNameRef.current}-aqua.mp4`);
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        setError("Export failed: " + (err instanceof Error ? err.message : String(err)));
       }
-      if (wakeLockListenerRef.current) {
-        document.removeEventListener("visibilitychange", wakeLockListenerRef.current);
-        wakeLockListenerRef.current = null;
-      }
-      setRecording(false);
-      setRecordProgress(0);
-      setRecordTime(0);
-      video.loop = true;
-      video.muted = true;
+    } finally {
+      exportAbortRef.current = null;
+      exportingRef.current = false;
+      releaseWakeLock();
+      setExporting(false);
+      setExportProgress(0);
+      setExportTime(0);
+      // Back to the preview with a fresh analysis of the first frame.
+      e.reset();
       try {
         video.currentTime = 0;
       } catch {
         // ignore
       }
-      await video.play().catch(() => undefined);
-      startPreview();
-    };
-    onEndedRef.current = onEnded;
-    video.addEventListener("ended", onEnded);
-
-    setRecording(true);
-    setRecordProgress(0);
-    setRecordTime(0);
-    // Start playback FIRST so an autoplay rejection doesn't leave the
-    // recorder running with no frames (which previously produced a
-    // 0-byte .tmp file in OPFS that lingered for 60s).
-    try {
-      await video.play();
-    } catch (e) {
-      recordingFlagRef.current = false;
-      audioCapture.cleanup();
-      audioCleanupRef.current = null;
-      try {
-        await sink.cleanup();
-      } catch {
-        // ignore
+      if (fileRef.current === file) {
+        e.upload(video, video.videoWidth, video.videoHeight, 0);
+        await e.analyzeNow(true);
+        e.render();
+        await video.play().catch(() => undefined);
+        startPreview();
       }
-      sinkRef.current = null;
-      setRecording(false);
-      setError("Couldn't start playback for recording: " + (e instanceof Error ? e.message : String(e)));
-      startPreview();
-      return;
     }
-    // 250 ms timeslice (was 1000 ms). MediaRecorder's internal encoder
-    // queue gets flushed 4× more often, which keeps the per-flush
-    // accumulated buffer smaller. Same total throughput, just less
-    // peak memory pressure — important on iOS Safari at 4K + 60 fps
-    // where the encoder's reference-frame pool + accumulated output
-    // was the prime suspect for the freeze around 28–51 s.
-    recorder.start(250);
   }
 
-  function cancelRecording() {
-    recordingFlagRef.current = false;
-    const v = videoRef.current;
-    if (v && onEndedRef.current) {
-      v.removeEventListener("ended", onEndedRef.current);
-      onEndedRef.current = null;
-    }
-    if (v) v.pause();
-    if (recorderRef.current) {
-      recorderRef.current.ondataavailable = null;
-      recorderRef.current.onstop = null;
-      try {
-        if (recorderRef.current.state !== "inactive") recorderRef.current.stop();
-      } catch {
-        // ignore
-      }
-      recorderRef.current = null;
-    }
-    if (audioCleanupRef.current) {
-      audioCleanupRef.current();
-      audioCleanupRef.current = null;
-    }
-    if (sinkRef.current) {
-      sinkRef.current.cleanup().catch(() => undefined);
-      sinkRef.current = null;
-    }
-    if (wakeLockRef.current) {
-      wakeLockRef.current.release().catch(() => undefined);
-      wakeLockRef.current = null;
-    }
-    setRecording(false);
-    setRecordProgress(0);
-    setRecordTime(0);
-    if (v) {
-      v.loop = true;
-      v.muted = true;
-      try {
-        v.currentTime = 0;
-      } catch {
-        // ignore
-      }
-      v.play().catch(() => undefined);
-    }
-    startPreview();
+  function cancelExport() {
+    exportAbortRef.current?.abort();
   }
 
   return (
     <div className="app">
       <div className="bg" aria-hidden="true" />
 
-      <Hero
-        logo={<AquaFixLogo />}
-        name={AQUA_FIX_BRAND.name}
-        tagline={AQUA_FIX_BRAND.tagline}
-        onInfoClick={() => setShowInfo(true)}
-      />
-      <Modal
-        open={showFuniePrompt}
-        onClose={() => {
-          setShowFuniePrompt(false);
-          pendingFileRef.current = null;
-        }}
-        title={`Download AI model (~${FUNIE_SIZE_MB.toFixed(0)} MB)`}
-      >
-        <p>
-          AI mode uses{" "}
-          <a href="https://arxiv.org/abs/1903.09766" target="_blank" rel="noopener noreferrer">
-            FUnIE-GAN
-          </a>{" "}
-          (Islam et al., RAL 2020) — a U-Net trained end-to-end on the EUVP
-          underwater dataset. It learns the inverse of the underwater
-          attenuation directly from data, with no per-image stats to tune. On
-          most footage it produces noticeably more natural colour than the
-          classical filter-matrix pipeline, especially on deep / very
-          green water.
-        </p>
-        <p>
-          The model is a one-time <b>~{FUNIE_SIZE_MB.toFixed(0)} MB</b>{" "}
-          download from this site, then it's cached on your device — subsequent
-          uses are instant and offline. Inference runs locally on WebGPU when
-          available, otherwise WASM. Output is fixed at 256×256 internally and
-          upscaled.
-        </p>
-        <div className="actions">
-          <button
-            className="ghost"
-            onClick={() => {
-              setShowFuniePrompt(false);
-              setQuality("classical");
-              const f = pendingFileRef.current;
-              pendingFileRef.current = null;
-              if (f) handleFile(f);
-            }}
-          >
-            Use Classical instead
-          </button>
-          <button className="primary" onClick={confirmFunieDownloadAndProceed}>
-            Download &amp; continue
-          </button>
-        </div>
-      </Modal>
-      <Modal
-        open={funieDownloadPct !== null}
-        onClose={cancelFunieDownload}
-        title="Downloading AI model…"
-      >
-        <p>This is a one-time download. Subsequent uses are instant.</p>
-        <div className="progress" style={{ height: 8, marginTop: 8 }}>
-          <div className="bar" style={{ width: `${(funieDownloadPct || 0) * 100}%` }} />
-        </div>
-        <p style={{ textAlign: "center", marginTop: 12, fontSize: 13 }}>
-          {Math.round((funieDownloadPct || 0) * 100)}%
-        </p>
-        <div className="actions">
-          <button className="ghost" onClick={cancelFunieDownload}>Cancel</button>
-        </div>
-      </Modal>
+      <Hero logo={<AquaFixLogo />} name={AQUA_FIX_BRAND.name} tagline={AQUA_FIX_BRAND.tagline} onInfoClick={() => setShowInfo(true)} />
+      <CapabilityBanner storageKey="aqua-fix:capnote" />
+
       <Modal open={showInfo} onClose={() => setShowInfo(false)} title="How Aqua Fix works">
-        <h4>Pipeline</h4>
+        <h4>One adaptive engine</h4>
         <p>
-          Each frame runs through a single WebGL fragment shader on-device:
+          Underwater footage is the scene multiplied by colour-dependent attenuation,
+          plus an additive blue-green veil (backscatter) that grows with distance. Boosting
+          red on top of that veil is what turns far water magenta. Aqua Fix instead follows
+          the Sea-thru image-formation model, in linear light:
         </p>
         <ul>
           <li>
-            <b>Depth-adaptive red reconstruction</b> — a 1-D search finds
-            the smallest hue rotation that restores the average red channel
-            to a target level, then red is rebuilt as a weighted mix of R,
-            G and B. Cross-channel mixing re-injects chroma that diagonal
-            white-balance gains mathematically cannot recover once red is
-            gone.
+            <b>Range proxy</b> — a per-pixel prior (ULAP) says how far each pixel is;
+            objects and water are told apart by hue against the veiling light and by how
+            much signal survives the veil.
           </li>
           <li>
-            <b>Robust per-channel stretch</b> — instead of fixed
-            percentiles, each channel stretches the dense interval between
-            the largest sparsely-populated histogram gaps; immune to big
-            dark-water or sun-ball regions.
+            <b>Backscatter removal</b> — the veiling light and its growth with range are
+            fitted from the darkest pixels at each range (Akkaynak &amp; Treibitz 2019) and
+            subtracted per pixel, so far regions lose their milky cast without reddening.
           </li>
           <li>
-            <b>One affine matrix per pixel</b> — the reconstruction and
-            stretch compose into a single 3×3 matrix + offset applied in
-            the shader, so white balance, stretch and saturation happen
-            simultaneously and consistently across the gamut. No per-stage
-            clipping, no halos.
+            <b>Range-adaptive compensation</b> — a Shades-of-Gray white balance measured on
+            the de-scattered image is spread over range: the far field gets more lift than
+            the foreground.
           </li>
           <li>
-            <b>Optional Lightroom .cube LUT</b> — packed as a 2D-tiled 3D
-            texture, trilinear lookup in the shader.
+            <b>Tone and colour</b> — highlight-protected exposure, robust levels, local
+            contrast (CLAHE) on luminance only, then a chroma ceiling and constant-luminance
+            gamut compression in Oklab so sand and skin never clip to magenta.
           </li>
           <li>
-            <b>Temporal stability</b> — the matrix is re-derived a few
-            times per second and EMA-blended element-wise; hard scene cuts
-            snap instead of crawling.
+            <b>Video</b> — a 256×144 thumbnail is read back from the GPU ~8× per second
+            and re-analysed in a worker; every parameter is eased in over ~0.6 s with hard
+            cuts snapping, so there is no flicker. The full-resolution frame is graded in a
+            single {engineKind === "webgpu" ? "WebGPU" : "WebGL2"} pass.
           </li>
         </ul>
         <h4>References</h4>
         <ul>
           <li>
-            The "blue magic" filter-matrix algorithm:{" "}
-            <a
-              href="https://github.com/nikolajbech/underwater-image-color-correction"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              nikolajbech/underwater-image-color-correction
+            Akkaynak &amp; Treibitz (2019) —{" "}
+            <a href="https://openaccess.thecvf.com/content_CVPR_2019/html/Akkaynak_Sea-Thru_A_Method_for_Removing_Water_From_Underwater_Images_CVPR_2019_paper.html" target="_blank" rel="noopener noreferrer">
+              Sea-thru: A Method for Removing Water from Underwater Images (CVPR)
             </a>
           </li>
           <li>
-            Reference impl that informed defaults:{" "}
-            <a
-              href="https://github.com/bornfree/dive-color-corrector"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              bornfree/dive-color-corrector
-            </a>
+            Song, Wang, Zhang &amp; Li (2018) — ULAP, a rapid underwater light-attenuation prior for scene depth.
+          </li>
+          <li>
+            Finlayson &amp; Trezzi (2004) — Shades of Gray and Colour Constancy (CIC).
+          </li>
+          <li>
+            Björn Ottosson — <a href="https://bottosson.github.io/posts/oklab/" target="_blank" rel="noopener noreferrer">Oklab</a> and sRGB gamut mapping.
           </li>
         </ul>
         <h4>Source</h4>
         <p>
-          <a
-            href="https://github.com/majdyz/video"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            github.com/majdyz/video
-          </a>{" "}
-          — both apps live in the same repo.
+          <a href="https://github.com/majdyz/video" target="_blank" rel="noopener noreferrer">github.com/majdyz/video</a>
         </p>
       </Modal>
 
       <div
         className={`stage ${mode === "idle" ? "is-empty" : ""}`}
         onClick={(e) => {
-          if (mode !== "video" || recording) return;
+          if (mode !== "video" || exporting) return;
           if ((e.target as HTMLElement).closest("button")) return;
-          // Suppress play/pause when the wipe is open — iOS dispatches
-          // a synthetic click after pointerup, so a finger-drag of the
-          // wipe handle that happens to land outside the bar still
-          // bubbled here and toggled playback.
           if (compareActive) return;
           togglePlay();
         }}
@@ -1464,21 +492,18 @@ export default function App() {
         {mode === "idle" && <PlaceholderDropZone accept="image/*,video/*" onPick={handleFile} />}
         {error && <div className="error">{error}</div>}
         {busy && <BusyOverlay message={busy} />}
-        {recording && (
-          <RecordingOverlay currentTime={recordTime} duration={duration} progress={recordProgress} />
-        )}
-        {mode === "video" && isPaused && !recording && <PlayOverlay />}
-        {mode !== "idle" && !recording && (
+        {exporting && <RecordingOverlay currentTime={exportTime} duration={duration} progress={exportProgress} />}
+        {mode === "video" && isPaused && !exporting && <PlayOverlay />}
+        {mode !== "idle" && !exporting && (
           <CompareWipe
             active={compareActive}
             value={compareSplit}
             onChange={setCompareSplit}
             onLiveChange={(v) => {
-              // Drive the split + repaint synchronously during the drag —
-              // no setState, so the image tracks the finger frame-for-frame
-              // and can't lag behind the handle.
-              rendererRef.current?.setSplit(v);
-              repaintStillFrame();
+              const e = engineRef.current;
+              if (!e) return;
+              e.split = v;
+              repaint();
             }}
             onToggle={() => setCompareActive((a) => !a)}
             canvasRef={canvasRef}
@@ -1486,200 +511,57 @@ export default function App() {
         )}
       </div>
 
-      {mode === "video" && (
-        <Scrubber
-          currentTime={currentTime}
-          duration={duration}
-          disabled={recording}
-          onSeek={seekTo}
-        />
-      )}
+      {mode === "video" && <Scrubber currentTime={currentTime} duration={duration} disabled={exporting} onSeek={seekTo} />}
 
       <section className="panel">
-        <FilePickerButton accept="image/*,video/*" disabled={recording} onPick={handleFile}>
+        <FilePickerButton accept="image/*,video/*" disabled={exporting} onPick={handleFile}>
           <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M5 5h14v14H5z M9 9l3-3 3 3M12 6v9"
-              stroke="currentColor"
-              strokeWidth="2"
-              fill="none"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
+            <path d="M5 5h14v14H5z M9 9l3-3 3 3M12 6v9" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
           Pick photo or video
         </FilePickerButton>
 
         {mode !== "idle" && (
           <>
-            <div className="model-picker">
-              <button
-                type="button"
-                className={`model-card${quality === "classical" ? " active" : ""}`}
-                disabled={recording}
-                onClick={() => setQuality("classical")}
-                aria-pressed={quality === "classical"}
-              >
-                <span className="model-title">Classical</span>
-                <span className="model-sub">Dive+-style color matrix, runs on every device.</span>
-              </button>
-              <button
-                type="button"
-                className={`model-card${quality === "ai" ? " active" : ""}`}
-                disabled={recording}
-                onClick={() => {
-                  if (funieReady) {
-                    setQuality("ai");
-                    return;
-                  }
-                  if (funieDownloadPct !== null) return;
-                  if (funieCached) {
-                    loadFunieFromCacheAndSwitch();
-                    return;
-                  }
-                  setShowFuniePrompt(true);
-                }}
-                aria-pressed={quality === "ai"}
-              >
-                <span className="model-title">
-                  AI
-                  <span className="model-badge model-badge--experimental">Experimental</span>
-                </span>
-                <span className="model-sub">
-                  {funieReady || funieCached
-                    ? "FUnIE-GAN. Sometimes less natural than Classical — try both."
-                    : `FUnIE-GAN. One-time ${FUNIE_SIZE_MB.toFixed(0)} MB download.`}
-                </span>
-              </button>
+            <div className="sliders">
+              <Slider label="Strength" value={settings.strength} min={0} max={1} step={0.01}
+                onChange={(v) => setSettings((s) => ({ ...s, strength: v }))} disabled={exporting} />
             </div>
-
-            {quality === "classical" && (
-              <>
-                <PresetsRow
-                  presets={PRESETS}
-                  current={settings}
-                  matches={matchesPreset}
-                  onSelect={setSettings}
-                  disabled={recording}
-                />
-
-                <div className="sliders">
-                  <Slider label="Intensity" value={settings.intensity} min={0} max={1} step={0.01}
-                    onChange={(v) => setSettings((s) => ({ ...s, intensity: v }))} disabled={recording} />
-                  <Slider label="Cast removal" value={settings.castStrength} min={0} max={1} step={0.01}
-                    onChange={(v) => setSettings((s) => ({ ...s, castStrength: v }))} disabled={recording} />
-                  <Slider label="Saturation" value={settings.saturation} min={0} max={2} step={0.01}
-                    onChange={(v) => setSettings((s) => ({ ...s, saturation: v }))} disabled={recording} />
-                </div>
-              </>
-            )}
-
-            {quality === "ai" && !funieReady && (
-              <p className="note">
-                AI model not loaded yet — pick a file to start the {FUNIE_SIZE_MB.toFixed(0)} MB
-                download, or switch back to Classical.
-              </p>
-            )}
-            {quality === "ai" && funieReady && (
-              <div className="sliders">
-                <Slider label="Strength" value={aiStrength} min={0} max={1} step={0.01}
-                  onChange={setAiStrength} disabled={recording} />
-              </div>
-            )}
-
-            {quality === "classical" && (
-            <AdvancedDisclosure disabled={recording}>
-              {mode === "video" && (
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={dynamicGrade}
-                    disabled={recording}
-                    onChange={(e) => setDynamicGrade(e.target.checked)}
-                  />
-                  <span className="checkbox-row-label">
-                    <span>Dynamic grading</span>
-                    <span className="checkbox-row-hint">
-                      Re-balance white-point as the scene changes. Off by
-                      default — can suddenly tint a good frame red when a
-                      fish swims through or the camera pans.
-                    </span>
-                  </span>
-                </label>
-              )}
-              <div className="lut-picker">
-                {lutName ? (
-                  <div className="lut-chip">
-                    <svg className="lut-chip-icon" viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M4 6h16v4H4zM4 12h16v4H4zM4 18h10v2H4z" fill="currentColor" />
-                    </svg>
-                    <span className="lut-chip-name" title={lutName}>{lutName}</span>
-                    <button
-                      type="button"
-                      className="lut-chip-clear"
-                      onClick={clearLUT}
-                      aria-label="Remove LUT"
-                      disabled={recording}
-                    >×</button>
-                  </div>
-                ) : null}
-                <label className="lut-button">
-                  <input
-                    type="file"
-                    accept=".cube,application/octet-stream,text/plain"
-                    disabled={recording}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) handleLUTFile(f);
-                      e.target.value = "";
-                    }}
-                  />
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4 6h16v4H4zM4 12h16v4H4zM4 18h10v2H4z" fill="currentColor" />
-                  </svg>
-                  <span className="lut-button-text">
-                    {lutName ? "Replace LUT" : "Add Lightroom .cube LUT"}
-                  </span>
-                </label>
-              </div>
-              <Slider label="LUT mix" value={settings.lutMix} min={0} max={1} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, lutMix: v }))} disabled={recording || !lutName} />
-              <Slider label="Gamma" value={settings.gamma} min={0.5} max={1.5} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, gamma: v }))} disabled={recording} />
-              <Slider label="Contrast" value={settings.contrast} min={0} max={1} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, contrast: v }))} disabled={recording} />
-              <Slider label="Clarity" value={settings.dehaze} min={0} max={1} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, dehaze: v }))} disabled={recording} />
+            <AdvancedDisclosure disabled={exporting}>
+              <Slider label="Saturation" value={settings.saturation} min={0} max={2} step={0.01}
+                onChange={(v) => setSettings((s) => ({ ...s, saturation: v }))} disabled={exporting} />
+              <Slider label="Clarity" value={settings.clarity} min={0} max={1} step={0.01}
+                onChange={(v) => setSettings((s) => ({ ...s, clarity: v }))} disabled={exporting} />
+              <Slider label="Veil removal" value={settings.veil} min={0} max={1.2} step={0.01}
+                onChange={(v) => setSettings((s) => ({ ...s, veil: v }))} disabled={exporting} />
             </AdvancedDisclosure>
-            )}
 
             <div className="actions">
-              <button className="ghost" onClick={() => setSettings(DEFAULT_SETTINGS)} disabled={recording}>
+              <button className="ghost" onClick={() => setSettings(DEFAULT_SETTINGS)} disabled={exporting}>
                 Reset
               </button>
               {mode === "photo" && (
                 <button className="primary" onClick={savePhoto}>
                   <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M5 19h14M12 4v11M7 10l5 5 5-5" stroke="currentColor" strokeWidth="2"
-                      fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M5 19h14M12 4v11M7 10l5 5 5-5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                   Save photo
                 </button>
               )}
-              {mode === "video" && !recording && (
-                <button className="primary" onClick={recordVideo} disabled={!canRecord}>
+              {mode === "video" && !exporting && (
+                <button className="primary" onClick={saveVideo} disabled={!canExport}>
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <circle cx="12" cy="12" r="6" fill="currentColor" />
                   </svg>
-                  {canRecord ? `Save video${duration ? ` (${duration.toFixed(1)}s)` : ""}` : "Recording unsupported"}
+                  {canExport ? `Save video${duration ? ` (${duration.toFixed(1)}s)` : ""}` : "Saving unsupported"}
                 </button>
               )}
-              {mode === "video" && recording && (
-                <button className="danger" onClick={cancelRecording}>Cancel</button>
+              {mode === "video" && exporting && (
+                <button className="danger" onClick={cancelExport}>Cancel</button>
               )}
             </div>
-            {mode === "video" && !canRecord && (
-              <p className="note">This browser can't encode video. The latest Safari, Chrome, or Edge will work.</p>
+            {mode === "video" && !canExport && (
+              <p className="note">Saving video needs WebCodecs. The latest Safari, Chrome, or Edge will work.</p>
             )}
           </>
         )}
@@ -1691,16 +573,5 @@ export default function App() {
         </p>
       </footer>
     </div>
-  );
-}
-
-function matchesPreset(a: Settings, b: Settings, eps = 0.01) {
-  return (
-    Math.abs(a.intensity - b.intensity) < eps &&
-    Math.abs(a.castStrength - b.castStrength) < eps &&
-    Math.abs(a.saturation - b.saturation) < eps &&
-    Math.abs(a.gamma - b.gamma) < eps &&
-    Math.abs(a.contrast - b.contrast) < eps &&
-    Math.abs(a.dehaze - b.dehaze) < eps
   );
 }

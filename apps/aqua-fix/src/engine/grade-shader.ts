@@ -1,0 +1,314 @@
+// Grading maths, once in GLSL ES 3.00 and once in WGSL — an exact mirror of
+// apply.ts (gradePixel). Both define
+//   grade(src: rgb in sRGB 0..1, uv: upright 0..1) -> rgb sRGB 0..1
+// and read the uniform block `p` (16 × vec4, layout in params.ts) and the
+// data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
+// (x = bin, y = tile), u_data2 = guide colour (linear rgb).
+
+export const GRADE_GLSL = `
+const float JBU_SIGMA = 0.14;
+
+vec3 srgbToLinear(vec3 c) {
+  vec3 lo = c / 12.92;
+  vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
+  return mix(lo, hi, step(0.04045, c));
+}
+vec3 linearToSrgb(vec3 c) {
+  c = clamp(c, 0.0, 1.0);
+  vec3 lo = c * 12.92;
+  vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+  return mix(lo, hi, step(0.0031308, c));
+}
+float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+vec3 linearToOklab(vec3 c) {
+  float l = pow(max(0.0, 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b), 1.0 / 3.0);
+  float m = pow(max(0.0, 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b), 1.0 / 3.0);
+  float s = pow(max(0.0, 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b), 1.0 / 3.0);
+  return vec3(
+    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s);
+}
+vec3 oklabToLinear(vec3 lab) {
+  float l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+  float m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+  float s_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+  float l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+  return vec3(
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+}
+// Constant-luminance gamut compression (see color.ts).
+vec3 compressToGamut(vec3 c) {
+  float Y = clamp(lum(c), 0.0, 1.0);
+  float t = 1.0;
+  for (int i = 0; i < 3; i++) {
+    float v = c[i];
+    if (v > 1.0) t = min(t, (1.0 - Y) / (v - Y));
+    else if (v < 0.0) t = min(t, (0.0 - Y) / (v - Y));
+  }
+  if (t >= 1.0) return c;
+  t = max(0.0, t);
+  return vec3(Y) + t * (c - vec3(Y));
+}
+// Joint bilateral upsample of (z, conf, d) guided by the pixel's linear colour.
+vec3 sampleFields(vec2 uv, vec3 c) {
+  ivec2 size = textureSize(u_data0, 0);
+  vec2 f = clamp(uv * vec2(size) - 0.5, vec2(0.0), vec2(size) - 1.0);
+  ivec2 i0 = ivec2(floor(f));
+  ivec2 i1 = min(i0 + 1, size - 1);
+  vec2 t = f - vec2(i0);
+  float cn = length(c) + 0.02;
+  vec3 sum = vec3(0.0), bil = vec3(0.0);
+  float sw = 0.0;
+  for (int k = 0; k < 4; k++) {
+    ivec2 ij = ivec2(k == 1 || k == 3 ? i1.x : i0.x, k >= 2 ? i1.y : i0.y);
+    float ws = (k == 1 || k == 3 ? t.x : 1.0 - t.x) * (k >= 2 ? t.y : 1.0 - t.y);
+    vec3 fld = texelFetch(u_data0, ij, 0).xyz;
+    vec3 g = texelFetch(u_data2, ij, 0).xyz;
+    float diff = length(c - g) / (cn + length(g));
+    float wr = exp(-(diff * diff) / (2.0 * JBU_SIGMA * JBU_SIGMA));
+    sum += ws * wr * fld;
+    sw += ws * wr;
+    bil += ws * fld;
+  }
+  if (sw < 1e-6) return bil;
+  float k = min(1.0, sw / 0.05);
+  return (sum / sw) * k + bil * (1.0 - k);
+}
+// CLAHE: LUT entry b = CDF at the upper edge of bin b; linear in value,
+// bilinear across the four nearest tiles.
+float lutAt(int tile, float fb, int bins) {
+  if (fb < 0.0) return texelFetch(u_data1, ivec2(0, tile), 0).x * (fb + 1.0);
+  int b0 = min(bins - 1, int(fb));
+  int b1 = min(bins - 1, b0 + 1);
+  float v0 = texelFetch(u_data1, ivec2(b0, tile), 0).x;
+  float v1 = texelFetch(u_data1, ivec2(b1, tile), 0).x;
+  return mix(v0, v1, clamp(fb - float(b0), 0.0, 1.0));
+}
+float sampleClahe(vec2 uv, float value, int tilesX, int tilesY, int bins) {
+  float fb = value * float(bins) - 1.0;
+  vec2 f = clamp(uv * vec2(float(tilesX), float(tilesY)) - 0.5, vec2(0.0), vec2(float(tilesX - 1), float(tilesY - 1)));
+  ivec2 i0 = ivec2(floor(f));
+  ivec2 i1 = min(i0 + 1, ivec2(tilesX - 1, tilesY - 1));
+  vec2 t = f - vec2(i0);
+  float top = mix(lutAt(i0.y * tilesX + i0.x, fb, bins), lutAt(i0.y * tilesX + i1.x, fb, bins), t.x);
+  float bot = mix(lutAt(i1.y * tilesX + i0.x, fb, bins), lutAt(i1.y * tilesX + i1.x, fb, bins), t.x);
+  return mix(top, bot, t.y);
+}
+
+vec3 grade(vec3 src, vec2 uv) {
+  float split = p[0].y;
+  float strength = p[0].z;
+  if (uv.x < split || strength <= 0.0) return src;
+  vec3 binf = p[1].xyz; float veil = p[1].w;
+  vec3 betaB = p[2].xyz;
+  vec3 cB = p[3].xyz;
+  vec3 attn = p[4].xyz; float gainCap = p[4].w;
+  vec3 wb = p[5].xyz; float exposure = p[5].w;
+  float black = p[6].x, white = p[6].y, levelsMix = p[6].z, clarity = p[6].w;
+  float saturation = p[7].x, chromaK = p[7].y, chromaC0 = p[7].z, depthGuide = p[7].w;
+  int tilesX = int(p[8].z + 0.5), tilesY = int(p[8].w + 0.5), bins = int(p[9].x + 0.5);
+  float floorFrac = p[9].y, zLo = p[9].z, zHi = p[9].w;
+  vec3 mu = p[10].xyz;
+  vec3 waterWb = p[11].xyz;
+  float waterExposure = p[14].z, zMean = p[14].w;
+
+  vec3 lin = srgbToLinear(src);
+  // Range proxy: joint-bilateral fields plus guided per-pixel detail.
+  float dPix = mu.x + mu.y * max(src.g, src.b) + mu.z * src.r;
+  vec3 fld = sampleFields(uv, lin);
+  float zRange = max(0.02, zHi - zLo);
+  float z = clamp(fld.x + clamp(depthGuide * (dPix - fld.z) / zRange, -0.25, 0.25), 0.0, 1.15);
+  float conf = clamp(fld.y, 0.0, 1.0);
+
+  // De-scatter, range-adaptive compensation, white balance.
+  vec3 B = veil * binf * (1.0 - exp(-(betaB * z + cB)));
+  vec3 D = max(lin - B, lin * floorFrac);
+  vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
+  vec3 full = D * rangeGain * wb;
+  float ew = pow(exposure, waterExposure);
+  vec3 water = lin * waterWb * ew;
+  vec3 o = water + (full * exposure - water) * conf;
+
+  // Levels on luminance, ratio-preserving.
+  float Y = lum(o);
+  float Ylv = Y + ((Y - black) / (white - black) - Y) * levelsMix;
+  float ratio = Y > 1e-5 ? max(0.0, Ylv) / Y : 1.0;
+  o *= ratio;
+  Y = max(0.0, Ylv);
+
+  // Local contrast on encoded luminance.
+  if (clarity > 0.0) {
+    float encY = linearToSrgb(vec3(Y)).x;
+    float eq = sampleClahe(uv, encY, tilesX, tilesY, bins);
+    float encNew = clamp(encY + (eq - encY) * clarity, 0.0, 1.0);
+    float Ynew = srgbToLinear(vec3(encNew)).x;
+    ratio = Y > 1e-5 ? Ynew / Y : 1.0;
+    o *= ratio;
+  }
+
+  // Chroma ceiling relative to the source, then saturation.
+  vec3 lab0 = linearToOklab(lin);
+  float cSrc = length(lab0.yz);
+  vec3 lab = linearToOklab(max(o, vec3(0.0)));
+  float C = length(lab.yz);
+  float cMax = chromaK * cSrc + chromaC0;
+  float scale = (C > cMax ? cMax / C : 1.0) * saturation;
+  vec3 o1 = oklabToLinear(vec3(lab.x, lab.yz * scale));
+  vec3 o2 = compressToGamut(o1);
+  vec3 outS = linearToSrgb(o2);
+  return mix(src, outS, strength);
+}`;
+
+export const GRADE_WGSL = `
+const JBU_SIGMA: f32 = 0.14;
+
+fn srgbToLinear(c: vec3<f32>) -> vec3<f32> {
+  let lo = c / 12.92;
+  let hi = pow((c + 0.055) / 1.055, vec3(2.4));
+  return mix(lo, hi, step(vec3(0.04045), c));
+}
+fn linearToSrgb(cIn: vec3<f32>) -> vec3<f32> {
+  let c = clamp(cIn, vec3(0.0), vec3(1.0));
+  let lo = c * 12.92;
+  let hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+  return mix(lo, hi, step(vec3(0.0031308), c));
+}
+fn lum(c: vec3<f32>) -> f32 { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+fn cbrt(x: f32) -> f32 { return pow(max(0.0, x), 1.0 / 3.0); }
+fn linearToOklab(c: vec3<f32>) -> vec3<f32> {
+  let l = cbrt(0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b);
+  let m = cbrt(0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b);
+  let s = cbrt(0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b);
+  return vec3(
+    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s);
+}
+fn oklabToLinear(lab: vec3<f32>) -> vec3<f32> {
+  let l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+  let m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+  let s_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+  let l = l_ * l_ * l_; let m = m_ * m_ * m_; let s = s_ * s_ * s_;
+  return vec3(
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+}
+fn compressToGamut(c: vec3<f32>) -> vec3<f32> {
+  let Y = clamp(lum(c), 0.0, 1.0);
+  var t = 1.0;
+  for (var i = 0; i < 3; i++) {
+    let v = c[i];
+    if (v > 1.0) { t = min(t, (1.0 - Y) / (v - Y)); }
+    else if (v < 0.0) { t = min(t, (0.0 - Y) / (v - Y)); }
+  }
+  if (t >= 1.0) { return c; }
+  t = max(0.0, t);
+  return vec3(Y) + t * (c - vec3(Y));
+}
+fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> vec3<f32> {
+  let size = vec2<i32>(textureDimensions(u_data0, 0));
+  let f = clamp(uv * vec2<f32>(size) - 0.5, vec2(0.0), vec2<f32>(size) - 1.0);
+  let i0 = vec2<i32>(floor(f));
+  let i1 = min(i0 + 1, size - 1);
+  let t = f - vec2<f32>(i0);
+  let cn = length(c) + 0.02;
+  var sum = vec3(0.0); var bil = vec3(0.0); var sw = 0.0;
+  for (var k = 0; k < 4; k++) {
+    let right = (k == 1 || k == 3);
+    let bottom = (k >= 2);
+    let ij = vec2<i32>(select(i0.x, i1.x, right), select(i0.y, i1.y, bottom));
+    let ws = select(1.0 - t.x, t.x, right) * select(1.0 - t.y, t.y, bottom);
+    let fld = textureLoad(u_data0, ij, 0).xyz;
+    let g = textureLoad(u_data2, ij, 0).xyz;
+    let diff = length(c - g) / (cn + length(g));
+    let wr = exp(-(diff * diff) / (2.0 * JBU_SIGMA * JBU_SIGMA));
+    sum += ws * wr * fld;
+    sw += ws * wr;
+    bil += ws * fld;
+  }
+  if (sw < 1e-6) { return bil; }
+  let kk = min(1.0, sw / 0.05);
+  return (sum / sw) * kk + bil * (1.0 - kk);
+}
+fn lutAt(tile: i32, fb: f32, bins: i32) -> f32 {
+  if (fb < 0.0) { return textureLoad(u_data1, vec2<i32>(0, tile), 0).x * (fb + 1.0); }
+  let b0 = min(bins - 1, i32(fb));
+  let b1 = min(bins - 1, b0 + 1);
+  let v0 = textureLoad(u_data1, vec2<i32>(b0, tile), 0).x;
+  let v1 = textureLoad(u_data1, vec2<i32>(b1, tile), 0).x;
+  return mix(v0, v1, clamp(fb - f32(b0), 0.0, 1.0));
+}
+fn sampleClahe(uv: vec2<f32>, value: f32, tilesX: i32, tilesY: i32, bins: i32) -> f32 {
+  let fb = value * f32(bins) - 1.0;
+  let f = clamp(uv * vec2(f32(tilesX), f32(tilesY)) - 0.5, vec2(0.0), vec2(f32(tilesX - 1), f32(tilesY - 1)));
+  let i0 = vec2<i32>(floor(f));
+  let i1 = min(i0 + 1, vec2<i32>(tilesX - 1, tilesY - 1));
+  let t = f - vec2<f32>(i0);
+  let top = mix(lutAt(i0.y * tilesX + i0.x, fb, bins), lutAt(i0.y * tilesX + i1.x, fb, bins), t.x);
+  let bot = mix(lutAt(i1.y * tilesX + i0.x, fb, bins), lutAt(i1.y * tilesX + i1.x, fb, bins), t.x);
+  return mix(top, bot, t.y);
+}
+
+fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+  let p = params.p;
+  let split = p[0].y;
+  let strength = p[0].z;
+  if (uv.x < split || strength <= 0.0) { return src; }
+  let binf = p[1].xyz; let veil = p[1].w;
+  let betaB = p[2].xyz;
+  let cB = p[3].xyz;
+  let attn = p[4].xyz; let gainCap = p[4].w;
+  let wb = p[5].xyz; let exposure = p[5].w;
+  let black = p[6].x; let white = p[6].y; let levelsMix = p[6].z; let clarity = p[6].w;
+  let saturation = p[7].x; let chromaK = p[7].y; let chromaC0 = p[7].z; let depthGuide = p[7].w;
+  let tilesX = i32(p[8].z + 0.5); let tilesY = i32(p[8].w + 0.5); let bins = i32(p[9].x + 0.5);
+  let floorFrac = p[9].y; let zLo = p[9].z; let zHi = p[9].w;
+  let mu = p[10].xyz;
+  let waterWb = p[11].xyz;
+  let waterExposure = p[14].z; let zMean = p[14].w;
+
+  let lin = srgbToLinear(src);
+  let dPix = mu.x + mu.y * max(src.g, src.b) + mu.z * src.r;
+  let fld = sampleFields(uv, lin);
+  let zRange = max(0.02, zHi - zLo);
+  let z = clamp(fld.x + clamp(depthGuide * (dPix - fld.z) / zRange, -0.25, 0.25), 0.0, 1.15);
+  let conf = clamp(fld.y, 0.0, 1.0);
+
+  let B = veil * binf * (1.0 - exp(-(betaB * z + cB)));
+  let D = max(lin - B, lin * floorFrac);
+  let rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
+  let full = D * rangeGain * wb;
+  let ew = pow(exposure, waterExposure);
+  let water = lin * waterWb * ew;
+  var o = water + (full * exposure - water) * conf;
+
+  var Y = lum(o);
+  let Ylv = Y + ((Y - black) / (white - black) - Y) * levelsMix;
+  var ratio = select(1.0, max(0.0, Ylv) / Y, Y > 1e-5);
+  o *= ratio;
+  Y = max(0.0, Ylv);
+
+  if (clarity > 0.0) {
+    let encY = linearToSrgb(vec3(Y)).x;
+    let eq = sampleClahe(uv, encY, tilesX, tilesY, bins);
+    let encNew = clamp(encY + (eq - encY) * clarity, 0.0, 1.0);
+    let Ynew = srgbToLinear(vec3(encNew)).x;
+    ratio = select(1.0, Ynew / Y, Y > 1e-5);
+    o *= ratio;
+  }
+
+  let lab0 = linearToOklab(lin);
+  let cSrc = length(lab0.yz);
+  let lab = linearToOklab(max(o, vec3(0.0)));
+  let C = length(lab.yz);
+  let cMax = chromaK * cSrc + chromaC0;
+  let scale = select(1.0, cMax / C, C > cMax) * saturation;
+  let o1 = oklabToLinear(vec3(lab.x, lab.yz * scale));
+  let o2 = compressToGamut(o1);
+  let outS = linearToSrgb(o2);
+  return mix(src, outS, strength);
+}`;

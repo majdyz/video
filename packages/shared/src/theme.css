@@ -751,3 +751,45 @@ footer {
   color: var(--dim);
   text-align: center;
 }
+
+/* Capability notice — informational strip under the hero. One line per gap,
+   tagged by whether it costs quality or only speed. Dismissable per session. */
+.capnote {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.capnote-row { display: flex; gap: 8px; align-items: flex-start; }
+.capnote-tag {
+  flex: none;
+  margin-top: 1px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.capnote-tag.speed { background: rgba(95, 208, 255, 0.14); color: var(--accent); }
+.capnote-tag.quality { background: rgba(255, 171, 74, 0.16); color: #ffab4a; }
+.capnote-tag.fatal { background: rgba(255, 107, 129, 0.18); color: var(--danger); }
+.capnote-ok { color: var(--dim); }
+.capnote-head { display: flex; align-items: center; gap: 8px; }
+.capnote-head strong { color: var(--text); font-weight: 600; font-size: 12px; }
+.capnote-head button {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+}

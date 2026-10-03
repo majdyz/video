@@ -3,8 +3,13 @@
 Two on-device PWAs for diver-shot footage, in one monorepo.
 
 - **Aqua Fix** · https://majdyz.github.io/video/aqua-fix/ — underwater colour
-  correction (Ancuti compensation + Shades-of-Gray WB + CLAHE-style tone
-  equalisation, optional Lightroom .cube LUT).
+  correction. One adaptive engine, no modes: a linear-light Sea-thru-style
+  pipeline (per-pixel range proxy → backscatter removal → range-adaptive
+  compensation → white balance on the de-scattered image → local contrast →
+  Oklab chroma control) estimated per frame from a 256×144 thumbnail in a
+  worker, smoothed over time, and applied at native resolution in one WebGPU
+  (or WebGL2) pass. Video export decodes/encodes offline with WebCodecs and
+  copies the original audio through.
 - **Motion Fix** · https://majdyz.github.io/video/motion-fix/ — similarity
   stabilisation (translation + rotation + uniform scale). Multi-point grid
   tracking on 128×72 luma thumbnails, Umeyama similarity fit, then
@@ -20,20 +25,29 @@ Safari's MediaRecorder ceiling).
 
 ### Aqua Fix
 
-- Ancuti, Ancuti, De Vleeschouwer & Bekaert (2018) —
-  [Color Balance and Fusion for Underwater Image Enhancement](https://ieeexplore.ieee.org/document/8059845)
-  (IEEE TIP). Channel-compensation + gray-world / multi-scale fusion pipeline;
-  the conceptual basis for the colour-correction shader here.
+- Akkaynak & Treibitz (2019) —
+  [Sea-thru: A Method for Removing Water from Underwater Images](https://openaccess.thecvf.com/content_CVPR_2019/html/Akkaynak_Sea-Thru_A_Method_for_Removing_Water_From_Underwater_Images_CVPR_2019_paper.html)
+  (CVPR). The revised image-formation model (additive, range-dependent
+  backscatter + colour-dependent attenuation) and the dark-pixel backscatter
+  fit per range bin that the engine implements, using a depth-free range proxy.
+- Song, Wang, Zhang & Li (2018) — ULAP, a rapid underwater light-attenuation
+  prior (PCM): the linear depth prior used as the per-pixel range proxy.
 - Finlayson & Trezzi (2004) —
   [Shades of Gray and Colour Constancy](https://ivrl.epfl.ch/wp-content/uploads/2018/08/Finlayson_2004.pdf)
-  (CIC). The Minkowski p-norm white-balance estimator (p=6) used after
-  channel compensation.
-- Pizer et al. (1987) — Adaptive Histogram Equalization and its Variations.
-  CLAHE applied here as a **luminance-only** tone LUT (3% bin clipping,
-  excess redistributed) so contrast is enhanced without colour shift.
-- Reference implementation that informed the defaults:
-  [bornfree/dive-color-corrector](https://github.com/bornfree/dive-color-corrector)
-  — popular open Dive+-style implementation.
+  (CIC). Minkowski p-norm white balance (p=6), measured on the de-scattered
+  image and spread over range.
+- Pizer et al. (1987) — Adaptive Histogram Equalization. CLAHE tile LUTs on
+  luminance only, interpolated in the shader.
+- Björn Ottosson — [Oklab](https://bottosson.github.io/posts/oklab/) and
+  [sRGB gamut clipping](https://bottosson.github.io/posts/gamutclipping/):
+  the chroma ceiling and constant-luminance gamut compression that keep sand
+  and skin from clipping to magenta.
+- Kopf et al. (2007) — Joint Bilateral Upsampling: the low-res range /
+  confidence fields are upsampled in the shader guided by the full-res pixel.
+
+Offline evaluation on still photos: `node --experimental-strip-types
+scripts/aqua-eval.ts <out dir> <images…>` runs the exact CPU reference of the
+shader and writes before/after comparisons.
 
 ### Motion Fix
 
