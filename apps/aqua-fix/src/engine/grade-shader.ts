@@ -6,7 +6,7 @@
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
 export const GRADE_GLSL = `
-const float JBU_SIGMA = 0.14;
+const float JBU_SIGMA = 0.12;
 
 vec3 srgbToLinear(vec3 c) {
   vec3 lo = c / 12.92;
@@ -52,8 +52,10 @@ vec3 compressToGamut(vec3 c) {
   t = max(0.0, t);
   return vec3(Y) + t * (c - vec3(Y));
 }
-// Joint bilateral upsample of (z, conf, d) guided by the pixel's linear colour.
-vec4 sampleFields(vec2 uv, vec3 c) {
+// Joint bilateral upsample of (z, conf, d, veilScale) guided by the pixel's
+// linear colour. kOut is the guide-match weight: 0 when no neighbour
+// resembles the pixel (content moved since the map was made).
+vec4 sampleFields(vec2 uv, vec3 c, out float kOut) {
   ivec2 size = textureSize(u_data0, 0);
   vec2 f = clamp(uv * vec2(size) - 0.5, vec2(0.0), vec2(size) - 1.0);
   ivec2 i0 = ivec2(floor(f));
@@ -73,9 +75,19 @@ vec4 sampleFields(vec2 uv, vec3 c) {
     sw += ws * wr;
     bil += ws * fld;
   }
-  if (sw < 1e-6) return bil;
-  float k = min(1.0, sw / 0.05);
-  return (sum / sw) * k + bil * (1.0 - k);
+  kOut = min(1.0, sw / 0.08);
+  if (sw < 1e-6) { kOut = 0.0; return bil; }
+  return sum / sw;
+}
+float smoothstepf(float e0, float e1, float x) { float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
+// 1 for objects, 0 for water: Oklab hue distance to the veil, achromatic → object.
+float hueConf(vec2 ab, vec2 veilHue, float lo, float hi, float achroma) {
+  float c = length(ab);
+  if (c < achroma) return 1.0;
+  float cosang = clamp(dot(ab / c, veilHue), -1.0, 1.0);
+  float t = 1.0 - smoothstepf(cos(hi), cos(lo), cosang);
+  float kk = smoothstepf(achroma, achroma * 2.0, c);
+  return t + (1.0 - t) * (1.0 - kk);
 }
 // CLAHE: LUT entry b = CDF at the upper edge of bin b; linear in value,
 // bilinear across the four nearest tiles.
@@ -113,19 +125,36 @@ vec3 grade(vec3 src, vec2 uv) {
   float floorFrac = p[9].y, zLo = p[9].z, zHi = p[9].w;
   vec3 mu = p[10].xyz;
   vec3 waterWb = p[11].xyz;
+  float confLo = p[12].x, confHi = p[12].y, hueLo = p[12].z, hueHi = p[12].w;
+  float achroma = p[13].w;
+  vec2 veilHue = p[14].xy;
   float waterExposure = p[14].z, zMean = p[14].w;
 
   vec3 lin = srgbToLinear(src);
-  // Range proxy: joint-bilateral fields plus guided per-pixel detail.
+  // Range proxy: joint-bilateral fields where the map still matches the
+  // pixel, the per-pixel prior where it doesn't.
   float dPix = mu.x + mu.y * max(src.g, src.b) + mu.z * src.r;
-  vec4 fld = sampleFields(uv, lin);
+  float k;
+  vec4 fld = sampleFields(uv, lin, k);
   float zRange = max(0.02, zHi - zLo);
-  float z = clamp(fld.x + clamp(depthGuide * (dPix - fld.z) / zRange, -0.25, 0.25), 0.0, 1.15);
-  float conf = clamp(fld.y, 0.0, 1.0);
+  float zPix = clamp((dPix - zLo) / zRange, 0.0, 1.15);
+  float zMap = clamp(fld.x + clamp(depthGuide * (dPix - fld.z) / zRange, -0.25, 0.25), 0.0, 1.15);
+  float z = mix(zPix, zMap, k);
+  float veilScale = mix(1.0, fld.w, k);
 
   // De-scatter, range-adaptive compensation, white balance.
-  vec3 B = veil * fld.w * binf * (1.0 - exp(-(betaB * z + cB)));
+  vec3 B = veil * veilScale * binf * (1.0 - exp(-(betaB * z + cB)));
   vec3 D = max(lin - B, lin * floorFrac);
+  // Water/object confidence: the map where it matches, else the pixel's own
+  // hue + signal tests (the analysis runs the same on the thumbnail).
+  vec3 lab0 = linearToOklab(lin);
+  float confSignal = smoothstepf(confLo, confHi, lum(D) / max(1e-5, lum(lin)));
+  float confPix = min(confSignal, hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma));
+  // Whatever the map says, a pixel the veil model would nearly erase
+  // (tiny D) must take the water path — the physics path would crush it
+  // to black, which is the dark ghost on moving content.
+  float conf = mix(confPix, clamp(fld.y, 0.0, 1.0), k) * confSignal;
+  if (p[0].w > 0.5) return vec3(k, confPix, clamp(fld.y, 0.0, 1.0));
   vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   vec3 full = D * rangeGain * wb;
   float ew = pow(exposure, waterExposure);
@@ -150,7 +179,6 @@ vec3 grade(vec3 src, vec2 uv) {
   }
 
   // Chroma ceiling relative to the source, then saturation.
-  vec3 lab0 = linearToOklab(lin);
   float cSrc = length(lab0.yz);
   vec3 lab = linearToOklab(max(o, vec3(0.0)));
   float C = length(lab.yz);
@@ -163,7 +191,7 @@ vec3 grade(vec3 src, vec2 uv) {
 }`;
 
 export const GRADE_WGSL = `
-const JBU_SIGMA: f32 = 0.14;
+const JBU_SIGMA: f32 = 0.12;
 
 fn srgbToLinear(c: vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92;
@@ -209,7 +237,8 @@ fn compressToGamut(c: vec3<f32>) -> vec3<f32> {
   t = max(0.0, t);
   return vec3(Y) + t * (c - vec3(Y));
 }
-fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> vec4<f32> {
+// Returns (z, conf, d, veilScale) and the guide-match weight k in .w of the second value.
+fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> array<vec4<f32>, 2> {
   let size = vec2<i32>(textureDimensions(u_data0, 0));
   let f = clamp(uv * vec2<f32>(size) - 0.5, vec2(0.0), vec2<f32>(size) - 1.0);
   let i0 = vec2<i32>(floor(f));
@@ -230,9 +259,17 @@ fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> vec4<f32> {
     sw += ws * wr;
     bil += ws * fld;
   }
-  if (sw < 1e-6) { return bil; }
-  let kk = min(1.0, sw / 0.05);
-  return (sum / sw) * kk + bil * (1.0 - kk);
+  if (sw < 1e-6) { return array<vec4<f32>, 2>(bil, vec4(0.0)); }
+  return array<vec4<f32>, 2>(sum / sw, vec4(0.0, 0.0, 0.0, min(1.0, sw / 0.08)));
+}
+fn smoothstepf(e0: f32, e1: f32, x: f32) -> f32 { let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
+fn hueConf(ab: vec2<f32>, veilHue: vec2<f32>, lo: f32, hi: f32, achroma: f32) -> f32 {
+  let c = length(ab);
+  if (c < achroma) { return 1.0; }
+  let cosang = clamp(dot(ab / c, veilHue), -1.0, 1.0);
+  let t = 1.0 - smoothstepf(cos(hi), cos(lo), cosang);
+  let kk = smoothstepf(achroma, achroma * 2.0, c);
+  return t + (1.0 - t) * (1.0 - kk);
 }
 fn lutAt(tile: i32, fb: f32, bins: i32) -> f32 {
   if (fb < 0.0) { return textureLoad(u_data1, vec2<i32>(0, tile), 0).x * (fb + 1.0); }
@@ -269,17 +306,29 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let floorFrac = p[9].y; let zLo = p[9].z; let zHi = p[9].w;
   let mu = p[10].xyz;
   let waterWb = p[11].xyz;
+  let confLo = p[12].x; let confHi = p[12].y; let hueLo = p[12].z; let hueHi = p[12].w;
+  let achroma = p[13].w;
+  let veilHue = p[14].xy;
   let waterExposure = p[14].z; let zMean = p[14].w;
 
   let lin = srgbToLinear(src);
   let dPix = mu.x + mu.y * max(src.g, src.b) + mu.z * src.r;
-  let fld = sampleFields(uv, lin);
+  let sf = sampleFields(uv, lin);
+  let fld = sf[0];
+  let k = sf[1].w;
   let zRange = max(0.02, zHi - zLo);
-  let z = clamp(fld.x + clamp(depthGuide * (dPix - fld.z) / zRange, -0.25, 0.25), 0.0, 1.15);
-  let conf = clamp(fld.y, 0.0, 1.0);
+  let zPix = clamp((dPix - zLo) / zRange, 0.0, 1.15);
+  let zMap = clamp(fld.x + clamp(depthGuide * (dPix - fld.z) / zRange, -0.25, 0.25), 0.0, 1.15);
+  let z = mix(zPix, zMap, k);
+  let veilScale = mix(1.0, fld.w, k);
 
-  let B = veil * fld.w * binf * (1.0 - exp(-(betaB * z + cB)));
+  let B = veil * veilScale * binf * (1.0 - exp(-(betaB * z + cB)));
   let D = max(lin - B, lin * floorFrac);
+  let lab0 = linearToOklab(lin);
+  let confSignal = smoothstepf(confLo, confHi, lum(D) / max(1e-5, lum(lin)));
+  let confPix = min(confSignal, hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma));
+  let conf = mix(confPix, clamp(fld.y, 0.0, 1.0), k) * confSignal;
+  if (p[0].w > 0.5) { return vec3(k, confPix, clamp(fld.y, 0.0, 1.0)); }
   let rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   let full = D * rangeGain * wb;
   let ew = pow(exposure, waterExposure);
@@ -301,7 +350,6 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     o *= ratio;
   }
 
-  let lab0 = linearToOklab(lin);
   let cSrc = length(lab0.yz);
   let lab = linearToOklab(max(o, vec3(0.0)));
   let C = length(lab.yz);

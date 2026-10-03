@@ -6,6 +6,8 @@ import { compressToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear,
 import { ULAP, type ClaheLuts, type DepthMap, type GradeParams, type UserSettings } from "./params.ts";
 
 export type ApplyContext = {
+  /** When set, gradePixel returns (k, confPix, confMap) instead of a colour. */
+  debug?: boolean;
   params: GradeParams;
   settings: UserSettings;
   depth: DepthMap;
@@ -18,8 +20,9 @@ export type ApplyContext = {
  * pixel colour resembles each neighbour's guide colour. Smooth inside a
  * region, sharp at edges, no halos.
  */
-export const JBU_SIGMA = 0.14;
-function sampleFields(d: DepthMap, u: number, v: number, r: number, g: number, b: number): [number, number, number, number] {
+export const JBU_SIGMA = 0.12;
+/** Returns the upsampled fields and the guide-match weight k (0 = the map says nothing about this pixel). */
+function sampleFields(d: DepthMap, u: number, v: number, r: number, g: number, b: number): [number, number, number, number, number] {
   const fx = Math.min(Math.max(u * d.width - 0.5, 0), d.width - 1);
   const fy = Math.min(Math.max(v * d.height - 0.5, 0), d.height - 1);
   const x0 = Math.floor(fx), y0 = Math.floor(fy);
@@ -39,10 +42,11 @@ function sampleFields(d: DepthMap, u: number, v: number, r: number, g: number, b
     sz += wgt * d.fields[f]; sc += wgt * d.fields[f + 1]; sd += wgt * d.fields[f + 2]; sv += wgt * d.fields[f + 3]; sw += wgt;
     bz += ws * d.fields[f]; bc += ws * d.fields[f + 1]; bd += ws * d.fields[f + 2]; bv += ws * d.fields[f + 3];
   }
-  // Mix toward plain bilinear when no neighbour resembles the pixel.
-  const k = Math.min(1, sw / 0.05);
-  if (sw < 1e-6) return [bz, bc, bd, bv];
-  return [sz / sw * k + bz * (1 - k), sc / sw * k + bc * (1 - k), sd / sw * k + bd * (1 - k), sv / sw * k + bv * (1 - k)];
+  // k → 0 when no neighbour resembles the pixel (content moved since the
+  // map was made): the caller then falls back to a per-pixel estimate.
+  const k = Math.min(1, sw / 0.08);
+  if (sw < 1e-6) return [bz, bc, bd, bv, 0];
+  return [sz / sw, sc / sw, sd / sw, sv / sw, k];
 }
 
 /**
@@ -77,9 +81,12 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
 
   // Range proxy: coarse map plus guided per-pixel detail from the prior.
   const dPix = ULAP.mu0 + ULAP.mu1 * Math.max(sg, sb) + ULAP.mu2 * sr;
-  const [zc, confMap, dc, veilScale] = sampleFields(ctx.depth, u, v, r0, g0, b0);
+  const [zc, confMap, dc, veilMap, k] = sampleFields(ctx.depth, u, v, r0, g0, b0);
   const zRange = Math.max(0.02, p.zHi - p.zLo);
-  const z = clamp(zc + clamp((p.depthGuide * (dPix - dc)) / zRange, -0.25, 0.25), 0, 1.15);
+  const zPix = clamp((dPix - p.zLo) / zRange, 0, 1.15);
+  const zMap = clamp(zc + clamp((p.depthGuide * (dPix - dc)) / zRange, -0.25, 0.25), 0, 1.15);
+  const z = zPix + (zMap - zPix) * k;
+  const veilScale = 1 + (veilMap - 1) * k;
 
   // De-scatter, compensate, white-balance. Veil-dominated pixels (low
   // signal confidence) take a toned-down copy of the input instead.
@@ -94,8 +101,16 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
     const rangeGain = Math.min(p.gainCap, Math.max(1 / p.gainCap, Math.exp(p.attn[c] * (z - p.zMean))));
     full[c] = D * rangeGain * p.wb[c];
   }
-  void dl;
-  const conf = clamp(confMap, 0, 1);
+  // Per-pixel classification for the fallback: hue against the veil and
+  // the signal fraction, the same tests the analysis runs on the thumbnail.
+  const lumI = luminance(r0, g0, b0);
+  const [, pa, pb] = linearToOklab(r0, g0, b0);
+  const confSignal = smoothstep(p.confLo, p.confHi, dl / Math.max(1e-5, lumI));
+  const confPix = Math.min(confSignal, hueConf(pa, pb, p));
+  // A pixel the veil model would nearly erase takes the water path whatever
+  // the map says (see grade-shader.ts).
+  const conf = (clamp(confMap, 0, 1) * k + confPix * (1 - k)) * confSignal;
+  if (ctx.debug) return [k, confPix, clamp(confMap, 0, 1)];
   const out = [0, 0, 0];
   const ew = Math.pow(p.exposure, p.waterExposure);
   for (let c = 0; c < 3; c++) {
@@ -143,6 +158,25 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
 
 function clamp(x: number, lo: number, hi: number): number {
   return x < lo ? lo : x > hi ? hi : x;
+}
+
+function smoothstep(e0: number, e1: number, x: number): number {
+  const t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+/** Mirrors analyze.ts hueConfidence using the packed veil hue. */
+function hueConf(a: number, b: number, p: GradeParams): number {
+  const c = Math.hypot(a, b);
+  if (c < p.achroma) return 1;
+  const [, va, vb] = linearToOklab(p.veilColor[0], p.veilColor[1], p.veilColor[2]);
+  const vn = Math.hypot(va, vb) || 1;
+  // Thresholds are angles; compare cosines instead of calling acos (whose
+  // precision differs between GPU stacks and flips pixels at the boundary).
+  const cosang = Math.max(-1, Math.min(1, (a * va / vn + b * vb / vn) / c));
+  const t = 1 - smoothstep(Math.cos(p.cosHi), Math.cos(p.cosLo), cosang);
+  const kk = smoothstep(p.achroma, p.achroma * 2, c);
+  return t + (1 - t) * (1 - kk);
 }
 
 

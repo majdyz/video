@@ -502,7 +502,8 @@ export default function App() {
               stage.lastUi = t2;
               const fps = stage.frames / ((t2 - stage.started) / 1000);
               const st = e.getStats();
-              setExportDetail(`${fps.toFixed(1)} fps · gpu ${(stage.render / stage.frames).toFixed(0)} ms · analysis ${st.analysisMs.toFixed(0)} ms · ${st.backend}`);
+              const be = e.backend as unknown as { capture?: string; externalOk?: boolean };
+              setExportDetail(`${fps.toFixed(1)} fps · up ${(stage.upload / stage.frames).toFixed(0)} · gpu ${(stage.render / stage.frames).toFixed(0)} ms · an ${st.analysisMs.toFixed(0)} ms · ${st.backend}${be.capture ? "/" + be.capture : ""}${be.externalOk ? "/ext" : ""}`);
             }
             return out;
           } finally {
