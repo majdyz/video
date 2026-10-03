@@ -12,10 +12,13 @@ const LOOK_CONSTS_GLSL = `
 const float CONF_BRIGHT_LO = ${CONF_BRIGHT.lo.toFixed(4)};
 const float CONF_BRIGHT_HI = ${CONF_BRIGHT.hi.toFixed(4)};
 const float LOOK_GAMMA = ${LOOK.gamma.toFixed(4)};
+const float LOOK_WATER_DIM = ${LOOK.waterDim.toFixed(4)};
 const float LOOK_HAZE_CHROMA = ${LOOK.hazeChroma.toFixed(4)};
 const float LOOK_NEUTRAL_DESAT = ${LOOK.neutralDesat.toFixed(4)};
 const float LOOK_NEUTRAL_LO = ${LOOK.neutralLo.toFixed(4)};
 const float LOOK_NEUTRAL_HI = ${LOOK.neutralHi.toFixed(4)};
+const float LOOK_NEUTRAL_L_LO = ${LOOK.neutralLLo.toFixed(4)};
+const float LOOK_NEUTRAL_L_HI = ${LOOK.neutralLHi.toFixed(4)};
 const float LOOK_TARGET_HUE = ${LOOK.targetHue.toFixed(6)};
 const float LOOK_WARM_HUE = ${LOOK.warmHue.toFixed(6)};
 const float LOOK_WARM_IN = ${LOOK.warmIn.toFixed(6)};
@@ -151,10 +154,10 @@ vec3 deepBlueLook(vec3 lab, float look, float water, float hazeW) {
   float warm = (1.0 - smoothstepf(LOOK_WARM_IN, LOOK_WARM_OUT, abs(dw))) * smoothstepf(LOOK_WARM_LO, LOOK_WARM_HI, C);
   float wTint = (1.0 - vivid) * (1.0 - warm) * (1.0 - smoothstepf(LOOK_BRIGHT_LO, LOOK_BRIGHT_HI, lab.x)) * smoothstepf(LOOK_DARK_LO, LOOK_DARK_HI, lab.x);
   float w = wTint * look * LOOK_MIX;
-  float L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look);
-  float Ct = (LOOK_C0 + LOOK_C1 * L2) * (1.0 + LOOK_HAZE_CHROMA * hazeW);
+  float L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look) * (1.0 - LOOK_WATER_DIM * look * water);
+  float Ct = max(C, (LOOK_C0 + LOOK_C1 * L2) * (1.0 + LOOK_HAZE_CHROMA * hazeW));
   vec2 t = Ct * vec2(cos(LOOK_TARGET_HUE), sin(LOOK_TARGET_HUE));
-  float ds = 1.0 - look * LOOK_NEUTRAL_DESAT * (1.0 - smoothstepf(LOOK_NEUTRAL_LO, LOOK_NEUTRAL_HI, C));
+  float ds = 1.0 - look * LOOK_NEUTRAL_DESAT * (1.0 - smoothstepf(LOOK_NEUTRAL_LO, LOOK_NEUTRAL_HI, C)) * smoothstepf(LOOK_NEUTRAL_L_LO, LOOK_NEUTRAL_L_HI, lab.x);
   return vec3(L2, (lab.yz + (t - lab.yz) * w) * ds);
 }
 float hueFar(vec2 ab, vec2 veilHue, float lo, float hi, float achroma) {
@@ -394,10 +397,10 @@ fn deepBlueLook(lab: vec3<f32>, look: f32, water: f32, hazeW: f32) -> vec3<f32> 
   let warm = (1.0 - smoothstepf(LOOK_WARM_IN, LOOK_WARM_OUT, abs(dw))) * smoothstepf(LOOK_WARM_LO, LOOK_WARM_HI, C);
   let wTint = (1.0 - vivid) * (1.0 - warm) * (1.0 - smoothstepf(LOOK_BRIGHT_LO, LOOK_BRIGHT_HI, lab.x)) * smoothstepf(LOOK_DARK_LO, LOOK_DARK_HI, lab.x);
   let w = wTint * look * LOOK_MIX;
-  let L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look);
-  let Ct = (LOOK_C0 + LOOK_C1 * L2) * (1.0 + LOOK_HAZE_CHROMA * hazeW);
+  let L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look) * (1.0 - LOOK_WATER_DIM * look * water);
+  let Ct = max(C, (LOOK_C0 + LOOK_C1 * L2) * (1.0 + LOOK_HAZE_CHROMA * hazeW));
   let t = Ct * vec2(cos(LOOK_TARGET_HUE), sin(LOOK_TARGET_HUE));
-  let ds = 1.0 - look * LOOK_NEUTRAL_DESAT * (1.0 - smoothstepf(LOOK_NEUTRAL_LO, LOOK_NEUTRAL_HI, C));
+  let ds = 1.0 - look * LOOK_NEUTRAL_DESAT * (1.0 - smoothstepf(LOOK_NEUTRAL_LO, LOOK_NEUTRAL_HI, C)) * smoothstepf(LOOK_NEUTRAL_L_LO, LOOK_NEUTRAL_L_HI, lab.x);
   return vec3(L2, (lab.yz + (t - lab.yz) * w) * ds);
 }
 fn hueFar(ab: vec2<f32>, veilHue: vec2<f32>, lo: f32, hi: f32, achroma: f32) -> f32 {

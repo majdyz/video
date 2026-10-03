@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { compressToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { CONF_BRIGHT, LOOK, SKIN, ULAP, boostParams, hazeWeight, lookParams, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { CONF_BRIGHT, LOOK, SKIN, ULAP, boostParams, hazeWeight, lookParams, lookSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
@@ -21,7 +21,8 @@ export type ApplyContext = {
 type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings };
 
 export function resolveContext(ctx: ApplyContext): PixelContext {
-  return { ...ctx, params: lookParams(boostParams(ctx.params, pushOf(ctx.settings)), ctx.settings), settings: resolveSettings(ctx.settings) };
+  const params = lookParams(boostParams(ctx.params, pushOf(ctx.settings)), ctx.settings);
+  return { ...ctx, params, settings: lookSettings(resolveSettings(ctx.settings), params) };
 }
 
 /**
@@ -245,15 +246,15 @@ export function deepBlueLook(L: number, a: number, b: number, look: number, wate
   // alike — and leave only skin (warm), blacks, whites and vivid colours
   // alone. Tinting by the water/object split instead left object patches
   // in their graded colour inside a blue frame (a halo around people).
-  void water;
   const vivid = smoothstep(LOOK.keepLo, LOOK.keepHi, C);
   const warm = (1 - smoothstep(LOOK.warmIn, LOOK.warmOut, Math.abs(wrap(h - LOOK.warmHue)))) * smoothstep(LOOK.warmLo, LOOK.warmHi, C);
   const wTint = (1 - vivid) * (1 - warm) * (1 - smoothstep(LOOK.brightLo, LOOK.brightHi, L)) * smoothstep(LOOK.darkLo, LOOK.darkHi, L);
   const w = wTint * look * LOOK.mix;
-  const L2 = Math.pow(Math.max(0, L), 1 + LOOK.gamma * look);
-  const Ct = (LOOK.c0 + LOOK.c1 * L2) * (1 + LOOK.hazeChroma * hazeW);
-  // Near-neutral objects (sand, white) go fully neutral.
-  const ds = 1 - look * LOOK.neutralDesat * (1 - smoothstep(LOOK.neutralLo, LOOK.neutralHi, C));
+  const L2 = Math.pow(Math.max(0, L), 1 + LOOK.gamma * look) * (1 - LOOK.waterDim * look * water);
+  // The tint never desaturates: an already-blue pixel keeps its chroma.
+  const Ct = Math.max(C, (LOOK.c0 + LOOK.c1 * L2) * (1 + LOOK.hazeChroma * hazeW));
+  // Light near-neutral pixels (sand, white coral) go fully neutral.
+  const ds = 1 - look * LOOK.neutralDesat * (1 - smoothstep(LOOK.neutralLo, LOOK.neutralHi, C)) * smoothstep(LOOK.neutralLLo, LOOK.neutralLHi, L);
   return [L2, (a + (Ct * Math.cos(LOOK.targetHue) - a) * w) * ds, (b + (Ct * Math.sin(LOOK.targetHue) - b) * w) * ds];
 }
 

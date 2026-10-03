@@ -68,24 +68,30 @@ export const LOOK = {
   // darker, clear scenes keep their exposure. The dim rides on the exposure
   // uniform, scaled by the frame's haze (see lookParams); gamma is a mild
   // per-pixel shadow crush.
-  gamma: 0.1,
-  dim: 0.45,
+  gamma: 0.05,
+  dim: 0.3,
+  hazeDehaze: 0.7, // hazy frames: the look also dehazes the water path …
+  hazeClarity: 0.5, // … adds local contrast …
+  hazeLevels: 0.2, // … and a fuller levels stretch, so the reef comes back
+  waterDim: 0.25, // water-path pixels go darker (deep water reads navy in the references)
   hazeLo: 0.05, // lifted-black haze below which nothing dims …
   hazeHi: 0.3, // … and above which the full dim applies
   hazeChroma: 0.8, // water tint chroma target rises with haze (murky refs are more saturated)
-  neutralDesat: 0.8, // near-neutral object pixels (sand, white) lose chroma …
-  neutralLo: 0.02, // … below this chroma fully …
-  neutralHi: 0.04, // … fading out by this
+  neutralDesat: 0.8, // light near-neutral pixels (sand, white coral) lose chroma …
+  neutralLo: 0.025, // … below this chroma fully …
+  neutralHi: 0.05, // … fading out by this (surface water sits above it) …
+  neutralLLo: 0.65, // … and only when light (water is never "white")
+  neutralLHi: 0.8,
   warmHue: (65 * Math.PI) / 180, // warm band (skin, sand: ~20°–110°) never takes the tint …
   warmIn: (45 * Math.PI) / 180,
   warmOut: (70 * Math.PI) / 180,
   warmLo: 0.006, // … once it has any chroma at all
   warmHi: 0.015,
-  brightLo: 0.7, // very light pixels (pale skin, white hands/feet) keep their colour …
-  brightHi: 0.85,
+  brightLo: 0.6, // light pixels (pale skin, white coral, hands) keep their colour …
+  brightHi: 0.8,
   keepLo: 0.09, // vivid in-band colours (blue fins) are kept …
   keepHi: 0.14,
-  targetHue: (246 * Math.PI) / 180,
+  targetHue: (252 * Math.PI) / 180,
   c0: 0.0, // target chroma = c0 + c1·L: zero at black, so blacks stay black …
   c1: 0.11,
   darkLo: 0.12, // … and dark pixels take no tint at all below this lightness
@@ -127,7 +133,16 @@ export function hazeWeight(p: GradeParams): number {
 export function lookParams(p: GradeParams, s: UserSettings): GradeParams {
   const look = Math.min(1, Math.max(0, s.look));
   if (look <= 0) return p;
-  return { ...p, exposure: p.exposure * (1 - LOOK.dim * look * hazeWeight(p)) };
+  const hw = hazeWeight(p) * look;
+  return { ...p, exposure: p.exposure * (1 - LOOK.dim * hw), levelsMix: Math.min(0.85, p.levelsMix + LOOK.hazeLevels * hw) };
+}
+
+/** Look-driven control adjustments: hazy frames get dehaze and clarity. */
+export function lookSettings(g: GradeSettings, p: GradeParams): GradeSettings {
+  const look = g.look;
+  if (look <= 0) return g;
+  const hw = hazeWeight(p) * look;
+  return { ...g, dehaze: Math.max(g.dehaze, LOOK.hazeDehaze * hw), clarity: Math.min(1, g.clarity + LOOK.hazeClarity * hw) };
 }
 
 export function boostParams(p: GradeParams, t: number): GradeParams {
@@ -330,7 +345,7 @@ export function packUniforms(
 ): Float32Array {
   const u = new Float32Array(UNIFORM_FLOATS);
   params = lookParams(boostParams(params, pushOf(settings)), settings);
-  const s = resolveSettings(settings);
+  const s = lookSettings(resolveSettings(settings), params);
   u.set([rotation, split, s.strength, 0], 0);
   u.set([...params.binf, s.veil], 4);
   u.set([...params.betaB, s.look], 8);
