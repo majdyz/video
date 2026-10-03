@@ -59,14 +59,17 @@ const VEIL_SCALE_MAX = 2.2;
 const VEIL_MIN_SAMPLES = 6;
 const ACHROMA = 0.025;
 // The water path keeps most of its original brightness.
-const WATER_EXPOSURE = 0.35;
+const WATER_EXPOSURE = 0.8;
 // How much of the white balance the water path gets (exponent on the gains).
-const WATER_WB_POWER = 0.35;
+const WATER_WB_POWER = 0.6;
 // White balance limits (linear gains relative to green).
+// Under water the cast is always blue/green: a red gain below 1 (or a
+// blue gain far above 1) only ever comes from a gray-world vote dominated
+// by one warm object, so those directions are clamped.
 const WB_R_MAX = 3.5;
-const WB_R_MIN = 0.65;
+const WB_R_MIN = 1.0;
 const WB_B_MIN = 0.55;
-const WB_B_MAX = 2.6;
+const WB_B_MAX = 1.5;
 // Below this share of confident pixels the scene is mostly water and the
 // gray-world assumption is weak: shrink the balance toward identity.
 const WB_CONF_LO = 0.03;
@@ -78,16 +81,28 @@ const MAGENTA_HI = 348;
 const MAGENTA_MAX_FRACTION = 0.015;
 const GUARD_STEPS = 6;
 // Exposure / levels.
-const KEY_TARGET = 0.17;
+const KEY_TARGET = 0.14;
 const EXPOSURE_MIN = 0.6;
-const EXPOSURE_MAX = 1.7;
+const EXPOSURE_MAX = 1.35;
 const HIGHLIGHT_CEILING = 0.86;
-const LEVELS_MIX = 0.6;
+const LEVELS_MIX = 0.5;
+const LEVELS_WHITE_MIN = 0.55;
 const CLAHE_CLIP = 2.0;
+// Highlight shoulder: linear luminance above KNEE rolls off toward 1.
+const KNEE = 0.75;
+// Veil subtraction: per channel (colour restoration) when the pixel keeps
+// a healthy signal fraction after the veil, proportional (hue-preserving)
+// when it doesn't — per-channel subtraction on a weak pixel floors G/B,
+// leaves R, and turns compression noise into black/green blotches.
+const SUB_LO = 0.2;
+const SUB_HI = 0.55;
 // Chroma ceiling relative to the source pixel's chroma.
 const CHROMA_K = 2.6;
 const CHROMA_C0 = 0.025;
 const FLOOR_FRAC = 0.05;
+// Dark subjects are mostly veil; subtracting it makes them darker still.
+// Hold corrected luminance at ≥ this fraction of the source luminance.
+const SHADOW_FLOOR = 0.55;
 const DEPTH_GUIDE = 0.5;
 
 export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number): FrameAnalysis {
@@ -277,7 +292,9 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
       const v = waterLin[i * 3 + c] * ew + (J[i * 3 + c] * e - waterLin[i * 3 + c] * ew) * wgt;
       y += v * (c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722);
     }
-    return y;
+    // Shadow floor and highlight shoulder, as the shader applies them.
+    y = Math.max(y, SHADOW_FLOOR * lum[i] * ew);
+    return y > KNEE ? KNEE + (1 - KNEE) * (1 - Math.exp(-(y - KNEE) / (1 - KNEE))) : y;
   };
   for (let i = 0; i < n; i++) Y[i] = mixY(i, exposure);
   const [p995] = percentiles(Y, [0.995]);
@@ -289,7 +306,9 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   }
   const [black, white] = percentiles(Y, [0.004, 0.996]);
   const blackPt = Math.min(black, 0.06);
-  const whitePt = Math.min(1.0, Math.max(white, blackPt + 0.2));
+  // Never stretch more than ~1.8×: a dim clip should stay dim-ish rather
+  // than have its brighter patches shoved to white.
+  const whitePt = Math.min(1.0, Math.max(white, blackPt + 0.2, LEVELS_WHITE_MIN));
 
   // 6. CLAHE on the encoded luminance after levels.
   const enc = new Float32Array(n);
@@ -327,6 +346,10 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     zHi,
     depthGuide: DEPTH_GUIDE,
     floorFrac: FLOOR_FRAC,
+    shadowFloor: SHADOW_FLOOR,
+    knee: KNEE,
+    subLo: SUB_LO,
+    subHi: SUB_HI,
   };
   return { params, depth, clahe, mean };
 }
@@ -494,6 +517,18 @@ function fitBackscatter3(zsAll: number[], ysAll: number[][]): { A: number; beta:
       }
     }
   }
+  // Red backscatter is physically the smallest of the three; a red fit that
+  // sits above green/blue anywhere in range (noise-floor samples pick a flat
+  // offset) would make the near-range veil red-dominant and turn neutral
+  // objects cyan. Scale red's amplitude down until it stays below.
+  const bAt = (f: { A: number; beta: number; c: number }, z: number) => f.A * (1 - Math.exp(-(f.beta * z + f.c)));
+  let scaleR = 1;
+  for (const z of [0.1, 0.3, 0.6, 1.0]) {
+    const r = bAt(best[0], z);
+    const gbMin = 0.85 * Math.min(bAt(best[1], z), bAt(best[2], z));
+    if (r > gbMin) scaleR = Math.min(scaleR, r > 1e-6 ? gbMin / r : 0);
+  }
+  best[0].A *= Math.max(0, scaleR);
   return best.map((b) => ({ A: b.A, beta: b.beta, c: b.c }));
 }
 

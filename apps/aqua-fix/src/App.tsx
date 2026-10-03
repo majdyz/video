@@ -469,7 +469,7 @@ export default function App() {
     const total = video.duration || 0;
     const bitrate = bitrateFromSource(file.size, total) ?? pickBitrate(video.videoWidth, video.videoHeight, 30);
     // Per-stage timing for the overlay: where an export spends its time.
-    const stage = { upload: 0, render: 0, frames: 0, started: performance.now(), lastUi: 0 };
+    const stage = { upload: 0, render: 0, draw: 0, capture: 0, frames: 0, started: performance.now(), lastUi: 0 };
     // Export has its own temporal state: start clean so the first frame
     // snaps to its own analysis instead of inheriting the preview's.
     e.reset();
@@ -497,13 +497,15 @@ export default function App() {
             const t2 = performance.now();
             stage.upload += t1 - t0;
             stage.render += t2 - t1;
+            stage.draw += e.backend.lastDrawMs;
+            stage.capture += e.backend.lastCaptureMs;
             stage.frames++;
             if (t2 - stage.lastUi > 500) {
               stage.lastUi = t2;
               const fps = stage.frames / ((t2 - stage.started) / 1000);
               const st = e.getStats();
               const be = e.backend as unknown as { capture?: string; externalOk?: boolean };
-              setExportDetail(`${fps.toFixed(1)} fps · up ${(stage.upload / stage.frames).toFixed(0)} · gpu ${(stage.render / stage.frames).toFixed(0)} ms · an ${st.analysisMs.toFixed(0)} ms · ${st.backend}${be.capture ? "/" + be.capture : ""}${be.externalOk ? "/ext" : ""}`);
+              setExportDetail(`${fps.toFixed(1)} fps · up ${(stage.upload / stage.frames).toFixed(0)} · draw ${(stage.draw / stage.frames).toFixed(0)} · cap ${(stage.capture / stage.frames).toFixed(0)} · wait ${((stage.render - stage.draw - stage.capture) / stage.frames).toFixed(0)} ms · an ${st.analysisMs.toFixed(0)} · ${st.backend}${be.capture ? "/" + be.capture : ""}${be.externalOk ? "/ext" : ""}`);
             }
             return out;
           } finally {

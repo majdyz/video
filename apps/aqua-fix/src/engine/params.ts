@@ -23,8 +23,8 @@ export type UserSettings = {
 export const DEFAULT_SETTINGS: UserSettings = {
   strength: 1,
   saturation: 1,
-  clarity: 0.45,
-  veil: 1,
+  clarity: 0.35,
+  veil: 0.7,
 };
 
 export type Vec3 = [number, number, number];
@@ -76,6 +76,13 @@ export type GradeParams = {
   depthGuide: number;
   /** Floor on the de-scattered signal as a fraction of the input, keeps shadows from crushing. */
   floorFrac: number;
+  /** Corrected luminance never drops below this fraction of the source luminance (hue preserved). */
+  shadowFloor: number;
+  /** Highlight shoulder knee (linear luminance); above it luminance rolls off toward 1. */
+  knee: number;
+  /** Signal-fraction ramp between hue-preserving (proportional) and per-channel veil subtraction. */
+  subLo: number;
+  subHi: number;
 };
 
 export const IDENTITY_PARAMS: GradeParams = {
@@ -104,6 +111,10 @@ export const IDENTITY_PARAMS: GradeParams = {
   zHi: 1,
   depthGuide: 0,
   floorFrac: 0.04,
+  shadowFloor: 0,
+  knee: 1,
+  subLo: 0,
+  subHi: 0.001,
 };
 
 /**
@@ -143,9 +154,10 @@ export const CLAHE_BINS = 32;
  *  p7: saturation, chromaK, chromaC0, depthGuide
  *  p8: depthW, depthH, tilesX, tilesY
  *  p9: bins, floorFrac, zLo, zHi
- *  p10: ulap mu0, mu1, mu2, 0
+ *  p10: ulap mu0, mu1, mu2, shadowFloor
  *  p11: waterWb.rgb, 0
  *  p12: confLo, confHi, cosLo, cosHi
+ *  p15: knee, subLo, subHi, 0
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -170,7 +182,7 @@ export function packUniforms(
   u.set([clahe.bins, params.floorFrac, params.zLo, params.zHi], 36);
   // zMean rides in p14.w (p9 is full).
 
-  u.set([ULAP.mu0, ULAP.mu1, ULAP.mu2, 0], 40);
+  u.set([ULAP.mu0, ULAP.mu1, ULAP.mu2, params.shadowFloor], 40);
   u.set([...params.waterWb, 0], 44);
   u.set([params.confLo, params.confHi, params.cosLo, params.cosHi], 48);
   u.set([...params.veilColor, params.achroma], 52);
@@ -179,6 +191,7 @@ export function packUniforms(
     const c = Math.hypot(a, b) || 1;
     u.set([a / c, b / c, params.waterExposure, params.zMean], 56);
   }
+  u.set([params.knee, params.subLo, params.subHi, 0], 60);
   return u;
 }
 
@@ -237,5 +250,9 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     zHi: m(a.zHi, b.zHi),
     depthGuide: m(a.depthGuide, b.depthGuide),
     floorFrac: m(a.floorFrac, b.floorFrac),
+    shadowFloor: m(a.shadowFloor, b.shadowFloor),
+    knee: m(a.knee, b.knee),
+    subLo: m(a.subLo, b.subLo),
+    subHi: m(a.subHi, b.subHi),
   };
 }

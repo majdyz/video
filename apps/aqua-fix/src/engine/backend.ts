@@ -40,6 +40,9 @@ export interface GpuBackend {
   render(): void;
   /** Draws the graded frame and wraps the result as a VideoFrame (export). */
   renderToFrame(timestampUs: number, durationUs: number | undefined): Promise<VideoFrame>;
+  /** Milliseconds the last renderToFrame spent issuing the draw vs. capturing the result. */
+  readonly lastDrawMs: number;
+  readonly lastCaptureMs: number;
   /** Width/height of the last upright upload (full resolution; exports use it). */
   readonly outputWidth: number;
   readonly outputHeight: number;

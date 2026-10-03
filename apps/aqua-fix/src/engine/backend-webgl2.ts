@@ -16,6 +16,8 @@ export class WebGL2Backend implements GpuBackend {
   readonly canvas: HTMLCanvasElement;
   outputWidth = 0;
   outputHeight = 0;
+  lastDrawMs = 0;
+  lastCaptureMs = 0;
   private readonly gl: WebGL2RenderingContext;
   private readonly grade: Program;
   private readonly down: Program;
@@ -186,8 +188,13 @@ export class WebGL2Backend implements GpuBackend {
     // this context can hand to a VideoFrame, so it is sized up for the
     // duration (callers set the preview scale to 1 around an export).
     this.sizeCanvas(1);
+    const t0 = performance.now();
     this.render();
-    return new VideoFrame(this.canvas, { timestamp: timestampUs, duration: durationUs });
+    const t1 = performance.now();
+    const f = new VideoFrame(this.canvas, { timestamp: timestampUs, duration: durationUs });
+    this.lastDrawMs = t1 - t0;
+    this.lastCaptureMs = performance.now() - t1;
+    return f;
   }
 
   private ensureAnalysisTargets(w: number, h: number) {

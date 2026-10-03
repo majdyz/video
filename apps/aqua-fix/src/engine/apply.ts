@@ -8,6 +8,8 @@ import { ULAP, type ClaheLuts, type DepthMap, type GradeParams, type UserSetting
 export type ApplyContext = {
   /** When set, gradePixel returns (k, confPix, confMap) instead of a colour. */
   debug?: boolean;
+  /** When set, gradePixel records its intermediates here (diagnostics). */
+  trace?: Record<string, unknown>;
   params: GradeParams;
   settings: UserSettings;
   depth: DepthMap;
@@ -88,24 +90,39 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
   const z = zPix + (zMap - zPix) * k;
   const veilScale = 1 + (veilMap - 1) * k;
 
-  // De-scatter, compensate, white-balance. Veil-dominated pixels (low
-  // signal confidence) take a toned-down copy of the input instead.
+  // De-scatter: per channel where the signal is healthy, proportional
+  // (hue-preserving) where it isn't; then compensate and white-balance.
   const src = [r0, g0, b0];
+  const lumI = Math.max(1e-5, luminance(r0, g0, b0));
+  // Scaled veil classifies (is this water?); at most the global fit is
+  // subtracted from an object (see analyze.ts).
+  const Bv = [0, 0, 0];
+  const Bs = [0, 0, 0];
+  let lumB = 0, lumBs = 0;
+  const subScale = Math.min(1, veilScale);
+  for (let c = 0; c < 3; c++) {
+    const bf = s.veil * p.binf[c] * (1 - Math.exp(-(p.betaB[c] * z + p.cB[c])));
+    Bv[c] = veilScale * bf;
+    Bs[c] = subScale * bf;
+    const wl = c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722;
+    lumB += Bv[c] * wl;
+    lumBs += Bs[c] * wl;
+  }
+  const sig = Math.max(0, (lumI - lumB) / lumI);
+  const wSub = smoothstep(p.subLo, p.subHi, sig);
+  const prop = Math.max(p.floorFrac, 1 - lumBs / lumI);
   const full = [0, 0, 0];
-  let dl = 0;
   for (let c = 0; c < 3; c++) {
     const I = src[c];
-    const B = s.veil * veilScale * p.binf[c] * (1 - Math.exp(-(p.betaB[c] * z + p.cB[c])));
-    const D = Math.max(I - B, I * p.floorFrac);
-    dl += D * (c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722);
+    const per = Math.max(I - Bs[c], I * p.floorFrac);
+    const D = I * prop + (per - I * prop) * wSub;
     const rangeGain = Math.min(p.gainCap, Math.max(1 / p.gainCap, Math.exp(p.attn[c] * (z - p.zMean))));
     full[c] = D * rangeGain * p.wb[c];
   }
   // Per-pixel classification for the fallback: hue against the veil and
   // the signal fraction, the same tests the analysis runs on the thumbnail.
-  const lumI = luminance(r0, g0, b0);
   const [, pa, pb] = linearToOklab(r0, g0, b0);
-  const confSignal = smoothstep(p.confLo, p.confHi, dl / Math.max(1e-5, lumI));
+  const confSignal = smoothstep(p.confLo, p.confHi, sig);
   const confPix = Math.min(confSignal, hueConf(pa, pb, p));
   // A pixel the veil model would nearly erase takes the water path whatever
   // the map says (see grade-shader.ts).
@@ -116,6 +133,18 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
   for (let c = 0; c < 3; c++) {
     const water = src[c] * p.waterWb[c] * ew;
     out[c] = water + (full[c] * p.exposure - water) * conf;
+  }
+  // Shadow floor (never darker than shadowFloor × the source) and highlight
+  // shoulder (luminance above the knee rolls off toward 1); hue kept.
+  {
+    const yo = luminance(out[0], out[1], out[2]);
+    const yMin = p.shadowFloor * lumI * ew;
+    let yt = Math.max(yo, yMin);
+    if (yt > p.knee) yt = p.knee + (1 - p.knee) * (1 - Math.exp(-(yt - p.knee) / (1 - p.knee)));
+    if (yo > 1e-6 && yt !== yo) {
+      const sc = yt / yo;
+      out[0] *= sc; out[1] *= sc; out[2] *= sc;
+    }
   }
 
   // Levels on luminance, ratio-preserving.
@@ -149,6 +178,10 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
 
   const [r2, g2, b2] = compressToGamut(r1, g1, b1);
   const rs = linearToSrgb(r2), gs = linearToSrgb(g2), bs = linearToSrgb(b2);
+  if (ctx.trace) {
+    const f3 = (v: number[]) => v.map((x) => +x.toFixed(3));
+    Object.assign(ctx.trace, { lin: f3([r0, g0, b0]), z: +z.toFixed(2), k: +k.toFixed(2), conf: +conf.toFixed(2), veilScale: +veilScale.toFixed(2), B: f3(Bv), sig: +sig.toFixed(2), wSub: +wSub.toFixed(2), full: f3(full), outPreLevels: f3(out.map((v) => v)), Y: +Y.toFixed(3), C: +C.toFixed(3), cMax: +cMax.toFixed(3), scale: +scale.toFixed(2), o1: f3([r1, g1, b1]), o2: f3([r2, g2, b2]) });
+  }
   return [
     sr + (rs - sr) * s.strength,
     sg + (gs - sg) * s.strength,

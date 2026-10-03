@@ -123,9 +123,10 @@ vec3 grade(vec3 src, vec2 uv) {
   float saturation = p[7].x, chromaK = p[7].y, chromaC0 = p[7].z, depthGuide = p[7].w;
   int tilesX = int(p[8].z + 0.5), tilesY = int(p[8].w + 0.5), bins = int(p[9].x + 0.5);
   float floorFrac = p[9].y, zLo = p[9].z, zHi = p[9].w;
-  vec3 mu = p[10].xyz;
+  vec3 mu = p[10].xyz; float shadowFloor = p[10].w;
   vec3 waterWb = p[11].xyz;
   float confLo = p[12].x, confHi = p[12].y, hueLo = p[12].z, hueHi = p[12].w;
+  float knee = p[15].x, subLo = p[15].y, subHi = p[15].z;
   float achroma = p[13].w;
   vec2 veilHue = p[14].xy;
   float waterExposure = p[14].z, zMean = p[14].w;
@@ -142,13 +143,22 @@ vec3 grade(vec3 src, vec2 uv) {
   float z = mix(zPix, zMap, k);
   float veilScale = mix(1.0, fld.w, k);
 
-  // De-scatter, range-adaptive compensation, white balance.
-  vec3 B = veil * veilScale * binf * (1.0 - exp(-(betaB * z + cB)));
-  vec3 D = max(lin - B, lin * floorFrac);
+  // De-scatter: per channel where the signal is healthy, proportional
+  // (hue-preserving) where it isn't; then compensate and white-balance.
+  vec3 bf = veil * binf * (1.0 - exp(-(betaB * z + cB)));
+  vec3 B = veilScale * bf;                 // classifies: is this water?
+  vec3 Bs = min(1.0, veilScale) * bf;      // subtracted from objects
+  float lumI = max(1e-5, lum(lin));
+  float lumB = lum(B);
+  float lumBs = lum(Bs);
+  float sig = max(0.0, (lumI - lumB) / lumI);
+  float wSub = smoothstepf(subLo, subHi, sig);
+  vec3 per = max(lin - Bs, lin * floorFrac);
+  vec3 D = mix(lin * max(floorFrac, 1.0 - lumBs / lumI), per, wSub);
   // Water/object confidence: the map where it matches, else the pixel's own
   // hue + signal tests (the analysis runs the same on the thumbnail).
   vec3 lab0 = linearToOklab(lin);
-  float confSignal = smoothstepf(confLo, confHi, lum(D) / max(1e-5, lum(lin)));
+  float confSignal = smoothstepf(confLo, confHi, sig);
   float confPix = min(confSignal, hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma));
   // Whatever the map says, a pixel the veil model would nearly erase
   // (tiny D) must take the water path — the physics path would crush it
@@ -160,6 +170,13 @@ vec3 grade(vec3 src, vec2 uv) {
   float ew = pow(exposure, waterExposure);
   vec3 water = lin * waterWb * ew;
   vec3 o = water + (full * exposure - water) * conf;
+  // Shadow floor and highlight shoulder, hue kept.
+  {
+    float yo = lum(o);
+    float yt = max(yo, shadowFloor * lumI * ew);
+    if (yt > knee) yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee)));
+    if (yo > 1e-6) o *= yt / yo;
+  }
 
   // Levels on luminance, ratio-preserving.
   float Y = lum(o);
@@ -304,9 +321,10 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let saturation = p[7].x; let chromaK = p[7].y; let chromaC0 = p[7].z; let depthGuide = p[7].w;
   let tilesX = i32(p[8].z + 0.5); let tilesY = i32(p[8].w + 0.5); let bins = i32(p[9].x + 0.5);
   let floorFrac = p[9].y; let zLo = p[9].z; let zHi = p[9].w;
-  let mu = p[10].xyz;
+  let mu = p[10].xyz; let shadowFloor = p[10].w;
   let waterWb = p[11].xyz;
   let confLo = p[12].x; let confHi = p[12].y; let hueLo = p[12].z; let hueHi = p[12].w;
+  let knee = p[15].x; let subLo = p[15].y; let subHi = p[15].z;
   let achroma = p[13].w;
   let veilHue = p[14].xy;
   let waterExposure = p[14].z; let zMean = p[14].w;
@@ -322,10 +340,18 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let z = mix(zPix, zMap, k);
   let veilScale = mix(1.0, fld.w, k);
 
-  let B = veil * veilScale * binf * (1.0 - exp(-(betaB * z + cB)));
-  let D = max(lin - B, lin * floorFrac);
+  let bf = veil * binf * (1.0 - exp(-(betaB * z + cB)));
+  let B = veilScale * bf;
+  let Bs = min(1.0, veilScale) * bf;
+  let lumI = max(1e-5, lum(lin));
+  let lumB = lum(B);
+  let lumBs = lum(Bs);
+  let sig = max(0.0, (lumI - lumB) / lumI);
+  let wSub = smoothstepf(subLo, subHi, sig);
+  let per = max(lin - Bs, lin * floorFrac);
+  let D = mix(lin * max(floorFrac, 1.0 - lumBs / lumI), per, vec3(wSub));
   let lab0 = linearToOklab(lin);
-  let confSignal = smoothstepf(confLo, confHi, lum(D) / max(1e-5, lum(lin)));
+  let confSignal = smoothstepf(confLo, confHi, sig);
   let confPix = min(confSignal, hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma));
   let conf = mix(confPix, clamp(fld.y, 0.0, 1.0), k) * confSignal;
   if (p[0].w > 0.5) { return vec3(k, confPix, clamp(fld.y, 0.0, 1.0)); }
@@ -334,6 +360,12 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let ew = pow(exposure, waterExposure);
   let water = lin * waterWb * ew;
   var o = water + (full * exposure - water) * conf;
+  {
+    let yo = lum(o);
+    var yt = max(yo, shadowFloor * lumI * ew);
+    if (yt > knee) { yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee))); }
+    if (yo > 1e-6) { o *= yt / yo; }
+  }
 
   var Y = lum(o);
   let Ylv = Y + ((Y - black) / (white - black) - Y) * levelsMix;

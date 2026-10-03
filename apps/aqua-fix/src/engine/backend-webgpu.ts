@@ -22,6 +22,8 @@ export class WebGPUBackend implements GpuBackend {
   readonly canvas: HTMLCanvasElement;
   outputWidth = 0;
   outputHeight = 0;
+  lastDrawMs = 0;
+  lastCaptureMs = 0;
   private readonly device: GPUDevice;
   private readonly ctx: GPUCanvasContext;
   private readonly format: GPUTextureFormat;
@@ -393,14 +395,21 @@ export class WebGPUBackend implements GpuBackend {
   private async captureAs(mode: "canvas" | "bitmap" | "readback", timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
     const w = this.outputWidth;
     const h = this.outputHeight;
+    const t0 = performance.now();
     if (mode === "canvas" || mode === "bitmap") {
       this.draw(this.exportCtx!.getCurrentTexture().createView());
-      if (mode === "canvas") return new VideoFrame(this.exportCanvas!, { timestamp: timestampUs, duration: durationUs });
-      const bitmap = this.exportCanvas!.transferToImageBitmap();
+      const t1 = performance.now();
       try {
-        return new VideoFrame(bitmap, { timestamp: timestampUs, duration: durationUs });
+        if (mode === "canvas") return new VideoFrame(this.exportCanvas!, { timestamp: timestampUs, duration: durationUs });
+        const bitmap = this.exportCanvas!.transferToImageBitmap();
+        try {
+          return new VideoFrame(bitmap, { timestamp: timestampUs, duration: durationUs });
+        } finally {
+          bitmap.close();
+        }
       } finally {
-        bitmap.close();
+        this.lastDrawMs = t1 - t0;
+        this.lastCaptureMs = performance.now() - t1;
       }
     }
     // Readback through a tight RGBA8 buffer (rows repacked if padded).
@@ -410,7 +419,10 @@ export class WebGPUBackend implements GpuBackend {
     const enc = this.device.createCommandEncoder();
     enc.copyTextureToBuffer({ texture: this.exportTex! }, { buffer: this.readbackBuf, bytesPerRow }, [w, h]);
     this.device.queue.submit([enc.finish()]);
+    const t1 = performance.now();
+    this.lastDrawMs = t1 - t0;
     await this.readbackBuf.mapAsync(GPUMapMode.READ);
+    this.lastCaptureMs = performance.now() - t1;
     try {
       const mapped = new Uint8Array(this.readbackBuf.getMappedRange());
       let tight: Uint8Array<ArrayBuffer>;
