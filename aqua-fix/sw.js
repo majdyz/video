@@ -1,4 +1,4 @@
-const VERSION = "aqua-fix-v5";
+const VERSION = "aqua-fix-v6";
 const STATIC = ["./icon.svg", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png", "./manifest.webmanifest"];
 // Caches we own outside the SW (Cache API populated by the app's lazy
 // loaders). Activate-step must NOT delete these — otherwise every page
