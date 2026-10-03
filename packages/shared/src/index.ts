@@ -6,3 +6,4 @@ export * from "./capabilities";
 export * from "./codec-export";
 export * from "./output-sink";
 export * from "./capability-banner";
+export * from "./realtime-export";

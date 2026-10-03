@@ -13,7 +13,10 @@ import {
   Scrubber,
   Slider,
   bitrateFromSource,
+  exportRealtime,
   exportWithCodec,
+  isRealtimeExportSupported,
+  isWebKit,
   isWebCodecsSupported,
   pickBitrate,
   shareOrDownload,
@@ -481,7 +484,52 @@ export default function App() {
     dropStill();
     e.setPreviewScale(1);
     let frames = 0;
+    // Real-time path: WebKit's canvas → VideoFrame copy pins the offline
+    // exporter to ~10 fps, so there we play the clip and record the graded
+    // canvas (MediaRecorder), then remux the original audio. ?rt=1/0 forces.
+    const rtParam = new URLSearchParams(location.search).get("rt");
+    const canvasEl = e.backend.canvas;
+    const useRealtime = rtParam === "1" || (rtParam !== "0" && isWebKit() && isRealtimeExportSupported(canvasEl));
     try {
+      if (useRealtime) {
+        setExportDetail("real-time · playing the clip and recording the graded canvas");
+        let rendered = 0;
+        const rtStart = performance.now();
+        const result = await exportRealtime(file, video, canvasEl, {
+          bitrate,
+          opfsPrefix: AQUA_FIX_BRAND.opfsPrefix,
+          fps: 30,
+          signal: ctrl.signal,
+          log: (line) => console.info("[export]", line),
+          onProgress: (p) => {
+            setExportProgress(p);
+            setExportTime(p * total);
+            const secs = (performance.now() - rtStart) / 1000;
+            if (secs > 0.5) setExportDetail(`real-time · ${(rendered / secs).toFixed(1)} fps rendered · ${e.backend.kind}`);
+          },
+          startRendering: () => {
+            let active = true;
+            const vv = video as VideoWithRVFC;
+            const step = () => {
+              if (!active || !exportingRef.current) return;
+              if (video.readyState >= 2) {
+                e.upload(video, video.videoWidth, video.videoHeight, 0);
+                if (rendered === 0) void e.analyzeNow(true).catch(() => undefined);
+                else e.analyzeSoon();
+                e.tick(video.currentTime);
+                e.render();
+                rendered++;
+              }
+              if (typeof vv.requestVideoFrameCallback === "function") vv.requestVideoFrameCallback(step);
+              else requestAnimationFrame(step);
+            };
+            step();
+            return () => { active = false; };
+          },
+        });
+        await shareOrDownload(result.blob, `${fileNameRef.current}-aqua.${result.blob.type === "video/webm" ? "webm" : "mp4"}`);
+        return;
+      }
       const result = await exportWithCodec(
         file,
         async (sample, info) => {
