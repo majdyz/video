@@ -293,7 +293,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
       y += v * (c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722);
     }
     // Shadow floor and highlight shoulder, as the shader applies them.
-    y = Math.max(y, SHADOW_FLOOR * lum[i] * ew);
+    y = Math.max(y, shadowFloorAt(lum[i]) * lum[i] * ew);
     return y > KNEE ? KNEE + (1 - KNEE) * (1 - Math.exp(-(y - KNEE) / (1 - KNEE))) : y;
   };
   for (let i = 0; i < n; i++) Y[i] = mixY(i, exposure);
@@ -448,6 +448,15 @@ export function hueConfidence(a: number, b: number, veilHue: [number, number], l
 function smoothstep(e0: number, e1: number, x: number): number {
   const t = clamp01((x - e0) / (e1 - e0));
   return t * t * (3 - 2 * t);
+}
+
+/**
+ * Shadow floor as a fraction of the source luminance: shadows (linear
+ * luminance ≲ 0.02) are never darkened — a stale map that calls a shadow an
+ * object would crush it to black — easing to SHADOW_FLOOR by ~0.15.
+ */
+export function shadowFloorAt(lumI: number, floor = SHADOW_FLOOR): number {
+  return 0.97 + (floor - 0.97) * smoothstep(0.02, 0.15, lumI);
 }
 
 /** Fraction of mid-lightness, chromatic pixels whose Oklab hue is magenta. */

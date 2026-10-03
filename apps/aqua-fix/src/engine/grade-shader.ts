@@ -173,7 +173,8 @@ vec3 grade(vec3 src, vec2 uv) {
   // Shadow floor and highlight shoulder, hue kept.
   {
     float yo = lum(o);
-    float yt = max(yo, shadowFloor * lumI * ew);
+    float sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
+    float yt = max(yo, sf * lumI * ew);
     if (yt > knee) yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee)));
     if (yo > 1e-6) o *= yt / yo;
   }
@@ -362,7 +363,8 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   var o = water + (full * exposure - water) * conf;
   {
     let yo = lum(o);
-    var yt = max(yo, shadowFloor * lumI * ew);
+    let sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
+    var yt = max(yo, sf * lumI * ew);
     if (yt > knee) { yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee))); }
     if (yo > 1e-6) { o *= yt / yo; }
   }

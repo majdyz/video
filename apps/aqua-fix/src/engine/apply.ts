@@ -4,6 +4,7 @@
 
 import { compressToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
 import { ULAP, type ClaheLuts, type DepthMap, type GradeParams, type UserSettings } from "./params.ts";
+import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
   /** When set, gradePixel returns (k, confPix, confMap) instead of a colour. */
@@ -138,7 +139,7 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
   // shoulder (luminance above the knee rolls off toward 1); hue kept.
   {
     const yo = luminance(out[0], out[1], out[2]);
-    const yMin = p.shadowFloor * lumI * ew;
+    const yMin = shadowFloorAt(lumI, p.shadowFloor) * lumI * ew;
     let yt = Math.max(yo, yMin);
     if (yt > p.knee) yt = p.knee + (1 - p.knee) * (1 - Math.exp(-(yt - p.knee) / (1 - p.knee)));
     if (yo > 1e-6 && yt !== yo) {
