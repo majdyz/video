@@ -348,7 +348,10 @@ export class WebGPUBackend implements GpuBackend {
       this.exportCtx = this.exportCanvas.getContext("webgpu") as GPUCanvasContext;
       this.exportCtx.configure({ device: this.device, format: this.format, alphaMode: "opaque", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
       this.exportTex?.destroy();
-      this.exportTex = this.device.createTexture({ size: [w, h], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+      // Same format as the grade pipeline's target (the canvas format): on
+      // Safari that is bgra8unorm, and rendering into an rgba8unorm texture
+      // was a validation error — the readback capture came out black there.
+      this.exportTex = this.device.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
       for (const r of this.readbackRing) r.buffer.destroy();
       this.readbackRing = [];
     }
@@ -470,7 +473,7 @@ export class WebGPUBackend implements GpuBackend {
           tight = new Uint8Array(w * 4 * h);
           for (let y = 0; y < h; y++) tight.set(mapped.subarray(y * bytesPerRow, y * bytesPerRow + w * 4), y * w * 4);
         }
-        return new VideoFrame(tight, { format: "RGBX", codedWidth: w, codedHeight: h, timestamp: timestampUs, duration: durationUs });
+        return new VideoFrame(tight, { format: this.format === "bgra8unorm" ? "BGRX" : "RGBX", codedWidth: w, codedHeight: h, timestamp: timestampUs, duration: durationUs });
       } finally {
         slot.buffer.unmap();
       }
