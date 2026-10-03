@@ -69,6 +69,12 @@ export type CodecExportOptions = {
   log?: (line: string) => void;
   /** Preferred codecs in order; the first one the browser can encode wins. */
   codecs?: VideoCodec[];
+  /**
+   * Frames whose render may be in flight at once (default 2): the next
+   * frame's draw is issued while the previous frame's capture/encode
+   * completes. Renderers that keep per-frame GPU state must tolerate this.
+   */
+  pipelineDepth?: number;
 };
 
 export type CodecExportResult = {
@@ -178,32 +184,52 @@ export async function exportWithCodec(
 
     const sampleSink = new VideoSampleSink(videoTrack);
     let lastProgressAt = 0;
-    for await (const sample of sampleSink.samples()) {
+    const depth = Math.max(1, opts.pipelineDepth ?? 2);
+    // Renders in flight, oldest first; each resolves to the frame to encode.
+    const inflight: { promise: Promise<VideoSample>; sample: VideoSample; timeSec: number }[] = [];
+    const encodeOldest = async () => {
+      const job = inflight.shift()!;
+      let out: VideoSample | undefined;
       try {
-        throwIfAborted(signal);
-        const timeSec = Math.max(0, sample.timestamp - t0);
-        const info: ExportFrameInfo = { timeSec, rotation, displayWidth, displayHeight, index: frames };
-        const rendered = await render(sample, info);
-        if (rendered instanceof VideoSample) rendered.setTimestamp(timeSec);
-        const out = rendered instanceof VideoSample
-          ? rendered
-          : new VideoSample(rendered, { timestamp: timeSec, duration: sample.duration });
+        out = await job.promise;
         // Awaiting add() is the encoder backpressure: without it the decode
         // loop outruns the encoder and buffers raw 4K frames until the tab dies.
-        try {
-          await videoSource.add(out);
-        } finally {
-          out.close();
-        }
-        frames += 1;
-        const now = performance.now();
-        if (duration > 0 && now - lastProgressAt > 100) {
-          lastProgressAt = now;
-          onProgress(Math.min(1, sample.timestamp / duration));
-        }
+        await videoSource.add(out);
       } finally {
-        sample.close();
+        out?.close();
+        job.sample.close();
       }
+      frames += 1;
+      const now = performance.now();
+      if (duration > 0 && now - lastProgressAt > 100) {
+        lastProgressAt = now;
+        onProgress(Math.min(1, job.timeSec / duration));
+      }
+    };
+    try {
+      for await (const sample of sampleSink.samples()) {
+        throwIfAborted(signal);
+        const timeSec = Math.max(0, sample.timestamp - t0);
+        const info: ExportFrameInfo = { timeSec, rotation, displayWidth, displayHeight, index: frames + inflight.length };
+        const promise = Promise.resolve(render(sample, info)).then((rendered) => {
+          if (rendered instanceof VideoSample) {
+            rendered.setTimestamp(timeSec);
+            return rendered;
+          }
+          return new VideoSample(rendered, { timestamp: timeSec, duration: sample.duration });
+        });
+        inflight.push({ promise, sample, timeSec });
+        if (inflight.length >= depth) await encodeOldest();
+      }
+      while (inflight.length > 0) await encodeOldest();
+    } catch (e) {
+      // Drain what is in flight so no frame leaks, then rethrow.
+      for (const job of inflight) {
+        job.promise.then((f) => f.close(), () => undefined);
+        job.sample.close();
+      }
+      inflight.length = 0;
+      throw e;
     }
     videoSource.close();
     throwIfAborted(signal);

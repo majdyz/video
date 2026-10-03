@@ -336,7 +336,9 @@ export class WebGPUBackend implements GpuBackend {
   // first export frame probes canvas → bitmap → readback and keeps the first
   // path that produces a lit picture.
   private capture: "canvas" | "bitmap" | "readback" | null = null;
-  private readbackBuf: GPUBuffer | null = null;
+  // Readback ring: the exporter keeps two renders in flight, so a frame can
+  // be mapping while the next one is copied into another slot.
+  private readbackRing: { buffer: GPUBuffer; busy: boolean }[] = [];
 
   async renderToFrame(timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
     const w = this.outputWidth;
@@ -347,8 +349,8 @@ export class WebGPUBackend implements GpuBackend {
       this.exportCtx.configure({ device: this.device, format: this.format, alphaMode: "opaque", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
       this.exportTex?.destroy();
       this.exportTex = this.device.createTexture({ size: [w, h], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
-      this.readbackBuf?.destroy();
-      this.readbackBuf = null;
+      for (const r of this.readbackRing) r.buffer.destroy();
+      this.readbackRing = [];
     }
     if (this.capture === null) await this.benchmarkCapture(timestampUs, durationUs);
     return this.captureAs(this.capture ?? "readback", timestampUs, durationUs);
@@ -414,26 +416,42 @@ export class WebGPUBackend implements GpuBackend {
     }
     // Readback through a tight RGBA8 buffer (rows repacked if padded).
     const bytesPerRow = Math.ceil((w * 4) / 256) * 256;
-    if (!this.readbackBuf) this.readbackBuf = this.device.createBuffer({ size: bytesPerRow * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    this.draw(this.exportTex!.createView());
-    const enc = this.device.createCommandEncoder();
-    enc.copyTextureToBuffer({ texture: this.exportTex! }, { buffer: this.readbackBuf, bytesPerRow }, [w, h]);
-    this.device.queue.submit([enc.finish()]);
-    const t1 = performance.now();
-    this.lastDrawMs = t1 - t0;
-    await this.readbackBuf.mapAsync(GPUMapMode.READ);
-    this.lastCaptureMs = performance.now() - t1;
+    if (this.readbackRing.length === 0) {
+      this.readbackRing = Array.from({ length: 3 }, () => ({
+        buffer: this.device.createBuffer({ size: bytesPerRow * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
+        busy: false,
+      }));
+    }
+    let slot = this.readbackRing.find((r) => !r.busy);
+    if (!slot) {
+      // More renders in flight than slots: wait for the oldest map to finish.
+      await new Promise<void>((r) => setTimeout(r, 1));
+      while (!(slot = this.readbackRing.find((r) => !r.busy))) await new Promise<void>((r) => setTimeout(r, 1));
+    }
+    slot.busy = true;
     try {
-      const mapped = new Uint8Array(this.readbackBuf.getMappedRange());
-      let tight: Uint8Array<ArrayBuffer>;
-      if (bytesPerRow === w * 4) tight = new Uint8Array(mapped);
-      else {
-        tight = new Uint8Array(w * 4 * h);
-        for (let y = 0; y < h; y++) tight.set(mapped.subarray(y * bytesPerRow, y * bytesPerRow + w * 4), y * w * 4);
+      this.draw(this.exportTex!.createView());
+      const enc = this.device.createCommandEncoder();
+      enc.copyTextureToBuffer({ texture: this.exportTex! }, { buffer: slot.buffer, bytesPerRow }, [w, h]);
+      this.device.queue.submit([enc.finish()]);
+      const t1 = performance.now();
+      this.lastDrawMs = t1 - t0;
+      await slot.buffer.mapAsync(GPUMapMode.READ);
+      this.lastCaptureMs = performance.now() - t1;
+      try {
+        const mapped = new Uint8Array(slot.buffer.getMappedRange());
+        let tight: Uint8Array<ArrayBuffer>;
+        if (bytesPerRow === w * 4) tight = new Uint8Array(mapped);
+        else {
+          tight = new Uint8Array(w * 4 * h);
+          for (let y = 0; y < h; y++) tight.set(mapped.subarray(y * bytesPerRow, y * bytesPerRow + w * 4), y * w * 4);
+        }
+        return new VideoFrame(tight, { format: "RGBX", codedWidth: w, codedHeight: h, timestamp: timestampUs, duration: durationUs });
+      } finally {
+        slot.buffer.unmap();
       }
-      return new VideoFrame(tight, { format: "RGBX", codedWidth: w, codedHeight: h, timestamp: timestampUs, duration: durationUs });
     } finally {
-      this.readbackBuf.unmap();
+      slot.busy = false;
     }
   }
 
@@ -484,7 +502,7 @@ export class WebGPUBackend implements GpuBackend {
     this.analysisTex?.destroy();
     this.analysisBuf?.destroy();
     this.exportTex?.destroy();
-    this.readbackBuf?.destroy();
+    for (const r of this.readbackRing) r.buffer.destroy();
     this.device.destroy();
   }
 }
