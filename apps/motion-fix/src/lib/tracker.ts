@@ -15,10 +15,16 @@
 //   5. MSAC similarity fit with the previous frame's motion as an extra
 //      hypothesis, refined by Tukey IRLS with track-age weights,
 //   6. a degrees-of-freedom ladder (similarity -> rigid -> translation ->
-//      identity) when inlier support is thin.
+//      identity) when inlier support is thin,
+//   7. an optional homography upgrade fitted on the similarity's inliers
+//      (normalised DLT, 4-point MSAC) and kept only when it explains them
+//      measurably better and passes sanity checks; the path solver ignores
+//      it, the renderer uses it for wobble suppression.
 //
 // Everything works on Float32 images in plain typed arrays so it runs in a
 // Worker, in Node for the tests, and needs no WASM download.
+
+import { affineAnisotropy, applyH, fitHomographyRobust, type Homography } from "./homography.ts";
 
 /** x' = a*x - b*y + tx ; y' = b*x + a*y + ty */
 export type Similarity = { a: number; b: number; tx: number; ty: number };
@@ -28,7 +34,7 @@ export const IDENTITY: Similarity = { a: 1, b: 0, tx: 0, ty: 0 };
 /** Which model the ladder settled on for a frame, in decreasing confidence. */
 export type MotionModel = "similarity" | "rigid" | "translation" | "identity";
 
-export type FrameMotion = Similarity & {
+export type SimilarityFit = Similarity & {
   model: MotionModel;
   /** Tracks that survived LK + forward-backward + cell RANSAC. */
   tracked: number;
@@ -36,6 +42,23 @@ export type FrameMotion = Similarity & {
   inliers: number;
   /** RMS residual of the inliers in analysis pixels. */
   rms: number;
+};
+
+/**
+ * Outcome of the homography upgrade: "upgraded" (kept), "similarity" (a sane
+ * fit that is not measurably better — the similarity stands in for it when
+ * chains are built), "none" (no trustworthy plane-projective model: thin
+ * support, or a homography that fits better but does not look like a camera
+ * motion).
+ */
+export type HomographyState = "none" | "similarity" | "upgraded";
+
+export type FrameMotion = SimilarityFit & {
+  /** Homography upgrade of the same prev -> current motion (centred analysis px); non-null only when `homographyState` is "upgraded". */
+  homography: Homography | null;
+  homographyState: HomographyState;
+  /** Mean reprojection error the homography saves over the similarity on the inliers (px; 0 unless upgraded). */
+  homographyGain: number;
 };
 
 export type TrackerOptions = {
@@ -65,6 +88,22 @@ export type TrackerOptions = {
   /** CLAHE clip limit relative to the uniform bin height; <= 0 disables CLAHE. */
   claheClip: number;
   claheTiles: number;
+  /** Homography upgrade: MSAC threshold (px). */
+  homographyThreshold: number;
+  homographyIterations: number;
+  /**
+   * Mean reprojection error the homography must save over the similarity
+   * (px) to be kept. On a pure similarity (synthetic or real reef clips from
+   * phones / action cameras) the apparent gain from fitting noise tops out
+   * near 0.1 px at 640 px, so 0.2 px is "measurably better".
+   */
+  homographyGain: number;
+  /** |h31|, |h32| limit per pixel at the 640-px analysis scale (scaled for other analysis widths). */
+  homographyMaxPerspective: number;
+  /** Corner displacement vs the similarity, as a fraction of the frame width. */
+  homographyMaxCorner: number;
+  /** Smallest allowed singular-value ratio of the affine part (1 = conformal). */
+  homographyMinAnisotropy: number;
 };
 
 export const DEFAULT_TRACKER_OPTIONS: TrackerOptions = {
@@ -84,6 +123,12 @@ export const DEFAULT_TRACKER_OPTIONS: TrackerOptions = {
   irlsIterations: 6,
   claheClip: 2.5,
   claheTiles: 8,
+  homographyThreshold: 1.0,
+  homographyIterations: 100,
+  homographyGain: 0.2,
+  homographyMaxPerspective: 4e-4,
+  homographyMaxCorner: 0.04,
+  homographyMinAnisotropy: 0.9,
 };
 
 // ---------------------------------------------------------------------------
@@ -552,6 +597,10 @@ export class MotionTracker {
   private readonly irlsW: Float32Array;
   private readonly res2: Float32Array;
   private readonly sortBuf: Float32Array;
+  private readonly hPx: Float32Array;
+  private readonly hPy: Float32Array;
+  private readonly hQx: Float32Array;
+  private readonly hQy: Float32Array;
   private rng = 0x9e3779b9;
 
   constructor(width: number, height: number, options: Partial<TrackerOptions> = {}) {
@@ -592,6 +641,10 @@ export class MotionTracker {
     this.irlsW = new Float32Array(c);
     this.res2 = new Float32Array(c);
     this.sortBuf = new Float32Array(c);
+    this.hPx = new Float32Array(c);
+    this.hPy = new Float32Array(c);
+    this.hQx = new Float32Array(c);
+    this.hQy = new Float32Array(c);
   }
 
   /** Number of live tracks after the last step (diagnostics). */
@@ -616,7 +669,7 @@ export class MotionTracker {
     this.next.build(this.gray);
     let motion: FrameMotion;
     if (!this.hasPrev) {
-      motion = { ...IDENTITY, model: "identity", tracked: 0, inliers: 0, rms: 0 };
+      motion = { ...IDENTITY, model: "identity", tracked: 0, inliers: 0, rms: 0, homography: null, homographyState: "none", homographyGain: 0 };
     } else {
       motion = this.estimate();
     }
@@ -661,19 +714,71 @@ export class MotionTracker {
       m++;
     }
     const fit = this.robustFit(m);
-    // 4. Keep only inliers as live tracks, advanced to their new positions.
+    // 4. Keep only inliers as live tracks, advanced to their new positions,
+    //    and collect them (centred) for the homography upgrade. The fit is
+    //    centred, the track store is top-left: test in the store's frame.
     let k = 0;
     const thr2 = opts.msacThreshold * opts.msacThreshold;
+    const cx = this.width * 0.5;
+    const cy = this.height * 0.5;
+    const fitTopLeft = this.toTopLeft(fit);
     for (let j = 0; j < m; j++) {
       const i = this.fitIdx[j];
-      if (fit.model !== "identity" && residual2(fit, tx[i], ty[i], nx[i], ny[i]) > thr2) continue;
+      if (fit.model !== "identity" && residual2(fitTopLeft, tx[i], ty[i], nx[i], ny[i]) > thr2) continue;
+      this.hPx[k] = tx[i] - cx;
+      this.hPy[k] = ty[i] - cy;
+      this.hQx[k] = nx[i] - cx;
+      this.hQy[k] = ny[i] - cy;
       tx[k] = nx[i];
       ty[k] = ny[i];
       this.age[k] = this.age[i] + 1;
       k++;
     }
     this.n = k;
-    return fit;
+    const upgrade = fit.model === "similarity" || fit.model === "rigid" ? this.upgradeToHomography(fit, k) : { state: "none" as const };
+    return { ...fit, homography: upgrade.state === "upgraded" ? upgrade.h : null, homographyState: upgrade.state, homographyGain: upgrade.state === "upgraded" ? upgrade.gain : 0 };
+  }
+
+  /**
+   * Fits a homography on the similarity's inliers and keeps it only when it
+   * explains them measurably better (mean reprojection error) and looks
+   * like a camera motion: small perspective terms, corners within a few
+   * percent of where the similarity puts them, no anisotropic stretch. A
+   * fish crossing the frame or a slightly wrong inlier set fails these and
+   * the frame falls back to the similarity, which the renderer treats as
+   * "no wobble correction across this keyframe interval".
+   */
+  private upgradeToHomography(sim: Similarity, n: number): { state: "upgraded"; h: Homography; gain: number } | { state: "similarity" | "none" } {
+    const { opts, hPx: px, hPy: py, hQx: qx, hQy: qy } = this;
+    if (n < 24) return { state: "none" };
+    const fit = fitHomographyRobust(px, py, qx, qy, n, {
+      threshold: opts.homographyThreshold,
+      maxIterations: opts.homographyIterations,
+      minInliers: 24,
+      minTriangleArea: 0.001 * this.width * this.height,
+    }, () => this.random());
+    if (!fit) return { state: "none" };
+    let simError = 0;
+    for (let i = 0; i < n; i++) simError += Math.sqrt(residual2(sim, px[i], py[i], qx[i], qy[i]));
+    simError /= n;
+    const gain = simError - fit.meanError;
+    // No measurable gain: the similarity is as good a homography as any.
+    if (gain < opts.homographyGain) return { state: "similarity" };
+    const h = fit.h;
+    const maxPerspective = (opts.homographyMaxPerspective * 640) / this.width;
+    if (Math.abs(h[6]) > maxPerspective || Math.abs(h[7]) > maxPerspective) return { state: "none" };
+    if (affineAnisotropy(h) < opts.homographyMinAnisotropy) return { state: "none" };
+    const hw = this.width * 0.5;
+    const hh = this.height * 0.5;
+    const maxCorner = opts.homographyMaxCorner * this.width;
+    for (const x of [-hw, hw]) {
+      for (const y of [-hh, hh]) {
+        const [hx, hy] = applyH(h, x, y);
+        const [sx, sy] = apply(sim, x, y);
+        if (Math.hypot(hx - sx, hy - sy) > maxCorner) return { state: "none" };
+      }
+    }
+    return { state: "upgraded", h, gain };
   }
 
   /**
@@ -742,13 +847,13 @@ export class MotionTracker {
    * previous frame's motion and identity, then Tukey-biweight IRLS on the
    * inliers. Falls down the DoF ladder when support is thin.
    */
-  private robustFit(m: number): FrameMotion {
+  private robustFit(m: number): SimilarityFit {
     const { fitPx: px, fitPy: py, fitQx: qx, fitQy: qy, fitAge, res2, irlsW } = this;
     const T = this.opts.msacThreshold;
     const T2 = T * T;
     const cx = this.width * 0.5;
     const cy = this.height * 0.5;
-    const identity = (): FrameMotion => ({ ...IDENTITY, model: "identity", tracked: m, inliers: 0, rms: 0 });
+    const identity = (): SimilarityFit => ({ ...IDENTITY, model: "identity", tracked: m, inliers: 0, rms: 0 });
     if (m < 4) return identity();
 
     const score = (s: Similarity): number => {

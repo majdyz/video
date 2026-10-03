@@ -40,6 +40,8 @@ function analysisFrom(poses: Similarity[], width: number, height: number, fps: n
     tracked: new Uint16Array(n).fill(220),
     rms: new Float32Array(n).fill(0.3),
     model: new Uint8Array(n).fill(3),
+    homography: new Float64Array(9 * n),
+    homographyState: new Uint8Array(n),
     trackMsPerFrame: 0,
   };
 }

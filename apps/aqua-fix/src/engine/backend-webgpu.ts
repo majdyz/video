@@ -46,6 +46,7 @@ export class WebGPUBackend implements GpuBackend {
   private analysisH = 0;
   private analysisBytesPerRow = 0;
   private readbackInFlight = false;
+  private previewScale = 1;
   private exportTex: GPUTexture | null = null;
   private exportCanvas: OffscreenCanvas | null = null;
   private exportCtx: GPUCanvasContext | null = null;
@@ -114,10 +115,7 @@ export class WebGPUBackend implements GpuBackend {
     const [ow, oh] = uprightSize(width, height, rotation);
     this.outputWidth = ow;
     this.outputHeight = oh;
-    if (this.canvas.width !== ow || this.canvas.height !== oh) {
-      this.canvas.width = ow;
-      this.canvas.height = oh;
-    }
+    this.sizeCanvas(this.previewScale);
     if (!this.source || this.srcW !== width || this.srcH !== height) {
       this.source?.destroy();
       this.source = this.device.createTexture({
@@ -162,6 +160,20 @@ export class WebGPUBackend implements GpuBackend {
     c2.drawImage(src as CanvasImageSource, 0, 0, width, height);
     this.device.queue.copyExternalImageToTexture({ source: this.scratch }, { texture: this.source }, [width, height]);
     void isVideoFrame;
+  }
+
+  setPreviewScale(scale: number): void {
+    this.previewScale = Math.min(1, Math.max(0.05, scale));
+    if (this.outputWidth) this.sizeCanvas(this.previewScale);
+  }
+
+  private sizeCanvas(scale: number): void {
+    const w = Math.max(1, Math.round(this.outputWidth * scale));
+    const h = Math.max(1, Math.round(this.outputHeight * scale));
+    if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.canvas.width = w;
+      this.canvas.height = h;
+    }
   }
 
   setUniforms(block: Float32Array): void {

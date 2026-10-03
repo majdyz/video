@@ -5,7 +5,8 @@
 // worker bundle does not drag React along.
 
 import { ALL_FORMATS, BlobSource, Input, VideoSampleSink } from "mediabunny";
-import { MODEL_CODE, type MotionAnalysis } from "./stabilize.ts";
+import { homographyFromSimilarity, rescaleH } from "./homography.ts";
+import { HOMOGRAPHY_STATE, MODEL_CODE, type MotionAnalysis } from "./stabilize.ts";
 import { MotionTracker, analysisSize } from "./tracker.ts";
 
 export type AnalysisProgress = (fraction: number, frames: number) => void;
@@ -45,6 +46,8 @@ export async function analyzeVideoFile(file: File, onProgress: AnalysisProgress,
     const tracked: number[] = [];
     const rms: number[] = [];
     const model: number[] = [];
+    const homography: number[] = [];
+    const homographyState: number[] = [];
     let cA = 1;
     let cB = 0;
     let cTX = 0;
@@ -83,6 +86,12 @@ export async function analyzeVideoFile(file: File, onProgress: AnalysisProgress,
         tracked.push(m.tracked);
         rms.push(m.rms);
         model.push(MODEL_CODE[m.model]);
+        // The homography is kept in source pixels like the translations;
+        // a pair the similarity explains as well stores the similarity, so
+        // chains can run straight through it.
+        const h = m.homography ? rescaleH(m.homography, scale) : homographyFromSimilarity({ a: m.a, b: m.b, tx, ty });
+        for (let i = 0; i < 9; i++) homography.push(h[i]);
+        homographyState.push(HOMOGRAPHY_STATE[m.homographyState]);
         const now = performance.now();
         if (duration > 0 && now - lastProgress > 80) {
           lastProgress = now;
@@ -110,6 +119,8 @@ export async function analyzeVideoFile(file: File, onProgress: AnalysisProgress,
       tracked: Uint16Array.from(tracked),
       rms: Float32Array.from(rms),
       model: Uint8Array.from(model),
+      homography: Float64Array.from(homography),
+      homographyState: Uint8Array.from(homographyState),
       trackMsPerFrame: trackMs / n,
     };
   } finally {

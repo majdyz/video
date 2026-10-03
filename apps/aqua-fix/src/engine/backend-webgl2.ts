@@ -33,6 +33,7 @@ export class WebGL2Backend implements GpuBackend {
   private analysisH = 0;
   private pbo: WebGLBuffer | null = null;
   private readbackInFlight = false;
+  private previewScale = 1;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -110,10 +111,7 @@ export class WebGL2Backend implements GpuBackend {
     const [ow, oh] = uprightSize(width, height, rotation);
     this.outputWidth = ow;
     this.outputHeight = oh;
-    if (this.canvas.width !== ow || this.canvas.height !== oh) {
-      this.canvas.width = ow;
-      this.canvas.height = oh;
-    }
+    this.sizeCanvas(this.previewScale);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.source);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
@@ -127,6 +125,20 @@ export class WebGL2Backend implements GpuBackend {
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, src as TexImageSource);
     }
     void isVideoFrame;
+  }
+
+  setPreviewScale(scale: number): void {
+    this.previewScale = Math.min(1, Math.max(0.05, scale));
+    if (this.outputWidth) this.sizeCanvas(this.previewScale);
+  }
+
+  private sizeCanvas(scale: number): void {
+    const w = Math.max(1, Math.round(this.outputWidth * scale));
+    const h = Math.max(1, Math.round(this.outputHeight * scale));
+    if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.canvas.width = w;
+      this.canvas.height = h;
+    }
   }
 
   setUniforms(block: Float32Array): void {
@@ -158,7 +170,7 @@ export class WebGL2Backend implements GpuBackend {
   render(): void {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, this.outputWidth, this.outputHeight);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     this.bindCommon(this.grade);
     for (let i = 0; i < DATA_SLOTS; i++) {
       gl.activeTexture(gl.TEXTURE1 + i);
@@ -170,6 +182,10 @@ export class WebGL2Backend implements GpuBackend {
   }
 
   async renderToFrame(timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
+    // Exports render at full size: the canvas is the only render surface
+    // this context can hand to a VideoFrame, so it is sized up for the
+    // duration (callers set the preview scale to 1 around an export).
+    this.sizeCanvas(1);
     this.render();
     return new VideoFrame(this.canvas, { timestamp: timestampUs, duration: durationUs });
   }

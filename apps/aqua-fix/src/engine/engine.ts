@@ -112,6 +112,11 @@ export class GradeEngine {
     return w;
   }
 
+  /** On-screen canvas scale relative to the source (exports ignore it). */
+  setPreviewScale(scale: number): void {
+    this.backend.setPreviewScale(scale);
+  }
+
   /** Uploads a frame. Call before render / analyze. */
   upload(src: SourceInput, width: number, height: number, rotation: Rotation): void {
     this.backend.upload(src, width, height, rotation);

@@ -40,9 +40,15 @@ export interface GpuBackend {
   render(): void;
   /** Draws the graded frame and wraps the result as a VideoFrame (export). */
   renderToFrame(timestampUs: number, durationUs: number | undefined): Promise<VideoFrame>;
-  /** Width/height of the last upright upload. */
+  /** Width/height of the last upright upload (full resolution; exports use it). */
   readonly outputWidth: number;
   readonly outputHeight: number;
+  /**
+   * Scale of the on-screen canvas relative to the source (0 < s ≤ 1). A 4K
+   * clip shown in a phone-sized stage needs no 4K preview; exports always
+   * render at full size regardless.
+   */
+  setPreviewScale(scale: number): void;
   dispose(): void;
 }
 

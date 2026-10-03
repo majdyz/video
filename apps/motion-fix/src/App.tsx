@@ -30,8 +30,7 @@ import { AnalysisClient } from "./lib/analysis-client.ts";
 import { MeshRenderer, type Rotation } from "./lib/mesh-renderer.ts";
 import {
   DEFAULT_PARAMS,
-  warpAtTime,
-  zoomedWarp,
+  warpFnAtTime,
   type MotionAnalysis,
   type StabilizedPath,
 } from "./lib/stabilize.ts";
@@ -122,8 +121,10 @@ export default function App() {
     renderer.resize(v.videoWidth, v.videoHeight);
     if (!renderer.upload(v, v.videoWidth, v.videoHeight)) return;
     const path = pathRef.current;
+    // Per-vertex warp (similarity + wobble residual): the same callback the
+    // export uses, so the preview is what gets saved.
     renderer.render({
-      warp: path ? zoomedWarp(warpAtTime(path, time)) : null,
+      warp: path ? warpFnAtTime(path, time) : null,
       rotation: 0,
       split: compareActiveRef.current ? compareSplitRef.current : null,
     });
@@ -342,7 +343,7 @@ export default function App() {
       if (!renderer.upload(fb, fb.width, fb.height)) throw new Error("Could not upload frame to WebGL");
       rotation = 0;
     }
-    renderer.render({ warp: zoomedWarp(warpAtTime(path, info.timeSec)), rotation, split: null });
+    renderer.render({ warp: warpFnAtTime(path, info.timeSec), rotation, split: null });
     return canvas;
   }
 
@@ -469,11 +470,24 @@ export default function App() {
             the kinks between segments.
           </li>
           <li>
+            <b>Wobble</b> — a similarity cannot describe parallax, refraction
+            through the port or what is left of rolling shutter, so each
+            frame pair also gets a homography (4-point MSAC on the
+            similarity's inliers, kept only when it fits measurably better
+            and looks like a camera motion). Following the paper's wobble
+            suppression, keyframes every 30 frames use the smoothed path
+            exactly; in between, the residual motion is replayed through the
+            chained homographies forward from the previous keyframe and
+            backward from the next, blended linearly in time, as a per-vertex
+            warp clamped to 2 % of the frame.
+          </li>
+          <li>
             <b>Zoom</b> — instead of a constant crop, each frame gets the
-            smallest zoom that fills the output, smoothed with a 2.5 s rolling
-            maximum and a Gaussian, within the <i>Max crop</i> budget. The
-            crop breathes slowly and invisibly rather than cropping the whole
-            clip for its worst second.
+            smallest zoom that fills the output (measured on the warped
+            border, wobble included), smoothed with a 2.5 s rolling maximum
+            and a Gaussian, within the <i>Max crop</i> budget. The crop
+            breathes slowly and invisibly rather than cropping the whole clip
+            for its worst second.
           </li>
           <li>
             <b>Render</b> — a 32×18 WebGL mesh samples the source where the
@@ -492,12 +506,13 @@ export default function App() {
         </p>
         <h4>Caveats</h4>
         <p>
-          A similarity describes camera rotation and zoom, not parallax or
-          rolling-shutter wobble. Phones and action cameras already correct
-          rolling shutter in-camera, so no per-row model is applied: with a
-          guessed readout time it adds jello rather than removing it. Clips
-          with a large moving subject that fills the frame will follow the
-          subject.
+          The path is planned on similarities (rotation, zoom, translation);
+          the wobble pass only corrects what a single plane-projective motion
+          per frame can explain, so strong parallax from nearby coral stays.
+          Phones and action cameras already correct rolling shutter in-camera,
+          so no per-row readout model is applied: with a guessed readout time
+          it adds jello rather than removing it. Clips with a large moving
+          subject that fills the frame will follow the subject.
         </p>
         <h4>References</h4>
         <ul>

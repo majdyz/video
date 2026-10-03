@@ -32,6 +32,8 @@ type Mode = "idle" | "photo" | "video";
 // The exporter analyses every Nth decoded frame; the smoother carries the
 // grade across the frames in between exactly as it does in the preview.
 const EXPORT_ANALYSIS_STRIDE = 4;
+// Preview renders at the stage's device-pixel size (capped), never at 4K.
+const PREVIEW_MAX_WIDTH = 1600;
 
 function waitForEvent(el: HTMLMediaElement, ok: string[], bad: string[], timeoutMs: number, failMsg: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
@@ -78,7 +80,11 @@ function waitForFirstFrame(video: HTMLVideoElement, timeoutMs: number): Promise<
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Frame grabbed when the video pauses, so wipe drags and slider changes
+  // repaint from a stable bitmap (Safari won't re-upload a paused <video>).
+  const pausedFrameRef = useRef<ImageBitmap | null>(null);
   const engineRef = useRef<GradeEngine | null>(null);
   const bitmapRef = useRef<ImageBitmap | null>(null);
   const fileRef = useRef<File | null>(null);
@@ -167,6 +173,32 @@ export default function App() {
     };
   }, []);
 
+  // Preview scale from the stage's device-pixel size and the source size.
+  function applyPreviewScale() {
+    const e = engineRef.current;
+    const stage = stageRef.current;
+    if (!e || !stage || exportingRef.current) return;
+    const sw = e.backend.outputWidth;
+    const sh = e.backend.outputHeight;
+    if (!sw || !sh) return;
+    const dpr = Math.min(3, window.devicePixelRatio || 1);
+    const wantW = Math.min(PREVIEW_MAX_WIDTH, stage.clientWidth * dpr);
+    const wantH = stage.clientHeight * dpr;
+    const scale = Math.min(1, wantW / sw, wantH / sh);
+    e.setPreviewScale(scale);
+  }
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const ro = new ResizeObserver(() => {
+      applyPreviewScale();
+      repaint();
+    });
+    ro.observe(stage);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Paint the current still (photo, or paused video) with the current grade.
   function repaint() {
     const e = engineRef.current;
@@ -179,16 +211,48 @@ export default function App() {
     }
     const v = videoRef.current;
     if (modeRef.current === "video" && v && v.paused && v.readyState >= 2 && !exportingRef.current) {
-      e.upload(v, v.videoWidth, v.videoHeight, 0);
+      const still = pausedFrameRef.current;
+      if (still) e.upload(still, still.width, still.height, 0);
+      else e.upload(v, v.videoWidth, v.videoHeight, 0);
       e.render();
     }
+  }
+
+  // Grab the paused frame as a bitmap (and drop it on play).
+  async function captureStill() {
+    const v = videoRef.current;
+    if (!v || !v.paused || v.readyState < 2 || modeRef.current !== "video") return;
+    const myGen = fileGenRef.current;
+    try {
+      const bmp = await createImageBitmap(v);
+      if (myGen !== fileGenRef.current || !v.paused) {
+        bmp.close();
+        return;
+      }
+      pausedFrameRef.current?.close();
+      pausedFrameRef.current = bmp;
+    } catch {
+      // Keep uploading from the element.
+    }
+  }
+  function dropStill() {
+    pausedFrameRef.current?.close();
+    pausedFrameRef.current = null;
   }
 
   const { currentTime, isPaused } = useVideoPlaybackState(videoRef, mode === "video", () => {
     const v = videoRef.current;
     if (!v || v.readyState < 2) return;
+    dropStill();
     renderVideoFrame(v);
+    if (v.paused) void captureStill();
   });
+  useEffect(() => {
+    if (mode !== "video") return;
+    if (isPaused) void captureStill();
+    else dropStill();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPaused, mode]);
 
   function renderVideoFrame(v: HTMLVideoElement) {
     const e = engineRef.current;
@@ -242,6 +306,7 @@ export default function App() {
       try { bitmapRef.current.close(); } catch { /* ignore */ }
       bitmapRef.current = null;
     }
+    dropStill();
     engineRef.current?.reset();
   }
 
@@ -287,6 +352,7 @@ export default function App() {
     modeRef.current = "photo";
     setMode("photo");
     e.upload(bitmap, bitmap.width, bitmap.height, 0);
+    applyPreviewScale();
     try {
       await e.analyzeNow(true);
     } catch (err) {
@@ -320,6 +386,8 @@ export default function App() {
     if (!video.videoWidth) throw new Error("This video has no decodable picture (unsupported codec?)");
     modeRef.current = "video";
     setMode("video");
+    e.upload(video, video.videoWidth, video.videoHeight, 0);
+    applyPreviewScale();
     // Analyse the first frame and snap so the clip never shows uncorrected;
     // if analysis fails the preview still runs (ungraded) and the error shows.
     e.upload(video, video.videoWidth, video.videoHeight, 0);
@@ -355,6 +423,7 @@ export default function App() {
     const bitmap = bitmapRef.current;
     if (!e || !bitmap) return;
     try {
+      e.setPreviewScale(1);
       e.upload(bitmap, bitmap.width, bitmap.height, 0);
       const frame = await e.renderToFrame(0, 0, undefined);
       const out = document.createElement("canvas");
@@ -367,6 +436,7 @@ export default function App() {
     } catch (err) {
       setError("Save failed: " + (err instanceof Error ? err.message : String(err)));
     } finally {
+      applyPreviewScale();
       repaint();
     }
   }
@@ -402,6 +472,8 @@ export default function App() {
     // Export has its own temporal state: start clean so the first frame
     // snaps to its own analysis instead of inheriting the preview's.
     e.reset();
+    dropStill();
+    e.setPreviewScale(1);
     let frames = 0;
     try {
       const result = await exportWithCodec(
@@ -450,7 +522,8 @@ export default function App() {
       }
       if (fileRef.current === file) {
         e.upload(video, video.videoWidth, video.videoHeight, 0);
-        await e.analyzeNow(true);
+        applyPreviewScale();
+        await e.analyzeNow(true).catch(() => undefined);
         e.render();
         await video.play().catch(() => undefined);
         startPreview();
@@ -531,6 +604,7 @@ export default function App() {
       </Modal>
 
       <div
+        ref={stageRef}
         className={`stage ${mode === "idle" ? "is-empty" : ""}`}
         onClick={(e) => {
           if (mode !== "video" || exporting) return;

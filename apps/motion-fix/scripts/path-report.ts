@@ -3,8 +3,9 @@
 //   node --experimental-strip-types apps/motion-fix/scripts/path-report.ts <clip.mp4> [smoothing] [maxCrop]
 // FIDELITY=0,0.1,0.5 sweeps the fidelity weight on the same analysis.
 import { spawnSync } from "node:child_process";
-import { computeStabilizedPath, rawMotion, residualMotion, MODEL_CODE, type MotionAnalysis } from "../src/lib/stabilize.ts";
+import { computeStabilizedPath, rawMotion, residualMotion, HOMOGRAPHY_STATE, MODEL_CODE, type MotionAnalysis } from "../src/lib/stabilize.ts";
 import { GRUNDMANN_WEIGHTS } from "../src/lib/path-l1.ts";
+import { homographyFromSimilarity, rescaleH } from "../src/lib/homography.ts";
 import { MotionTracker } from "../src/lib/tracker.ts";
 
 const [file, smoothingArg, cropArg] = process.argv.slice(2);
@@ -34,6 +35,9 @@ const inliers = new Uint16Array(n);
 const tracked = new Uint16Array(n);
 const rms = new Float32Array(n);
 const model = new Uint8Array(n);
+const homography = new Float64Array(9 * n);
+const homographyState = new Uint8Array(n);
+let upgrades = 0;
 let c = { a: 1, b: 0, tx: 0, ty: 0 };
 let ms = 0;
 for (let t = 0; t < n; t++) {
@@ -51,14 +55,17 @@ for (let t = 0; t < n; t++) {
   tracked[t] = m.tracked;
   rms[t] = m.rms;
   model[t] = MODEL_CODE[m.model];
+  homography.set(m.homography ? rescaleH(m.homography, scale) : homographyFromSimilarity({ a: m.a, b: m.b, tx, ty }), 9 * t);
+  homographyState[t] = HOMOGRAPHY_STATE[m.homographyState];
+  if (m.homography) upgrades++;
 }
-const analysis: MotionAnalysis = { width, height, analysisWidth: aw, analysisHeight: ah, frameCount: n, frameRate: fps, times, motion, cumulative, inliers, tracked, rms, model, trackMsPerFrame: ms / n };
+const analysis: MotionAnalysis = { width, height, analysisWidth: aw, analysisHeight: ah, frameCount: n, frameRate: fps, times, motion, cumulative, inliers, tracked, rms, model, homography, homographyState, trackMsPerFrame: ms / n };
 const params = { smoothing: Number(smoothingArg ?? 0.8), maxCrop: Number(cropArg ?? 0.15) };
 const rawSummary = rawMotion(analysis);
 const models = [0, 0, 0, 0];
 for (let t = 0; t < n; t++) models[model[t]]++;
 console.log(`${file}: ${n} frames ${width}x${height}@${fps.toFixed(2)}, tracker ${(ms / n).toFixed(1)} ms/frame`);
-console.log(`  models: similarity ${models[3]}, rigid ${models[2]}, translation ${models[1]}, identity ${models[0]}`);
+console.log(`  models: similarity ${models[3]}, rigid ${models[2]}, translation ${models[1]}, identity ${models[0]}; homography upgrades ${upgrades}`);
 console.log(`  raw motion ${rawSummary.meanShift.toFixed(2)} px/frame, ${rawSummary.meanRotationDeg.toFixed(3)}°/frame, jitter RMS ${rawSummary.jitterRms.toFixed(2)} px`);
 const fidelities = (process.env.FIDELITY ?? String(GRUNDMANN_WEIGHTS.fidelity)).split(",").map(Number);
 for (const fidelity of fidelities) {
