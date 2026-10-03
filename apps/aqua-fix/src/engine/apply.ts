@@ -110,7 +110,13 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
     lumBs += Bs[c] * wl;
   }
   const sig = Math.max(0, (lumI - lumB) / lumI);
-  const wSub = smoothstep(p.subLo, p.subHi, sig);
+  // An object whose hue sits far from the veil's (yellow algae, a red fish
+  // under blue water) has already escaped the cast: it is near, and the
+  // global fit overstates its veil. Per-channel subtraction would push it
+  // past its own colour (yellow → orange), so it is de-scattered
+  // proportionally instead.
+  const [, pa, pb] = linearToOklab(r0, g0, b0);
+  const wSub = smoothstep(p.subLo, p.subHi, sig) * (1 - hueFar(pa, pb, p));
   const prop = Math.max(p.floorFrac, 1 - lumBs / lumI);
   const full = [0, 0, 0];
   for (let c = 0; c < 3; c++) {
@@ -122,7 +128,6 @@ export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number
   }
   // Per-pixel classification for the fallback: hue against the veil and
   // the signal fraction, the same tests the analysis runs on the thumbnail.
-  const [, pa, pb] = linearToOklab(r0, g0, b0);
   const confSignal = smoothstep(p.confLo, p.confHi, sig);
   const confPix = Math.min(confSignal, hueConf(pa, pb, p));
   // A pixel the veil model would nearly erase takes the water path whatever
@@ -197,6 +202,17 @@ function clamp(x: number, lo: number, hi: number): number {
 function smoothstep(e0: number, e1: number, x: number): number {
   const t = clamp((x - e0) / (e1 - e0), 0, 1);
   return t * t * (3 - 2 * t);
+}
+
+/** Mirrors analyze.ts hueFarness: 1 when the hue is ≥ hueFarHi from the veil's. */
+function hueFar(a: number, b: number, p: GradeParams): number {
+  const c = Math.hypot(a, b);
+  if (c < p.achroma) return 0;
+  const [, va, vb] = linearToOklab(p.veilColor[0], p.veilColor[1], p.veilColor[2]);
+  const vn = Math.hypot(va, vb) || 1;
+  const cosang = Math.max(-1, Math.min(1, (a * va / vn + b * vb / vn) / c));
+  const t = 1 - smoothstep(Math.cos(p.hueFarHi), Math.cos(p.hueFarLo), cosang);
+  return t * smoothstep(p.achroma, p.achroma * 2, c);
 }
 
 /** Mirrors analyze.ts hueConfidence using the packed veil hue. */

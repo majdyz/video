@@ -56,6 +56,10 @@ export type GradeParams = {
   /** Oklab hue distance (radians) ramp: below hueLo a pixel's hue matches the veil → water. */
   cosLo: number;
   cosHi: number;
+  /** Hue distance (radians) from the veil beyond which an object is
+   *  de-scattered proportionally (hue-preserving) rather than per channel. */
+  hueFarLo: number;
+  hueFarHi: number;
   /** Oklab chroma below which a pixel is achromatic and always counts as an object. */
   achroma: number;
   /** Exponent on the exposure for the water path (water keeps its brightness). */
@@ -99,6 +103,8 @@ export const IDENTITY_PARAMS: GradeParams = {
   veilColor: [0, 0, 1],
   cosLo: 0,
   cosHi: 0.001,
+  hueFarLo: 3,
+  hueFarHi: 3.1,
   achroma: 0,
   waterExposure: 1,
   exposure: 1,
@@ -155,9 +161,9 @@ export const CLAHE_BINS = 32;
  *  p8: depthW, depthH, tilesX, tilesY
  *  p9: bins, floorFrac, zLo, zHi
  *  p10: ulap mu0, mu1, mu2, shadowFloor
- *  p11: waterWb.rgb, 0
+ *  p11: waterWb.rgb, hueFarHi
  *  p12: confLo, confHi, cosLo, cosHi
- *  p15: knee, subLo, subHi, 0
+ *  p15: knee, subLo, subHi, hueFarLo
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -183,7 +189,7 @@ export function packUniforms(
   // zMean rides in p14.w (p9 is full).
 
   u.set([ULAP.mu0, ULAP.mu1, ULAP.mu2, params.shadowFloor], 40);
-  u.set([...params.waterWb, 0], 44);
+  u.set([...params.waterWb, params.hueFarHi], 44);
   u.set([params.confLo, params.confHi, params.cosLo, params.cosHi], 48);
   u.set([...params.veilColor, params.achroma], 52);
   {
@@ -191,7 +197,7 @@ export function packUniforms(
     const c = Math.hypot(a, b) || 1;
     u.set([a / c, b / c, params.waterExposure, params.zMean], 56);
   }
-  u.set([params.knee, params.subLo, params.subHi, 0], 60);
+  u.set([params.knee, params.subLo, params.subHi, params.hueFarLo], 60);
   return u;
 }
 
@@ -238,6 +244,8 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     veilColor: v(a.veilColor, b.veilColor),
     cosLo: m(a.cosLo, b.cosLo),
     cosHi: m(a.cosHi, b.cosHi),
+    hueFarLo: m(a.hueFarLo, b.hueFarLo),
+    hueFarHi: m(a.hueFarHi, b.hueFarHi),
     achroma: m(a.achroma, b.achroma),
     waterExposure: m(a.waterExposure, b.waterExposure),
     exposure: ml(a.exposure, b.exposure),

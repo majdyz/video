@@ -81,6 +81,13 @@ vec4 sampleFields(vec2 uv, vec3 c, out float kOut) {
 }
 float smoothstepf(float e0, float e1, float x) { float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
 // 1 for objects, 0 for water: Oklab hue distance to the veil, achromatic → object.
+float hueFar(vec2 ab, vec2 veilHue, float lo, float hi, float achroma) {
+  float c = length(ab);
+  if (c < achroma) return 0.0;
+  float cosang = clamp(dot(ab / c, veilHue), -1.0, 1.0);
+  float t = 1.0 - smoothstepf(cos(hi), cos(lo), cosang);
+  return t * smoothstepf(achroma, achroma * 2.0, c);
+}
 float hueConf(vec2 ab, vec2 veilHue, float lo, float hi, float achroma) {
   float c = length(ab);
   if (c < achroma) return 1.0;
@@ -124,9 +131,9 @@ vec3 grade(vec3 src, vec2 uv) {
   int tilesX = int(p[8].z + 0.5), tilesY = int(p[8].w + 0.5), bins = int(p[9].x + 0.5);
   float floorFrac = p[9].y, zLo = p[9].z, zHi = p[9].w;
   vec3 mu = p[10].xyz; float shadowFloor = p[10].w;
-  vec3 waterWb = p[11].xyz;
+  vec3 waterWb = p[11].xyz; float hueFarHi = p[11].w;
   float confLo = p[12].x, confHi = p[12].y, hueLo = p[12].z, hueHi = p[12].w;
-  float knee = p[15].x, subLo = p[15].y, subHi = p[15].z;
+  float knee = p[15].x, subLo = p[15].y, subHi = p[15].z, hueFarLo = p[15].w;
   float achroma = p[13].w;
   vec2 veilHue = p[14].xy;
   float waterExposure = p[14].z, zMean = p[14].w;
@@ -152,12 +159,14 @@ vec3 grade(vec3 src, vec2 uv) {
   float lumB = lum(B);
   float lumBs = lum(Bs);
   float sig = max(0.0, (lumI - lumB) / lumI);
-  float wSub = smoothstepf(subLo, subHi, sig);
+  // A hue far from the veil's is a near object the global fit overstates:
+  // proportional (hue-preserving) subtraction only (see apply.ts).
+  vec3 lab0 = linearToOklab(lin);
+  float wSub = smoothstepf(subLo, subHi, sig) * (1.0 - hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma));
   vec3 per = max(lin - Bs, lin * floorFrac);
   vec3 D = mix(lin * max(floorFrac, 1.0 - lumBs / lumI), per, wSub);
   // Water/object confidence: the map where it matches, else the pixel's own
   // hue + signal tests (the analysis runs the same on the thumbnail).
-  vec3 lab0 = linearToOklab(lin);
   float confSignal = smoothstepf(confLo, confHi, sig);
   float confPix = min(confSignal, hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma));
   // Whatever the map says, a pixel the veil model would nearly erase
@@ -281,6 +290,13 @@ fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> array<vec4<f32>, 2> {
   return array<vec4<f32>, 2>(sum / sw, vec4(0.0, 0.0, 0.0, min(1.0, sw / 0.08)));
 }
 fn smoothstepf(e0: f32, e1: f32, x: f32) -> f32 { let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
+fn hueFar(ab: vec2<f32>, veilHue: vec2<f32>, lo: f32, hi: f32, achroma: f32) -> f32 {
+  let c = length(ab);
+  if (c < achroma) { return 0.0; }
+  let cosang = clamp(dot(ab / c, veilHue), -1.0, 1.0);
+  let t = 1.0 - smoothstepf(cos(hi), cos(lo), cosang);
+  return t * smoothstepf(achroma, achroma * 2.0, c);
+}
 fn hueConf(ab: vec2<f32>, veilHue: vec2<f32>, lo: f32, hi: f32, achroma: f32) -> f32 {
   let c = length(ab);
   if (c < achroma) { return 1.0; }
@@ -323,9 +339,9 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let tilesX = i32(p[8].z + 0.5); let tilesY = i32(p[8].w + 0.5); let bins = i32(p[9].x + 0.5);
   let floorFrac = p[9].y; let zLo = p[9].z; let zHi = p[9].w;
   let mu = p[10].xyz; let shadowFloor = p[10].w;
-  let waterWb = p[11].xyz;
+  let waterWb = p[11].xyz; let hueFarHi = p[11].w;
   let confLo = p[12].x; let confHi = p[12].y; let hueLo = p[12].z; let hueHi = p[12].w;
-  let knee = p[15].x; let subLo = p[15].y; let subHi = p[15].z;
+  let knee = p[15].x; let subLo = p[15].y; let subHi = p[15].z; let hueFarLo = p[15].w;
   let achroma = p[13].w;
   let veilHue = p[14].xy;
   let waterExposure = p[14].z; let zMean = p[14].w;
@@ -348,10 +364,10 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let lumB = lum(B);
   let lumBs = lum(Bs);
   let sig = max(0.0, (lumI - lumB) / lumI);
-  let wSub = smoothstepf(subLo, subHi, sig);
+  let lab0 = linearToOklab(lin);
+  let wSub = smoothstepf(subLo, subHi, sig) * (1.0 - hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma));
   let per = max(lin - Bs, lin * floorFrac);
   let D = mix(lin * max(floorFrac, 1.0 - lumBs / lumI), per, vec3(wSub));
-  let lab0 = linearToOklab(lin);
   let confSignal = smoothstepf(confLo, confHi, sig);
   let confPix = min(confSignal, hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma));
   let conf = mix(confPix, clamp(fld.y, 0.0, 1.0), k) * confSignal;

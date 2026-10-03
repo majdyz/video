@@ -58,10 +58,16 @@ const VEIL_SCALE_MIN = 0.6;
 const VEIL_SCALE_MAX = 2.2;
 const VEIL_MIN_SAMPLES = 6;
 const ACHROMA = 0.025;
+// Hue distance from the veil beyond which an object is de-scattered
+// proportionally only (it has escaped the cast: it is near, and the global
+// fit overstates its veil — per-channel subtraction turns yellow orange).
+const HUE_FAR_LO = (60 * Math.PI) / 180;
+const HUE_FAR_HI = (110 * Math.PI) / 180;
 // The water path keeps most of its original brightness.
 const WATER_EXPOSURE = 0.8;
 // How much of the white balance the water path gets (exponent on the gains).
 const WATER_WB_POWER = 0.6;
+const WATER_WB_MAX = 1.6;
 // White balance limits (linear gains relative to green).
 // Under water the cast is always blue/green: a red gain below 1 (or a
 // blue gain far above 1) only ever comes from a gray-world vote dominated
@@ -72,8 +78,11 @@ const WB_B_MIN = 0.55;
 const WB_B_MAX = 1.5;
 // Below this share of confident pixels the scene is mostly water and the
 // gray-world assumption is weak: shrink the balance toward identity.
-const WB_CONF_LO = 0.03;
-const WB_CONF_HI = 0.25;
+// A deep or murky scene is far-dominated everywhere: few pixels keep much
+// signal, yet it is exactly where the balance must act. A few percent of
+// voting pixels is enough.
+const WB_CONF_LO = 0.01;
+const WB_CONF_HI = 0.06;
 // Memory-colour guardrail: back red off while too many mid-tone, saturated
 // pixels sit in the magenta hue band.
 const MAGENTA_LO = 300;
@@ -82,11 +91,17 @@ const MAGENTA_MAX_FRACTION = 0.015;
 const GUARD_STEPS = 6;
 // Exposure / levels.
 const KEY_TARGET = 0.14;
+// Share of confident pixels below which the key stops driving exposure.
+const KEY_COVER_LO = 0.02;
+const KEY_COVER_HI = 0.15;
 const EXPOSURE_MIN = 0.6;
+// The key alone pulls a bright scene down no further than this; the
+// highlight ceiling may go on to EXPOSURE_MIN.
+const KEY_EXPOSURE_MIN = 0.75;
 const EXPOSURE_MAX = 1.35;
 const HIGHLIGHT_CEILING = 0.86;
 const LEVELS_MIX = 0.5;
-const LEVELS_WHITE_MIN = 0.55;
+const LEVELS_WHITE_MIN = 0.65;
 const CLAHE_CLIP = 2.0;
 // Highlight shoulder: linear luminance above KNEE rolls off toward 1.
 const KNEE = 0.75;
@@ -197,26 +212,47 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
 
   // Spatial veil scale from water-hued pixels (see VEIL_CELLS_*).
   const hueObj = new Float32Array(n);
+  const hueFarArr = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const [, pa, pb] = linearToOklab(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
     hueObj[i] = hueConfidence(pa, pb, veilHue, HUE_LO, HUE_HI, ACHROMA);
+    hueFarArr[i] = hueFarness(pa, pb, veilHue, HUE_FAR_LO, HUE_FAR_HI, ACHROMA);
   }
   const veilScale = veilScaleMap(lin, z, hueObj, binf, betaB, cB, w, h);
   const J = new Float32Array(n * 3);
   const conf = new Float32Array(n);
+  const wbWeight = new Float32Array(n);
+  // Mirrors the shader: the scaled veil says whether a pixel *is* water
+  // (sunlit water sits above the global fit); what gets subtracted from an
+  // object is at most the global fit; and a pixel that keeps little signal
+  // gets a proportional (hue-preserving) subtraction instead of per channel.
   for (let i = 0; i < n; i++) {
     const zi = z[i];
-    let dl = 0;
+    const lumI = Math.max(1e-5, lum[i]);
+    const subScale = Math.min(1, veilScale[i]);
+    let lumBc = 0, lumBs = 0;
+    const Bsub = [0, 0, 0];
+    for (let c = 0; c < 3; c++) {
+      const bf = binf[c] * (1 - Math.exp(-(betaB[c] * zi + cB[c])));
+      Bsub[c] = subScale * bf;
+      const wl = c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722;
+      lumBc += veilScale[i] * bf * wl;
+      lumBs += Bsub[c] * wl;
+    }
+    const sig = Math.max(0, (lumI - lumBc) / lumI);
+    const wSub = smoothstep(SUB_LO, SUB_HI, sig) * (1 - hueFarArr[i]);
+    const prop = Math.max(FLOOR_FRAC, 1 - lumBs / lumI);
     for (let c = 0; c < 3; c++) {
       const I = lin[i * 3 + c];
-      const B = veilScale[i] * binf[c] * (1 - Math.exp(-(betaB[c] * zi + cB[c])));
-      const D = Math.max(I - B, I * FLOOR_FRAC);
-      dl += D * (c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722);
-      J[i * 3 + c] = D;
+      const per = Math.max(I - Bsub[c], I * FLOOR_FRAC);
+      J[i * 3 + c] = I * prop + (per - I * prop) * wSub;
     }
-    void zi;
-    const confSignal = smoothstep(CONF_LO, CONF_HI, dl / Math.max(1e-5, lum[i]));
+    const confSignal = smoothstep(CONF_LO, CONF_HI, sig);
     conf[i] = Math.min(confSignal, hueObj[i]);
+    // The balance vote uses the signal test alone: in a blue scene nearly
+    // every object shares the water's hue and the hue test would starve the
+    // vote, leaving deep reef uncorrected. Open water drops out by itself.
+    wbWeight[i] = Math.sqrt(confSignal);
   }
 
   // 4. Shades-of-Gray white balance (p = 6) on the de-scattered image,
@@ -224,7 +260,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   const P = 6;
   let sr = 0, sg = 0, sb = 0, sw = 0;
   for (let i = 0; i < n; i++) {
-    const wgt = conf[i];
+    const wgt = wbWeight[i];
     if (wgt <= 0) continue;
     const r = J[i * 3], g = J[i * 3 + 1], b = J[i * 3 + 2];
     const r2 = r * r, g2 = g * g, b2 = b * b;
@@ -239,7 +275,12 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     const eg = Math.pow(sg / sw, 1 / P) + 1e-5;
     const eb = Math.pow(sb / sw, 1 / P) + 1e-5;
     wb[0] = Math.min(WB_R_MAX, Math.max(WB_R_MIN, eg / er));
-    wb[2] = Math.min(WB_B_MAX, Math.max(WB_B_MIN, eg / eb));
+    // Blue is the last channel the water takes: a blue gain above 1 is only
+    // physical when the water itself is green (chlorophyll absorbs blue).
+    // Under a blue veil a gray-world blue push is a yellow subject (algae,
+    // sand) being neutralised, so cap it by the veil's green:blue ratio.
+    const bMax = Math.min(WB_B_MAX, Math.max(1, binf[1] / Math.max(1e-4, binf[2])));
+    wb[2] = Math.min(bMax, Math.max(WB_B_MIN, eg / eb));
   }
   // Mostly-water scenes: shrink toward identity.
   const wbConf = smoothstep(WB_CONF_LO, WB_CONF_HI, sw / n);
@@ -247,7 +288,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   wb[2] = 1 + (wb[2] - 1) * wbConf;
   // Memory-colour guardrail.
   for (let step = 0; step < GUARD_STEPS; step++) {
-    if (magentaFraction(J, conf, n, wb) <= MAGENTA_MAX_FRACTION) break;
+    if (magentaFraction(J, wbWeight, n, wb) <= MAGENTA_MAX_FRACTION) break;
     wb[0] = Math.max(WB_R_MIN, wb[0] * 0.9);
   }
   const attn: Vec3 = [ATTN_GAMMA * Math.log(wb[0]), 0, ATTN_GAMMA * Math.log(wb[2])];
@@ -257,7 +298,11 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
       J[i * 3 + c] *= Math.min(GAIN_CAP, Math.max(1 / GAIN_CAP, Math.exp(attn[c] * dz)));
     }
   }
-  const waterWb: Vec3 = [Math.pow(wb[0], WATER_WB_POWER), 1, Math.pow(wb[2], WATER_WB_POWER)];
+  // The water path gets a toned-down balance, capped: deep or murky water
+  // whose balance runs to the clamp must stay water-coloured rather than
+  // turn grey-white.
+  const waterGain = (g: number) => Math.min(WATER_WB_MAX, Math.max(1 / WATER_WB_MAX, Math.pow(g, WATER_WB_POWER)));
+  const waterWb: Vec3 = [waterGain(wb[0]), 1, waterGain(wb[2])];
   // Final per-pixel signal before exposure: mix(water, physics, conf). The
   // exposure is solved below on the physics path; the water path takes
   // exposure^WATER_EXPOSURE, which the shader applies per pixel.
@@ -275,15 +320,6 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // robust levels. The key is measured on the confident (object) pixels so
   // open water doesn't dictate it; the ceiling sees every pixel.
   const Y = new Float32Array(n);
-  let logSum = 0, logW = 0;
-  for (let i = 0; i < n; i++) {
-    const y = luminance(J[i * 3], J[i * 3 + 1], J[i * 3 + 2]);
-    const wgt = 0.15 + conf[i];
-    logSum += wgt * Math.log(1e-4 + y);
-    logW += wgt;
-  }
-  const lavg = Math.exp(logSum / Math.max(1e-6, logW));
-  let exposure = Math.min(EXPOSURE_MAX, Math.max(EXPOSURE_MIN, KEY_TARGET / Math.max(1e-4, lavg)));
   const mixY = (i: number, e: number) => {
     const ew = Math.pow(e, WATER_EXPOSURE);
     const wgt = conf[i];
@@ -296,6 +332,20 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     y = Math.max(y, shadowFloorAt(lum[i]) * lum[i] * ew);
     return y > KNEE ? KNEE + (1 - KNEE) * (1 - Math.exp(-(y - KNEE) / (1 - KNEE))) : y;
   };
+  // Key from the object pixels of the blended image at unit exposure. A
+  // scene with (almost) no confident pixels — deep blue, far wreck, murky
+  // haze — is left at its own brightness: lifting it only whitens the haze.
+  let logSum = 0, logW = 0, confSum = 0;
+  for (let i = 0; i < n; i++) {
+    const y = mixY(i, 1);
+    logSum += conf[i] * Math.log(1e-4 + y);
+    logW += conf[i];
+    confSum += conf[i];
+  }
+  const coverage = smoothstep(KEY_COVER_LO, KEY_COVER_HI, confSum / n);
+  const lavg = logW > 1e-6 ? Math.exp(logSum / logW) : KEY_TARGET;
+  let exposure = Math.min(EXPOSURE_MAX, Math.max(KEY_EXPOSURE_MIN, KEY_TARGET / Math.max(1e-4, lavg)));
+  exposure = 1 + (exposure - 1) * coverage;
   for (let i = 0; i < n; i++) Y[i] = mixY(i, exposure);
   const [p995] = percentiles(Y, [0.995]);
   if (p995 > HIGHLIGHT_CEILING) {
@@ -308,7 +358,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // A black point is a crush by definition; keep it tiny so a frame that
   // darkens under a smoothed, brighter-frame black point loses nothing.
   const blackPt = Math.min(black, 0.015);
-  // Never stretch more than ~1.8×: a dim clip should stay dim-ish rather
+  // Never stretch more than ~1.5×: a dim clip should stay dim-ish rather
   // than have its brighter patches shoved to white.
   const whitePt = Math.min(1.0, Math.max(white, blackPt + 0.2, LEVELS_WHITE_MIN));
 
@@ -336,6 +386,8 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     veilColor,
     cosLo: HUE_LO,
     cosHi: HUE_HI,
+    hueFarLo: HUE_FAR_LO,
+    hueFarHi: HUE_FAR_HI,
     achroma: ACHROMA,
     waterExposure: WATER_EXPOSURE,
     exposure,
@@ -445,6 +497,15 @@ export function hueConfidence(a: number, b: number, veilHue: [number, number], l
   // Fade the achromatic rule in smoothly just above the threshold.
   const k = smoothstep(achroma, achroma * 2, c);
   return t + (1 - t) * (1 - k);
+}
+
+/** 1 when the hue is ≥ hi radians from the veil's, 0 when ≤ lo or achromatic. */
+export function hueFarness(a: number, b: number, veilHue: [number, number], lo: number, hi: number, achroma: number): number {
+  const c = Math.hypot(a, b);
+  if (c < achroma) return 0;
+  const cosang = Math.max(-1, Math.min(1, (a * veilHue[0] + b * veilHue[1]) / c));
+  const ang = Math.acos(cosang);
+  return smoothstep(lo, hi, ang) * smoothstep(achroma, achroma * 2, c);
 }
 
 function smoothstep(e0: number, e1: number, x: number): number {
