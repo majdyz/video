@@ -126,7 +126,7 @@ export default function App() {
       const e = engineRef.current;
       if (!e) return;
       const st = e.getStats();
-      setDiag(`${st.backend} · analysis ${st.analysisMs.toFixed(0)} ms (${st.analyses} runs, ${st.sceneCuts} cuts) · people ${st.person}${st.person === "on" ? ` ${st.personMs.toFixed(0)} ms, ${(st.personCoverage * 100).toFixed(0)}%` : ""}`);
+      setDiag(`${st.backend} · analysis ${st.analysisMs.toFixed(0)} ms (${st.analyses} runs, ${st.sceneCuts} cuts) · people ${st.person}${st.person === "on" ? ` ${st.personMs.toFixed(0)} ms, ${(st.personCoverage * 100).toFixed(0)}%` : ""}${e.isLocked ? " · clip-locked" : ""}`);
     };
     update();
     const id = setInterval(update, 500);
@@ -428,7 +428,7 @@ export default function App() {
       for (let i = 0; i < n; i++) {
         if (myGen !== fileGenRef.current || exportingRef.current) return;
         const t = Math.min(dur - 0.05, 0.15 + ((dur - 0.3) * (i + 0.5)) / n);
-        await seekTo(video, t);
+        await seekVideoTo(video, t);
         e.upload(video, video.videoWidth, video.videoHeight, 0);
         try {
           samples.push(await e.analyzeRaw());
@@ -438,10 +438,11 @@ export default function App() {
       }
       if (myGen !== fileGenRef.current) return;
       if (samples.length >= 3) e.lockGlobals(samples);
+      console.info(`[profile] ${samples.length >= 3 ? "locked" : "skipped"}: ${samples.length}/${n} samples, wb ${samples.map((p) => p.wb[0].toFixed(2)).join("/")}`);
     } finally {
       setBusy(null);
       if (myGen === fileGenRef.current && !exportingRef.current) {
-        await seekTo(video, resumeAt).catch(() => undefined);
+        await seekVideoTo(video, resumeAt).catch(() => undefined);
         e.upload(video, video.videoWidth, video.videoHeight, 0);
         e.render();
         if (!wasPaused) await video.play().catch(() => undefined);
@@ -450,7 +451,7 @@ export default function App() {
     }
   }
 
-  function seekTo(video: HTMLVideoElement, t: number): Promise<void> {
+  function seekVideoTo(video: HTMLVideoElement, t: number): Promise<void> {
     return new Promise((resolve, reject) => {
       const done = () => { video.removeEventListener("seeked", done); video.removeEventListener("error", fail); resolve(); };
       const fail = () => { video.removeEventListener("seeked", done); video.removeEventListener("error", fail); reject(new Error("seek failed")); };
