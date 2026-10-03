@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { compressToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { CONF_BRIGHT, LOOK, SKIN, ULAP, boostParams, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { CONF_BRIGHT, LOOK, SKIN, ULAP, boostParams, hazeWeight, lookParams, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
@@ -21,7 +21,7 @@ export type ApplyContext = {
 type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings };
 
 export function resolveContext(ctx: ApplyContext): PixelContext {
-  return { ...ctx, params: boostParams(ctx.params, pushOf(ctx.settings)), settings: resolveSettings(ctx.settings) };
+  return { ...ctx, params: lookParams(boostParams(ctx.params, pushOf(ctx.settings)), ctx.settings), settings: resolveSettings(ctx.settings) };
 }
 
 /**
@@ -195,7 +195,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   let scale = C > cMax ? cMax / C : 1;
   scale *= s.saturation;
   const skinned = skinTone(L, a * scale, b * scale, person);
-  const looked = deepBlueLook(L, skinned[0], skinned[1], s.look, 1 - conf);
+  const looked = deepBlueLook(L, skinned[0], skinned[1], s.look, 1 - conf, hazeWeight(p));
   const [r1, g1, b1] = oklabToLinear(looked[0], looked[1], looked[2]);
   void C;
 
@@ -236,7 +236,7 @@ export function skinTone(L: number, a: number, b: number, person: number): [numb
 }
 
 /** Deep-blue look in Oklab (mirrors the shaders; see LOOK in params.ts). */
-export function deepBlueLook(L: number, a: number, b: number, look: number, water: number): [number, number, number] {
+export function deepBlueLook(L: number, a: number, b: number, look: number, water: number, hazeW: number): [number, number, number] {
   if (look <= 0) return [L, a, b];
   const C = Math.hypot(a, b);
   const h = Math.atan2(b, a);
@@ -248,9 +248,11 @@ export function deepBlueLook(L: number, a: number, b: number, look: number, wate
   const warm = (1 - smoothstep(LOOK.warmIn, LOOK.warmOut, Math.abs(wrap(h - LOOK.warmHue)))) * smoothstep(LOOK.warmLo, LOOK.warmHi, C);
   const wTint = water * (1 - vivid) * (1 - warm) * (1 - smoothstep(LOOK.brightLo, LOOK.brightHi, L));
   const w = wTint * look * LOOK.mix;
-  const L2 = Math.pow(Math.max(0, L), 1 + LOOK.gamma * look) * (1 - LOOK.dim * look);
-  const Ct = LOOK.c0 + LOOK.c1 * L2;
-  return [L2, a + (Ct * Math.cos(LOOK.targetHue) - a) * w, b + (Ct * Math.sin(LOOK.targetHue) - b) * w];
+  const L2 = Math.pow(Math.max(0, L), 1 + LOOK.gamma * look);
+  const Ct = (LOOK.c0 + LOOK.c1 * L2) * (1 + LOOK.hazeChroma * hazeW);
+  // Near-neutral objects (sand, white) go fully neutral.
+  const ds = 1 - look * LOOK.neutralDesat * (1 - smoothstep(LOOK.neutralLo, LOOK.neutralHi, C)) * (1 - water);
+  return [L2, (a + (Ct * Math.cos(LOOK.targetHue) - a) * w) * ds, (b + (Ct * Math.sin(LOOK.targetHue) - b) * w) * ds];
 }
 
 /** Mirrors analyze.ts hueFarness: 1 when the hue is ≥ hueFarHi from the veil's. */

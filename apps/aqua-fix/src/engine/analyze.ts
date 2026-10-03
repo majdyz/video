@@ -123,6 +123,8 @@ const FLOOR_FRAC = 0.05;
 // Hold corrected luminance at ≥ this fraction of the source luminance.
 const SHADOW_FLOOR = 0.55;
 const DEPTH_GUIDE = 0.5;
+// Lifted-black level (p0.4 of exposed luminance) that counts as fully hazy.
+const HAZE_BLACK_REF = 0.12;
 
 export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number): FrameAnalysis {
   const n = w * h;
@@ -255,6 +257,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     // Far brighter than the water at its range → object, whatever the hue.
     const confBright = smoothstep(CONF_BRIGHT.lo, CONF_BRIGHT.hi, sig);
     conf[i] = Math.min(confSignal, Math.max(hueObj[i], confBright));
+
     // The balance vote uses the signal test alone: in a blue scene nearly
     // every object shares the water's hue and the hue test would starve the
     // vote, leaving deep reef uncorrected. Open water drops out by itself.
@@ -399,6 +402,10 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     cosHi: HUE_HI,
     hueFarLo: HUE_FAR_LO,
     hueFarHi: HUE_FAR_HI,
+    // Haze for the look: how lifted the blacks are after exposure (the
+    // references stretch hazy frames down to a real black point and leave
+    // clear, contrasty frames alone).
+    haze: clamp01(black / HAZE_BLACK_REF),
     achroma: ACHROMA,
     waterExposure: WATER_EXPOSURE,
     exposure,

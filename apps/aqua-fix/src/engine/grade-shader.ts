@@ -12,7 +12,10 @@ const LOOK_CONSTS_GLSL = `
 const float CONF_BRIGHT_LO = ${CONF_BRIGHT.lo.toFixed(4)};
 const float CONF_BRIGHT_HI = ${CONF_BRIGHT.hi.toFixed(4)};
 const float LOOK_GAMMA = ${LOOK.gamma.toFixed(4)};
-const float LOOK_DIM = ${LOOK.dim.toFixed(4)};
+const float LOOK_HAZE_CHROMA = ${LOOK.hazeChroma.toFixed(4)};
+const float LOOK_NEUTRAL_DESAT = ${LOOK.neutralDesat.toFixed(4)};
+const float LOOK_NEUTRAL_LO = ${LOOK.neutralLo.toFixed(4)};
+const float LOOK_NEUTRAL_HI = ${LOOK.neutralHi.toFixed(4)};
 const float LOOK_TARGET_HUE = ${LOOK.targetHue.toFixed(6)};
 const float LOOK_WARM_HUE = ${LOOK.warmHue.toFixed(6)};
 const float LOOK_WARM_IN = ${LOOK.warmIn.toFixed(6)};
@@ -137,7 +140,7 @@ vec2 skinTone(float L, vec2 ab, float person) {
   return vec2(C2 * cos(h2), C2 * sin(h2));
 }
 // Deep-blue look in Oklab (see LOOK in params.ts; mirrors apply.ts).
-vec3 deepBlueLook(vec3 lab, float look, float water) {
+vec3 deepBlueLook(vec3 lab, float look, float water, float hazeW) {
   if (look <= 0.0) return lab;
   float C = length(lab.yz);
   float h = atan(lab.z, lab.y);
@@ -146,10 +149,11 @@ vec3 deepBlueLook(vec3 lab, float look, float water) {
   float warm = (1.0 - smoothstepf(LOOK_WARM_IN, LOOK_WARM_OUT, abs(dw))) * smoothstepf(LOOK_WARM_LO, LOOK_WARM_HI, C);
   float wTint = water * (1.0 - vivid) * (1.0 - warm) * (1.0 - smoothstepf(LOOK_BRIGHT_LO, LOOK_BRIGHT_HI, lab.x));
   float w = wTint * look * LOOK_MIX;
-  float L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look) * (1.0 - LOOK_DIM * look);
-  float Ct = LOOK_C0 + LOOK_C1 * L2;
+  float L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look);
+  float Ct = (LOOK_C0 + LOOK_C1 * L2) * (1.0 + LOOK_HAZE_CHROMA * hazeW);
   vec2 t = Ct * vec2(cos(LOOK_TARGET_HUE), sin(LOOK_TARGET_HUE));
-  return vec3(L2, lab.yz + (t - lab.yz) * w);
+  float ds = 1.0 - look * LOOK_NEUTRAL_DESAT * (1.0 - smoothstepf(LOOK_NEUTRAL_LO, LOOK_NEUTRAL_HI, C)) * (1.0 - water);
+  return vec3(L2, (lab.yz + (t - lab.yz) * w) * ds);
 }
 float hueFar(vec2 ab, vec2 veilHue, float lo, float hi, float achroma) {
   float c = length(ab);
@@ -283,7 +287,7 @@ vec3 grade(vec3 src, vec2 uv) {
   float C = length(lab.yz);
   float cMax = chromaK * cSrc + chromaC0;
   float scale = (C > cMax ? cMax / C : 1.0) * saturation;
-  vec3 o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - conf));
+  vec3 o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - conf, p[16].x));
   vec3 o2 = compressToGamut(o1);
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
@@ -379,7 +383,7 @@ fn skinTone(L: f32, ab: vec2<f32>, person: f32) -> vec2<f32> {
   let C2 = C + max(0.0, SKIN_C_MIN - C) * w;
   return vec2(C2 * cos(h2), C2 * sin(h2));
 }
-fn deepBlueLook(lab: vec3<f32>, look: f32, water: f32) -> vec3<f32> {
+fn deepBlueLook(lab: vec3<f32>, look: f32, water: f32, hazeW: f32) -> vec3<f32> {
   if (look <= 0.0) { return lab; }
   let C = length(lab.yz);
   let h = atan2(lab.z, lab.y);
@@ -388,10 +392,11 @@ fn deepBlueLook(lab: vec3<f32>, look: f32, water: f32) -> vec3<f32> {
   let warm = (1.0 - smoothstepf(LOOK_WARM_IN, LOOK_WARM_OUT, abs(dw))) * smoothstepf(LOOK_WARM_LO, LOOK_WARM_HI, C);
   let wTint = water * (1.0 - vivid) * (1.0 - warm) * (1.0 - smoothstepf(LOOK_BRIGHT_LO, LOOK_BRIGHT_HI, lab.x));
   let w = wTint * look * LOOK_MIX;
-  let L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look) * (1.0 - LOOK_DIM * look);
-  let Ct = LOOK_C0 + LOOK_C1 * L2;
+  let L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look);
+  let Ct = (LOOK_C0 + LOOK_C1 * L2) * (1.0 + LOOK_HAZE_CHROMA * hazeW);
   let t = Ct * vec2(cos(LOOK_TARGET_HUE), sin(LOOK_TARGET_HUE));
-  return vec3(L2, lab.yz + (t - lab.yz) * w);
+  let ds = 1.0 - look * LOOK_NEUTRAL_DESAT * (1.0 - smoothstepf(LOOK_NEUTRAL_LO, LOOK_NEUTRAL_HI, C)) * (1.0 - water);
+  return vec3(L2, (lab.yz + (t - lab.yz) * w) * ds);
 }
 fn hueFar(ab: vec2<f32>, veilHue: vec2<f32>, lo: f32, hi: f32, achroma: f32) -> f32 {
   let c = length(ab);
@@ -509,7 +514,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let C = length(lab.yz);
   let cMax = chromaK * cSrc + chromaC0;
   let scale = select(1.0, cMax / C, C > cMax) * saturation;
-  let o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - conf));
+  let o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - conf, p[16].x));
   let o2 = compressToGamut(o1);
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);

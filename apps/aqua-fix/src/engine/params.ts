@@ -64,10 +64,18 @@ export const CONF_BRIGHT = { lo: 0.55, hi: 0.78 };
 
 /** Deep-blue look constants (fitted to a reference grade in Oklab). */
 export const LOOK = {
-  // Reference measured as ≈ 0.66·L with a touch more shadow crush:
-  // L' = L^(1 + gamma·look) · (1 − dim·look).
-  gamma: 0.15,
-  dim: 0.22,
+  // Measured against the user's references: hazy scenes come out ≈0.65×
+  // darker, clear scenes keep their exposure. The dim rides on the exposure
+  // uniform, scaled by the frame's haze (see lookParams); gamma is a mild
+  // per-pixel shadow crush.
+  gamma: 0.1,
+  dim: 0.35,
+  hazeLo: 0.05, // lifted-black haze below which nothing dims …
+  hazeHi: 0.3, // … and above which the full dim applies
+  hazeChroma: 0.8, // water tint chroma target rises with haze (murky refs are more saturated)
+  neutralDesat: 0.8, // near-neutral object pixels (sand, white) lose chroma …
+  neutralLo: 0.02, // … below this chroma fully …
+  neutralHi: 0.04, // … fading out by this
   warmHue: (65 * Math.PI) / 180, // warm band (skin, sand: ~20°–110°) never takes the tint …
   warmIn: (45 * Math.PI) / 180,
   warmOut: (70 * Math.PI) / 180,
@@ -107,6 +115,19 @@ export function resolveSettings(s: UserSettings): GradeSettings {
  * range compensation it sets), the water path follows it further, and the
  * levels / chroma ceilings open up.
  */
+/** How much of the look's haze-dependent behaviour applies to this frame, 0..1. */
+export function hazeWeight(p: GradeParams): number {
+  const t = Math.min(1, Math.max(0, (p.haze - LOOK.hazeLo) / (LOOK.hazeHi - LOOK.hazeLo)));
+  return t * t * (3 - 2 * t);
+}
+
+/** Look-driven global adjustments (exposure dim in hazy scenes). */
+export function lookParams(p: GradeParams, s: UserSettings): GradeParams {
+  const look = Math.min(1, Math.max(0, s.look));
+  if (look <= 0) return p;
+  return { ...p, exposure: p.exposure * (1 - LOOK.dim * look * hazeWeight(p)) };
+}
+
 export function boostParams(p: GradeParams, t: number): GradeParams {
   if (t <= 0) return p;
   const e = 1 + 0.8 * t;
@@ -157,6 +178,8 @@ export type GradeParams = {
    *  de-scattered proportionally (hue-preserving) rather than per channel. */
   hueFarLo: number;
   hueFarHi: number;
+  /** Water-path share of the frame (0 clear objects … 1 all water/haze); drives the look's dimming. */
+  haze: number;
   /** Oklab chroma below which a pixel is achromatic and always counts as an object. */
   achroma: number;
   /** Exponent on the exposure for the water path (water keeps its brightness). */
@@ -202,6 +225,7 @@ export const IDENTITY_PARAMS: GradeParams = {
   cosHi: 0.001,
   hueFarLo: 3,
   hueFarHi: 3.1,
+  haze: 0,
   achroma: 0,
   waterExposure: 1,
   exposure: 1,
@@ -290,6 +314,7 @@ export const CLAHE_BINS = 32;
  *  p11: waterWb.rgb, hueFarHi
  *  p12: confLo, confHi, cosLo, cosHi
  *  p15: knee, subLo, subHi, hueFarLo
+ *  p16: hazeWeight, 0, 0, 0
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -302,7 +327,7 @@ export function packUniforms(
   split: number,
 ): Float32Array {
   const u = new Float32Array(UNIFORM_FLOATS);
-  params = boostParams(params, pushOf(settings));
+  params = lookParams(boostParams(params, pushOf(settings)), settings);
   const s = resolveSettings(settings);
   u.set([rotation, split, s.strength, 0], 0);
   u.set([...params.binf, s.veil], 4);
@@ -326,6 +351,7 @@ export function packUniforms(
     u.set([a / c, b / c, params.waterExposure, params.zMean], 56);
   }
   u.set([params.knee, params.subLo, params.subHi, params.hueFarLo], 60);
+  u.set([hazeWeight(params), 0, 0, 0], 64);
   return u;
 }
 
@@ -375,6 +401,7 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     cosHi: m(a.cosHi, b.cosHi),
     hueFarLo: m(a.hueFarLo, b.hueFarLo),
     hueFarHi: m(a.hueFarHi, b.hueFarHi),
+    haze: m(a.haze, b.haze),
     achroma: m(a.achroma, b.achroma),
     waterExposure: m(a.waterExposure, b.waterExposure),
     exposure: ml(a.exposure, b.exposure),

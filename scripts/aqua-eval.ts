@@ -67,7 +67,7 @@ for (const file of images) {
   const f = (v: number[]) => v.map((x) => x.toFixed(2)).join(",");
   console.log(
     `${name}: ${info.width}x${info.height} analyse ${(t1 - t0).toFixed(0)}ms (warm ${warmMs.toFixed(0)}ms) apply ${(t2 - t1).toFixed(0)}ms | ` +
-      `Binf ${f(p.binf)} betaB ${f(p.betaB)} cB ${f(p.cB)} attn ${f(p.attn)} wb ${f(p.wb)} exp ${p.exposure.toFixed(2)} ` +
+      `Binf ${f(p.binf)} betaB ${f(p.betaB)} cB ${f(p.cB)} attn ${f(p.attn)} haze ${analysis.params.haze.toFixed(2)} wb ${f(p.wb)} exp ${p.exposure.toFixed(2)} ` +
       `levels ${p.black.toFixed(3)}..${p.white.toFixed(3)} z ${p.zLo.toFixed(2)}..${p.zHi.toFixed(2)} mean ${f(analysis.mean)}`,
   );
 }
