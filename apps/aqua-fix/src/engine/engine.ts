@@ -286,7 +286,7 @@ export class GradeEngine {
   private pack(): Float32Array {
     const depth: DepthMap = { width: this.fields!.width, height: this.fields!.height, fields: new Float32Array(0), guide: new Float32Array(0) };
     const clahe: ClaheLuts = { tilesX: CLAHE_TILES_X, tilesY: CLAHE_TILES_Y, bins: CLAHE_BINS, data: new Float32Array(0) };
-    const settings = this.hasAnalysis ? this.settings : { ...this.settings, strength: 0 };
+    const settings = this.hasAnalysis ? this.settings : { intensity: 0 };
     return packUniforms(this.current, settings, depth, clahe, 0, this.split);
   }
 

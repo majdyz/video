@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { compressToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { ULAP, type ClaheLuts, type DepthMap, type GradeParams, type UserSettings } from "./params.ts";
+import { ULAP, boostParams, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
@@ -16,6 +16,13 @@ export type ApplyContext = {
   depth: DepthMap;
   clahe: ClaheLuts;
 };
+
+/** The context as gradePixel reads it: intensity already resolved. */
+type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings };
+
+export function resolveContext(ctx: ApplyContext): PixelContext {
+  return { ...ctx, params: boostParams(ctx.params, pushOf(ctx.settings)), settings: resolveSettings(ctx.settings) };
+}
 
 /**
  * Joint bilateral upsample of the (z, conf, dSmooth) fields at upright uv:
@@ -78,7 +85,7 @@ function sampleClahe(c: ClaheLuts, u: number, v: number, value: number): number 
 }
 
 /** Grades one sRGB pixel (0..1) at upright uv. Returns sRGB 0..1. */
-export function gradePixel(ctx: ApplyContext, sr: number, sg: number, sb: number, u: number, v: number): [number, number, number] {
+export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number, u: number, v: number): [number, number, number] {
   const { params: p, settings: s } = ctx;
   const r0 = srgbToLinear(sr), g0 = srgbToLinear(sg), b0 = srgbToLinear(sb);
 
@@ -231,7 +238,8 @@ function hueConf(a: number, b: number, p: GradeParams): number {
 
 
 /** Grades a whole RGBA8 image (upright). */
-export function applyGrade(ctx: ApplyContext, rgba: Uint8ClampedArray, w: number, h: number): Uint8ClampedArray {
+export function applyGrade(ctxIn: ApplyContext, rgba: Uint8ClampedArray, w: number, h: number): Uint8ClampedArray {
+  const ctx = resolveContext(ctxIn);
   const out = new Uint8ClampedArray(rgba.length);
   for (let y = 0; y < h; y++) {
     const v = (y + 0.5) / h;

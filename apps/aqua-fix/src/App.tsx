@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  AdvancedDisclosure,
   BusyOverlay,
   CapabilityBanner,
   CompareWipe,
@@ -24,7 +23,7 @@ import {
 import "@dive-tools/shared/theme.css";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
 import { GradeEngine } from "./engine/engine";
-import { DEFAULT_SETTINGS, type UserSettings } from "./engine/params";
+import { DEFAULT_SETTINGS, INTENSITY_MAX, type UserSettings } from "./engine/params";
 import type { Rotation } from "./engine/backend";
 
 type Mode = "idle" | "photo" | "video";
@@ -672,17 +671,11 @@ export default function App() {
         {mode !== "idle" && (
           <>
             <div className="sliders">
-              <Slider label="Strength" value={settings.strength} min={0} max={1} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, strength: v }))} disabled={exporting} />
+              <Slider label="Intensity" value={settings.intensity} min={0} max={INTENSITY_MAX} step={0.01}
+                format={(v) => `${Math.round((v / INTENSITY_MAX) * 100)}%`}
+                onChange={(v) => setSettings({ intensity: v })} disabled={exporting} />
+              <p className="hint">50% is the estimated correction. Above it the colour split is pushed harder than the estimate.</p>
             </div>
-            <AdvancedDisclosure disabled={exporting}>
-              <Slider label="Saturation" value={settings.saturation} min={0} max={2} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, saturation: v }))} disabled={exporting} />
-              <Slider label="Clarity" value={settings.clarity} min={0} max={1} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, clarity: v }))} disabled={exporting} />
-              <Slider label="Veil removal" value={settings.veil} min={0} max={1.2} step={0.01}
-                onChange={(v) => setSettings((s) => ({ ...s, veil: v }))} disabled={exporting} />
-            </AdvancedDisclosure>
 
             <div className="actions">
               <button className="ghost" onClick={() => setSettings(DEFAULT_SETTINGS)} disabled={exporting}>

@@ -8,24 +8,70 @@ import { linearToOklab } from "./color.ts";
 /** ULAP depth prior (Song et al. 2018): d = mu0 + mu1·max(G,B) + mu2·R on 0..1 sRGB. */
 export const ULAP = { mu0: 0.53214829, mu1: 0.51309827, mu2: -0.91066194 };
 
-/** User-facing controls. Everything else is estimated per frame. */
+/**
+ * The one user-facing control. Everything else is estimated per frame.
+ * 0 = source, 1 = the estimated correction as is, 2 = pushed: the balance,
+ * range compensation, veil removal and chroma are all driven harder than
+ * the estimate (reds redder, sand whiter, at the cost of some fidelity).
+ */
 export type UserSettings = {
+  intensity: number;
+};
+
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1 };
+export const INTENSITY_MAX = 2;
+
+/** Internal controls the shader reads, derived from the intensity. */
+export type GradeSettings = {
   /** Overall mix between source and corrected, 0..1. */
   strength: number;
-  /** Oklab chroma multiplier, 0..2 (1 = as corrected). */
+  /** Oklab chroma multiplier (1 = as corrected). */
   saturation: number;
   /** Local-contrast (CLAHE) mix, 0..1. */
   clarity: number;
-  /** Backscatter subtraction amount, 0..1.2 (1 = as fitted). */
+  /** Backscatter subtraction amount (1 = as fitted). */
   veil: number;
 };
 
-export const DEFAULT_SETTINGS: UserSettings = {
-  strength: 1,
-  saturation: 1,
-  clarity: 0.25,
-  veil: 0.7,
-};
+const BASE: GradeSettings = { strength: 1, saturation: 1, clarity: 0.25, veil: 0.7 };
+
+/** Push amount above the estimate, 0..1. */
+export function pushOf(s: UserSettings): number {
+  return Math.min(1, Math.max(0, s.intensity - 1));
+}
+
+export function resolveSettings(s: UserSettings): GradeSettings {
+  const t = pushOf(s);
+  return {
+    strength: Math.min(1, Math.max(0, s.intensity)),
+    saturation: BASE.saturation + 0.35 * t,
+    clarity: BASE.clarity + 0.25 * t,
+    veil: BASE.veil + 0.3 * t,
+  };
+}
+
+/**
+ * Drives the estimated parameters harder by the push amount: the balance
+ * is extrapolated (gains to the power 1 + 0.8t, which also widens the
+ * range compensation it sets), the water path follows it further, and the
+ * levels / chroma ceilings open up.
+ */
+export function boostParams(p: GradeParams, t: number): GradeParams {
+  if (t <= 0) return p;
+  const e = 1 + 0.8 * t;
+  const wb = p.wb.map((g) => Math.min(5, Math.max(0.25, Math.pow(g, e)))) as Vec3;
+  const waterMax = 1.6 + 0.9 * t;
+  const waterWb = wb.map((g) => Math.min(waterMax, Math.max(1 / waterMax, Math.pow(g, 0.6)))) as Vec3;
+  return {
+    ...p,
+    wb,
+    waterWb,
+    attn: p.attn.map((a) => a * e) as Vec3,
+    gainCap: p.gainCap + t,
+    levelsMix: Math.min(0.85, p.levelsMix + 0.3 * t),
+    chromaK: p.chromaK + t,
+  };
+}
 
 export type Vec3 = [number, number, number];
 
@@ -176,14 +222,16 @@ export function packUniforms(
   split: number,
 ): Float32Array {
   const u = new Float32Array(UNIFORM_FLOATS);
-  u.set([rotation, split, settings.strength, 0], 0);
-  u.set([...params.binf, settings.veil], 4);
+  params = boostParams(params, pushOf(settings));
+  const s = resolveSettings(settings);
+  u.set([rotation, split, s.strength, 0], 0);
+  u.set([...params.binf, s.veil], 4);
   u.set([...params.betaB, 0], 8);
   u.set([...params.cB, 0], 12);
   u.set([...params.attn, params.gainCap], 16);
   u.set([...params.wb, params.exposure], 20);
-  u.set([params.black, params.white, params.levelsMix, settings.clarity], 24);
-  u.set([settings.saturation, params.chromaK, params.chromaC0, params.depthGuide], 28);
+  u.set([params.black, params.white, params.levelsMix, s.clarity], 24);
+  u.set([s.saturation, params.chromaK, params.chromaC0, params.depthGuide], 28);
   u.set([depth.width, depth.height, clahe.tilesX, clahe.tilesY], 32);
   u.set([clahe.bins, params.floorFrac, params.zLo, params.zHi], 36);
   // zMean rides in p14.w (p9 is full).

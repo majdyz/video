@@ -72,6 +72,7 @@ export function Slider({
   step,
   onChange,
   disabled,
+  format,
 }: {
   label: string;
   value: number;
@@ -80,11 +81,13 @@ export function Slider({
   step: number;
   onChange: (v: number) => void;
   disabled?: boolean;
+  /** Formats the displayed value (default: two decimals). */
+  format?: (v: number) => string;
 }) {
   return (
     <label className={`slider ${disabled ? "is-disabled" : ""}`}>
       <span>
-        {label} <em>{value.toFixed(2)}</em>
+        {label} <em>{format ? format(value) : value.toFixed(2)}</em>
       </span>
       <input
         type="range"
