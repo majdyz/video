@@ -10,11 +10,14 @@ Two on-device PWAs for diver-shot footage, in one monorepo.
   worker, smoothed over time, and applied at native resolution in one WebGPU
   (or WebGL2) pass. Video export decodes/encodes offline with WebCodecs and
   copies the original audio through.
-- **Motion Fix** · https://majdyz.github.io/video/motion-fix/ — similarity
-  stabilisation (translation + rotation + uniform scale). Multi-point grid
-  tracking on 128×72 luma thumbnails, Umeyama similarity fit, then
-  L1-optimal path smoothing via ADMM (the Grundmann-Kwatra-Essa formulation,
-  pentadiagonal banded Cholesky, in-bundle, no LP solver dependency).
+- **Motion Fix** · https://majdyz.github.io/video/motion-fix/ — stabilisation.
+  One pipeline, no modes: dependency-free KLT tracking (Shi-Tomasi corners
+  bucketed on a grid, pyramidal Lucas-Kanade with a forward–backward check,
+  per-cell translational RANSAC, MSAC similarity + Tukey IRLS), Grundmann's
+  L1-optimal camera path solved exactly by a banded primal-dual interior
+  point (1000 frames in under a second), adaptive zoom within the crop
+  budget, a 32×18 WebGL UV-warp mesh for preview and export, analysis in a
+  worker over WebCodecs decode, offline WebCodecs export.
 - Landing page · https://majdyz.github.io/video/
 
 Both run entirely in the browser, install as standalone PWAs, and process
@@ -53,20 +56,21 @@ shader and writes before/after comparisons.
 
 - Grundmann, Kwatra & Essa (2011) —
   [Auto-Directed Video Stabilization with Robust L1 Optimal Camera Paths](https://research.google.com/pubs/archive/37041.pdf)
-  (CVPR). The Google/YouTube stabiliser: feature tracking + motion
-  estimation + L1-optimal path. Motion Fix uses the same L1 first- and
-  second-difference penalty (jitter + acceleration) via an ADMM solver
-  shipped in-bundle — no LP-solver dependency. The full paper formulation
-  also weights a third derivative (jerk) and adds explicit
-  constant/linear/parabolic regime constraints via linear programming;
-  that's the natural next upgrade.
-- Umeyama (1991) —
-  [Least-Squares Estimation of Transformation Parameters Between Two Point Patterns](https://web.stanford.edu/class/cs273/refs/umeyama.pdf)
-  (IEEE TPAMI). Closed-form similarity-transform fit used per frame on
-  the inlier matches.
-- Lucas & Kanade (1981) — feature-tracking literature underlying the
-  optical-flow approach. We use patch-based block-matching at low
-  resolution instead, to keep the bundle small.
+  (CVPR). The path model: w = (10, 1, 100) on first/second/third
+  differences with the 100:1 affine:translation scaling inside residuals,
+  proximity bounds and crop-window inclusion constraints. Solved here as a
+  banded primal-dual interior-point LP (Kim, Koh, Boyd & Gorinevsky 2009,
+  [ℓ1 trend filtering](https://web.stanford.edu/~boyd/papers/l1_trend_filter.html)),
+  windowed with pinned frames for long clips.
+- Bouguet (2000) — Pyramidal implementation of the Lucas-Kanade feature
+  tracker; Shi & Tomasi (1994) — Good Features to Track; Kalal et al. (2010)
+  — forward–backward error.
+- Umeyama (1991) — closed-form similarity fit; MSAC (Torr & Zisserman 2000)
+  with Tukey IRLS for the robust frame-to-frame estimate.
+- Adaptive zoom follows the approach used by Gyroflow (per-frame minimal
+  zoom, rolling maximum, Gaussian smoothing).
+
+Tests: `node --experimental-strip-types apps/motion-fix/test/*.test.ts`.
 
 The "How it works" button in each app's header opens a modal with the same
 explanation and links.

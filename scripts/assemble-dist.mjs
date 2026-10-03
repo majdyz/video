@@ -74,7 +74,7 @@ writeFileSync(
     <a class="card motion" href="./motion-fix/">
       <span class="arrow">→</span>
       <h2>Motion Fix</h2>
-      <p>Stabilize shaky clips. Block-matching translation tracker with Gaussian path smoothing.</p>
+      <p>Stabilize shaky clips. KLT tracking with outlier rejection, L1-optimal camera path (interior-point solver), adaptive zoom, WebCodecs export.</p>
     </a>
     <a class="card dewarp" href="./dewarp/">
       <span class="arrow">→</span>
