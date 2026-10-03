@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { compressToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, boostParams, hazeWeight, lookParams, lookSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, boostParams, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
@@ -21,8 +21,8 @@ export type ApplyContext = {
 type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings };
 
 export function resolveContext(ctx: ApplyContext): PixelContext {
-  const params = lookParams(boostParams(ctx.params, pushOf(ctx.settings)), ctx.settings);
-  return { ...ctx, params, settings: lookSettings(resolveSettings(ctx.settings), params) };
+  const params = lookParams(hazeParams(boostParams(ctx.params, pushOf(ctx.settings))), ctx.settings);
+  return { ...ctx, params, settings: lookSettings(hazeSettings(resolveSettings(ctx.settings), params), params) };
 }
 
 /**

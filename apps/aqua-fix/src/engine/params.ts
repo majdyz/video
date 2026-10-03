@@ -152,6 +152,23 @@ export function lookParams(p: GradeParams, s: UserSettings): GradeParams {
   return { ...p, exposure: p.exposure * (1 - LOOK.dim * hw), levelsMix: Math.min(0.85, p.levelsMix + LOOK.hazeLevels * hw) };
 }
 
+/**
+ * Haze-adaptive default: hazy frames get dehaze, local contrast and a fuller
+ * levels stretch on their own (no balance push), so a murky clip clears up
+ * at the default Intensity while clear scenes are untouched.
+ */
+export const HAZE_AUTO = { dehaze: 0.5, clarity: 0.3, levels: 0.15 };
+export function hazeSettings(g: GradeSettings, p: GradeParams): GradeSettings {
+  const hw = hazeWeight(p);
+  if (hw <= 0) return g;
+  return { ...g, dehaze: Math.max(g.dehaze, HAZE_AUTO.dehaze * hw), clarity: Math.min(1, g.clarity + HAZE_AUTO.clarity * hw) };
+}
+export function hazeParams(p: GradeParams): GradeParams {
+  const hw = hazeWeight(p);
+  if (hw <= 0) return p;
+  return { ...p, levelsMix: Math.min(0.85, p.levelsMix + HAZE_AUTO.levels * hw) };
+}
+
 /** Look-driven control adjustments: hazy frames get dehaze and clarity. */
 export function lookSettings(g: GradeSettings, p: GradeParams): GradeSettings {
   const look = g.look;
@@ -359,8 +376,8 @@ export function packUniforms(
   split: number,
 ): Float32Array {
   const u = new Float32Array(UNIFORM_FLOATS);
-  params = lookParams(boostParams(params, pushOf(settings)), settings);
-  const s = lookSettings(resolveSettings(settings), params);
+  params = lookParams(hazeParams(boostParams(params, pushOf(settings))), settings);
+  const s = lookSettings(hazeSettings(resolveSettings(settings), params), params);
   u.set([rotation, split, s.strength, 0], 0);
   u.set([...params.binf, s.veil], 4);
   u.set([...params.betaB, s.look], 8);
