@@ -241,17 +241,19 @@ export function deepBlueLook(L: number, a: number, b: number, look: number, wate
   const C = Math.hypot(a, b);
   const h = Math.atan2(b, a);
   const wrap = (x: number) => x - 2 * Math.PI * Math.round(x / (2 * Math.PI));
-  // The tint follows the engine's own water/object split: water (and the far
-  // reef the model can't separate from it) goes deep blue; graded objects
-  // keep their colour. Warm, very light or vivid pixels are never tinted.
+  // The references tint the whole frame toward deep blue — water and reef
+  // alike — and leave only skin (warm), blacks, whites and vivid colours
+  // alone. Tinting by the water/object split instead left object patches
+  // in their graded colour inside a blue frame (a halo around people).
+  void water;
   const vivid = smoothstep(LOOK.keepLo, LOOK.keepHi, C);
   const warm = (1 - smoothstep(LOOK.warmIn, LOOK.warmOut, Math.abs(wrap(h - LOOK.warmHue)))) * smoothstep(LOOK.warmLo, LOOK.warmHi, C);
-  const wTint = water * (1 - vivid) * (1 - warm) * (1 - smoothstep(LOOK.brightLo, LOOK.brightHi, L));
+  const wTint = (1 - vivid) * (1 - warm) * (1 - smoothstep(LOOK.brightLo, LOOK.brightHi, L)) * smoothstep(LOOK.darkLo, LOOK.darkHi, L);
   const w = wTint * look * LOOK.mix;
   const L2 = Math.pow(Math.max(0, L), 1 + LOOK.gamma * look);
   const Ct = (LOOK.c0 + LOOK.c1 * L2) * (1 + LOOK.hazeChroma * hazeW);
   // Near-neutral objects (sand, white) go fully neutral.
-  const ds = 1 - look * LOOK.neutralDesat * (1 - smoothstep(LOOK.neutralLo, LOOK.neutralHi, C)) * (1 - water);
+  const ds = 1 - look * LOOK.neutralDesat * (1 - smoothstep(LOOK.neutralLo, LOOK.neutralHi, C));
   return [L2, (a + (Ct * Math.cos(LOOK.targetHue) - a) * w) * ds, (b + (Ct * Math.sin(LOOK.targetHue) - b) * w) * ds];
 }
 

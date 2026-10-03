@@ -69,7 +69,7 @@ export const LOOK = {
   // uniform, scaled by the frame's haze (see lookParams); gamma is a mild
   // per-pixel shadow crush.
   gamma: 0.1,
-  dim: 0.35,
+  dim: 0.45,
   hazeLo: 0.05, // lifted-black haze below which nothing dims …
   hazeHi: 0.3, // … and above which the full dim applies
   hazeChroma: 0.8, // water tint chroma target rises with haze (murky refs are more saturated)
@@ -86,8 +86,10 @@ export const LOOK = {
   keepLo: 0.09, // vivid in-band colours (blue fins) are kept …
   keepHi: 0.14,
   targetHue: (246 * Math.PI) / 180,
-  c0: 0.05, // target chroma = c0 + c1·L
-  c1: 0.035,
+  c0: 0.0, // target chroma = c0 + c1·L: zero at black, so blacks stay black …
+  c1: 0.11,
+  darkLo: 0.12, // … and dark pixels take no tint at all below this lightness
+  darkHi: 0.3,
   mix: 0.9, // how far (a, b) move toward the target
 };
 
