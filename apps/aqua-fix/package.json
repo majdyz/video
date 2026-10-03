@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@dive-tools/shared": "workspace:*",
+    "@mediapipe/tasks-vision": "^1.0.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
@@ -19,9 +20,9 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
+    "@webgpu/types": "0.1.72",
     "sharp": "^0.34.5",
     "typescript": "~6.0.2",
-    "vite": "^8.0.10",
-    "@webgpu/types": "0.1.72"
+    "vite": "^8.0.10"
   }
 }

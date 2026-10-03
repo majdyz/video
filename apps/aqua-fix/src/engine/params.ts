@@ -227,7 +227,34 @@ export const IDENTITY_PARAMS: GradeParams = {
  * pixel to it). veilScale multiplies the veiling light: it is brighter
  * toward the sunlit surface than the single B∞ fit says.
  */
-export type DepthMap = { width: number; height: number; fields: Float32Array; guide: Float32Array };
+export type DepthMap = {
+  width: number;
+  height: number;
+  fields: Float32Array;
+  guide: Float32Array;
+  /** Optional person mask (0..1, one value per texel), rides in the guide's alpha. */
+  person?: Float32Array;
+};
+
+/**
+ * Skin memory colour, applied to person pixels that are light and not
+ * strongly coloured: hue pulled toward SKIN.hue and a chroma floor, so skin
+ * comes out pink rather than cream/grey. Wetsuits (dark) and fins (vivid)
+ * are untouched.
+ */
+export const SKIN = {
+  hue: (35 * Math.PI) / 180,
+  bandHue: (65 * Math.PI) / 180, // candidates: hue within ~15°–115° …
+  bandIn: (50 * Math.PI) / 180,
+  bandOut: (75 * Math.PI) / 180,
+  achroma: 0.012, // … or nearly neutral
+  lLo: 0.4, // light enough
+  lHi: 0.55,
+  cLo: 0.07, // not vivid
+  cHi: 0.1,
+  mix: 0.85, // how far the hue moves toward SKIN.hue
+  cMin: 0.045, // chroma floor
+};
 
 /** CLAHE tile LUTs: `tilesX*tilesY` rows of `bins` entries (R channel). */
 export type ClaheLuts = { tilesX: number; tilesY: number; bins: number; data: Float32Array };
@@ -312,6 +339,7 @@ export function guideTexture(d: DepthMap): Float32Array {
     out[i * 4] = d.guide[i * 3];
     out[i * 4 + 1] = d.guide[i * 3 + 1];
     out[i * 4 + 2] = d.guide[i * 3 + 2];
+    out[i * 4 + 3] = d.person ? d.person[i] : 0;
   }
   return out;
 }

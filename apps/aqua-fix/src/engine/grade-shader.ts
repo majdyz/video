@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, LOOK } from "./params.ts";
+import { CONF_BRIGHT, LOOK, SKIN } from "./params.ts";
 
 // Look constants shared by both shaders, emitted as literals.
 const LOOK_CONSTS_GLSL = `
@@ -26,6 +26,17 @@ const float LOOK_KEEP_HI = ${LOOK.keepHi.toFixed(4)};
 const float LOOK_C0 = ${LOOK.c0.toFixed(4)};
 const float LOOK_C1 = ${LOOK.c1.toFixed(4)};
 const float LOOK_MIX = ${LOOK.mix.toFixed(4)};
+const float SKIN_HUE = ${SKIN.hue.toFixed(6)};
+const float SKIN_BAND_HUE = ${SKIN.bandHue.toFixed(6)};
+const float SKIN_BAND_IN = ${SKIN.bandIn.toFixed(6)};
+const float SKIN_BAND_OUT = ${SKIN.bandOut.toFixed(6)};
+const float SKIN_ACHROMA = ${SKIN.achroma.toFixed(4)};
+const float SKIN_L_LO = ${SKIN.lLo.toFixed(4)};
+const float SKIN_L_HI = ${SKIN.lHi.toFixed(4)};
+const float SKIN_C_LO = ${SKIN.cLo.toFixed(4)};
+const float SKIN_C_HI = ${SKIN.cHi.toFixed(4)};
+const float SKIN_MIX = ${SKIN.mix.toFixed(4)};
+const float SKIN_C_MIN = ${SKIN.cMin.toFixed(4)};
 `;
 const LOOK_CONSTS_WGSL = LOOK_CONSTS_GLSL.replace(/const float (\w+) = ([^;]+);/g, "const $1: f32 = $2;");
 
@@ -79,7 +90,7 @@ vec3 compressToGamut(vec3 c) {
 // Joint bilateral upsample of (z, conf, d, veilScale) guided by the pixel's
 // linear colour. kOut is the guide-match weight: 0 when no neighbour
 // resembles the pixel (content moved since the map was made).
-vec4 sampleFields(vec2 uv, vec3 c, out float kOut) {
+vec4 sampleFields(vec2 uv, vec3 c, out float kOut, out float personOut) {
   ivec2 size = textureSize(u_data0, 0);
   vec2 f = clamp(uv * vec2(size) - 0.5, vec2(0.0), vec2(size) - 1.0);
   ivec2 i0 = ivec2(floor(f));
@@ -87,24 +98,42 @@ vec4 sampleFields(vec2 uv, vec3 c, out float kOut) {
   vec2 t = f - vec2(i0);
   float cn = length(c) + 0.02;
   vec4 sum = vec4(0.0), bil = vec4(0.0);
-  float sw = 0.0;
+  float sw = 0.0, sp = 0.0, bp = 0.0;
   for (int k = 0; k < 4; k++) {
     ivec2 ij = ivec2(k == 1 || k == 3 ? i1.x : i0.x, k >= 2 ? i1.y : i0.y);
     float ws = (k == 1 || k == 3 ? t.x : 1.0 - t.x) * (k >= 2 ? t.y : 1.0 - t.y);
     vec4 fld = texelFetch(u_data0, ij, 0);
-    vec3 g = texelFetch(u_data2, ij, 0).xyz;
+    vec4 gd = texelFetch(u_data2, ij, 0);
+    vec3 g = gd.xyz;
     float diff = length(c - g) / (cn + length(g));
     float wr = exp(-(diff * diff) / (2.0 * JBU_SIGMA * JBU_SIGMA));
     sum += ws * wr * fld;
     sw += ws * wr;
     bil += ws * fld;
+    sp += ws * wr * gd.w;
+    bp += ws * gd.w;
   }
   kOut = min(1.0, sw / 0.08);
-  if (sw < 1e-6) { kOut = 0.0; return bil; }
+  if (sw < 1e-6) { kOut = 0.0; personOut = bp; return bil; }
+  personOut = sp / sw;
   return sum / sw;
 }
 float smoothstepf(float e0, float e1, float x) { float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
 // 1 for objects, 0 for water: Oklab hue distance to the veil, achromatic → object.
+// Skin memory colour on person pixels (see SKIN in params.ts; mirrors apply.ts).
+vec2 skinTone(float L, vec2 ab, float person) {
+  if (person <= 0.0) return ab;
+  float C = length(ab);
+  float h = atan(ab.y, ab.x);
+  float d = h - SKIN_BAND_HUE; d -= 6.2831853 * round(d / 6.2831853);
+  float inBand = max(1.0 - smoothstepf(SKIN_BAND_IN, SKIN_BAND_OUT, abs(d)), 1.0 - smoothstepf(SKIN_ACHROMA * 0.5, SKIN_ACHROMA, C));
+  float w = person * inBand * smoothstepf(SKIN_L_LO, SKIN_L_HI, L) * (1.0 - smoothstepf(SKIN_C_LO, SKIN_C_HI, C));
+  if (w <= 0.0) return ab;
+  float dh = SKIN_HUE - h; dh -= 6.2831853 * round(dh / 6.2831853);
+  float h2 = h + dh * SKIN_MIX * w;
+  float C2 = C + max(0.0, SKIN_C_MIN - C) * w;
+  return vec2(C2 * cos(h2), C2 * sin(h2));
+}
 // Deep-blue look in Oklab (see LOOK in params.ts; mirrors apply.ts).
 vec3 deepBlueLook(vec3 lab, float look, float water) {
   if (look <= 0.0) return lab;
@@ -181,8 +210,9 @@ vec3 grade(vec3 src, vec2 uv) {
   // Range proxy: joint-bilateral fields where the map still matches the
   // pixel, the per-pixel prior where it doesn't.
   float dPix = mu.x + mu.y * max(src.g, src.b) + mu.z * src.r;
-  float k;
-  vec4 fld = sampleFields(uv, lin, k);
+  float k, personMap;
+  vec4 fld = sampleFields(uv, lin, k, personMap);
+  float person = clamp(personMap, 0.0, 1.0);
   float zRange = max(0.02, zHi - zLo);
   float zPix = clamp((dPix - zLo) / zRange, 0.0, 1.15);
   float zMap = clamp(fld.x + clamp(depthGuide * (dPix - fld.z) / zRange, -0.25, 0.25), 0.0, 1.15);
@@ -212,7 +242,7 @@ vec3 grade(vec3 src, vec2 uv) {
   // Whatever the map says, a pixel the veil model would nearly erase
   // (tiny D) must take the water path — the physics path would crush it
   // to black, which is the dark ghost on moving content.
-  float conf = mix(confPix, clamp(fld.y, 0.0, 1.0), k) * confSignal;
+  float conf = max(mix(confPix, clamp(fld.y, 0.0, 1.0), k), person) * confSignal;
   if (p[0].w > 0.5) return vec3(k, confPix, clamp(fld.y, 0.0, 1.0));
   vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   vec3 full = D * rangeGain * wb;
@@ -251,7 +281,7 @@ vec3 grade(vec3 src, vec2 uv) {
   float C = length(lab.yz);
   float cMax = chromaK * cSrc + chromaC0;
   float scale = (C > cMax ? cMax / C : 1.0) * saturation;
-  vec3 o1 = oklabToLinear(deepBlueLook(vec3(lab.x, lab.yz * scale), look, 1.0 - conf));
+  vec3 o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - conf));
   vec3 o2 = compressToGamut(o1);
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
@@ -312,24 +342,41 @@ fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> array<vec4<f32>, 2> {
   let i1 = min(i0 + 1, size - 1);
   let t = f - vec2<f32>(i0);
   let cn = length(c) + 0.02;
-  var sum = vec4(0.0); var bil = vec4(0.0); var sw = 0.0;
+  var sum = vec4(0.0); var bil = vec4(0.0); var sw = 0.0; var sp = 0.0; var bp = 0.0;
   for (var k = 0; k < 4; k++) {
     let right = (k == 1 || k == 3);
     let bottom = (k >= 2);
     let ij = vec2<i32>(select(i0.x, i1.x, right), select(i0.y, i1.y, bottom));
     let ws = select(1.0 - t.x, t.x, right) * select(1.0 - t.y, t.y, bottom);
     let fld = textureLoad(u_data0, ij, 0);
-    let g = textureLoad(u_data2, ij, 0).xyz;
+    let gd = textureLoad(u_data2, ij, 0);
+    let g = gd.xyz;
     let diff = length(c - g) / (cn + length(g));
     let wr = exp(-(diff * diff) / (2.0 * JBU_SIGMA * JBU_SIGMA));
     sum += ws * wr * fld;
     sw += ws * wr;
     bil += ws * fld;
+    sp += ws * wr * gd.w;
+    bp += ws * gd.w;
   }
-  if (sw < 1e-6) { return array<vec4<f32>, 2>(bil, vec4(0.0)); }
-  return array<vec4<f32>, 2>(sum / sw, vec4(0.0, 0.0, 0.0, min(1.0, sw / 0.08)));
+  // second vector: (person, 0, 0, k)
+  if (sw < 1e-6) { return array<vec4<f32>, 2>(bil, vec4(bp, 0.0, 0.0, 0.0)); }
+  return array<vec4<f32>, 2>(sum / sw, vec4(sp / sw, 0.0, 0.0, min(1.0, sw / 0.08)));
 }
 fn smoothstepf(e0: f32, e1: f32, x: f32) -> f32 { let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
+fn skinTone(L: f32, ab: vec2<f32>, person: f32) -> vec2<f32> {
+  if (person <= 0.0) { return ab; }
+  let C = length(ab);
+  let h = atan2(ab.y, ab.x);
+  var d = h - SKIN_BAND_HUE; d -= 6.2831853 * round(d / 6.2831853);
+  let inBand = max(1.0 - smoothstepf(SKIN_BAND_IN, SKIN_BAND_OUT, abs(d)), 1.0 - smoothstepf(SKIN_ACHROMA * 0.5, SKIN_ACHROMA, C));
+  let w = person * inBand * smoothstepf(SKIN_L_LO, SKIN_L_HI, L) * (1.0 - smoothstepf(SKIN_C_LO, SKIN_C_HI, C));
+  if (w <= 0.0) { return ab; }
+  var dh = SKIN_HUE - h; dh -= 6.2831853 * round(dh / 6.2831853);
+  let h2 = h + dh * SKIN_MIX * w;
+  let C2 = C + max(0.0, SKIN_C_MIN - C) * w;
+  return vec2(C2 * cos(h2), C2 * sin(h2));
+}
 fn deepBlueLook(lab: vec3<f32>, look: f32, water: f32) -> vec3<f32> {
   if (look <= 0.0) { return lab; }
   let C = length(lab.yz);
@@ -405,6 +452,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let sf = sampleFields(uv, lin);
   let fld = sf[0];
   let k = sf[1].w;
+  let person = clamp(sf[1].x, 0.0, 1.0);
   let zRange = max(0.02, zHi - zLo);
   let zPix = clamp((dPix - zLo) / zRange, 0.0, 1.15);
   let zMap = clamp(fld.x + clamp(depthGuide * (dPix - fld.z) / zRange, -0.25, 0.25), 0.0, 1.15);
@@ -425,7 +473,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let confSignal = smoothstepf(confLo, confHi, sig);
   let confBright = smoothstepf(CONF_BRIGHT_LO, CONF_BRIGHT_HI, sig);
   let confPix = min(confSignal, max(hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), confBright));
-  let conf = mix(confPix, clamp(fld.y, 0.0, 1.0), k) * confSignal;
+  let conf = max(mix(confPix, clamp(fld.y, 0.0, 1.0), k), person) * confSignal;
   if (p[0].w > 0.5) { return vec3(k, confPix, clamp(fld.y, 0.0, 1.0)); }
   let rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   let full = D * rangeGain * wb;
@@ -459,7 +507,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let C = length(lab.yz);
   let cMax = chromaK * cSrc + chromaC0;
   let scale = select(1.0, cMax / C, C > cMax) * saturation;
-  let o1 = oklabToLinear(deepBlueLook(vec3(lab.x, lab.yz * scale), look, 1.0 - conf));
+  let o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - conf));
   let o2 = compressToGamut(o1);
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);

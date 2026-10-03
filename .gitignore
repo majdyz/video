@@ -25,3 +25,7 @@ dist-ssr
 
 # local smoke pages
 apps/*/dev
+
+# segmentation dev samples (models are copied to public/ when shipped)
+apps/aqua-fix/dev/seg/*.jpg
+apps/aqua-fix/dev/seg/*.tflite

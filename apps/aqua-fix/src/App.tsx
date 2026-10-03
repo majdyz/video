@@ -118,7 +118,7 @@ export default function App() {
       const e = engineRef.current;
       if (!e) return;
       const st = e.getStats();
-      setDiag(`${st.backend} · analysis ${st.analysisMs.toFixed(0)} ms (${st.analyses} runs, ${st.sceneCuts} cuts)`);
+      setDiag(`${st.backend} · analysis ${st.analysisMs.toFixed(0)} ms (${st.analyses} runs, ${st.sceneCuts} cuts) · people ${st.person}${st.person === "on" ? ` ${st.personMs.toFixed(0)} ms, ${(st.personCoverage * 100).toFixed(0)}%` : ""}`);
     };
     update();
     const id = setInterval(update, 500);
@@ -505,7 +505,7 @@ export default function App() {
               const fps = stage.frames / ((t2 - stage.started) / 1000);
               const st = e.getStats();
               const be = e.backend as unknown as { capture?: string; externalOk?: boolean };
-              setExportDetail(`${fps.toFixed(1)} fps · up ${(stage.upload / stage.frames).toFixed(0)} · draw ${(stage.draw / stage.frames).toFixed(0)} · cap ${(stage.capture / stage.frames).toFixed(0)} · wait ${((stage.render - stage.draw - stage.capture) / stage.frames).toFixed(0)} ms · an ${st.analysisMs.toFixed(0)} · ${st.backend}${be.capture ? "/" + be.capture : ""}${be.externalOk ? "/ext" : ""}`);
+              setExportDetail(`${fps.toFixed(1)} fps · up ${(stage.upload / stage.frames).toFixed(0)} · draw ${(stage.draw / stage.frames).toFixed(0)} · cap ${(stage.capture / stage.frames).toFixed(0)} · wait ${((stage.render - stage.draw - stage.capture) / stage.frames).toFixed(0)} ms · an ${st.analysisMs.toFixed(0)} · ppl ${st.person === "on" ? st.personMs.toFixed(0) : st.person} · ${st.backend}${be.capture ? "/" + be.capture : ""}${be.externalOk ? "/ext" : ""}`);
             }
             return out;
           } finally {

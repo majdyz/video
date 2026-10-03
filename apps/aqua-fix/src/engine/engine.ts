@@ -11,6 +11,7 @@ import { WebGL2Backend } from "./backend-webgl2.ts";
 import { WebGPUBackend } from "./backend-webgpu.ts";
 import { ANALYSIS_H, ANALYSIS_W } from "./analyze.ts";
 import type { AnalysisPacket, AnalysisRequest } from "./analysis-worker.ts";
+import type { PersonPacket, PersonRequest } from "./person-worker.ts";
 import type { GpuBackend, Rotation, SourceInput } from "./backend.ts";
 import {
   CLAHE_BINS,
@@ -37,6 +38,13 @@ const TAU_MAPS_S = 0.4;
 // Local-contrast tiles describe tone, not geometry: they can lag longer.
 const TAU_CLAHE_S = 0.7;
 const SCENE_CUT_MEAN_DIFF = 0.16;
+// Person segmentation runs on every Nth analysis (it costs ~25–40 ms of
+// worker CPU on the same thumbnail the analysis uses).
+const PERSON_EVERY = 2;
+// Mask growth through bright cells (see resampleMask).
+const PERSON_GROW_PASSES = 10;
+const PERSON_GROW_DECAY = 0.93;
+const PERSON_GROW_LUM = 0.2;
 
 type Packed = { width: number; height: number; data: Float32Array };
 /** Analysis packet with the CLAHE LUTs re-shaped to a (bins × tiles) texture. */
@@ -45,7 +53,17 @@ function toGpuPacket(raw: AnalysisPacket): GpuPacket {
   return { ...raw, clahe: { width: raw.clahe.bins, height: raw.clahe.tilesX * raw.clahe.tilesY, data: raw.clahe.data } };
 }
 
-export type EngineStats = { backend: "webgpu" | "webgl2"; analysisMs: number; analyses: number; sceneCuts: number };
+export type PersonState = "off" | "loading" | "on" | "failed";
+export type EngineStats = {
+  backend: "webgpu" | "webgl2";
+  analysisMs: number;
+  analyses: number;
+  sceneCuts: number;
+  /** Person segmentation: worker state, last cost, and the mask's coverage (0..1). */
+  person: PersonState;
+  personMs: number;
+  personCoverage: number;
+};
 
 export class GradeEngine {
   readonly backend: GpuBackend;
@@ -55,6 +73,15 @@ export class GradeEngine {
   private worker: Worker | null = null;
   private inflight = false;
   private reqId = 0;
+  private personWorker: Worker | null = null;
+  private personInflight = false;
+  private personReqId = 0;
+  private personFailed = false;
+  private personCount = 0;
+  /** Eased person map at the fields' resolution, written into the guide's alpha. */
+  private person: Float32Array | null = null;
+  private personTarget: Float32Array | null = null;
+  private personWaiters: (() => void)[] = [];
   private lastAnalysisAt = -Infinity;
   private current: GradeParams = IDENTITY_PARAMS;
   private target: GradeParams | null = null;
@@ -76,7 +103,7 @@ export class GradeEngine {
   private constructor(backend: GpuBackend, onError: (e: Error) => void) {
     this.backend = backend;
     this.onError = onError;
-    this.stats = { backend: backend.kind, analysisMs: 0, analyses: 0, sceneCuts: 0 };
+    this.stats = { backend: backend.kind, analysisMs: 0, analyses: 0, sceneCuts: 0, person: "off", personMs: 0, personCoverage: 0 };
     // Placeholder data textures so the first render is valid.
     const fw = 2, fh = 2;
     this.fields = { width: fw, height: fh, data: new Float32Array(fw * fh * 4) };
@@ -105,6 +132,12 @@ export class GradeEngine {
     return { ...this.stats };
   }
 
+  /** Current (eased) person map at the fields' resolution — diagnostics. */
+  getPersonMap(): { width: number; height: number; data: Float32Array } | null {
+    if (!this.person || !this.fields) return null;
+    return { width: this.fields.width, height: this.fields.height, data: this.person };
+  }
+
   private ensureWorker(): Worker {
     if (this.worker) return this.worker;
     const w = new Worker(new URL("./analysis-worker.ts", import.meta.url), { type: "module" });
@@ -117,6 +150,61 @@ export class GradeEngine {
     };
     this.worker = w;
     return w;
+  }
+
+  private ensurePersonWorker(): Worker {
+    if (this.personWorker) return this.personWorker;
+    const w = new Worker(new URL("./person-worker.ts", import.meta.url), { type: "module" });
+    w.onmessage = (e: MessageEvent<PersonPacket>) => this.onPersonPacket(e.data);
+    w.onerror = (e) => {
+      this.personInflight = false;
+      this.personFailed = true;
+      this.stats.person = "failed";
+      console.warn("Person segmentation worker failed:", e.message);
+      this.settlePerson();
+    };
+    this.personWorker = w;
+    this.stats.person = "loading";
+    return w;
+  }
+
+  private settlePerson(): void {
+    const ws = this.personWaiters;
+    this.personWaiters = [];
+    for (const r of ws) r();
+  }
+
+  /** Resolves when the person request in flight (if any) has answered. */
+  private waitPerson(): Promise<void> {
+    if (!this.personInflight) return Promise.resolve();
+    return new Promise((resolve) => this.personWaiters.push(resolve));
+  }
+
+  private onPersonPacket(p: PersonPacket): void {
+    this.personInflight = false;
+    this.settlePerson();
+    if (p.id !== this.personReqId) return;
+    if (!p.mask) {
+      if (p.error && !this.personFailed) console.warn("Person segmentation unavailable:", p.error);
+      this.personFailed = true;
+      this.stats.person = "failed";
+      return;
+    }
+    this.stats.person = "on";
+    this.stats.personMs = p.ms;
+    const fw = this.fields?.width ?? 0, fh = this.fields?.height ?? 0;
+    if (fw < 4 || fh < 4) return;
+    const map = resampleMask(p.mask, p.width, p.height, fw, fh, this.guide?.data ?? null);
+    let cov = 0;
+    for (let i = 0; i < map.length; i++) cov += map[i];
+    this.stats.personCoverage = cov / map.length;
+    if (!this.person || this.person.length !== map.length) {
+      this.person = map;
+      this.personTarget = null;
+      this.dirtyData = true;
+    } else {
+      this.personTarget = map;
+    }
   }
 
   /** On-screen canvas scale relative to the source (exports ignore it). */
@@ -171,6 +259,12 @@ export class GradeEngine {
     const p = wait();
     await this.startAnalysis();
     const packet = await withTimeout(p);
+    if (snap) {
+      // First frame of an export / a photo: let the person mask land too so
+      // the snap carries it (bounded by the same timeout; failure is fine).
+      await withTimeout(this.waitPerson()).catch(() => undefined);
+      if (this.personTarget) { this.person = this.personTarget; this.personTarget = null; }
+    }
     if (snap && packet.id === this.reqId) this.snapTo(toGpuPacket(packet));
   }
 
@@ -189,6 +283,13 @@ export class GradeEngine {
     this.lastAnalysisAt = performance.now();
     try {
       const rgba = await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
+      // Person segmentation shares the thumbnail (a copy; the buffer below is transferred).
+      if (!this.personFailed && !this.personInflight && this.personCount++ % PERSON_EVERY === 0) {
+        const copy = rgba.slice();
+        const preq: PersonRequest = { id: ++this.personReqId, rgba: copy.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, timestampMs: Math.round(this.lastTickSec * 1000) };
+        this.personInflight = true;
+        this.ensurePersonWorker().postMessage(preq, [preq.rgba]);
+      }
       const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H };
       this.ensureWorker().postMessage(req, [req.rgba]);
     } catch (e) {
@@ -253,17 +354,32 @@ export class GradeEngine {
     const g = ease(this.guide, this.guideTarget);
     const c = ease(this.clahe, this.claheTarget, ac);
     if (f !== this.fields || g !== this.guide || c !== this.clahe) this.dirtyData = true;
+    if (this.person && this.personTarget && this.personTarget.length === this.person.length) {
+      lerpInto(this.person, this.personTarget, am);
+      this.dirtyData = true;
+    }
     this.fields = f;
     this.guide = g;
     this.clahe = c;
   }
   private lastEased = new WeakMap<Packed, Packed>();
+  private guideMerged: Float32Array | null = null;
 
   private pushData(): void {
     if (!this.fields || !this.guide || !this.clahe) return;
     this.backend.setData(0, this.fields);
     this.backend.setData(1, this.clahe);
-    this.backend.setData(2, this.guide);
+    const g = this.guide;
+    if (this.person && this.person.length * 4 === g.data.length) {
+      // The guide's alpha carries the person mask (the analysis leaves it 0).
+      const merged = this.guideMerged && this.guideMerged.length === g.data.length ? this.guideMerged : new Float32Array(g.data.length);
+      merged.set(g.data);
+      for (let i = 0; i < this.person.length; i++) merged[i * 4 + 3] = this.person[i];
+      this.guideMerged = merged;
+      this.backend.setData(2, { width: g.width, height: g.height, data: merged });
+    } else {
+      this.backend.setData(2, g);
+    }
     this.dirtyData = false;
   }
 
@@ -281,6 +397,13 @@ export class GradeEngine {
     this.lastAnalysisAt = -Infinity;
     this.lastTickSec = 0;
     this.settle({ id: -1 } as AnalysisPacket, null);
+    this.personReqId++;
+    this.personInflight = false;
+    this.person = null;
+    this.personTarget = null;
+    this.personCount = 0;
+    this.stats.personCoverage = 0;
+    this.settlePerson();
   }
 
   private pack(): Float32Array {
@@ -312,8 +435,59 @@ export class GradeEngine {
   dispose(): void {
     this.worker?.terminate();
     this.worker = null;
+    this.personWorker?.terminate();
+    this.personWorker = null;
     this.backend.dispose();
   }
+}
+
+/** Box-resamples a mask (mw×mh) to the fields' grid (fw×fh), clamped to 0..1. */
+function resampleMask(mask: Float32Array, mw: number, mh: number, fw: number, fh: number, guide: Float32Array | null): Float32Array {
+  const out = new Float32Array(fw * fh);
+  for (let ty = 0; ty < fh; ty++) {
+    const y0 = Math.floor((ty * mh) / fh);
+    const y1 = Math.max(y0 + 1, Math.floor(((ty + 1) * mh) / fh));
+    for (let tx = 0; tx < fw; tx++) {
+      const x0 = Math.floor((tx * mw) / fw);
+      const x1 = Math.max(x0 + 1, Math.floor(((tx + 1) * mw) / fw));
+      let sum = 0, n = 0;
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { sum += mask[y * mw + x]; n++; }
+      // The selfie model is unsure on limbs (0.3–0.5): sharpen the soft
+      // confidence so partially covered skin still counts.
+      const v = Math.min(1, Math.max(0, sum / n));
+      const t = Math.min(1, Math.max(0, (v - 0.1) / 0.4));
+      out[ty * fw + tx] = t * t * (3 - 2 * t);
+    }
+  }
+  // The selfie model finds the torso (wetsuit) but stops short of bare limbs
+  // under a cast. Grow the mask a few cells through *bright* cells only
+  // (skin is far lighter than reef around a diver), decaying per step.
+  const bright = new Uint8Array(fw * fh);
+  for (let i = 0; i < fw * fh; i++) {
+    const lum = guide && guide.length >= i * 4 + 3 ? 0.2126 * guide[i * 4] + 0.7152 * guide[i * 4 + 1] + 0.0722 * guide[i * 4 + 2] : 1;
+    bright[i] = lum > PERSON_GROW_LUM ? 1 : 0;
+  }
+  let cur = out;
+  for (let pass = 0; pass < PERSON_GROW_PASSES; pass++) {
+    const next = new Float32Array(cur);
+    for (let y = 0; y < fh; y++) {
+      for (let x = 0; x < fw; x++) {
+        const i = y * fw + x;
+        if (!bright[i] && pass > 0) continue;
+        let m = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = y + dy; if (yy < 0 || yy >= fh) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = x + dx; if (xx < 0 || xx >= fw) continue;
+            m = Math.max(m, cur[yy * fw + xx]);
+          }
+        }
+        next[i] = Math.max(cur[i], PERSON_GROW_DECAY * m);
+      }
+    }
+    cur = next;
+  }
+  return cur;
 }
 
 function lerpInto(dst: Float32Array, src: Float32Array, t: number): void {

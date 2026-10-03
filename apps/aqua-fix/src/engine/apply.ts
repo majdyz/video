@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { compressToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { CONF_BRIGHT, LOOK, ULAP, boostParams, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { CONF_BRIGHT, LOOK, SKIN, ULAP, boostParams, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
@@ -32,15 +32,15 @@ export function resolveContext(ctx: ApplyContext): PixelContext {
  */
 export const JBU_SIGMA = 0.12;
 /** Returns the upsampled fields and the guide-match weight k (0 = the map says nothing about this pixel). */
-function sampleFields(d: DepthMap, u: number, v: number, r: number, g: number, b: number): [number, number, number, number, number] {
+function sampleFields(d: DepthMap, u: number, v: number, r: number, g: number, b: number): [number, number, number, number, number, number] {
   const fx = Math.min(Math.max(u * d.width - 0.5, 0), d.width - 1);
   const fy = Math.min(Math.max(v * d.height - 0.5, 0), d.height - 1);
   const x0 = Math.floor(fx), y0 = Math.floor(fy);
   const x1 = Math.min(x0 + 1, d.width - 1), y1 = Math.min(y0 + 1, d.height - 1);
   const tx = fx - x0, ty = fy - y0;
   const cn = Math.hypot(r, g, b) + 0.02;
-  let sz = 0, sc = 0, sd = 0, sv = 0, sw = 0;
-  let bz = 0, bc = 0, bd = 0, bv = 0;
+  let sz = 0, sc = 0, sd = 0, sv = 0, sw = 0, sp = 0;
+  let bz = 0, bc = 0, bd = 0, bv = 0, bp = 0;
   const taps: [number, number, number][] = [[x0, y0, (1 - tx) * (1 - ty)], [x1, y0, tx * (1 - ty)], [x0, y1, (1 - tx) * ty], [x1, y1, tx * ty]];
   for (const [x, y, ws] of taps) {
     const i = y * d.width + x;
@@ -49,14 +49,15 @@ function sampleFields(d: DepthMap, u: number, v: number, r: number, g: number, b
     const wr = Math.exp(-(diff * diff) / (2 * JBU_SIGMA * JBU_SIGMA));
     const wgt = ws * wr;
     const f = i * 4;
-    sz += wgt * d.fields[f]; sc += wgt * d.fields[f + 1]; sd += wgt * d.fields[f + 2]; sv += wgt * d.fields[f + 3]; sw += wgt;
-    bz += ws * d.fields[f]; bc += ws * d.fields[f + 1]; bd += ws * d.fields[f + 2]; bv += ws * d.fields[f + 3];
+    const pg = d.person ? d.person[i] : 0;
+    sz += wgt * d.fields[f]; sc += wgt * d.fields[f + 1]; sd += wgt * d.fields[f + 2]; sv += wgt * d.fields[f + 3]; sp += wgt * pg; sw += wgt;
+    bz += ws * d.fields[f]; bc += ws * d.fields[f + 1]; bd += ws * d.fields[f + 2]; bv += ws * d.fields[f + 3]; bp += ws * pg;
   }
   // k → 0 when no neighbour resembles the pixel (content moved since the
   // map was made): the caller then falls back to a per-pixel estimate.
   const k = Math.min(1, sw / 0.08);
-  if (sw < 1e-6) return [bz, bc, bd, bv, 0];
-  return [sz / sw, sc / sw, sd / sw, sv / sw, k];
+  if (sw < 1e-6) return [bz, bc, bd, bv, 0, bp];
+  return [sz / sw, sc / sw, sd / sw, sv / sw, k, sp / sw];
 }
 
 /**
@@ -91,7 +92,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
 
   // Range proxy: coarse map plus guided per-pixel detail from the prior.
   const dPix = ULAP.mu0 + ULAP.mu1 * Math.max(sg, sb) + ULAP.mu2 * sr;
-  const [zc, confMap, dc, veilMap, k] = sampleFields(ctx.depth, u, v, r0, g0, b0);
+  const [zc, confMap, dc, veilMap, k, personMap] = sampleFields(ctx.depth, u, v, r0, g0, b0);
+  const person = clamp(personMap, 0, 1);
   const zRange = Math.max(0.02, p.zHi - p.zLo);
   const zPix = clamp((dPix - p.zLo) / zRange, 0, 1.15);
   const zMap = clamp(zc + clamp((p.depthGuide * (dPix - dc)) / zRange, -0.25, 0.25), 0, 1.15);
@@ -140,7 +142,9 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const confPix = Math.min(confSignal, Math.max(hueConf(pa, pb, p), confBright));
   // A pixel the veil model would nearly erase takes the water path whatever
   // the map says (see grade-shader.ts).
-  const conf = (clamp(confMap, 0, 1) * k + confPix * (1 - k)) * confSignal;
+  // A detected person is an object whatever the colour tests say (the
+  // "tiny D" protection via confSignal still applies).
+  const conf = Math.max(clamp(confMap, 0, 1) * k + confPix * (1 - k), person) * confSignal;
   if (ctx.debug) return [k, confPix, clamp(confMap, 0, 1)];
   const out = [0, 0, 0];
   const ew = Math.pow(p.exposure, p.waterExposure);
@@ -190,7 +194,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const cMax = p.chromaK * cSrc + p.chromaC0;
   let scale = C > cMax ? cMax / C : 1;
   scale *= s.saturation;
-  const looked = deepBlueLook(L, a * scale, b * scale, s.look, 1 - conf);
+  const skinned = skinTone(L, a * scale, b * scale, person);
+  const looked = deepBlueLook(L, skinned[0], skinned[1], s.look, 1 - conf);
   const [r1, g1, b1] = oklabToLinear(looked[0], looked[1], looked[2]);
   void C;
 
@@ -214,6 +219,20 @@ function clamp(x: number, lo: number, hi: number): number {
 function smoothstep(e0: number, e1: number, x: number): number {
   const t = clamp((x - e0) / (e1 - e0), 0, 1);
   return t * t * (3 - 2 * t);
+}
+
+/** Skin memory colour on person pixels (mirrors the shaders; see SKIN in params.ts). Returns (a, b). */
+export function skinTone(L: number, a: number, b: number, person: number): [number, number] {
+  if (person <= 0) return [a, b];
+  const C = Math.hypot(a, b);
+  const h = Math.atan2(b, a);
+  const wrap = (x: number) => x - 2 * Math.PI * Math.round(x / (2 * Math.PI));
+  const inBand = Math.max(1 - smoothstep(SKIN.bandIn, SKIN.bandOut, Math.abs(wrap(h - SKIN.bandHue))), 1 - smoothstep(SKIN.achroma * 0.5, SKIN.achroma, C));
+  const w = person * inBand * smoothstep(SKIN.lLo, SKIN.lHi, L) * (1 - smoothstep(SKIN.cLo, SKIN.cHi, C));
+  if (w <= 0) return [a, b];
+  const h2 = h + wrap(SKIN.hue - h) * SKIN.mix * w;
+  const C2 = C + Math.max(0, SKIN.cMin - C) * w;
+  return [C2 * Math.cos(h2), C2 * Math.sin(h2)];
 }
 
 /** Deep-blue look in Oklab (mirrors the shaders; see LOOK in params.ts). */
