@@ -69,7 +69,7 @@ writeFileSync(
     <a class="card aqua" href="./aqua-fix/">
       <span class="arrow">→</span>
       <h2>Aqua Fix</h2>
-      <p>Underwater colour correction. Removes the blue/green cast, restores red, optional Lightroom .cube LUT.</p>
+      <p>Underwater colour correction. Physically-based: removes the backscatter veil, restores colour by range, keeps water looking like water. One adaptive engine, native 4K, WebGPU.</p>
     </a>
     <a class="card motion" href="./motion-fix/">
       <span class="arrow">→</span>
