@@ -22,9 +22,15 @@ export type UserSettings = {
   clarity: number;
   /** Advanced: backscatter subtraction amount, 0..1.2 (1 = as fitted). */
   veil: number;
+  /**
+   * Deep-blue look, 0..1: a creative grade on top of the correction —
+   * crushed shadows (L^1.7), teal/cyan hues rotated toward deep blue and
+   * desaturated, skin and already-blue objects left alone.
+   */
+  look: number;
 };
 
-export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7 };
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0 };
 export const INTENSITY_MAX = 2;
 
 /** Internal controls the shader reads, derived from the intensity. */
@@ -37,6 +43,41 @@ export type GradeSettings = {
   clarity: number;
   /** Backscatter subtraction amount (1 = as fitted). */
   veil: number;
+  /** Deep-blue look amount, 0..1. */
+  look: number;
+};
+
+/**
+ * Signal fraction above which a pixel counts as an object whatever its hue:
+ * sig = 1 − lumWater/lumPixel, so 0.55 → 2.2× brighter than the water at
+ * its range, 0.78 → 4.5×. Skin, sand and pale coral share the water's hue
+ * under a cyan cast, yet nothing that bright is water.
+ */
+export const CONF_BRIGHT = { lo: 0.55, hi: 0.78 };
+
+/** Deep-blue look constants (fitted to a reference grade in Oklab). */
+export const LOOK = {
+  // Reference measured as ≈ 0.66·L with a touch more shadow crush:
+  // L' = L^(1 + gamma·look) · (1 − dim·look).
+  gamma: 0.15,
+  dim: 0.22,
+  otherDesat: 0.2, // chroma loss on colours outside the band (skin goes pale)
+  bandHue: (215 * Math.PI) / 180, // centre of the teal/cyan band
+  bandIn: (35 * Math.PI) / 180, // full weight within ±bandIn …
+  bandOut: (55 * Math.PI) / 180, // … fading to none at ±bandOut
+  achLo: 0.03, // near-neutral pixels (corrected reef, sand) take the tint too …
+  achHi: 0.08, // … fading out as they get chromatic (skin, fish)
+  warmHue: (65 * Math.PI) / 180, // warm band (skin, sand: ~20°–110°) never takes the tint …
+  warmIn: (45 * Math.PI) / 180,
+  warmOut: (70 * Math.PI) / 180,
+  warmLo: 0.006, // … once it has any chroma at all
+  warmHi: 0.015,
+  keepLo: 0.09, // vivid in-band colours (blue fins) are kept …
+  keepHi: 0.14,
+  targetHue: (246 * Math.PI) / 180,
+  c0: 0.05, // target chroma = c0 + c1·L
+  c1: 0.035,
+  mix: 0.9, // how far (a, b) move toward the target
 };
 
 /** Push amount above the estimate, 0..1. */
@@ -50,8 +91,9 @@ export function resolveSettings(s: UserSettings): GradeSettings {
   return {
     strength: Math.min(1, Math.max(0, s.intensity)),
     saturation: s.saturation + 0.35 * t,
-    clarity: s.clarity + 0.25 * t,
+    clarity: Math.min(1, s.clarity + 0.5 * t),
     veil: s.veil + 0.3 * t,
+    look: Math.min(1, Math.max(0, s.look)),
   };
 }
 
@@ -202,7 +244,7 @@ export const CLAHE_BINS = 32;
  * Uniform block layout (16 × vec4):
  *  p0: rotation, split, strength, 0
  *  p1: binf.rgb, veil
- *  p2: betaB.rgb, 0
+ *  p2: betaB.rgb, look
  *  p3: cB.rgb, 0
  *  p4: attn.rgb, gainCap
  *  p9.w: zMean
@@ -231,7 +273,7 @@ export function packUniforms(
   const s = resolveSettings(settings);
   u.set([rotation, split, s.strength, 0], 0);
   u.set([...params.binf, s.veil], 4);
-  u.set([...params.betaB, 0], 8);
+  u.set([...params.betaB, s.look], 8);
   u.set([...params.cB, 0], 12);
   u.set([...params.attn, params.gainCap], 16);
   u.set([...params.wb, params.exposure], 20);

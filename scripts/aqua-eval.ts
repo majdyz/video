@@ -23,6 +23,7 @@ const settings: UserSettings = {
   saturation: flag("saturation", DEFAULT_SETTINGS.saturation),
   clarity: flag("clarity", DEFAULT_SETTINGS.clarity),
   veil: flag("veil", DEFAULT_SETTINGS.veil),
+  look: flag("look", DEFAULT_SETTINGS.look),
 };
 const maxW = flag("maxw", 1600);
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--")));

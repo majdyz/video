@@ -676,6 +676,9 @@ export default function App() {
                 format={(v) => `${Math.round((v / INTENSITY_MAX) * 100)}%`}
                 onChange={(v) => setSettings((s) => ({ ...s, intensity: v }))} disabled={exporting} />
               <p className="hint">50% is the estimated correction. Above it the colour split is pushed harder than the estimate.</p>
+              <Slider label="Deep blue look" value={settings.look} min={0} max={1} step={0.01}
+                format={(v) => `${Math.round(v * 100)}%`}
+                onChange={(v) => setSettings((s) => ({ ...s, look: v }))} disabled={exporting} />
             </div>
             <AdvancedDisclosure disabled={exporting}>
               <Slider label="Saturation" value={settings.saturation} min={0} max={2} step={0.01}

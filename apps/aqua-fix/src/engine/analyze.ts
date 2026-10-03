@@ -24,7 +24,7 @@ import {
   type FrameAnalysis,
   type GradeParams,
   type Vec3,
-} from "./params.ts";
+ CONF_BRIGHT } from "./params.ts";
 
 /** Thumbnail size the engine analyses at (upright, 16:9 box). */
 export const ANALYSIS_W = 256;
@@ -38,6 +38,10 @@ const MIN_DARK = 6;
 // Range-adaptive compensation: the white balance is spread over range with
 // exponent γ·ln(wb) around the mean range, bounded per pixel.
 const ATTN_GAMMA = 1.1;
+// Spread of the range prior (p98 − p2 of ULAP d) below which range
+// compensation fades out.
+const RANGE_SPREAD_LO = 0.12;
+const RANGE_SPREAD_HI = 0.3;
 const GAIN_CAP = 2.2;
 // Signal confidence: lum(D)/lum(I). Veil-dominated pixels (open water) keep
 // a toned-down version of the input instead of amplified noise.
@@ -248,7 +252,9 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
       J[i * 3 + c] = I * prop + (per - I * prop) * wSub;
     }
     const confSignal = smoothstep(CONF_LO, CONF_HI, sig);
-    conf[i] = Math.min(confSignal, hueObj[i]);
+    // Far brighter than the water at its range → object, whatever the hue.
+    const confBright = smoothstep(CONF_BRIGHT.lo, CONF_BRIGHT.hi, sig);
+    conf[i] = Math.min(confSignal, Math.max(hueObj[i], confBright));
     // The balance vote uses the signal test alone: in a blue scene nearly
     // every object shares the water's hue and the hue test would starve the
     // vote, leaving deep reef uncorrected. Open water drops out by itself.
@@ -291,7 +297,12 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     if (magentaFraction(J, wbWeight, n, wb) <= MAGENTA_MAX_FRACTION) break;
     wb[0] = Math.max(WB_R_MIN, wb[0] * 0.9);
   }
-  const attn: Vec3 = [ATTN_GAMMA * Math.log(wb[0]), 0, ATTN_GAMMA * Math.log(wb[2])];
+  // Range compensation only where the range prior actually spreads: on a
+  // flat prior its per-pixel noise is all it would act on, and the prior
+  // reads bright, red-rich subjects (skin) as nearest — handing exactly the
+  // pixels that need the most red the least.
+  const rangeConf = smoothstep(RANGE_SPREAD_LO, RANGE_SPREAD_HI, zHi - zLo);
+  const attn: Vec3 = [ATTN_GAMMA * rangeConf * Math.log(wb[0]), 0, ATTN_GAMMA * rangeConf * Math.log(wb[2])];
   for (let i = 0; i < n; i++) {
     const dz = z[i] - zMean;
     for (let c = 0; c < 3; c++) {

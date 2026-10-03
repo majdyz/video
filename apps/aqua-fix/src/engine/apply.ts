@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { compressToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { ULAP, boostParams, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { CONF_BRIGHT, LOOK, ULAP, boostParams, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
@@ -136,7 +136,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // Per-pixel classification for the fallback: hue against the veil and
   // the signal fraction, the same tests the analysis runs on the thumbnail.
   const confSignal = smoothstep(p.confLo, p.confHi, sig);
-  const confPix = Math.min(confSignal, hueConf(pa, pb, p));
+  const confBright = smoothstep(CONF_BRIGHT.lo, CONF_BRIGHT.hi, sig);
+  const confPix = Math.min(confSignal, Math.max(hueConf(pa, pb, p), confBright));
   // A pixel the veil model would nearly erase takes the water path whatever
   // the map says (see grade-shader.ts).
   const conf = (clamp(confMap, 0, 1) * k + confPix * (1 - k)) * confSignal;
@@ -186,7 +187,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const cMax = p.chromaK * cSrc + p.chromaC0;
   let scale = C > cMax ? cMax / C : 1;
   scale *= s.saturation;
-  const [r1, g1, b1] = oklabToLinear(L, a * scale, b * scale);
+  const looked = deepBlueLook(L, a * scale, b * scale, s.look);
+  const [r1, g1, b1] = oklabToLinear(looked[0], looked[1], looked[2]);
   void C;
 
   const [r2, g2, b2] = compressToGamut(r1, g1, b1);
@@ -209,6 +211,28 @@ function clamp(x: number, lo: number, hi: number): number {
 function smoothstep(e0: number, e1: number, x: number): number {
   const t = clamp((x - e0) / (e1 - e0), 0, 1);
   return t * t * (3 - 2 * t);
+}
+
+/** Deep-blue look in Oklab (mirrors the shaders; see LOOK in params.ts). */
+export function deepBlueLook(L: number, a: number, b: number, look: number): [number, number, number] {
+  if (look <= 0) return [L, a, b];
+  const C = Math.hypot(a, b);
+  const h = Math.atan2(b, a);
+  const wrap = (x: number) => x - 2 * Math.PI * Math.round(x / (2 * Math.PI));
+  // Teal/cyan/blue pixels (unless vivid) and near-neutral pixels take the
+  // tint; chromatic colours of other hues (skin, fish) are left alone.
+  const inBand = 1 - smoothstep(LOOK.bandIn, LOOK.bandOut, Math.abs(wrap(h - LOOK.bandHue)));
+  const vivid = smoothstep(LOOK.keepLo, LOOK.keepHi, C);
+  const warm = (1 - smoothstep(LOOK.warmIn, LOOK.warmOut, Math.abs(wrap(h - LOOK.warmHue)))) * smoothstep(LOOK.warmLo, LOOK.warmHi, C);
+  const wAch = (1 - smoothstep(LOOK.achLo, LOOK.achHi, C)) * (1 - warm);
+  const wTint = Math.max(inBand * (1 - vivid), wAch);
+  const wKeep = inBand * vivid;
+  const wOther = Math.max(0, 1 - wTint - wKeep);
+  const w = wTint * look * LOOK.mix;
+  const L2 = Math.pow(Math.max(0, L), 1 + LOOK.gamma * look) * (1 - LOOK.dim * look);
+  const Ct = LOOK.c0 + LOOK.c1 * L2;
+  const ds = 1 - LOOK.otherDesat * look * wOther;
+  return [L2, (a + (Ct * Math.cos(LOOK.targetHue) - a) * w) * ds, (b + (Ct * Math.sin(LOOK.targetHue) - b) * w) * ds];
 }
 
 /** Mirrors analyze.ts hueFarness: 1 when the hue is ≥ hueFarHi from the veil's. */
