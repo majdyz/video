@@ -490,9 +490,12 @@ export default function App() {
             const rot = (info.rotation / 90) as Rotation;
             const t0 = performance.now();
             e.upload(frame, frame.displayWidth, frame.displayHeight, rot);
-            // Every export frame is analysed (cheap next to the capture) so
-            // the eased maps track the picture; the first one snaps.
-            await e.analyzeNow(frames === 0);
+            // The first frame waits for its analysis (and person mask) and
+            // snaps; after that the analysis runs alongside the frame loop —
+            // waiting on it cost a GPU readback round-trip per frame on
+            // iPhone (up ≈ 100 ms), and the eased maps hide a frame of lag.
+            if (frames === 0) await e.analyzeNow(true);
+            else e.analyzeSoon();
             e.tick(info.timeSec);
             frames++;
             const t1 = performance.now();
