@@ -144,8 +144,11 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   if (ctx.debug) return [k, confPix, clamp(confMap, 0, 1)];
   const out = [0, 0, 0];
   const ew = Math.pow(p.exposure, p.waterExposure);
+  // Water path: own brightness, toned-down balance, optional hue-preserving
+  // dehaze (gives up part of the veil fraction; floor keeps pure water lit).
+  const wd = 1 - s.dehaze * Math.min(0.9, lumBs / lumI);
   for (let c = 0; c < 3; c++) {
-    const water = src[c] * p.waterWb[c] * ew;
+    const water = src[c] * p.waterWb[c] * ew * wd;
     out[c] = water + (full[c] * p.exposure - water) * conf;
   }
   // Levels on luminance, ratio-preserving.
@@ -187,7 +190,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const cMax = p.chromaK * cSrc + p.chromaC0;
   let scale = C > cMax ? cMax / C : 1;
   scale *= s.saturation;
-  const looked = deepBlueLook(L, a * scale, b * scale, s.look);
+  const looked = deepBlueLook(L, a * scale, b * scale, s.look, 1 - conf);
   const [r1, g1, b1] = oklabToLinear(looked[0], looked[1], looked[2]);
   void C;
 
@@ -214,25 +217,21 @@ function smoothstep(e0: number, e1: number, x: number): number {
 }
 
 /** Deep-blue look in Oklab (mirrors the shaders; see LOOK in params.ts). */
-export function deepBlueLook(L: number, a: number, b: number, look: number): [number, number, number] {
+export function deepBlueLook(L: number, a: number, b: number, look: number, water: number): [number, number, number] {
   if (look <= 0) return [L, a, b];
   const C = Math.hypot(a, b);
   const h = Math.atan2(b, a);
   const wrap = (x: number) => x - 2 * Math.PI * Math.round(x / (2 * Math.PI));
-  // Teal/cyan/blue pixels (unless vivid) and near-neutral pixels take the
-  // tint; chromatic colours of other hues (skin, fish) are left alone.
-  const inBand = 1 - smoothstep(LOOK.bandIn, LOOK.bandOut, Math.abs(wrap(h - LOOK.bandHue)));
+  // The tint follows the engine's own water/object split: water (and the far
+  // reef the model can't separate from it) goes deep blue; graded objects
+  // keep their colour. Warm, very light or vivid pixels are never tinted.
   const vivid = smoothstep(LOOK.keepLo, LOOK.keepHi, C);
   const warm = (1 - smoothstep(LOOK.warmIn, LOOK.warmOut, Math.abs(wrap(h - LOOK.warmHue)))) * smoothstep(LOOK.warmLo, LOOK.warmHi, C);
-  const wAch = (1 - smoothstep(LOOK.achLo, LOOK.achHi, C)) * (1 - warm);
-  const wTint = Math.max(inBand * (1 - vivid), wAch);
-  const wKeep = inBand * vivid;
-  const wOther = Math.max(0, 1 - wTint - wKeep);
+  const wTint = water * (1 - vivid) * (1 - warm) * (1 - smoothstep(LOOK.brightLo, LOOK.brightHi, L));
   const w = wTint * look * LOOK.mix;
   const L2 = Math.pow(Math.max(0, L), 1 + LOOK.gamma * look) * (1 - LOOK.dim * look);
   const Ct = LOOK.c0 + LOOK.c1 * L2;
-  const ds = 1 - LOOK.otherDesat * look * wOther;
-  return [L2, (a + (Ct * Math.cos(LOOK.targetHue) - a) * w) * ds, (b + (Ct * Math.sin(LOOK.targetHue) - b) * w) * ds];
+  return [L2, a + (Ct * Math.cos(LOOK.targetHue) - a) * w, b + (Ct * Math.sin(LOOK.targetHue) - b) * w];
 }
 
 /** Mirrors analyze.ts hueFarness: 1 when the hue is ≥ hueFarHi from the veil's. */

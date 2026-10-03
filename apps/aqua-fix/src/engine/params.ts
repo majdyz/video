@@ -24,8 +24,9 @@ export type UserSettings = {
   veil: number;
   /**
    * Deep-blue look, 0..1: a creative grade on top of the correction —
-   * crushed shadows (L^1.7), teal/cyan hues rotated toward deep blue and
-   * desaturated, skin and already-blue objects left alone.
+   * darker with mild shadow crush, and the water (per the engine's own
+   * water/object split) tinted toward deep blue; graded objects keep their
+   * colour.
    */
   look: number;
 };
@@ -45,6 +46,12 @@ export type GradeSettings = {
   veil: number;
   /** Deep-blue look amount, 0..1. */
   look: number;
+  /**
+   * Water-path dehaze, 0..1: how much of the (hue-preserving) veil the
+   * water path gives up. 0 keeps water at its own brightness; the push
+   * raises it so murky far reef gains contrast and water goes darker.
+   */
+  dehaze: number;
 };
 
 /**
@@ -61,17 +68,13 @@ export const LOOK = {
   // L' = L^(1 + gamma·look) · (1 − dim·look).
   gamma: 0.15,
   dim: 0.22,
-  otherDesat: 0.2, // chroma loss on colours outside the band (skin goes pale)
-  bandHue: (215 * Math.PI) / 180, // centre of the teal/cyan band
-  bandIn: (35 * Math.PI) / 180, // full weight within ±bandIn …
-  bandOut: (55 * Math.PI) / 180, // … fading to none at ±bandOut
-  achLo: 0.03, // near-neutral pixels (corrected reef, sand) take the tint too …
-  achHi: 0.08, // … fading out as they get chromatic (skin, fish)
   warmHue: (65 * Math.PI) / 180, // warm band (skin, sand: ~20°–110°) never takes the tint …
   warmIn: (45 * Math.PI) / 180,
   warmOut: (70 * Math.PI) / 180,
   warmLo: 0.006, // … once it has any chroma at all
   warmHi: 0.015,
+  brightLo: 0.7, // very light pixels (pale skin, white hands/feet) keep their colour …
+  brightHi: 0.85,
   keepLo: 0.09, // vivid in-band colours (blue fins) are kept …
   keepHi: 0.14,
   targetHue: (246 * Math.PI) / 180,
@@ -94,6 +97,7 @@ export function resolveSettings(s: UserSettings): GradeSettings {
     clarity: Math.min(1, s.clarity + 0.5 * t),
     veil: s.veil + 0.3 * t,
     look: Math.min(1, Math.max(0, s.look)),
+    dehaze: 0.6 * t,
   };
 }
 
@@ -107,7 +111,7 @@ export function boostParams(p: GradeParams, t: number): GradeParams {
   if (t <= 0) return p;
   const e = 1 + 0.8 * t;
   const wb = p.wb.map((g) => Math.min(5, Math.max(0.25, Math.pow(g, e)))) as Vec3;
-  const waterMax = 1.6 + 0.9 * t;
+  const waterMax = 1.6 + 0.4 * t;
   const waterWb = wb.map((g) => Math.min(waterMax, Math.max(1 / waterMax, Math.pow(g, 0.6)))) as Vec3;
   return {
     ...p,
@@ -245,7 +249,7 @@ export const CLAHE_BINS = 32;
  *  p0: rotation, split, strength, 0
  *  p1: binf.rgb, veil
  *  p2: betaB.rgb, look
- *  p3: cB.rgb, 0
+ *  p3: cB.rgb, dehaze
  *  p4: attn.rgb, gainCap
  *  p9.w: zMean
  *  p5: wb.rgb, exposure
@@ -274,7 +278,7 @@ export function packUniforms(
   u.set([rotation, split, s.strength, 0], 0);
   u.set([...params.binf, s.veil], 4);
   u.set([...params.betaB, s.look], 8);
-  u.set([...params.cB, 0], 12);
+  u.set([...params.cB, s.dehaze], 12);
   u.set([...params.attn, params.gainCap], 16);
   u.set([...params.wb, params.exposure], 20);
   u.set([params.black, params.white, params.levelsMix, s.clarity], 24);

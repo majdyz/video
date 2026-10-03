@@ -13,18 +13,14 @@ const float CONF_BRIGHT_LO = ${CONF_BRIGHT.lo.toFixed(4)};
 const float CONF_BRIGHT_HI = ${CONF_BRIGHT.hi.toFixed(4)};
 const float LOOK_GAMMA = ${LOOK.gamma.toFixed(4)};
 const float LOOK_DIM = ${LOOK.dim.toFixed(4)};
-const float LOOK_OTHER_DESAT = ${LOOK.otherDesat.toFixed(4)};
-const float LOOK_BAND_HUE = ${LOOK.bandHue.toFixed(6)};
-const float LOOK_BAND_IN = ${LOOK.bandIn.toFixed(6)};
-const float LOOK_BAND_OUT = ${LOOK.bandOut.toFixed(6)};
 const float LOOK_TARGET_HUE = ${LOOK.targetHue.toFixed(6)};
-const float LOOK_ACH_LO = ${LOOK.achLo.toFixed(4)};
-const float LOOK_ACH_HI = ${LOOK.achHi.toFixed(4)};
 const float LOOK_WARM_HUE = ${LOOK.warmHue.toFixed(6)};
 const float LOOK_WARM_IN = ${LOOK.warmIn.toFixed(6)};
 const float LOOK_WARM_OUT = ${LOOK.warmOut.toFixed(6)};
 const float LOOK_WARM_LO = ${LOOK.warmLo.toFixed(4)};
 const float LOOK_WARM_HI = ${LOOK.warmHi.toFixed(4)};
+const float LOOK_BRIGHT_LO = ${LOOK.brightLo.toFixed(4)};
+const float LOOK_BRIGHT_HI = ${LOOK.brightHi.toFixed(4)};
 const float LOOK_KEEP_LO = ${LOOK.keepLo.toFixed(4)};
 const float LOOK_KEEP_HI = ${LOOK.keepHi.toFixed(4)};
 const float LOOK_C0 = ${LOOK.c0.toFixed(4)};
@@ -110,24 +106,19 @@ vec4 sampleFields(vec2 uv, vec3 c, out float kOut) {
 float smoothstepf(float e0, float e1, float x) { float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
 // 1 for objects, 0 for water: Oklab hue distance to the veil, achromatic → object.
 // Deep-blue look in Oklab (see LOOK in params.ts; mirrors apply.ts).
-vec3 deepBlueLook(vec3 lab, float look) {
+vec3 deepBlueLook(vec3 lab, float look, float water) {
   if (look <= 0.0) return lab;
   float C = length(lab.yz);
   float h = atan(lab.z, lab.y);
-  float d = h - LOOK_BAND_HUE; d -= 6.2831853 * round(d / 6.2831853);
-  float inBand = 1.0 - smoothstepf(LOOK_BAND_IN, LOOK_BAND_OUT, abs(d));
   float vivid = smoothstepf(LOOK_KEEP_LO, LOOK_KEEP_HI, C);
   float dw = h - LOOK_WARM_HUE; dw -= 6.2831853 * round(dw / 6.2831853);
   float warm = (1.0 - smoothstepf(LOOK_WARM_IN, LOOK_WARM_OUT, abs(dw))) * smoothstepf(LOOK_WARM_LO, LOOK_WARM_HI, C);
-  float wAch = (1.0 - smoothstepf(LOOK_ACH_LO, LOOK_ACH_HI, C)) * (1.0 - warm);
-  float wTint = max(inBand * (1.0 - vivid), wAch);
-  float wOther = max(0.0, 1.0 - wTint - inBand * vivid);
+  float wTint = water * (1.0 - vivid) * (1.0 - warm) * (1.0 - smoothstepf(LOOK_BRIGHT_LO, LOOK_BRIGHT_HI, lab.x));
   float w = wTint * look * LOOK_MIX;
   float L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look) * (1.0 - LOOK_DIM * look);
   float Ct = LOOK_C0 + LOOK_C1 * L2;
   vec2 t = Ct * vec2(cos(LOOK_TARGET_HUE), sin(LOOK_TARGET_HUE));
-  float ds = 1.0 - LOOK_OTHER_DESAT * look * wOther;
-  return vec3(L2, (lab.yz + (t - lab.yz) * w) * ds);
+  return vec3(L2, lab.yz + (t - lab.yz) * w);
 }
 float hueFar(vec2 ab, vec2 veilHue, float lo, float hi, float achroma) {
   float c = length(ab);
@@ -171,7 +162,7 @@ vec3 grade(vec3 src, vec2 uv) {
   if (uv.x < split || strength <= 0.0) return src;
   vec3 binf = p[1].xyz; float veil = p[1].w;
   vec3 betaB = p[2].xyz; float look = p[2].w;
-  vec3 cB = p[3].xyz;
+  vec3 cB = p[3].xyz; float dehaze = p[3].w;
   vec3 attn = p[4].xyz; float gainCap = p[4].w;
   vec3 wb = p[5].xyz; float exposure = p[5].w;
   float black = p[6].x, white = p[6].y, levelsMix = p[6].z, clarity = p[6].w;
@@ -226,7 +217,7 @@ vec3 grade(vec3 src, vec2 uv) {
   vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   vec3 full = D * rangeGain * wb;
   float ew = pow(exposure, waterExposure);
-  vec3 water = lin * waterWb * ew;
+  vec3 water = lin * waterWb * ew * (1.0 - dehaze * min(0.9, lumBs / lumI));
   vec3 o = water + (full * exposure - water) * conf;
   // Levels on luminance, ratio-preserving.
   float Y = lum(o);
@@ -260,7 +251,7 @@ vec3 grade(vec3 src, vec2 uv) {
   float C = length(lab.yz);
   float cMax = chromaK * cSrc + chromaC0;
   float scale = (C > cMax ? cMax / C : 1.0) * saturation;
-  vec3 o1 = oklabToLinear(deepBlueLook(vec3(lab.x, lab.yz * scale), look));
+  vec3 o1 = oklabToLinear(deepBlueLook(vec3(lab.x, lab.yz * scale), look, 1.0 - conf));
   vec3 o2 = compressToGamut(o1);
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
@@ -339,24 +330,19 @@ fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> array<vec4<f32>, 2> {
   return array<vec4<f32>, 2>(sum / sw, vec4(0.0, 0.0, 0.0, min(1.0, sw / 0.08)));
 }
 fn smoothstepf(e0: f32, e1: f32, x: f32) -> f32 { let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
-fn deepBlueLook(lab: vec3<f32>, look: f32) -> vec3<f32> {
+fn deepBlueLook(lab: vec3<f32>, look: f32, water: f32) -> vec3<f32> {
   if (look <= 0.0) { return lab; }
   let C = length(lab.yz);
   let h = atan2(lab.z, lab.y);
-  var d = h - LOOK_BAND_HUE; d -= 6.2831853 * round(d / 6.2831853);
-  let inBand = 1.0 - smoothstepf(LOOK_BAND_IN, LOOK_BAND_OUT, abs(d));
   let vivid = smoothstepf(LOOK_KEEP_LO, LOOK_KEEP_HI, C);
   var dw = h - LOOK_WARM_HUE; dw -= 6.2831853 * round(dw / 6.2831853);
   let warm = (1.0 - smoothstepf(LOOK_WARM_IN, LOOK_WARM_OUT, abs(dw))) * smoothstepf(LOOK_WARM_LO, LOOK_WARM_HI, C);
-  let wAch = (1.0 - smoothstepf(LOOK_ACH_LO, LOOK_ACH_HI, C)) * (1.0 - warm);
-  let wTint = max(inBand * (1.0 - vivid), wAch);
-  let wOther = max(0.0, 1.0 - wTint - inBand * vivid);
+  let wTint = water * (1.0 - vivid) * (1.0 - warm) * (1.0 - smoothstepf(LOOK_BRIGHT_LO, LOOK_BRIGHT_HI, lab.x));
   let w = wTint * look * LOOK_MIX;
   let L2 = pow(max(lab.x, 0.0), 1.0 + LOOK_GAMMA * look) * (1.0 - LOOK_DIM * look);
   let Ct = LOOK_C0 + LOOK_C1 * L2;
   let t = Ct * vec2(cos(LOOK_TARGET_HUE), sin(LOOK_TARGET_HUE));
-  let ds = 1.0 - LOOK_OTHER_DESAT * look * wOther;
-  return vec3(L2, (lab.yz + (t - lab.yz) * w) * ds);
+  return vec3(L2, lab.yz + (t - lab.yz) * w);
 }
 fn hueFar(ab: vec2<f32>, veilHue: vec2<f32>, lo: f32, hi: f32, achroma: f32) -> f32 {
   let c = length(ab);
@@ -399,7 +385,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   if (uv.x < split || strength <= 0.0) { return src; }
   let binf = p[1].xyz; let veil = p[1].w;
   let betaB = p[2].xyz; let look = p[2].w;
-  let cB = p[3].xyz;
+  let cB = p[3].xyz; let dehaze = p[3].w;
   let attn = p[4].xyz; let gainCap = p[4].w;
   let wb = p[5].xyz; let exposure = p[5].w;
   let black = p[6].x; let white = p[6].y; let levelsMix = p[6].z; let clarity = p[6].w;
@@ -444,7 +430,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   let full = D * rangeGain * wb;
   let ew = pow(exposure, waterExposure);
-  let water = lin * waterWb * ew;
+  let water = lin * waterWb * ew * (1.0 - dehaze * min(0.9, lumBs / lumI));
   var o = water + (full * exposure - water) * conf;
   var Y = lum(o);
   let Ylv = Y + ((Y - black) / (white - black) - Y) * levelsMix;
@@ -473,7 +459,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let C = length(lab.yz);
   let cMax = chromaK * cSrc + chromaC0;
   let scale = select(1.0, cMax / C, C > cMax) * saturation;
-  let o1 = oklabToLinear(deepBlueLook(vec3(lab.x, lab.yz * scale), look));
+  let o1 = oklabToLinear(deepBlueLook(vec3(lab.x, lab.yz * scale), look, 1.0 - conf));
   let o2 = compressToGamut(o1);
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);
