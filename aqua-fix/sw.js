@@ -32,6 +32,24 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
+  // The MediaPipe runtime (~12 MB wasm) and the person model never change
+  // without a VERSION bump: cache-first.
+  if (req.url.includes("/mediapipe/")) {
+    event.respondWith(
+      caches.match(req).then(
+        (cached) =>
+          cached ||
+          fetch(req).then((res) => {
+            if (res && res.status === 200) {
+              const clone = res.clone();
+              caches.open(VERSION).then((cache) => cache.put(req, clone)).catch(() => undefined);
+            }
+            return res;
+          }),
+      ),
+    );
+    return;
+  }
   event.respondWith(
     fetch(req)
       .then((res) => {
