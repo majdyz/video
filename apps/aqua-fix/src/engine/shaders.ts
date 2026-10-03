@@ -51,16 +51,17 @@ uniform sampler2D u_source;
 uniform int u_rotation;
 uniform vec2 u_srcSize;
 uniform vec2 u_outSize;
+uniform vec4 u_rect; // sub-rectangle of the upright frame (x, y, w, h in 0..1)
 in vec2 v_uv;
 out vec4 o_color;
 ${ROTATE_GLSL}
 void main() {
   // readPixels returns rows bottom-up; flip here so the readback is top-down.
-  vec2 v_uv = vec2(v_uv.x, 1.0 - v_uv.y);
+  vec2 v_uv = u_rect.xy + vec2(v_uv.x, 1.0 - v_uv.y) * u_rect.zw;
   vec2 upright = (u_rotation == 1 || u_rotation == 3) ? u_srcSize.yx : u_srcSize;
-  vec2 texel = 1.0 / u_outSize;
+  vec2 texel = u_rect.zw / u_outSize;
   // Taps per axis: enough to cover the source footprint, capped at 8.
-  float ratio = max(upright.x / u_outSize.x, upright.y / u_outSize.y);
+  float ratio = max(upright.x * u_rect.z / u_outSize.x, upright.y * u_rect.w / u_outSize.y);
   int n = int(clamp(ceil(ratio * 0.5), 1.0, 8.0));
   vec3 acc = vec3(0.0);
   for (int j = 0; j < 8; j++) {
@@ -101,7 +102,7 @@ ${GRADE_WGSL}
 }`;
 
 export const WGSL_DOWNSCALE = `
-struct DownParams { srcSize: vec2<f32>, outSize: vec2<f32>, rotation: f32, pad0: f32, pad1: f32, pad2: f32 };
+struct DownParams { srcSize: vec2<f32>, outSize: vec2<f32>, rotation: f32, pad0: f32, pad1: f32, pad2: f32, rect: vec4<f32> };
 @group(0) @binding(0) var<uniform> dp: DownParams;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var u_source: texture_2d<f32>;
@@ -117,14 +118,15 @@ ${ROTATE_WGSL}
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let rot = u32(dp.rotation + 0.5);
   let upright = select(dp.srcSize, dp.srcSize.yx, rot == 1u || rot == 3u);
-  let texel = 1.0 / dp.outSize;
-  let ratio = max(upright.x / dp.outSize.x, upright.y / dp.outSize.y);
+  let base = dp.rect.xy + in.uv * dp.rect.zw;
+  let texel = dp.rect.zw / dp.outSize;
+  let ratio = max(upright.x * dp.rect.z / dp.outSize.x, upright.y * dp.rect.w / dp.outSize.y);
   let n = i32(clamp(ceil(ratio * 0.5), 1.0, 8.0));
   var acc = vec3<f32>(0.0);
   for (var j = 0; j < n; j++) {
     for (var i = 0; i < n; i++) {
       let off = (vec2(f32(i), f32(j)) + 0.5) / f32(n) - 0.5;
-      let uv = in.uv + off * texel;
+      let uv = base + off * texel;
       acc += textureSampleLevel(u_source, samp, rotateUV(uv, rot), 0.0).rgb;
     }
   }

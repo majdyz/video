@@ -6,6 +6,10 @@
 // with texelFetch/textureLoad and interpolates by hand — float filtering is
 // optional on both APIs, manual interpolation is not.
 
+/** Sub-rectangle of the upright frame, 0..1. */
+export type Rect = { x: number; y: number; w: number; h: number };
+export const FULL_RECT: Rect = { x: 0, y: 0, w: 1, h: 1 };
+
 export type SourceInput = HTMLVideoElement | VideoFrame | ImageBitmap | HTMLCanvasElement | OffscreenCanvas | HTMLImageElement;
 
 /** Clockwise quarter turns to apply when sampling the source (0..3). */
@@ -35,7 +39,7 @@ export interface GpuBackend {
    * Downscales the current source to `width`×`height` (upright) and reads
    * back RGBA8. Async so the GPU never stalls the main thread.
    */
-  analyze(width: number, height: number): Promise<Uint8ClampedArray>;
+  analyze(width: number, height: number, rect?: Rect): Promise<Uint8ClampedArray>;
   /** Draws the graded frame into the canvas at the upright source size. */
   render(): void;
   /** Draws the graded frame and wraps the result as a VideoFrame (export). */

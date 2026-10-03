@@ -12,7 +12,8 @@ import { WebGPUBackend } from "./backend-webgpu.ts";
 import { ANALYSIS_H, ANALYSIS_W } from "./analyze.ts";
 import type { AnalysisPacket, AnalysisRequest } from "./analysis-worker.ts";
 import type { PersonPacket, PersonRequest } from "./person-worker.ts";
-import type { GpuBackend, Rotation, SourceInput } from "./backend.ts";
+import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
+import { linearToOklab } from "./color.ts";
 import {
   CLAHE_BINS,
   CLAHE_TILES_X,
@@ -46,6 +47,19 @@ const PERSON_GROW_PASSES = 16;
 const PERSON_GROW_DECAY = 0.95;
 const PERSON_GROW_LUM = 0.2;
 const PERSON_GROW_CONF = 0.3;
+// … and never through water-coloured cells: hue within this angle of the
+// veil's with some chroma (sunlit water is bright and passes the signal test).
+const PERSON_GROW_WATER_COS = Math.cos((15 * Math.PI) / 180);
+const PERSON_GROW_WATER_CHROMA = 0.02;
+// Person requests cycle: full frame, then the four quadrants at 2× detail
+// (small / far divers vanish at the full-frame thumbnail scale).
+const PERSON_RECTS: Rect[] = [
+  FULL_RECT,
+  { x: 0, y: 0, w: 0.5, h: 0.5 },
+  { x: 0.5, y: 0, w: 0.5, h: 0.5 },
+  { x: 0, y: 0.5, w: 0.5, h: 0.5 },
+  { x: 0.5, y: 0.5, w: 0.5, h: 0.5 },
+];
 
 type Packed = { width: number; height: number; data: Float32Array };
 /** Analysis packet with the CLAHE LUTs re-shaped to a (bins × tiles) texture. */
@@ -82,6 +96,11 @@ export class GradeEngine {
   /** Eased person map at the fields' resolution, written into the guide's alpha. */
   private person: Float32Array | null = null;
   private personTarget: Float32Array | null = null;
+  /** Raw (un-grown) detections: full frame and the quadrant tiles, fields grid. */
+  private personFull: Float32Array | null = null;
+  private personTiles: Float32Array | null = null;
+  private personRectIdx = 0;
+  private personRectInflight: Rect = FULL_RECT;
   private personWaiters: (() => void)[] = [];
   private lastAnalysisAt = -Infinity;
   private current: GradeParams = IDENTITY_PARAMS;
@@ -195,7 +214,20 @@ export class GradeEngine {
     this.stats.personMs = p.ms;
     const fw = this.fields?.width ?? 0, fh = this.fields?.height ?? 0;
     if (fw < 4 || fh < 4) return;
-    const map = resampleMask(p.mask, p.width, p.height, fw, fh, this.guide?.data ?? null, this.fields?.data ?? null);
+    const rect = this.personRectInflight;
+    if (!this.personFull || this.personFull.length !== fw * fh) { this.personFull = new Float32Array(fw * fh); this.personTiles = new Float32Array(fw * fh); }
+    if (rect === FULL_RECT) {
+      this.personFull = resampleMask(p.mask, p.width, p.height, fw, fh);
+    } else {
+      // Box-resample the tile into its quadrant of the tile layer.
+      const x0 = Math.round(rect.x * fw), y0 = Math.round(rect.y * fh);
+      const tw = Math.round(rect.w * fw), th = Math.round(rect.h * fh);
+      const sub = resampleMask(p.mask, p.width, p.height, tw, th);
+      for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) this.personTiles![(y0 + y) * fw + x0 + x] = sub[y * tw + x];
+    }
+    const raw = new Float32Array(fw * fh);
+    for (let i = 0; i < raw.length; i++) raw[i] = Math.max(this.personFull[i], this.personTiles![i]);
+    const map = growMask(raw, fw, fh, this.guide?.data ?? null, this.fields?.data ?? null, this.current.veilColor);
     let cov = 0;
     for (let i = 0; i < map.length; i++) cov += map[i];
     this.stats.personCoverage = cov / map.length;
@@ -284,20 +316,30 @@ export class GradeEngine {
     this.lastAnalysisAt = performance.now();
     try {
       const rgba = await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
-      // Person segmentation shares the thumbnail (a copy; the buffer below is transferred).
-      if (!this.personFailed && !this.personInflight && this.personCount++ % PERSON_EVERY === 0) {
-        const copy = rgba.slice();
-        const preq: PersonRequest = { id: ++this.personReqId, rgba: copy.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, timestampMs: Math.round(this.lastTickSec * 1000) };
-        this.personInflight = true;
-        this.ensurePersonWorker().postMessage(preq, [preq.rgba]);
-      }
+      // Person segmentation: a copy of this thumbnail (full frame) or a
+      // quadrant at 2× detail, cycling through PERSON_RECTS. Both readbacks
+      // finish before anything is posted: once the analysis reply lands,
+      // `inflight` clears and the next tick may start a new readback.
+      const wantPerson = !this.personFailed && !this.personInflight && this.personCount++ % PERSON_EVERY === 0;
+      const rect = PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
+      const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.backend.analyze(ANALYSIS_W, ANALYSIS_H, rect);
       const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H };
       this.ensureWorker().postMessage(req, [req.rgba]);
+      if (px) {
+        this.personRectIdx++;
+        const preq: PersonRequest = { id: ++this.personReqId, rgba: px.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, timestampMs: Math.round(this.lastTickSec * 1000) };
+        this.personInflight = true;
+        this.personRectInflight = rect;
+        this.ensurePersonWorker().postMessage(preq, [preq.rgba]);
+      }
     } catch (e) {
       this.inflight = false;
       const err = e instanceof Error ? e : new Error(String(e));
       this.settle(null, err);
-      this.onError(err);
+      // A readback that merely timed out (a starved GPU on a busy device)
+      // is not worth alarming the user over: the next tick simply retries.
+      if (/timed out/i.test(err.message)) console.warn("Analysis skipped:", err.message);
+      else this.onError(err);
     }
   }
 
@@ -402,6 +444,9 @@ export class GradeEngine {
     this.personInflight = false;
     this.person = null;
     this.personTarget = null;
+    this.personFull = null;
+    this.personTiles = null;
+    this.personRectIdx = 0;
     this.personCount = 0;
     this.stats.personCoverage = 0;
     this.settlePerson();
@@ -442,8 +487,8 @@ export class GradeEngine {
   }
 }
 
-/** Box-resamples a mask (mw×mh) to the fields' grid (fw×fh), clamped to 0..1. */
-function resampleMask(mask: Float32Array, mw: number, mh: number, fw: number, fh: number, guide: Float32Array | null, fields: Float32Array | null): Float32Array {
+/** Box-resamples a mask (mw×mh) to a grid (fw×fh), clamped to 0..1. */
+function resampleMask(mask: Float32Array, mw: number, mh: number, fw: number, fh: number): Float32Array {
   const out = new Float32Array(fw * fh);
   for (let ty = 0; ty < fh; ty++) {
     const y0 = Math.floor((ty * mh) / fh);
@@ -456,6 +501,14 @@ function resampleMask(mask: Float32Array, mw: number, mh: number, fw: number, fh
       out[ty * fw + tx] = Math.min(1, Math.max(0, sum / n));
     }
   }
+  return out;
+}
+
+/** Seeds from confident detections and grows them through bright object cells (see PERSON_GROW_*). */
+function growMask(raw: Float32Array, fw: number, fh: number, guide: Float32Array | null, fields: Float32Array | null, veil: Vec3): Float32Array {
+  const out = new Float32Array(raw);
+  const [, va, vb] = linearToOklab(veil[0], veil[1], veil[2]);
+  const vn = Math.hypot(va, vb) || 1;
   // The selfie model finds the torso (wetsuit) but stops short of bare limbs
   // under a cast. Grow the mask a few cells through cells that are bright
   // (skin is far lighter than reef around a diver) and that the analysis
@@ -464,13 +517,22 @@ function resampleMask(mask: Float32Array, mw: number, mh: number, fw: number, fh
   for (let i = 0; i < fw * fh; i++) {
     const lum = guide && guide.length >= i * 4 + 3 ? 0.2126 * guide[i * 4] + 0.7152 * guide[i * 4 + 1] + 0.0722 * guide[i * 4 + 2] : 1;
     const conf = fields && fields.length >= i * 4 + 2 ? fields[i * 4 + 1] : 1;
-    bright[i] = lum > PERSON_GROW_LUM && conf > PERSON_GROW_CONF ? 1 : 0;
+    let waterHued = false;
+    if (guide && guide.length >= i * 4 + 3) {
+      const [, a, b] = linearToOklab(guide[i * 4], guide[i * 4 + 1], guide[i * 4 + 2]);
+      const c = Math.hypot(a, b);
+      waterHued = c > PERSON_GROW_WATER_CHROMA && (a * va + b * vb) / (c * vn) > PERSON_GROW_WATER_COS;
+    }
+    bright[i] = lum > PERSON_GROW_LUM && conf > PERSON_GROW_CONF && !waterHued ? 1 : 0;
     // Seed only where the model is confident: it smears a soft halo well
     // beyond the person (into open water and reef). Limbs it is unsure
-    // about are reached by the growth below.
+    // about are reached by the growth below. Water-coloured cells are never
+    // a person, however sure the model is (the quadrant passes in particular
+    // bleed into open water next to a diver).
     const v = out[i];
     const t = Math.min(1, Math.max(0, (v - 0.45) / 0.3));
-    out[i] = t * t * (3 - 2 * t);
+    // (Dark water-hued cells stay: a wetsuit under a cast is tinted too.)
+    out[i] = waterHued && lum > PERSON_GROW_LUM ? 0 : t * t * (3 - 2 * t);
   }
   let cur = out;
   for (let pass = 0; pass < PERSON_GROW_PASSES; pass++) {

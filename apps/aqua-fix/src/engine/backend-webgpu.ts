@@ -1,4 +1,4 @@
-import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput } from "./backend.ts";
+import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput, FULL_RECT, type Rect } from "./backend.ts";
 import { WGSL_GRADE, WGSL_DOWNSCALE, WGSL_GRADE_EXT, WGSL_DOWNSCALE_EXT } from "./shaders.ts";
 
 /** Draws the frame small into a 2D canvas and looks for anything above black. */
@@ -114,7 +114,7 @@ export class WebGPUBackend implements GpuBackend {
     this.downPipelineExt = pipeline(WGSL_DOWNSCALE_EXT, "rgba8unorm", downLayoutExt);
     this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.uniformBuf = device.createBuffer({ size: UNIFORM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.downParamsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.downParamsBuf = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     for (let i = 0; i < DATA_SLOTS; i++) this.data.push(this.makeDataTexture(1, 1, new Float32Array(4)));
   }
 
@@ -292,7 +292,7 @@ export class WebGPUBackend implements GpuBackend {
     const buf = this.device.createBuffer({ size: 256 * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     try {
       this.device.pushErrorScope("validation");
-      this.device.queue.writeBuffer(this.downParamsBuf, 0, new Float32Array([frame.displayWidth, frame.displayHeight, w, h, 0, 0, 0, 0]));
+      this.device.queue.writeBuffer(this.downParamsBuf, 0, new Float32Array([frame.displayWidth, frame.displayHeight, w, h, 0, 0, 0, 0, 0, 0, 1, 1]));
       const group = this.device.createBindGroup({
         layout: this.downPipelineExt.getBindGroupLayout(0),
         entries: [
@@ -475,7 +475,7 @@ export class WebGPUBackend implements GpuBackend {
     }
   }
 
-  async analyze(width: number, height: number): Promise<Uint8ClampedArray> {
+  async analyze(width: number, height: number, rect: Rect = FULL_RECT): Promise<Uint8ClampedArray> {
     if (this.readbackInFlight) throw new Error("analysis readback already in flight");
     if (!this.source && !this.extSource) throw new Error("no source uploaded");
     this.readbackInFlight = true;
@@ -489,7 +489,7 @@ export class WebGPUBackend implements GpuBackend {
         this.analysisW = width;
         this.analysisH = height;
       }
-      this.device.queue.writeBuffer(this.downParamsBuf, 0, new Float32Array([this.srcW, this.srcH, width, height, this.rotation, 0, 0, 0]));
+      this.device.queue.writeBuffer(this.downParamsBuf, 0, new Float32Array([this.srcW, this.srcH, width, height, this.rotation, 0, 0, 0, rect.x, rect.y, rect.w, rect.h]));
       const group = this.downGroup();
       const encoder = this.device.createCommandEncoder();
       const pass = encoder.beginRenderPass({ colorAttachments: [{ view: this.analysisTex.createView(), loadOp: "clear", storeOp: "store" }] });

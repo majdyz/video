@@ -1,4 +1,4 @@
-import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput } from "./backend.ts";
+import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput, FULL_RECT, type Rect } from "./backend.ts";
 import { GLSL_FRAGMENT, GLSL_DOWNSCALE_FRAGMENT } from "./shaders.ts";
 
 const VS = `#version 300 es
@@ -52,7 +52,7 @@ export class WebGL2Backend implements GpuBackend {
     this.gl = gl;
     gl.getExtension("EXT_color_buffer_float");
     this.grade = this.link(VS, GLSL_FRAGMENT, ["u_source", "u_data0", "u_data1", "u_data2"]);
-    this.down = this.link(VS, GLSL_DOWNSCALE_FRAGMENT, ["u_source", "u_rotation", "u_srcSize", "u_outSize"]);
+    this.down = this.link(VS, GLSL_DOWNSCALE_FRAGMENT, ["u_source", "u_rotation", "u_srcSize", "u_outSize", "u_rect"]);
     this.vao = gl.createVertexArray()!;
     this.source = this.makeTexture(gl.LINEAR);
     for (let i = 0; i < DATA_SLOTS; i++) {
@@ -218,7 +218,7 @@ export class WebGL2Backend implements GpuBackend {
     this.analysisH = h;
   }
 
-  async analyze(width: number, height: number): Promise<Uint8ClampedArray> {
+  async analyze(width: number, height: number, rect: Rect = FULL_RECT): Promise<Uint8ClampedArray> {
     const gl = this.gl;
     if (this.readbackInFlight) throw new Error("analysis readback already in flight");
     this.readbackInFlight = true;
@@ -230,6 +230,7 @@ export class WebGL2Backend implements GpuBackend {
       gl.uniform1i(this.down.loc.get("u_rotation")!, this.rotation);
       gl.uniform2f(this.down.loc.get("u_srcSize")!, this.srcW, this.srcH);
       gl.uniform2f(this.down.loc.get("u_outSize")!, width, height);
+      gl.uniform4f(this.down.loc.get("u_rect")!, rect.x, rect.y, rect.w, rect.h);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       // Async readback: readPixels into a PBO, wait on a fence, then copy.
       // A direct readPixels would stall the pipeline on every analysis tick.
@@ -244,7 +245,7 @@ export class WebGL2Backend implements GpuBackend {
         const poll = () => {
           const status = gl.clientWaitSync(sync, 0, 0);
           if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return resolve();
-          if (status === gl.WAIT_FAILED || ++tries > 5000) return reject(new Error("GPU readback timed out"));
+          if (status === gl.WAIT_FAILED || ++tries > 15000) return reject(new Error("GPU readback timed out"));
           setTimeout(poll, 2);
         };
         poll();
