@@ -98,7 +98,12 @@ export default function App() {
   const modeRef = useRef<Mode>("idle");
 
   const [mode, setMode] = useState<Mode>("idle");
-  const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<UserSettings>(() => {
+    // Debug/testing: ?intensity=1.5&look=1 preset the controls (headless runs).
+    const q = new URLSearchParams(location.search);
+    const num = (k: string) => { const v = parseFloat(q.get(k) ?? ""); return Number.isFinite(v) ? v : undefined; };
+    return { ...DEFAULT_SETTINGS, intensity: num("intensity") ?? DEFAULT_SETTINGS.intensity, look: num("look") ?? DEFAULT_SETTINGS.look };
+  });
   const [compareActive, setCompareActive] = useState(false);
   const [compareSplit, setCompareSplit] = useState(0.5);
   const [error, setError] = useState<string | null>(null);
