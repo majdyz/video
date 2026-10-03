@@ -130,3 +130,12 @@ ${ROTATE_WGSL}
   }
   return vec4(acc / f32(n * n), 1.0);
 }`;
+
+/** WGSL variants that read the source through a zero-copy external texture (VideoFrames). */
+function externalVariant(code: string): string {
+  return code
+    .replace("var u_source: texture_2d<f32>;", "var u_source: texture_external;")
+    .replace(/textureSampleLevel\(u_source, samp, ([^;]*?), 0\.0\)/g, "textureSampleBaseClampToEdge(u_source, samp, $1)");
+}
+export const WGSL_GRADE_EXT = externalVariant(WGSL_GRADE);
+export const WGSL_DOWNSCALE_EXT = externalVariant(WGSL_DOWNSCALE);

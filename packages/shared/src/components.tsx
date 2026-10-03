@@ -437,16 +437,20 @@ export function RecordingOverlay({
   currentTime,
   duration,
   progress,
+  detail,
 }: {
   currentTime: number;
   duration: number;
   progress: number;
+  /** Optional small status, e.g. export speed. */
+  detail?: string;
 }) {
   return (
     <div className="recording-overlay">
       <div className="rec-dot" />
       <span>
         {formatTime(currentTime)} / {formatTime(duration)}
+        {detail ? <small style={{ marginLeft: 8, opacity: 0.7 }}>{detail}</small> : null}
       </span>
       <div className="progress">
         <div className="bar" style={{ width: `${progress * 100}%` }} />

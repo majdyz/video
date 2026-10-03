@@ -29,9 +29,7 @@ import type { Rotation } from "./engine/backend";
 
 type Mode = "idle" | "photo" | "video";
 
-// The exporter analyses every Nth decoded frame; the smoother carries the
-// grade across the frames in between exactly as it does in the preview.
-const EXPORT_ANALYSIS_STRIDE = 4;
+
 // Preview renders at the stage's device-pixel size (capped), never at 4K.
 const PREVIEW_MAX_WIDTH = 1600;
 
@@ -108,6 +106,7 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportTime, setExportTime] = useState(0);
+  const [exportDetail, setExportDetail] = useState("");
   const [duration, setDuration] = useState(0);
   const [showInfo, setShowInfo] = useState(false);
   const [engineKind, setEngineKind] = useState<"webgpu" | "webgl2" | null>(null);
@@ -469,6 +468,8 @@ export default function App() {
     setExportTime(0);
     const total = video.duration || 0;
     const bitrate = bitrateFromSource(file.size, total) ?? pickBitrate(video.videoWidth, video.videoHeight, 30);
+    // Per-stage timing for the overlay: where an export spends its time.
+    const stage = { upload: 0, render: 0, frames: 0, started: performance.now(), lastUi: 0 };
     // Export has its own temporal state: start clean so the first frame
     // snaps to its own analysis instead of inheriting the preview's.
     e.reset();
@@ -482,11 +483,28 @@ export default function App() {
           const frame = sample.toVideoFrame();
           try {
             const rot = (info.rotation / 90) as Rotation;
+            const t0 = performance.now();
             e.upload(frame, frame.displayWidth, frame.displayHeight, rot);
-            if (frames % EXPORT_ANALYSIS_STRIDE === 0) await e.analyzeNow(frames === 0);
+            // First frame waits for its analysis so the clip starts graded;
+            // after that the worker runs alongside the encoder and each
+            // result snaps in when it lands (never stalls the pipeline).
+            if (frames === 0) await e.analyzeNow(true);
+            else e.analyzeSoon();
             e.tick(info.timeSec);
             frames++;
-            return await e.renderToFrame(rot, frame.timestamp, frame.duration ?? undefined);
+            const t1 = performance.now();
+            const out = await e.renderToFrame(rot, frame.timestamp, frame.duration ?? undefined);
+            const t2 = performance.now();
+            stage.upload += t1 - t0;
+            stage.render += t2 - t1;
+            stage.frames++;
+            if (t2 - stage.lastUi > 500) {
+              stage.lastUi = t2;
+              const fps = stage.frames / ((t2 - stage.started) / 1000);
+              const st = e.getStats();
+              setExportDetail(`${fps.toFixed(1)} fps · gpu ${(stage.render / stage.frames).toFixed(0)} ms · analysis ${st.analysisMs.toFixed(0)} ms · ${st.backend}`);
+            }
+            return out;
           } finally {
             frame.close();
           }
@@ -513,6 +531,7 @@ export default function App() {
       setExporting(false);
       setExportProgress(0);
       setExportTime(0);
+      setExportDetail("");
       // Back to the preview with a fresh analysis of the first frame.
       e.reset();
       try {
@@ -618,7 +637,7 @@ export default function App() {
         {mode === "idle" && <PlaceholderDropZone accept="image/*,video/*" onPick={handleFile} />}
         {error && <div className="error">{error}</div>}
         {busy && <BusyOverlay message={busy} />}
-        {exporting && <RecordingOverlay currentTime={exportTime} duration={duration} progress={exportProgress} />}
+        {exporting && <RecordingOverlay currentTime={exportTime} duration={duration} progress={exportProgress} detail={exportDetail} />}
         {mode === "video" && isPaused && !exporting && <PlayOverlay />}
         {mode !== "idle" && !exporting && (
           <CompareWipe

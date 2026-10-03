@@ -4,8 +4,10 @@
 //   uniform packing · render / export frames.
 //
 // Global parameters ease in with a ~0.6 s time constant (log domain for the
-// gains) so nothing pulses; the spatial fields follow the frame faster
-// (0.15 s) since they describe where the water is *now*. A hard cut snaps.
+// gains) so nothing pulses. The spatial maps (where the water is, the veil
+// level, the local-contrast tiles) snap to every analysis: easing them made
+// the previous frame's layout linger as a dark ghost on moving content.
+// A hard cut snaps the parameters too.
 
 import { WebGL2Backend } from "./backend-webgl2.ts";
 import { WebGPUBackend } from "./backend-webgpu.ts";
@@ -27,9 +29,8 @@ import {
   type Vec3,
 } from "./params.ts";
 
-export const ANALYSIS_INTERVAL_MS = 120;
+export const ANALYSIS_INTERVAL_MS = 70;
 const TAU_PARAMS_S = 0.6;
-const TAU_FIELDS_S = 0.15;
 const SCENE_CUT_MEAN_DIFF = 0.16;
 
 type Packed = { width: number; height: number; data: Float32Array };
@@ -53,10 +54,8 @@ export class GradeEngine {
   private current: GradeParams = IDENTITY_PARAMS;
   private target: GradeParams | null = null;
   private fields: Packed | null = null;
-  private fieldsTarget: Packed | null = null;
   private guide: Packed | null = null;
   private clahe: Packed | null = null;
-  private claheTarget: Packed | null = null;
   private lastMean: Vec3 | null = null;
   private lastTickSec = 0;
   private hasAnalysis = false;
@@ -139,6 +138,11 @@ export class GradeEngine {
     return false;
   }
 
+  /** Starts an analysis of the current source if none is in flight (export loop). */
+  analyzeSoon(): void {
+    if (!this.inflight) void this.startAnalysis();
+  }
+
   /**
    * Runs one analysis and waits for it (photos, export keyframes). Rejects
    * on a GPU/worker failure or after `timeoutMs`, so callers can carry on
@@ -200,9 +204,10 @@ export class GradeEngine {
       this.snapTo(packet);
     } else {
       this.target = packet.params;
-      this.fieldsTarget = packet.fields;
-      this.claheTarget = packet.clahe;
-      this.guide = packet.guide; // follows the frame immediately
+      // Spatial maps follow the frame immediately.
+      this.fields = packet.fields;
+      this.clahe = packet.clahe;
+      this.guide = packet.guide;
       this.dirtyData = true;
     }
     this.settle(raw, null);
@@ -212,10 +217,8 @@ export class GradeEngine {
     this.current = packet.params;
     this.target = packet.params;
     this.fields = packet.fields;
-    this.fieldsTarget = packet.fields;
     this.guide = packet.guide;
     this.clahe = packet.clahe;
-    this.claheTarget = packet.clahe;
     this.hasAnalysis = true;
     this.dirtyData = true;
   }
@@ -224,19 +227,6 @@ export class GradeEngine {
     if (!this.target || dt <= 0) return;
     const a = 1 - Math.exp(-dt / TAU_PARAMS_S);
     this.current = lerpParams(this.current, this.target, a);
-    const af = 1 - Math.exp(-dt / TAU_FIELDS_S);
-    if (this.fieldsTarget && this.fields) {
-      if (this.fields.width !== this.fieldsTarget.width || this.fields.height !== this.fieldsTarget.height || this.fields === this.fieldsTarget) {
-        this.fields = this.fieldsTarget;
-      } else {
-        lerpInto(this.fields.data, this.fieldsTarget.data, af);
-      }
-    }
-    if (this.claheTarget && this.clahe) {
-      if (this.clahe.data.length !== this.claheTarget.data.length || this.clahe === this.claheTarget) this.clahe = this.claheTarget;
-      else lerpInto(this.clahe.data, this.claheTarget.data, a);
-    }
-    this.dirtyData = true;
   }
 
   private pushData(): void {
@@ -295,8 +285,4 @@ export class GradeEngine {
 
 function meanDiff(a: Vec3, b: Vec3): number {
   return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
-}
-
-function lerpInto(dst: Float32Array, src: Float32Array, t: number): void {
-  for (let i = 0; i < dst.length; i++) dst[i] += (src[i] - dst[i]) * t;
 }

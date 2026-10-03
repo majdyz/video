@@ -1,5 +1,5 @@
 import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput } from "./backend.ts";
-import { WGSL_GRADE, WGSL_DOWNSCALE } from "./shaders.ts";
+import { WGSL_GRADE, WGSL_DOWNSCALE, WGSL_GRADE_EXT, WGSL_DOWNSCALE_EXT } from "./shaders.ts";
 
 /** Draws the frame small into a 2D canvas and looks for anything above black. */
 function frameIsLit(frame: VideoFrame): boolean {
@@ -12,11 +12,11 @@ function frameIsLit(frame: VideoFrame): boolean {
   return false;
 }
 
-// The grade pass samples the source through a regular 2D texture: video
-// frames are copied in with copyExternalImageToTexture (one GPU-side copy,
-// no CPU readback). importExternalTexture would skip that copy but needs a
-// separate pipeline flavour and expires per task; the copy is cheap next to
-// a 4K fragment pass and keeps one shader for preview and export.
+// Sources reach the shader two ways. VideoFrames go through
+// importExternalTexture (zero-copy, the export path's hot loop; the import
+// only lives for the current task, so every draw re-imports). Everything
+// else — and VideoFrames on a stack where the external import renders black
+// — is copied into a regular 2D texture with copyExternalImageToTexture.
 export class WebGPUBackend implements GpuBackend {
   readonly kind = "webgpu";
   readonly canvas: HTMLCanvasElement;
@@ -27,6 +27,12 @@ export class WebGPUBackend implements GpuBackend {
   private readonly format: GPUTextureFormat;
   private readonly gradePipeline: GPURenderPipeline;
   private readonly downPipeline: GPURenderPipeline;
+  private readonly gradePipelineExt: GPURenderPipeline;
+  private readonly downPipelineExt: GPURenderPipeline;
+  /** Current VideoFrame source when the external path is in use. */
+  private extSource: VideoFrame | null = null;
+  /** undefined = not probed yet, false = external import renders black here. */
+  private externalOk: boolean | undefined = undefined;
   private readonly sampler: GPUSampler;
   private readonly uniformBuf: GPUBuffer;
   private readonly downParamsBuf: GPUBuffer;
@@ -78,6 +84,21 @@ export class WebGPUBackend implements GpuBackend {
         tex(2),
       ],
     });
+    const ext: GPUBindGroupLayoutEntry = { binding: 2, visibility: GPUShaderStage.FRAGMENT, externalTexture: {} };
+    const gradeLayoutExt = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
+        ext, tex(3, "unfilterable-float"), tex(4, "unfilterable-float"), tex(5, "unfilterable-float"),
+      ],
+    });
+    const downLayoutExt = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
+        ext,
+      ],
+    });
     const pipeline = (code: string, targetFormat: GPUTextureFormat, layout: GPUBindGroupLayout) =>
       device.createRenderPipeline({
         layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
@@ -87,6 +108,8 @@ export class WebGPUBackend implements GpuBackend {
       });
     this.gradePipeline = pipeline(WGSL_GRADE, this.format, gradeLayout);
     this.downPipeline = pipeline(WGSL_DOWNSCALE, "rgba8unorm", downLayout);
+    this.gradePipelineExt = pipeline(WGSL_GRADE_EXT, this.format, gradeLayoutExt);
+    this.downPipelineExt = pipeline(WGSL_DOWNSCALE_EXT, "rgba8unorm", downLayoutExt);
     this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.uniformBuf = device.createBuffer({ size: UNIFORM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.downParamsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -126,6 +149,19 @@ export class WebGPUBackend implements GpuBackend {
       this.srcW = width;
       this.srcH = height;
       this.bindGroupDirty = true;
+    }
+    // VideoFrames: zero-copy external import (probed once; the probe renders
+    // the frame small and checks it isn't black).
+    this.extSource = null;
+    if (isVideoFrame(src) && this.externalOk !== false) {
+      this.srcW = width;
+      this.srcH = height;
+      if (this.externalOk === undefined) void this.probeExternal(src);
+      if (this.externalOk) {
+        this.extSource = src;
+        this.bindGroupDirty = true;
+        return;
+      }
     }
     // copyExternalImageToTexture takes video elements, VideoFrames, bitmaps
     // and canvases directly, but some stacks reject video sources with a
@@ -195,6 +231,20 @@ export class WebGPUBackend implements GpuBackend {
   }
 
   private gradeGroup(): GPUBindGroup {
+    if (this.extSource) {
+      // External textures are per task: a fresh import and bind group per draw.
+      return this.device.createBindGroup({
+        layout: this.gradePipelineExt.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.uniformBuf } },
+          { binding: 1, resource: this.sampler },
+          { binding: 2, resource: this.device.importExternalTexture({ source: this.extSource }) },
+          { binding: 3, resource: this.data[0].createView() },
+          { binding: 4, resource: this.data[1].createView() },
+          { binding: 5, resource: this.data[2].createView() },
+        ],
+      });
+    }
     if (this.gradeBindGroup && !this.bindGroupDirty) return this.gradeBindGroup;
     if (!this.source) throw new Error("no source uploaded");
     this.gradeBindGroup = this.device.createBindGroup({
@@ -215,11 +265,64 @@ export class WebGPUBackend implements GpuBackend {
   private draw(target: GPUTextureView): void {
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target, loadOp: "clear", storeOp: "store" }] });
-    pass.setPipeline(this.gradePipeline);
+    pass.setPipeline(this.extSource ? this.gradePipelineExt : this.gradePipeline);
     pass.setBindGroup(0, this.gradeGroup());
     pass.draw(3);
     pass.end();
     this.device.queue.submit([encoder.finish()]);
+  }
+
+  private downGroup(): GPUBindGroup {
+    const srcEntry: GPUBindGroupEntry = this.extSource
+      ? { binding: 2, resource: this.device.importExternalTexture({ source: this.extSource }) }
+      : { binding: 2, resource: this.source!.createView() };
+    return this.device.createBindGroup({
+      layout: (this.extSource ? this.downPipelineExt : this.downPipeline).getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: this.downParamsBuf } }, { binding: 1, resource: this.sampler }, srcEntry],
+    });
+  }
+
+  /** Renders the frame small through the external path and checks it isn't black. */
+  private async probeExternal(frame: VideoFrame): Promise<void> {
+    this.externalOk = false; // pessimistic until proven; this frame goes the copy route
+    const w = 32, h = 18;
+    const tex = this.device.createTexture({ size: [w, h], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    const buf = this.device.createBuffer({ size: 256 * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      this.device.pushErrorScope("validation");
+      this.device.queue.writeBuffer(this.downParamsBuf, 0, new Float32Array([frame.displayWidth, frame.displayHeight, w, h, 0, 0, 0, 0]));
+      const group = this.device.createBindGroup({
+        layout: this.downPipelineExt.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.downParamsBuf } },
+          { binding: 1, resource: this.sampler },
+          { binding: 2, resource: this.device.importExternalTexture({ source: frame }) },
+        ],
+      });
+      const enc = this.device.createCommandEncoder();
+      const pass = enc.beginRenderPass({ colorAttachments: [{ view: tex.createView(), loadOp: "clear", storeOp: "store" }] });
+      pass.setPipeline(this.downPipelineExt);
+      pass.setBindGroup(0, group);
+      pass.draw(3);
+      pass.end();
+      enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: 256 }, [w, h]);
+      this.device.queue.submit([enc.finish()]);
+      const err = await this.device.popErrorScope();
+      if (err) throw new Error(err.message);
+      await buf.mapAsync(GPUMapMode.READ);
+      const px = new Uint8Array(buf.getMappedRange());
+      let lit = false;
+      for (let y = 0; y < h && !lit; y++) for (let x = 0; x < w * 4; x += 4) if (px[y * 256 + x] > 8 || px[y * 256 + x + 1] > 8 || px[y * 256 + x + 2] > 8) { lit = true; break; }
+      buf.unmap();
+      this.externalOk = lit;
+      console.info(`WebGPU external video import: ${lit ? "ok" : "renders black, using copy path"}`);
+    } catch (e) {
+      console.warn("WebGPU external video import unavailable:", (e as Error).message);
+      this.externalOk = false;
+    } finally {
+      tex.destroy();
+      buf.destroy();
+    }
   }
 
   render(): void {
@@ -245,23 +348,46 @@ export class WebGPUBackend implements GpuBackend {
       this.readbackBuf?.destroy();
       this.readbackBuf = null;
     }
-    if (this.capture === null) {
-      for (const mode of ["canvas", "bitmap", "readback"] as const) {
-        try {
-          const f = await this.captureAs(mode, timestampUs, durationUs);
-          const lit = frameIsLit(f);
-          if (lit) {
-            this.capture = mode;
-            return f;
-          }
-          f.close();
-        } catch (e) {
-          console.warn(`WebGPU capture ${mode} failed:`, (e as Error).message);
-        }
-      }
-      this.capture = "readback";
+    if (this.capture === null) await this.benchmarkCapture(timestampUs, durationUs);
+    return this.captureAs(this.capture ?? "readback", timestampUs, durationUs);
+  }
+
+  /**
+   * Times each capture path on the current frame (a few frames each) and
+   * keeps the fastest one that produces a lit picture — the modes differ by
+   * 10× between browsers. Runs on the copy path so the awaits inside don't
+   * outlive an external texture import.
+   */
+  private async benchmarkCapture(timestampUs: number, durationUs: number | undefined): Promise<void> {
+    const ext = this.extSource;
+    if (ext) {
+      this.extSource = null;
+      this.externalOk = false; // force the copy route for the probe frame
+      this.upload(ext, this.srcW, this.srcH, this.rotation);
+      this.externalOk = true;
     }
-    return this.captureAs(this.capture, timestampUs, durationUs);
+    const N = 3;
+    const results: string[] = [];
+    let best: { mode: "canvas" | "bitmap" | "readback"; ms: number } | null = null;
+    for (const mode of ["canvas", "bitmap", "readback"] as const) {
+      try {
+        let lit = false;
+        const t0 = performance.now();
+        for (let i = 0; i < N; i++) {
+          const f = await this.captureAs(mode, timestampUs, durationUs);
+          lit = lit || frameIsLit(f);
+          f.close();
+        }
+        const ms = (performance.now() - t0) / N;
+        results.push(`${mode} ${ms.toFixed(1)} ms${lit ? "" : " (black)"}`);
+        if (lit && (!best || ms < best.ms)) best = { mode, ms };
+      } catch (e) {
+        results.push(`${mode} failed (${(e as Error).message.split("\n")[0].slice(0, 50)})`);
+      }
+    }
+    this.capture = best?.mode ?? "readback";
+    console.info(`WebGPU capture bench: ${results.join(", ")} → ${this.capture}`);
+    if (ext) this.extSource = ext;
   }
 
   private async captureAs(mode: "canvas" | "bitmap" | "readback", timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
@@ -301,7 +427,7 @@ export class WebGPUBackend implements GpuBackend {
 
   async analyze(width: number, height: number): Promise<Uint8ClampedArray> {
     if (this.readbackInFlight) throw new Error("analysis readback already in flight");
-    if (!this.source) throw new Error("no source uploaded");
+    if (!this.source && !this.extSource) throw new Error("no source uploaded");
     this.readbackInFlight = true;
     try {
       if (!this.analysisTex || this.analysisW !== width || this.analysisH !== height) {
@@ -314,17 +440,10 @@ export class WebGPUBackend implements GpuBackend {
         this.analysisH = height;
       }
       this.device.queue.writeBuffer(this.downParamsBuf, 0, new Float32Array([this.srcW, this.srcH, width, height, this.rotation, 0, 0, 0]));
-      const group = this.device.createBindGroup({
-        layout: this.downPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: this.downParamsBuf } },
-          { binding: 1, resource: this.sampler },
-          { binding: 2, resource: this.source.createView() },
-        ],
-      });
+      const group = this.downGroup();
       const encoder = this.device.createCommandEncoder();
       const pass = encoder.beginRenderPass({ colorAttachments: [{ view: this.analysisTex.createView(), loadOp: "clear", storeOp: "store" }] });
-      pass.setPipeline(this.downPipeline);
+      pass.setPipeline(this.extSource ? this.downPipelineExt : this.downPipeline);
       pass.setBindGroup(0, group);
       pass.draw(3);
       pass.end();
