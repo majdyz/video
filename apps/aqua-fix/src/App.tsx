@@ -33,6 +33,49 @@ type Mode = "idle" | "photo" | "video";
 // grade across the frames in between exactly as it does in the preview.
 const EXPORT_ANALYSIS_STRIDE = 4;
 
+function waitForEvent(el: HTMLMediaElement, ok: string[], bad: string[], timeoutMs: number, failMsg: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const done = (f: () => void) => () => {
+      for (const n of ok) el.removeEventListener(n, onOk);
+      for (const n of bad) el.removeEventListener(n, onBad);
+      clearTimeout(t);
+      f();
+    };
+    const onOk = done(resolve);
+    const onBad = done(() => reject(new Error(failMsg)));
+    const t = setTimeout(done(() => reject(new Error(failMsg + " (timed out)"))), timeoutMs);
+    for (const n of ok) el.addEventListener(n, onOk);
+    for (const n of bad) el.addEventListener(n, onBad);
+    if (el.readyState >= 1 && ok.includes("loadedmetadata")) onOk();
+  });
+}
+
+type VideoWithRVFC = HTMLVideoElement & {
+  requestVideoFrameCallback?: (cb: (now: number, metadata: unknown) => void) => number;
+};
+
+/** Resolves once a frame has been presented (rVFC), or readyState says so, or on timeout. */
+function waitForFirstFrame(video: HTMLVideoElement, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      resolve();
+    };
+    const t = setTimeout(finish, timeoutMs);
+    const v = video as VideoWithRVFC;
+    if (typeof v.requestVideoFrameCallback === "function") v.requestVideoFrameCallback(finish);
+    const poll = () => {
+      if (done) return;
+      if (video.readyState >= 2 && video.videoWidth > 0) finish();
+      else setTimeout(poll, 50);
+    };
+    poll();
+  });
+}
+
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -62,6 +105,20 @@ export default function App() {
   const [duration, setDuration] = useState(0);
   const [showInfo, setShowInfo] = useState(false);
   const [engineKind, setEngineKind] = useState<"webgpu" | "webgl2" | null>(null);
+  // Diagnostics for the info modal, refreshed while it is open.
+  const [diag, setDiag] = useState<string | null>(null);
+  useEffect(() => {
+    if (!showInfo) return;
+    const update = () => {
+      const e = engineRef.current;
+      if (!e) return;
+      const st = e.getStats();
+      setDiag(`${st.backend} · analysis ${st.analysisMs.toFixed(0)} ms (${st.analyses} runs, ${st.sceneCuts} cuts)`);
+    };
+    update();
+    const id = setInterval(update, 500);
+    return () => clearInterval(id);
+  }, [showInfo]);
   const canExport = isWebCodecsSupported();
 
   useEffect(() => {
@@ -140,10 +197,6 @@ export default function App() {
     e.tick(v.currentTime);
     e.render();
   }
-
-  type VideoWithRVFC = HTMLVideoElement & {
-    requestVideoFrameCallback?: (cb: (now: number, metadata: unknown) => void) => number;
-  };
 
   function startPreview() {
     const video = videoRef.current as VideoWithRVFC | null;
@@ -234,7 +287,11 @@ export default function App() {
     modeRef.current = "photo";
     setMode("photo");
     e.upload(bitmap, bitmap.width, bitmap.height, 0);
-    await e.analyzeNow(true);
+    try {
+      await e.analyzeNow(true);
+    } catch (err) {
+      setError("Analysis failed: " + (err instanceof Error ? err.message : String(err)));
+    }
     if (myGen !== fileGenRef.current) return;
     e.render();
   }
@@ -251,34 +308,28 @@ export default function App() {
     video.playsInline = true;
     video.loop = true;
     video.preload = "auto";
-    await new Promise<void>((resolve, reject) => {
-      const onReady = () => {
-        cleanup();
-        resolve();
-      };
-      const onErr = () => {
-        cleanup();
-        reject(new Error("Could not decode this video"));
-      };
-      const cleanup = () => {
-        video.removeEventListener("loadeddata", onReady);
-        video.removeEventListener("error", onErr);
-      };
-      video.addEventListener("loadeddata", onReady);
-      video.addEventListener("error", onErr);
-      if (video.readyState >= 2) onReady();
-    });
+    // Metadata first (dimensions, duration) …
+    await waitForEvent(video, ["loadedmetadata"], ["error"], 20_000, "Could not read this video");
     if (myGen !== fileGenRef.current) return;
     setDuration(video.duration || 0);
+    // … then a decoded frame. iOS Safari only decodes once playback starts,
+    // so play (muted, inline) and wait for the first presented frame.
+    await video.play().catch(() => undefined);
+    await waitForFirstFrame(video, 15_000);
+    if (myGen !== fileGenRef.current) return;
+    if (!video.videoWidth) throw new Error("This video has no decodable picture (unsupported codec?)");
     modeRef.current = "video";
     setMode("video");
-    // First frame: analyse and snap before anything is shown, so the clip
-    // never flashes uncorrected.
+    // Analyse the first frame and snap so the clip never shows uncorrected;
+    // if analysis fails the preview still runs (ungraded) and the error shows.
     e.upload(video, video.videoWidth, video.videoHeight, 0);
-    await e.analyzeNow(true);
+    try {
+      await e.analyzeNow(true);
+    } catch (err) {
+      setError("Analysis failed: " + (err instanceof Error ? err.message : String(err)));
+    }
     if (myGen !== fileGenRef.current) return;
     e.render();
-    await video.play().catch(() => undefined);
     startPreview();
   }
 
@@ -475,6 +526,7 @@ export default function App() {
         <h4>Source</h4>
         <p>
           <a href="https://github.com/majdyz/video" target="_blank" rel="noopener noreferrer">github.com/majdyz/video</a>
+          {diag && <><br /><span style={{ color: "var(--dim)", fontSize: 12 }}>This device: {diag}</span></>}
         </p>
       </Modal>
 

@@ -63,6 +63,7 @@ export class GradeEngine {
   private dirtyData = false;
   private stats: EngineStats;
   private resolveWaiters: ((p: AnalysisPacket) => void)[] = [];
+  private rejectWaiters: ((e: Error) => void)[] = [];
   private onError: (e: Error) => void;
 
   private constructor(backend: GpuBackend, onError: (e: Error) => void) {
@@ -103,7 +104,9 @@ export class GradeEngine {
     w.onmessage = (e: MessageEvent<AnalysisPacket>) => this.onPacket(e.data);
     w.onerror = (e) => {
       this.inflight = false;
-      this.onError(new Error("Analysis worker failed: " + e.message));
+      const err = new Error("Analysis worker failed: " + e.message);
+      this.settle(null, err);
+      this.onError(err);
     };
     this.worker = w;
     return w;
@@ -131,13 +134,36 @@ export class GradeEngine {
     return false;
   }
 
-  /** Runs one analysis and waits for it (photos, export keyframes). */
-  async analyzeNow(snap: boolean): Promise<void> {
-    if (this.inflight) await new Promise<AnalysisPacket>((r) => this.resolveWaiters.push(r));
-    const p = new Promise<AnalysisPacket>((r) => this.resolveWaiters.push(r));
+  /**
+   * Runs one analysis and waits for it (photos, export keyframes). Rejects
+   * on a GPU/worker failure or after `timeoutMs`, so callers can carry on
+   * with the ungraded frame instead of hanging.
+   */
+  async analyzeNow(snap: boolean, timeoutMs = 10_000): Promise<void> {
+    const wait = () =>
+      new Promise<AnalysisPacket>((resolve, reject) => {
+        this.resolveWaiters.push(resolve);
+        this.rejectWaiters.push(reject);
+      });
+    const withTimeout = <T>(p: Promise<T>) =>
+      new Promise<T>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("Frame analysis timed out")), timeoutMs);
+        p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+      });
+    if (this.inflight) await withTimeout(wait()).catch(() => undefined);
+    const p = wait();
     await this.startAnalysis();
-    const packet = await p;
+    const packet = await withTimeout(p);
     if (snap && packet.id === this.reqId) this.snapTo(toGpuPacket(packet));
+  }
+
+  private settle(packet: AnalysisPacket | null, error: Error | null): void {
+    const res = this.resolveWaiters;
+    const rej = this.rejectWaiters;
+    this.resolveWaiters = [];
+    this.rejectWaiters = [];
+    if (packet) for (const r of res) r(packet);
+    else if (error) for (const r of rej) r(error);
   }
 
   private async startAnalysis(): Promise<void> {
@@ -150,7 +176,9 @@ export class GradeEngine {
       this.ensureWorker().postMessage(req, [req.rgba]);
     } catch (e) {
       this.inflight = false;
-      this.onError(e instanceof Error ? e : new Error(String(e)));
+      const err = e instanceof Error ? e : new Error(String(e));
+      this.settle(null, err);
+      this.onError(err);
     }
   }
 
@@ -172,9 +200,7 @@ export class GradeEngine {
       this.guide = packet.guide; // follows the frame immediately
       this.dirtyData = true;
     }
-    const w = this.resolveWaiters;
-    this.resolveWaiters = [];
-    for (const r of w) r(raw);
+    this.settle(raw, null);
   }
 
   private snapTo(packet: GpuPacket): void {
@@ -226,9 +252,7 @@ export class GradeEngine {
     this.lastMean = null;
     this.lastAnalysisAt = -Infinity;
     this.lastTickSec = 0;
-    const w = this.resolveWaiters;
-    this.resolveWaiters = [];
-    for (const r of w) r({ id: -1 } as AnalysisPacket);
+    this.settle({ id: -1 } as AnalysisPacket, null);
   }
 
   private pack(): Float32Array {

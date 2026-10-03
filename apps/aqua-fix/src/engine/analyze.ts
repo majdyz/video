@@ -47,8 +47,8 @@ const CONF_HI = 0.4;
 // Water shares the veil's hue whatever its brightness; below HUE_LO it is
 // water, above HUE_HI an object. Achromatic pixels (dark wetsuits, white
 // sand) have no usable hue and always count as objects.
-const HUE_LO = 10 * Math.PI / 180;
-const HUE_HI = 24 * Math.PI / 180;
+const HUE_LO = 6 * Math.PI / 180;
+const HUE_HI = 14 * Math.PI / 180;
 const ACHROMA = 0.025;
 // The water path keeps most of its original brightness.
 const WATER_EXPOSURE = 0.35;
