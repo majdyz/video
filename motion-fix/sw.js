@@ -1,10 +1,8 @@
-const VERSION = "motion-fix-v1";
+// v2: the OpenCV.js download is gone (the tracker is built in), so the old
+// motion-fix-deps-* caches holding it are deleted on activate like any
+// other stale cache.
+const VERSION = "motion-fix-v2";
 const STATIC = ["./icon.svg", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png", "./manifest.webmanifest"];
-// Caches the app's lazy loader populates outside the SW. Activate-step
-// must skip these — otherwise the OpenCV bytes our cachedFetch stashed
-// in motion-fix-deps-v1 get wiped on every page load and the user has
-// to re-download.
-const DEPS_CACHE_PREFIXES = ["motion-fix-deps-"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -17,10 +15,7 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(
-        keys
-          .filter((k) => k !== VERSION)
-          .filter((k) => !DEPS_CACHE_PREFIXES.some((p) => k.startsWith(p)))
-          .map((k) => caches.delete(k)),
+        keys.filter((k) => k !== VERSION).map((k) => caches.delete(k)),
       ),
     ),
   );
