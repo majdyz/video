@@ -27,7 +27,7 @@ import {
 import "@dive-tools/shared/theme.css";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
 import { GradeEngine } from "./engine/engine";
-import { DEFAULT_SETTINGS, INTENSITY_MAX, type UserSettings } from "./engine/params";
+import { DEFAULT_SETTINGS, INTENSITY_MAX, type GradeParams, type UserSettings } from "./engine/params";
 import type { Rotation } from "./engine/backend";
 
 type Mode = "idle" | "photo" | "video";
@@ -335,6 +335,7 @@ export default function App() {
     fileNameRef.current = file.name.replace(/\.[^.]+$/, "");
     setCompareActive(false);
     setBusy(isVideo ? "Loading video…" : "Loading photo…");
+    engineRef.current?.lockGlobals(null);
     try {
       await touchFile(file);
       if (isVideo) await loadVideo(file);
@@ -406,6 +407,58 @@ export default function App() {
     if (myGen !== fileGenRef.current) return;
     e.render();
     startPreview();
+    // Clip profile: analyse a dozen frames spread over the clip and lock the
+    // global correction to their median, so a subject passing through (an
+    // orange fish filling the frame) can't swing the balance mid-video.
+    void profileClip(video, myGen);
+  }
+
+  async function profileClip(video: HTMLVideoElement, myGen: number) {
+    const e = engineRef.current;
+    const dur = video.duration;
+    if (!e || !Number.isFinite(dur) || dur < 0.5) return;
+    const n = Math.min(12, Math.max(4, Math.round(dur)));
+    const samples: GradeParams[] = [];
+    const wasPaused = video.paused;
+    const resumeAt = video.currentTime;
+    previewActiveRef.current = false;
+    video.pause();
+    setBusy("Analysing clip…");
+    try {
+      for (let i = 0; i < n; i++) {
+        if (myGen !== fileGenRef.current || exportingRef.current) return;
+        const t = Math.min(dur - 0.05, 0.15 + ((dur - 0.3) * (i + 0.5)) / n);
+        await seekTo(video, t);
+        e.upload(video, video.videoWidth, video.videoHeight, 0);
+        try {
+          samples.push(await e.analyzeRaw());
+        } catch {
+          // a failed sample just doesn't vote
+        }
+      }
+      if (myGen !== fileGenRef.current) return;
+      if (samples.length >= 3) e.lockGlobals(samples);
+    } finally {
+      setBusy(null);
+      if (myGen === fileGenRef.current && !exportingRef.current) {
+        await seekTo(video, resumeAt).catch(() => undefined);
+        e.upload(video, video.videoWidth, video.videoHeight, 0);
+        e.render();
+        if (!wasPaused) await video.play().catch(() => undefined);
+        startPreview();
+      }
+    }
+  }
+
+  function seekTo(video: HTMLVideoElement, t: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const done = () => { video.removeEventListener("seeked", done); video.removeEventListener("error", fail); resolve(); };
+      const fail = () => { video.removeEventListener("seeked", done); video.removeEventListener("error", fail); reject(new Error("seek failed")); };
+      video.addEventListener("seeked", done);
+      video.addEventListener("error", fail);
+      try { video.currentTime = t; } catch (err) { fail(); void err; }
+      setTimeout(() => done(), 4000);
+    });
   }
 
   function togglePlay() {

@@ -21,6 +21,7 @@ import {
   DEFAULT_SETTINGS,
   IDENTITY_PARAMS,
   lerpParams,
+  medianParams,
   packUniforms,
   type ClaheLuts,
   type DepthMap,
@@ -116,6 +117,8 @@ export class GradeEngine {
   private hasAnalysis = false;
   private dirtyData = false;
   private stats: EngineStats;
+  /** Clip-wide global parameters; when set, per-frame packets keep only their maps and range normalisation. */
+  private locked: GradeParams | null = null;
   private resolveWaiters: ((p: AnalysisPacket) => void)[] = [];
   private rejectWaiters: ((e: Error) => void)[] = [];
   private onError: (e: Error) => void;
@@ -150,6 +153,46 @@ export class GradeEngine {
 
   getStats(): EngineStats {
     return { ...this.stats };
+  }
+
+  /**
+   * Locks the global correction (balance, veil, exposure, levels …) to the
+   * median of `samples` for the rest of the clip; null unlocks. Maps stay
+   * per frame.
+   */
+  lockGlobals(samples: GradeParams[] | null): void {
+    this.locked = samples && samples.length > 0 ? medianParams(samples) : null;
+    if (this.locked) {
+      this.current = this.applyLock(this.current);
+      if (this.target) this.target = this.applyLock(this.target);
+    }
+  }
+
+  get isLocked(): boolean {
+    return this.locked !== null;
+  }
+
+  private applyLock(p: GradeParams): GradeParams {
+    return this.locked ? { ...this.locked, zLo: p.zLo, zHi: p.zHi } : p;
+  }
+
+  /** Runs one analysis of the current source and returns its raw parameters (clip profiling). */
+  async analyzeRaw(timeoutMs = 10_000): Promise<GradeParams> {
+    const p = new Promise<AnalysisPacket>((resolve, reject) => {
+      this.resolveWaiters.push(resolve);
+      this.rejectWaiters.push(reject);
+    });
+    if (this.inflight) await p.catch(() => undefined);
+    const q = new Promise<AnalysisPacket>((resolve, reject) => {
+      this.resolveWaiters.push(resolve);
+      this.rejectWaiters.push(reject);
+    });
+    await this.startAnalysis();
+    const packet = await new Promise<AnalysisPacket>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("Frame analysis timed out")), timeoutMs);
+      q.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+    });
+    return packet.params;
   }
 
   /** Current (eased) person map at the fields' resolution — diagnostics. */
@@ -355,7 +398,7 @@ export class GradeEngine {
       if (cut) this.stats.sceneCuts++;
       this.snapTo(packet);
     } else {
-      this.target = packet.params;
+      this.target = this.applyLock(packet.params);
       this.fieldsTarget = packet.fields;
       this.guideTarget = packet.guide;
       this.claheTarget = packet.clahe;
@@ -364,8 +407,8 @@ export class GradeEngine {
   }
 
   private snapTo(packet: GpuPacket): void {
-    this.current = packet.params;
-    this.target = packet.params;
+    this.current = this.applyLock(packet.params);
+    this.target = this.current;
     this.fields = packet.fields;
     this.guide = packet.guide;
     this.clahe = packet.clahe;

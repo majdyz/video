@@ -429,6 +429,23 @@ export function claheTexture(c: ClaheLuts): Float32Array {
   return out;
 }
 
+/**
+ * Component-wise median of several frames' parameters: the clip-wide
+ * estimate the engine locks so a passing subject (an orange fish filling
+ * the frame) cannot swing the balance for the frames it is in.
+ */
+export function medianParams(list: GradeParams[]): GradeParams {
+  if (list.length === 0) throw new Error("medianParams: empty");
+  const med = (xs: number[]) => { const s = [...xs].sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const out = { ...list[0] } as Record<string, unknown>;
+  for (const key of Object.keys(list[0]) as (keyof GradeParams)[]) {
+    const v0 = list[0][key];
+    if (typeof v0 === "number") out[key] = med(list.map((p) => p[key] as number));
+    else if (Array.isArray(v0)) out[key] = (v0 as number[]).map((_, i) => med(list.map((p) => (p[key] as number[])[i])));
+  }
+  return out as unknown as GradeParams;
+}
+
 export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradeParams {
   const m = (x: number, y: number) => x + (y - x) * t;
   // Gains blend in the log domain so a 2× → 4× ramp is perceptually even.
