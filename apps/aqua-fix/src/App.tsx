@@ -128,7 +128,7 @@ export default function App() {
       const e = engineRef.current;
       if (!e) return;
       const st = e.getStats();
-      setDiag(`${st.backend} · analysis ${st.analysisMs.toFixed(0)} ms (${st.analyses} runs, ${st.sceneCuts} cuts) · people ${st.person}${st.person === "on" ? ` ${st.personMs.toFixed(0)} ms, ${(st.personCoverage * 100).toFixed(0)}%` : ""}${e.isLocked ? ` · clip-locked (${e.lockSegments} seg)` : ""}`);
+      setDiag(`${st.backend} · analysis ${st.analysisMs.toFixed(0)} ms (${st.analyses} runs, ${st.sceneCuts} cuts) · people ${st.person}${st.person === "on" ? ` ${st.personMs.toFixed(0)} ms, ${(st.personCoverage * 100).toFixed(0)}%, ${st.personBoxes < 0 ? "?" : st.personBoxes} found` : ""}${e.isLocked ? ` · clip-locked (${e.lockSegments} seg)` : ""}`);
     };
     update();
     const id = setInterval(update, 500);
@@ -414,6 +414,7 @@ export default function App() {
     // orange fish filling the frame) can't swing the balance mid-video.
     // ?lock=0 keeps per-frame estimation (A/B testing).
     e.lockRange = new URLSearchParams(location.search).get("lockz") === "1";
+    e.personEnabled = new URLSearchParams(location.search).get("person") !== "0";
     if (new URLSearchParams(location.search).get("lock") !== "0") void profileClip(video, myGen);
   }
 

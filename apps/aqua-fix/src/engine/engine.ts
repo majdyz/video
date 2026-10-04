@@ -12,6 +12,7 @@ import { WebGPUBackend } from "./backend-webgpu.ts";
 import { ANALYSIS_H, ANALYSIS_W } from "./analyze.ts";
 import type { AnalysisPacket, AnalysisRequest } from "./analysis-worker.ts";
 import type { PersonPacket, PersonRequest } from "./person-worker.ts";
+import { boxGate, PERSON_BOX_MIN_SCORE, type PersonBox } from "./person-gate.ts";
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
 import { linearToOklab } from "./color.ts";
 import {
@@ -53,6 +54,12 @@ const PERSON_GROW_WATER_COS = Math.cos((15 * Math.PI) / 180);
 const PERSON_GROW_WATER_CHROMA = 0.02;
 // Person requests cycle: full frame, then the four quadrants at 2× detail
 // (small / far divers vanish at the full-frame thumbnail scale).
+// Every Nth person pass asks the detector (EfficientDet, ~300 ms on a slow
+// CPU) whether anybody is there at all; the selfie mask counts only inside
+// its boxes. A verdict older than this is dropped (a starved worker must not
+// keep a stale person alive).
+const PERSON_DETECT_EVERY = 3;
+const PERSON_BOX_HOLD_S = 8;
 const PERSON_RECTS: Rect[] = [
   FULL_RECT,
   { x: 0, y: 0, w: 0.5, h: 0.5 },
@@ -81,6 +88,9 @@ export type EngineStats = {
   person: PersonState;
   personMs: number;
   personCoverage: number;
+  /** Person detector: boxes in force (−1 = no verdict yet) and its last cost. */
+  personBoxes: number;
+  personDetectMs: number;
 };
 
 export class GradeEngine {
@@ -94,6 +104,8 @@ export class GradeEngine {
   /** Analysis cadence (ms) and how many analyses per person pass; the real-time export relaxes both. */
   analysisIntervalMs = ANALYSIS_INTERVAL_MS;
   personEvery = PERSON_EVERY;
+  /** Person segmentation on/off (debug `?person=0`). */
+  personEnabled = true;
   private personWorker: Worker | null = null;
   private personInflight = false;
   private personReqId = 0;
@@ -107,6 +119,12 @@ export class GradeEngine {
   private personTiles: Float32Array | null = null;
   private personRectIdx = 0;
   private personRectInflight: Rect = FULL_RECT;
+  /** Detector verdict: null until the first reply (gate closed), boxes thereafter; when it was given. */
+  private personBoxes: PersonBox[] | null = null;
+  private personBoxesAt = -Infinity;
+  private personPasses = 0;
+  private personDetectInflight = false;
+  private personDetectWarned = false;
   private personWaiters: (() => void)[] = [];
   private lastAnalysisAt = -Infinity;
   private current: GradeParams = IDENTITY_PARAMS;
@@ -135,7 +153,7 @@ export class GradeEngine {
   private constructor(backend: GpuBackend, onError: (e: Error) => void) {
     this.backend = backend;
     this.onError = onError;
-    this.stats = { backend: backend.kind, analysisMs: 0, analyses: 0, sceneCuts: 0, person: "off", personMs: 0, personCoverage: 0 };
+    this.stats = { backend: backend.kind, analysisMs: 0, analyses: 0, sceneCuts: 0, person: "off", personMs: 0, personCoverage: 0, personBoxes: -1, personDetectMs: 0 };
     // Placeholder data textures so the first render is valid.
     const fw = 2, fh = 2;
     this.fields = { width: fw, height: fh, data: new Float32Array(fw * fh * 4) };
@@ -278,6 +296,22 @@ export class GradeEngine {
     this.personInflight = false;
     this.settlePerson();
     if (p.id !== this.personReqId) return;
+    if (this.personDetectInflight) {
+      this.personDetectInflight = false;
+      if (p.boxes === undefined) {
+        // No detector (download failed, …): the gate stays open rather than losing the feature.
+        if (p.error && !this.personDetectWarned) console.warn("Person detector unavailable:", p.error);
+        this.personDetectWarned = true;
+        this.personBoxes = [{ x: 0, y: 0, w: 1, h: 1, score: 1 }];
+      } else {
+        this.personBoxes = p.boxes.filter((b) => b.score >= PERSON_BOX_MIN_SCORE);
+      }
+      this.personBoxesAt = this.lastTickSec;
+      this.stats.personBoxes = this.personBoxes.length;
+      this.stats.personDetectMs = p.ms;
+      this.rebuildPerson();
+      return;
+    }
     if (!p.mask) {
       if (p.error && !this.personFailed) console.warn("Person segmentation unavailable:", p.error);
       this.personFailed = true;
@@ -299,8 +333,17 @@ export class GradeEngine {
       const sub = resampleMask(p.mask, p.width, p.height, tw, th);
       for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) this.personTiles![(y0 + y) * fw + x0 + x] = sub[y * tw + x];
     }
+    this.rebuildPerson();
+  }
+
+  /** Recomputes the eased person target from the raw detections, gated by the detector's boxes. */
+  private rebuildPerson(): void {
+    const fw = this.fields?.width ?? 0, fh = this.fields?.height ?? 0;
+    if (fw < 4 || fh < 4 || !this.personFull || !this.personTiles || this.personFull.length !== fw * fh) return;
+    const fresh = this.lastTickSec - this.personBoxesAt <= PERSON_BOX_HOLD_S;
+    const gate = this.personBoxes && fresh ? boxGate(this.personBoxes, fw, fh) : null;
     const raw = new Float32Array(fw * fh);
-    for (let i = 0; i < raw.length; i++) raw[i] = Math.max(this.personFull[i], this.personTiles![i]);
+    if (gate) for (let i = 0; i < raw.length; i++) raw[i] = Math.max(this.personFull[i], this.personTiles[i]) * gate[i];
     const map = growMask(raw, fw, fh, this.guide?.data ?? null, this.fields?.data ?? null, this.current.veilColor);
     let cov = 0;
     for (let i = 0; i < map.length; i++) cov += map[i];
@@ -401,15 +444,18 @@ export class GradeEngine {
       // quadrant at 2× detail, cycling through PERSON_RECTS. Both readbacks
       // finish before anything is posted: once the analysis reply lands,
       // `inflight` clears and the next tick may start a new readback.
-      const wantPerson = !this.personFailed && !this.personInflight && this.personCount++ % this.personEvery === 0;
-      const rect = PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
+      const wantPerson = this.personEnabled && !this.personFailed && !this.personInflight && this.personCount++ % this.personEvery === 0;
+      // The first pass (and every PERSON_DETECT_EVERY-th) is a detection on the full frame.
+      const detect = wantPerson && this.personPasses++ % PERSON_DETECT_EVERY === 0;
+      const rect = detect ? FULL_RECT : PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
       const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.backend.analyze(ANALYSIS_W, ANALYSIS_H, rect);
       const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H };
       this.ensureWorker().postMessage(req, [req.rgba]);
       if (px) {
-        this.personRectIdx++;
-        const preq: PersonRequest = { id: ++this.personReqId, rgba: px.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, timestampMs: Math.round(this.lastTickSec * 1000) };
+        if (!detect) this.personRectIdx++;
+        const preq: PersonRequest = { id: ++this.personReqId, rgba: px.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, timestampMs: Math.round(this.lastTickSec * 1000), detect };
         this.personInflight = true;
+        this.personDetectInflight = detect;
         this.personRectInflight = rect;
         this.ensurePersonWorker().postMessage(preq, [preq.rgba]);
       }
@@ -433,7 +479,15 @@ export class GradeEngine {
     const cut = this.lastMean !== null && meanDiff(this.lastMean, packet.mean) > SCENE_CUT_MEAN_DIFF;
     this.lastMean = packet.mean;
     if (!this.hasAnalysis || cut) {
-      if (cut) this.stats.sceneCuts++;
+      if (cut) {
+        this.stats.sceneCuts++;
+        // New scene: the detector must speak again before any mask counts.
+        this.personBoxes = null;
+        this.personPasses = 0;
+        this.personFull?.fill(0);
+        this.personTiles?.fill(0);
+        this.stats.personBoxes = -1;
+      }
       this.snapTo(packet);
     } else {
       this.target = this.applyLock(packet.params);
@@ -529,7 +583,12 @@ export class GradeEngine {
     this.personTiles = null;
     this.personRectIdx = 0;
     this.personCount = 0;
+    this.personBoxes = null;
+    this.personBoxesAt = -Infinity;
+    this.personPasses = 0;
+    this.personDetectInflight = false;
     this.stats.personCoverage = 0;
+    this.stats.personBoxes = -1;
     this.settlePerson();
   }
 
