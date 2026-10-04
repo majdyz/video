@@ -24,6 +24,7 @@ const settings: UserSettings = {
   clarity: flag("clarity", DEFAULT_SETTINGS.clarity),
   veil: flag("veil", DEFAULT_SETTINGS.veil),
   look: flag("look", DEFAULT_SETTINGS.look),
+  preset: ((): UserSettings["preset"] => { const i = args.indexOf("--preset"); const v = i >= 0 ? args[i + 1] : "auto"; return (["auto", "murky", "deep", "reef"].includes(v) ? v : "auto") as UserSettings["preset"]; })(),
 };
 const maxW = flag("maxw", 1600);
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--")));

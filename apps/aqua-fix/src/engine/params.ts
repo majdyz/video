@@ -29,9 +29,31 @@ export type UserSettings = {
    * colour.
    */
   look: number;
+  /** Scene preset (prior on the estimate). */
+  preset: ScenePreset;
 };
 
-export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0 };
+/**
+ * Scene preset: a prior on top of the estimated (clip-locked) correction.
+ * "auto" trusts the estimate; the others nudge it the way a diver would for
+ * that water — green/murky kills more green and dehazes harder, deep blue
+ * restores more red, shallow reef is gentle (little cast to begin with).
+ */
+export type ScenePreset = "auto" | "murky" | "deep" | "reef";
+export const SCENE_PRESETS: { id: ScenePreset; label: string; hint: string }[] = [
+  { id: "auto", label: "Auto", hint: "Trust the estimate" },
+  { id: "murky", label: "Green water", hint: "Murky, green, low visibility" },
+  { id: "deep", label: "Deep blue", hint: "Deep or far, blue cast" },
+  { id: "reef", label: "Shallow reef", hint: "Bright, close, little cast" },
+];
+export const PRESET_ADJUST: Record<ScenePreset, { red: number; blue: number; redMax: number; dehaze: number; clarity: number; exposure: number }> = {
+  auto: { red: 1, blue: 1, redMax: 5, dehaze: 0, clarity: 0, exposure: 1 },
+  murky: { red: 1.1, blue: 1.2, redMax: 5, dehaze: 0.65, clarity: 0.35, exposure: 1.1 },
+  deep: { red: 1.5, blue: 0.9, redMax: 5, dehaze: 0.25, clarity: 0.15, exposure: 1.05 },
+  reef: { red: 1, blue: 1, redMax: 1.6, dehaze: 0, clarity: -0.1, exposure: 0.97 },
+};
+
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto" };
 export const INTENSITY_MAX = 2;
 
 /** Internal controls the shader reads, derived from the intensity. */
@@ -150,6 +172,22 @@ export function resolveSettings(s: UserSettings): GradeSettings {
 export function hazeWeight(p: GradeParams): number {
   const t = Math.min(1, Math.max(0, (p.haze - LOOK.hazeLo) / (LOOK.hazeHi - LOOK.hazeLo)));
   return t * t * (3 - 2 * t);
+}
+
+/** Scene-preset prior on the estimated parameters. */
+export function presetParams(p: GradeParams, s: UserSettings): GradeParams {
+  const a = PRESET_ADJUST[s.preset ?? "auto"];
+  if (!s.preset || s.preset === "auto" || !a) return p;
+  const wb: Vec3 = [Math.min(a.redMax, Math.max(1, p.wb[0] * a.red)), 1, Math.min(1.6, Math.max(0.5, p.wb[2] * a.blue))];
+  const waterWb: Vec3 = [Math.min(2, Math.pow(wb[0], 0.6)), 1, Math.min(2, Math.max(0.5, Math.pow(wb[2], 0.6)))];
+  return { ...p, wb, waterWb, exposure: p.exposure * a.exposure };
+}
+export function presetSettings(g: GradeSettings, s: UserSettings): GradeSettings {
+  const a = PRESET_ADJUST[s.preset ?? "auto"];
+  if (!s.preset || s.preset === "auto" || !a) return g;
+  // Reef: little haze by definition — also damp the automatic dehaze.
+  const dehaze = s.preset === "reef" ? Math.min(g.dehaze, 0.15) : Math.min(1, Math.max(g.dehaze, a.dehaze));
+  return { ...g, dehaze, clarity: Math.min(1, Math.max(0, g.clarity + a.clarity)) };
 }
 
 /** Look-driven global adjustments (exposure dim in hazy scenes). */
@@ -384,8 +422,8 @@ export function packUniforms(
   split: number,
 ): Float32Array {
   const u = new Float32Array(UNIFORM_FLOATS);
-  params = lookParams(hazeParams(boostParams(params, pushOf(settings))), settings);
-  const s = lookSettings(hazeSettings(resolveSettings(settings), params), params);
+  params = lookParams(hazeParams(presetParams(boostParams(params, pushOf(settings)), settings)), settings);
+  const s = lookSettings(hazeSettings(presetSettings(resolveSettings(settings), settings), params), params);
   u.set([rotation, split, s.strength, 0], 0);
   u.set([...params.binf, s.veil], 4);
   u.set([...params.betaB, s.look], 8);

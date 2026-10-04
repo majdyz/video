@@ -28,7 +28,7 @@ import {
 import "@dive-tools/shared/theme.css";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
 import { GradeEngine } from "./engine/engine";
-import { DEFAULT_SETTINGS, INTENSITY_MAX, type GradeParams, type UserSettings } from "./engine/params";
+import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, type GradeParams, type UserSettings } from "./engine/params";
 import { ANALYSIS_INTERVAL_MS } from "./engine/engine";
 import type { Rotation } from "./engine/backend";
 
@@ -827,6 +827,13 @@ export default function App() {
         {mode !== "idle" && (
           <>
             <div className="sliders">
+              <div className="optswitch" role="radiogroup" aria-label="Scene">
+                {SCENE_PRESETS.map((p) => (
+                  <button key={p.id} type="button" role="radio" aria-checked={settings.preset === p.id} title={p.hint}
+                    className={settings.preset === p.id ? "on" : ""} disabled={exporting}
+                    onClick={() => setSettings((s) => ({ ...s, preset: p.id }))}>{p.label}</button>
+                ))}
+              </div>
               <Slider label="Intensity" value={settings.intensity} min={0} max={INTENSITY_MAX} step={0.01}
                 format={(v) => `${Math.round((v / INTENSITY_MAX) * 100)}%`}
                 onChange={(v) => setSettings((s) => ({ ...s, intensity: v }))} disabled={exporting} />
