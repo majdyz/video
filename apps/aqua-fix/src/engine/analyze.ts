@@ -126,10 +126,32 @@ const DEPTH_GUIDE = 0.5;
 // Lifted-black level (p0.4 of exposed luminance) that counts as fully hazy.
 const HAZE_BLACK_REF = 0.12;
 
+// Per-frame temporaries, reused between calls (one analysis at a time per
+// worker): ~15 thumbnail-sized allocations a frame were a tenth of the cost in GC.
+const scratch = new Map<string, Float32Array>();
+function temp(name: string, len: number): Float32Array {
+  let a = scratch.get(name);
+  if (!a || a.length !== len) { a = new Float32Array(len); scratch.set(name, a); }
+  return a;
+}
+// linear → sRGB encoding on a 4096-entry table with linear interpolation
+// (error < 2e-5, far below the 256-bin CLAHE histogram's resolution).
+const ENC_LUT_N = 4096;
+const ENC_LUT = new Float32Array(ENC_LUT_N + 1);
+for (let i = 0; i <= ENC_LUT_N; i++) ENC_LUT[i] = linearToSrgb(i / ENC_LUT_N);
+function encodeLut(c: number): number {
+  if (c <= 0) return 0;
+  if (c >= 1) return 1;
+  const f = c * ENC_LUT_N;
+  const i = f | 0;
+  const t = f - i;
+  return ENC_LUT[i] + (ENC_LUT[i + 1] - ENC_LUT[i]) * t;
+}
+
 export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number): FrameAnalysis {
   const n = w * h;
-  const lin = new Float32Array(n * 3);
-  const d = new Float32Array(n);
+  const lin = temp("lin", n * 3);
+  const d = temp("d", n);
   let mr = 0, mg = 0, mb = 0;
   for (let i = 0; i < n; i++) {
     const r8 = rgba[i * 4], g8 = rgba[i * 4 + 1], b8 = rgba[i * 4 + 2];
@@ -144,10 +166,10 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
 
   // 1. Range proxy: smooth the prior (two 5×5 box passes ≈ Gaussian σ≈2
   // at thumbnail scale), normalise between robust percentiles.
-  const ds = boxBlur(boxBlur(d, w, h, 2), w, h, 2);
+  const ds = boxBlur(boxBlur(d, w, h, 2, temp("blurA", n), temp("blurT", n)), w, h, 2, temp("blurB", n), temp("blurT", n));
   const [zLo, zHi] = percentiles(ds, [0.02, 0.98]);
   const zRange = Math.max(0.02, zHi - zLo);
-  const z = new Float32Array(n);
+  const z = temp("z", n);
   for (let i = 0; i < n; i++) z[i] = clamp01((ds[i] - zLo) / zRange);
 
   // 2. Backscatter fit from the darkest pixels in each range bin. Per bin,
@@ -155,7 +177,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // DARK_FRACTION; everything under it is a sample (O(n), no sorting).
   const samplesZ: number[] = [];
   const samplesC: number[][] = [[], [], []];
-  const lum = new Float32Array(n);
+  const lum = temp("lum", n);
   const bin = new Uint8Array(n);
   const binCount = new Uint32Array(RANGE_BINS);
   const LBINS = 128;
@@ -217,29 +239,37 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   const zMean = zSum / n;
 
   // Spatial veil scale from water-hued pixels (see VEIL_CELLS_*).
-  const hueObj = new Float32Array(n);
-  const hueFarArr = new Float32Array(n);
+  const hueObj = temp("hueObj", n);
+  const hueFarArr = temp("hueFar", n);
   for (let i = 0; i < n; i++) {
     const [, pa, pb] = linearToOklab(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
     hueObj[i] = hueConfidence(pa, pb, veilHue, HUE_LO, HUE_HI, ACHROMA);
     hueFarArr[i] = hueFarness(pa, pb, veilHue, HUE_FAR_LO, HUE_FAR_HI, ACHROMA);
   }
-  const veilScale = veilScaleMap(lin, z, hueObj, binf, betaB, cB, w, h);
-  const J = new Float32Array(n * 3);
-  const conf = new Float32Array(n);
-  const wbWeight = new Float32Array(n);
+  // Global backscatter fit per pixel and channel, shared by the veil-scale
+  // map and the de-scatter pass below.
+  const bfArr = temp("bf", n * 3);
+  for (let i = 0; i < n; i++) {
+    const zi = z[i];
+    bfArr[i * 3] = binf[0] * (1 - Math.exp(-(betaB[0] * zi + cB[0])));
+    bfArr[i * 3 + 1] = binf[1] * (1 - Math.exp(-(betaB[1] * zi + cB[1])));
+    bfArr[i * 3 + 2] = binf[2] * (1 - Math.exp(-(betaB[2] * zi + cB[2])));
+  }
+  const veilScale = veilScaleMap(lin, hueObj, bfArr, w, h, temp("veilScale", n));
+  const J = temp("J", n * 3);
+  const conf = temp("conf", n);
+  const wbWeight = temp("wbWeight", n);
   // Mirrors the shader: the scaled veil says whether a pixel *is* water
   // (sunlit water sits above the global fit); what gets subtracted from an
   // object is at most the global fit; and a pixel that keeps little signal
   // gets a proportional (hue-preserving) subtraction instead of per channel.
   for (let i = 0; i < n; i++) {
-    const zi = z[i];
     const lumI = Math.max(1e-5, lum[i]);
     const subScale = Math.min(1, veilScale[i]);
     let lumBc = 0, lumBs = 0;
     const Bsub = [0, 0, 0];
     for (let c = 0; c < 3; c++) {
-      const bf = binf[c] * (1 - Math.exp(-(betaB[c] * zi + cB[c])));
+      const bf = bfArr[i * 3 + c];
       Bsub[c] = subScale * bf;
       const wl = c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722;
       lumBc += veilScale[i] * bf * wl;
@@ -320,7 +350,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // Final per-pixel signal before exposure: mix(water, physics, conf). The
   // exposure is solved below on the physics path; the water path takes
   // exposure^WATER_EXPOSURE, which the shader applies per pixel.
-  const waterLin = new Float32Array(n * 3);
+  const waterLin = temp("waterLin", n * 3);
   for (let i = 0; i < n; i++) {
     const wgt = conf[i];
     for (let c = 0; c < 3; c++) {
@@ -333,25 +363,25 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // 5. Exposure (log-average luminance → key, highlight-protected) and
   // robust levels. The key is measured on the confident (object) pixels so
   // open water doesn't dictate it; the ceiling sees every pixel.
-  const Y = new Float32Array(n);
-  const mixY = (i: number, e: number) => {
-    const ew = Math.pow(e, WATER_EXPOSURE);
+  const Y = temp("Y", n);
+  const mixYAt = (i: number, e: number, ew: number) => {
     const wgt = conf[i];
-    let y = 0;
-    for (let c = 0; c < 3; c++) {
-      const v = waterLin[i * 3 + c] * ew + (J[i * 3 + c] * e - waterLin[i * 3 + c] * ew) * wgt;
-      y += v * (c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722);
-    }
+    const i3 = i * 3;
+    const w0 = waterLin[i3] * ew, w1 = waterLin[i3 + 1] * ew, w2 = waterLin[i3 + 2] * ew;
+    let y = (w0 + (J[i3] * e - w0) * wgt) * 0.2126;
+    y += (w1 + (J[i3 + 1] * e - w1) * wgt) * 0.7152;
+    y += (w2 + (J[i3 + 2] * e - w2) * wgt) * 0.0722;
     // Shadow floor and highlight shoulder, as the shader applies them.
     y = Math.max(y, shadowFloorAt(lum[i]) * lum[i] * ew);
     return y > KNEE ? KNEE + (1 - KNEE) * (1 - Math.exp(-(y - KNEE) / (1 - KNEE))) : y;
   };
+  const mixY = (i: number, e: number) => mixYAt(i, e, Math.pow(e, WATER_EXPOSURE));
   // Key from the object pixels of the blended image at unit exposure. A
   // scene with (almost) no confident pixels — deep blue, far wreck, murky
   // haze — is left at its own brightness: lifting it only whitens the haze.
   let logSum = 0, logW = 0, confSum = 0;
   for (let i = 0; i < n; i++) {
-    const y = mixY(i, 1);
+    const y = mixYAt(i, 1, 1);
     logSum += conf[i] * Math.log(1e-4 + y);
     logW += conf[i];
     confSum += conf[i];
@@ -360,13 +390,17 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   const lavg = logW > 1e-6 ? Math.exp(logSum / logW) : KEY_TARGET;
   let exposure = Math.min(EXPOSURE_MAX, Math.max(KEY_EXPOSURE_MIN, KEY_TARGET / Math.max(1e-4, lavg)));
   exposure = 1 + (exposure - 1) * coverage;
-  for (let i = 0; i < n; i++) Y[i] = mixY(i, exposure);
+  {
+    const ew = Math.pow(exposure, WATER_EXPOSURE);
+    for (let i = 0; i < n; i++) Y[i] = mixYAt(i, exposure, ew);
+  }
   const [p995] = percentiles(Y, [0.995]);
   if (p995 > HIGHLIGHT_CEILING) {
     // Scale the whole exposure down until the highlights fit (both paths
     // are monotone in the exposure, so one proportional step is enough).
     exposure = Math.max(EXPOSURE_MIN, exposure * (HIGHLIGHT_CEILING / p995));
-    for (let i = 0; i < n; i++) Y[i] = mixY(i, exposure);
+    const ew = Math.pow(exposure, WATER_EXPOSURE);
+    for (let i = 0; i < n; i++) Y[i] = mixYAt(i, exposure, ew);
   }
   const [black, white] = percentiles(Y, [0.004, 0.996]);
   // A black point is a crush by definition; keep it tiny so a frame that
@@ -377,12 +411,13 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   const whitePt = Math.min(1.0, Math.max(white, blackPt + 0.2, LEVELS_WHITE_MIN));
 
   // 6. CLAHE on the encoded luminance after levels.
-  const enc = new Float32Array(n);
+  const enc = temp("enc", n);
   for (let i = 0; i < n; i++) {
     const yl = Y[i];
     const ylv = yl + ((yl - blackPt) / (whitePt - blackPt) - yl) * LEVELS_MIX;
-    enc[i] = linearToSrgb(clamp01(ylv));
+    enc[i] = encodeLut(clamp01(ylv));
   }
+  void mixY;
   const clahe = buildClahe(enc, w, h);
 
   const depth = buildMaps(z, conf, ds, veilScale, lin, w, h);
@@ -440,8 +475,7 @@ function clamp01(x: number): number {
  * neighbours; the cell grid is bilinearly expanded to the thumbnail.
  */
 function veilScaleMap(
-  lin: Float32Array, z: Float32Array, hueObj: Float32Array,
-  binf: Vec3, betaB: Vec3, cB: Vec3, w: number, h: number,
+  lin: Float32Array, hueObj: Float32Array, bfArr: Float32Array, w: number, h: number, out: Float32Array,
 ): Float32Array {
   const cx = VEIL_CELLS_X, cy = VEIL_CELLS_Y;
   const samples: number[][] = Array.from({ length: cx * cy }, () => []);
@@ -450,8 +484,9 @@ function veilScaleMap(
     for (let x = 0; x < w; x++) {
       const i = y * w + x;
       if (hueObj[i] > 0.5) continue;
-      let lb = 0;
-      for (let c = 0; c < 3; c++) lb += binf[c] * (1 - Math.exp(-(betaB[c] * z[i] + cB[c]))) * (c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722);
+      let lb = bfArr[i * 3] * 0.2126;
+      lb += bfArr[i * 3 + 1] * 0.7152;
+      lb += bfArr[i * 3 + 2] * 0.0722;
       if (lb < 1e-3) continue;
       const li = luminance(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
       const tx = Math.min(cx - 1, Math.floor((x * cx) / w));
@@ -490,7 +525,6 @@ function veilScaleMap(
   }
   for (let k = 0; k < cx * cy; k++) if (Number.isNaN(cell[k])) cell[k] = 1;
   // Bilinear expansion to the thumbnail.
-  const out = new Float32Array(w * h);
   for (let y = 0; y < h; y++) {
     const fy = Math.min(Math.max(((y + 0.5) * cy) / h - 0.5, 0), cy - 1);
     const y0 = Math.floor(fy), y1 = Math.min(y0 + 1, cy - 1), ty = fy - y0;
@@ -648,9 +682,7 @@ function percentiles(v: Float32Array, qs: number[]): number[] {
   return out;
 }
 
-function boxBlur(src: Float32Array, w: number, h: number, r: number): Float32Array {
-  const tmp = new Float32Array(w * h);
-  const out = new Float32Array(w * h);
+function boxBlur(src: Float32Array, w: number, h: number, r: number, out: Float32Array = new Float32Array(w * h), tmp: Float32Array = new Float32Array(w * h)): Float32Array {
   const k = 2 * r + 1;
   for (let y = 0; y < h; y++) {
     let acc = 0;
