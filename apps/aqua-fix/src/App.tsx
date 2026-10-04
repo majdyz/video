@@ -546,46 +546,73 @@ export default function App() {
     const useRealtime = rtParam === "1" || (rtParam !== "0" && isWebKit() && isRealtimeExportSupported(canvasEl));
     try {
       if (useRealtime) {
-        setExportDetail("real-time · playing the clip and recording the graded canvas");
-        let rendered = 0;
-        const rtStart = performance.now();
-        const result = await exportRealtime(file, video, canvasEl, {
-          bitrate,
-          opfsPrefix: AQUA_FIX_BRAND.opfsPrefix,
-          fps: 30,
-          signal: ctrl.signal,
-          log: (line) => console.info("[export]", line),
-          onProgress: (p) => {
-            setExportProgress(p);
-            setExportTime(p * total);
-            const secs = (performance.now() - rtStart) / 1000;
-            if (secs > 0.5) setExportDetail(`real-time · ${(rendered / secs).toFixed(1)} fps rendered · ${e.backend.kind}`);
-          },
-          startRendering: (onFrame) => {
-            let active = true;
-            const vv = video as VideoWithRVFC;
-            const step = () => {
-              if (!active || !exportingRef.current) return;
-              if (video.readyState >= 2) {
-                e.upload(video, video.videoWidth, video.videoHeight, 0);
-                // First frame snaps to its own analysis; afterwards tick()
-                // starts analyses at the preview's cadence (~70 ms) — forcing
-                // one per frame cost a GPU readback per frame and starved the
-                // renderer (choppy real-time exports on the phone).
-                if (rendered === 0) void e.analyzeNow(true).catch(() => undefined);
-                e.tick(video.currentTime);
-                e.render();
-                onFrame(video.currentTime);
-                rendered++;
-              }
-              if (typeof vv.requestVideoFrameCallback === "function") vv.requestVideoFrameCallback(step);
-              else requestAnimationFrame(step);
-            };
-            step();
-            return () => { active = false; };
-          },
-        });
-        await shareOrDownload(result.blob, `${fileNameRef.current}-aqua.${result.blob.type === "video/webm" ? "webm" : "mp4"}`);
+        // The recorder captures whatever gets painted, so the renderer must
+        // keep up with playback. Start at full size; if the first seconds
+        // render well below the capture rate, restart at a smaller scale.
+        const SCALES = [1, 0.75, 0.5];
+        for (let si = 0; si < SCALES.length; si++) {
+          const scale = SCALES[si];
+          const canRetry = si < SCALES.length - 1;
+          e.reset();
+          e.setPreviewScale(scale);
+          setExportDetail(`real-time · playing the clip and recording the graded canvas${scale < 1 ? ` · ${Math.round(scale * 100)}% size` : ""}`);
+          let rendered = 0;
+          let slow = false;
+          const rtStart = performance.now();
+          const rtCtrl = new AbortController();
+          const onOuterAbort = () => rtCtrl.abort();
+          ctrl.signal.addEventListener("abort", onOuterAbort, { once: true });
+          try {
+            const result = await exportRealtime(file, video, canvasEl, {
+              bitrate,
+              opfsPrefix: AQUA_FIX_BRAND.opfsPrefix,
+              fps: 30,
+              signal: rtCtrl.signal,
+              log: (line) => console.info("[export]", line),
+              onProgress: (p) => {
+                setExportProgress(p);
+                setExportTime(p * total);
+                const secs = (performance.now() - rtStart) / 1000;
+                if (secs > 0.5) setExportDetail(`real-time · ${(rendered / secs).toFixed(1)} fps rendered${scale < 1 ? ` · ${Math.round(scale * 100)}% size` : ""} · ${e.backend.kind}`);
+                if (canRetry && secs > 2.5 && rendered / secs < 22 && !slow) {
+                  slow = true;
+                  console.info(`[export] ${(rendered / secs).toFixed(1)} fps at ${scale}× — restarting smaller`);
+                  rtCtrl.abort();
+                }
+              },
+              startRendering: (onFrame) => {
+                let active = true;
+                const vv = video as VideoWithRVFC;
+                const step = () => {
+                  if (!active || !exportingRef.current) return;
+                  if (video.readyState >= 2) {
+                    e.upload(video, video.videoWidth, video.videoHeight, 0);
+                    // First frame snaps to its own analysis; afterwards tick()
+                    // starts analyses at the preview's cadence (~70 ms) — one
+                    // per frame cost a GPU readback per frame and starved the
+                    // renderer.
+                    if (rendered === 0) void e.analyzeNow(true).catch(() => undefined);
+                    e.tick(video.currentTime);
+                    e.render();
+                    onFrame(video.currentTime);
+                    rendered++;
+                  }
+                  if (typeof vv.requestVideoFrameCallback === "function") vv.requestVideoFrameCallback(step);
+                  else requestAnimationFrame(step);
+                };
+                step();
+                return () => { active = false; };
+              },
+            });
+            await shareOrDownload(result.blob, `${fileNameRef.current}-aqua.${result.blob.type === "video/webm" ? "webm" : "mp4"}`);
+            return;
+          } catch (err) {
+            if (slow && !ctrl.signal.aborted) continue; // retry at the next scale
+            throw err;
+          } finally {
+            ctrl.signal.removeEventListener("abort", onOuterAbort);
+          }
+        }
         return;
       }
       const result = await exportWithCodec(
