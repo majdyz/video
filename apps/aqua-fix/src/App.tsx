@@ -413,6 +413,7 @@ export default function App() {
     // global correction to their median, so a subject passing through (an
     // orange fish filling the frame) can't swing the balance mid-video.
     // ?lock=0 keeps per-frame estimation (A/B testing).
+    e.lockRange = new URLSearchParams(location.search).get("lockz") === "1";
     if (new URLSearchParams(location.search).get("lock") !== "0") void profileClip(video, myGen);
   }
 

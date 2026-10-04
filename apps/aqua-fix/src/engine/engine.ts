@@ -198,9 +198,13 @@ export class GradeEngine {
     return seg.params;
   }
 
+  /** Debug (?lockz=1): also lock the range normalisation (zLo/zHi) — A/B for flicker. */
+  lockRange = false;
+
   private applyLock(p: GradeParams): GradeParams {
     const l = this.lockedAt(this.lastTickSec);
-    return l ? { ...l, zLo: p.zLo, zHi: p.zHi } : p;
+    if (!l) return p;
+    return this.lockRange ? { ...l } : { ...l, zLo: p.zLo, zHi: p.zHi };
   }
 
   /** Runs one analysis of the current source and returns its raw parameters and mean colour (clip profiling). */
