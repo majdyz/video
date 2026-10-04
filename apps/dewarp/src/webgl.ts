@@ -15,22 +15,26 @@ uniform sampler2D src;
 uniform vec2 srcSize;
 uniform float fFish;
 uniform float fOut;
-uniform float k1;
+uniform vec4 k;
 uniform float strength;
 uniform float zoom;
 uniform float projection;
+uniform float fy;
+uniform vec2 center;
+uniform float thetaMax;
 in vec2 uv;
 out vec4 color;
 void main() {
   vec2 c = srcSize * 0.5;
   vec2 p = (uv * srcSize - c) / zoom;
   float r = length(p);
-  if (r < 0.5) { color = texture(src, c / srcSize); return; }
-  float theta = projection > 0.5 ? 2.0 * atan(r / (2.0 * fOut)) : atan(r / fOut);
-  float thetaD = theta * (1.0 + k1 * theta * theta);
-  float rFish = fFish * thetaD;
-  float rs = r + (rFish - r) * strength;
-  vec2 s = c + p / r * rs;
+  if (r < 0.5) { color = texture(src, mix(c, center, strength) / srcSize); return; }
+  float theta0 = projection > 0.5 ? 2.0 * atan(r / (2.0 * fOut)) : atan(r / fOut);
+  float theta = min(theta0, thetaMax);
+  float t2 = theta * theta;
+  float thetaD = theta * (1.0 + t2 * (k.x + t2 * (k.y + t2 * (k.z + t2 * k.w))));
+  vec2 fish = center + p / r * vec2(fFish, fy) * thetaD;
+  vec2 s = mix(c + p, fish, strength);
   vec2 suv = s / srcSize;
   if (suv.x < 0.0 || suv.y < 0.0 || suv.x > 1.0 || suv.y > 1.0) { color = vec4(0.0, 0.0, 0.0, 1.0); return; }
   color = texture(src, suv);
@@ -42,7 +46,7 @@ export class GlWarper {
   private readonly gl: WebGL2RenderingContext;
   private readonly program: WebGLProgram;
   private readonly texture: WebGLTexture;
-  private readonly loc: Record<"srcSize" | "fFish" | "fOut" | "k1" | "strength" | "zoom" | "projection", WebGLUniformLocation | null>;
+  private readonly loc: Record<"srcSize" | "fFish" | "fOut" | "k" | "strength" | "zoom" | "projection" | "fy" | "center" | "thetaMax", WebGLUniformLocation | null>;
 
   constructor(width: number, height: number) {
     this.canvas = new OffscreenCanvas(width, height);
@@ -74,7 +78,10 @@ export class GlWarper {
       srcSize: gl.getUniformLocation(program, "srcSize"),
       fFish: gl.getUniformLocation(program, "fFish"),
       fOut: gl.getUniformLocation(program, "fOut"),
-      k1: gl.getUniformLocation(program, "k1"),
+      k: gl.getUniformLocation(program, "k"),
+      fy: gl.getUniformLocation(program, "fy"),
+      center: gl.getUniformLocation(program, "center"),
+      thetaMax: gl.getUniformLocation(program, "thetaMax"),
       strength: gl.getUniformLocation(program, "strength"),
       zoom: gl.getUniformLocation(program, "zoom"),
       projection: gl.getUniformLocation(program, "projection"),
@@ -93,7 +100,10 @@ export class GlWarper {
     gl.uniform2f(this.loc.srcSize, u.srcSize[0], u.srcSize[1]);
     gl.uniform1f(this.loc.fFish, u.fFish);
     gl.uniform1f(this.loc.fOut, u.fOut);
-    gl.uniform1f(this.loc.k1, u.k1);
+    gl.uniform4f(this.loc.k, u.k[0], u.k[1], u.k[2], u.k[3]);
+    gl.uniform1f(this.loc.fy, u.fy);
+    gl.uniform2f(this.loc.center, u.center[0], u.center[1]);
+    gl.uniform1f(this.loc.thetaMax, u.thetaMax);
     gl.uniform1f(this.loc.strength, u.strength);
     gl.uniform1f(this.loc.zoom, u.zoom);
     gl.uniform1f(this.loc.projection, u.projection);

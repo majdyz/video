@@ -1,7 +1,7 @@
 import "./style.css";
 
 declare const __BUILD__: string;
-import { warpUniforms, type WarpUniforms, type Projection } from "./fisheye";
+import { lensDiagonalFov, warpUniforms, type WarpUniforms, type Projection } from "./fisheye";
 import { Warper } from "./gpu";
 
 import { decodeFrameAt, describeBoxes, exportClip, indexTopLevelBoxes, probe, type ProbeResult } from "./pipeline";
@@ -111,11 +111,12 @@ async function main() {
   profileSelect.value = DEFAULT_PROFILE;
 
   const projectionSelect = el("select") as HTMLSelectElement;
-  projectionSelect.append(el("option", { value: "stereographic" }, "Natural shapes"), el("option", { value: "rectilinear" }, "Straight lines"));
-  const strength = slider("Strength", -100, 100, 1, 70, v => `${v}%`);
+  projectionSelect.append(el("option", { value: "rectilinear" }, "Straight lines"), el("option", { value: "stereographic" }, "Natural shapes"));
+  const strength = slider("Strength", -100, 100, 1, 100, v => `${v}%`);
   const zoom = slider("Zoom", 60, 160, 1, 100, v => `${(v / 100).toFixed(2)}x`);
   const fov = slider("Source FOV", 100, 180, 1, PROFILES[DEFAULT_PROFILE].fovDeg, v => `${v}°`);
   const k1 = slider("Edge tweak", -0.3, 0.3, 0.01, 0, v => v.toFixed(2));
+  const profileNote = el("p", { class: "hint" });
 
   const exportBtn = el("button", {}, "Export") as HTMLButtonElement;
   const cancelBtn = el("button", { class: "secondary" }, "Cancel") as HTMLButtonElement;
@@ -141,11 +142,12 @@ async function main() {
   app.append(
     el("div", { class: "wrap" },
       el("header", {}, el("h1", {}, "Dewarp ", el("span", {}, "Wide → straight")),
-        el("p", {}, "Straightens DJI Osmo Action Wide clips on this device. Nothing is uploaded. Like the camera's Standard mode it keeps the center and crops the edges; Zoom below 1x brings more of the view back, Strength below 100% keeps some of the curve.")),
+        el("p", {}, "Straightens DJI Osmo Action and GoPro wide-angle clips on this device with a calibrated lens model. Nothing is uploaded. Like the camera's Standard mode it keeps the center and crops the edges; Zoom below 1x brings more of the view back, Strength below 100% keeps some of the curve.")),
       el("div", { class: "card" }, fileLabel, meta, logPanel),
       el("div", { class: "card" }, el("h2", {}, "Preview one frame"), preview, wipe.row, scrub.row),
       el("div", { class: "card" }, el("h2", {}, "Correction"),
         el("div", { class: "row" }, el("span", {}, "Camera"), profileSelect, el("span")),
+        profileNote,
         el("div", { class: "row" }, el("span", {}, "Projection"), projectionSelect, el("span")),
         strength.row, zoom.row,
         el("details", {}, el("summary", {}, "Advanced"), fov.row, k1.row)),
@@ -192,7 +194,25 @@ async function main() {
       strength: strength.input.valueAsNumber / 100,
       projection: projectionSelect.value as Projection,
       zoom: zoom.input.valueAsNumber / 100,
+      lens: PROFILES[profileSelect.value]?.lens,
     });
+
+  // The FOV slider starts at what the calibration implies for this clip's frame; the tweak at the profile's.
+  const syncProfile = () => {
+    const p = PROFILES[profileSelect.value];
+    const w = info?.width ?? p.lens?.width ?? 3840;
+    const h = info?.height ?? p.lens?.height ?? 2160;
+    const fovDeg = p.lens ? Math.round(lensDiagonalFov(p.lens, w, h)) : p.fovDeg;
+    fov.input.value = String(fovDeg);
+    fov.input.dispatchEvent(new Event("input"));
+    k1.input.value = String(p.k1);
+    k1.input.dispatchEvent(new Event("input"));
+    const aspectOff = p.lens && info ? Math.abs(info.width / info.height - p.lens.width / p.lens.height) > 0.02 : false;
+    profileNote.textContent = p.lens
+      ? `${p.source}, ${fovDeg}° diagonal${aspectOff ? " — this clip has a different aspect ratio than the calibration; check the preview edges" : ""}`
+      : "No calibration: set the field of view and edge tweak until lines look straight";
+  };
+  syncProfile();
 
   let modeReady = false;
   // The frame on screen, decoded from the file at the scrub time; sliders repaint it, a scrub replaces it.
@@ -272,13 +292,7 @@ async function main() {
   wipe.input.addEventListener("input", setWipe);
   for (const s of [strength, zoom, fov, k1]) s.input.addEventListener("input", renderPreview);
   projectionSelect.addEventListener("change", renderPreview);
-  profileSelect.addEventListener("change", () => {
-    const p = PROFILES[profileSelect.value];
-    fov.input.value = String(p.fovDeg);
-    fov.input.dispatchEvent(new Event("input"));
-    k1.input.value = String(p.k1);
-    k1.input.dispatchEvent(new Event("input"));
-  });
+  profileSelect.addEventListener("change", syncProfile);
   scrub.input.addEventListener("input", () => {
     window.clearTimeout(scrubTimer);
     scrubTimer = window.setTimeout(() => void loadPreview(scrub.input.valueAsNumber), 250);
@@ -310,6 +324,7 @@ async function main() {
     if (afterTarget?.kind === "gpu") afterTarget = { kind: "gpu", ctx: warper!.configureCanvas(after) };
     if (warper && modeReady) warper.prepareOutput(info.width, info.height);
     orientPreview(info.width, info.height, info.rotation);
+    syncProfile();
     meta.textContent = `${info.width}×${info.height}, ${info.fps.toFixed(2)} fps, ${fmtTime(info.durationS)}, ${info.codec}${info.hasAudio ? ", audio" : ", no audio"}${info.rotation ? `, rotated ${info.rotation}°` : ""}`;
     scrub.input.max = String(Math.max(0.1, info.durationS - 0.1));
     scrub.input.value = String(Math.min(1, info.durationS / 2));

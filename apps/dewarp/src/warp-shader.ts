@@ -3,10 +3,14 @@ struct Params {
   srcSize: vec2<f32>,
   fFish: f32,
   fOut: f32,
-  k1: f32,
+  k: vec4<f32>,
   strength: f32,
   zoom: f32,
   projection: f32,
+  fy: f32,
+  center: vec2<f32>,
+  thetaMax: f32,
+  pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -34,13 +38,15 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let p = (in.uv * params.srcSize - c) / params.zoom;
   let r = length(p);
   if (r < 0.5) {
-    return textureSampleBaseClampToEdge(src, samp, c / params.srcSize);
+    let s0 = mix(c, params.center, params.strength);
+    return textureSampleBaseClampToEdge(src, samp, s0 / params.srcSize);
   }
-  let theta = select(atan(r / params.fOut), 2.0 * atan(r / (2.0 * params.fOut)), params.projection > 0.5);
-  let thetaD = theta * (1.0 + params.k1 * theta * theta);
-  let rFish = params.fFish * thetaD;
-  let rs = r + (rFish - r) * params.strength;
-  let s = c + p / r * rs;
+  let theta0 = select(atan(r / params.fOut), 2.0 * atan(r / (2.0 * params.fOut)), params.projection > 0.5);
+  let theta = min(theta0, params.thetaMax);
+  let t2 = theta * theta;
+  let thetaD = theta * (1.0 + t2 * (params.k.x + t2 * (params.k.y + t2 * (params.k.z + t2 * params.k.w))));
+  let fish = params.center + p / r * vec2(params.fFish, params.fy) * thetaD;
+  let s = mix(c + p, fish, params.strength);
   let suv = s / params.srcSize;
   if (suv.x < 0.0 || suv.y < 0.0 || suv.x > 1.0 || suv.y > 1.0) {
     return vec4(0.0, 0.0, 0.0, 1.0);

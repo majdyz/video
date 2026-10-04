@@ -14,7 +14,7 @@ describe("differs", () => {
     expect(differs(a, b)).toBe(false);
   });
   it("sees a sheared frame as disagreement", () => {
-    const a = frame((x, y) => (x * 4) & 255);
+    const a = frame((x, _y) => (x * 4) & 255);
     const b = frame((x, y) => ((x + y * 3) * 4) & 255);
     expect(differs(a, b)).toBe(true);
   });

@@ -1,4 +1,4 @@
-import { packUniforms, type WarpUniforms } from "./fisheye";
+import { packUniforms, UNIFORM_FLOATS, type WarpUniforms } from "./fisheye";
 import { WARP_WGSL } from "./warp-shader";
 import { GlWarper } from "./webgl";
 
@@ -124,7 +124,7 @@ export class Warper {
       )
     );
     const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
-    const uniforms = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const uniforms = device.createBuffer({ size: UNIFORM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     return new Warper(device, external, copy, sampler, uniforms);
   }
 

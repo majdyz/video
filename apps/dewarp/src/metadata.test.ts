@@ -34,7 +34,7 @@ function file(moov: Uint8Array): { blob: Blob; moov: { start: number; size: numb
   const ftyp = box("ftyp", enc.encode("isom"));
   const mdat = box("mdat", new Uint8Array(64));
   const start = ftyp.length + mdat.length;
-  return { blob: new Blob([ftyp, mdat, moov]), moov: { start, size: moov.length } };
+  return { blob: new Blob([ftyp, mdat, moov] as BlobPart[]), moov: { start, size: moov.length } };
 }
 
 const SOURCE_TIME = 3_800_000_000;
@@ -93,7 +93,7 @@ describe("applying it to the export", () => {
     const ftyp = box("ftyp", enc.encode("isom"));
     const moovBytes = movie(MUXER_TIME);
     const trailing = box("free", new Uint8Array(8));
-    const blob = new Blob([ftyp, moovBytes, trailing]);
+    const blob = new Blob([ftyp, moovBytes, trailing] as BlobPart[]);
     const tagged = await applyMetadata(blob, { start: ftyp.length, size: moovBytes.length }, {
       creationTime: SOURCE_TIME,
       tags: [box("udta", enc.encode("no"))],
