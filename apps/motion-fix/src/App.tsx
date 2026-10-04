@@ -4,7 +4,11 @@ import {
   BusyOverlay,
   CapabilityBanner,
   CompareWipe,
+  exportRealtime,
   exportWithCodec,
+  isRealtimeExportSupported,
+  isWebKit,
+  probeFrameRate,
   FilePickerButton,
   Hero,
   isWebCodecsSupported,
@@ -373,6 +377,55 @@ export default function App() {
     const started = performance.now();
     try {
       const bitrate = sourceBitrateRef.current ?? pickBitrate(video.videoWidth, video.videoHeight, analysisRef.current?.frameRate ?? 30);
+      // Real-time path on WebKit (see aqua-fix): Safari's canvas → VideoFrame
+      // copy pins the offline exporter to ~10 fps, so play the clip and
+      // record the stabilised canvas instead, then remux the original audio.
+      // ?rt=1 / ?rt=0 force it on or off.
+      const rtParam = new URLSearchParams(location.search).get("rt");
+      const canvasEl = canvasRef.current;
+      const useRealtime = !!canvasEl && (rtParam === "1" || (rtParam !== "0" && isWebKit() && isRealtimeExportSupported(canvasEl)));
+      if (useRealtime && canvasEl) {
+        const srcFps = Math.min(60, Math.max(24, Math.round(analysisRef.current?.frameRate ?? (await probeFrameRate(file)))));
+        let rendered = 0;
+        const result = await exportRealtime(file, video, canvasEl, {
+          bitrate,
+          opfsPrefix: MOTION_FIX_BRAND.opfsPrefix,
+          fps: srcFps,
+          signal: ctrl.signal,
+          log: (line) => console.info("[export]", line),
+          onProgress: (p) => {
+            const now = performance.now();
+            if (now - lastUiPush < 250 && p < 1) return;
+            lastUiPush = now;
+            setExportProgress(p);
+            setExportTime(p * total);
+          },
+          startRendering: (onFrame) => {
+            let active = true;
+            const vv = video as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number };
+            const step = () => {
+              if (!active || !exportingRef.current) return;
+              if (video.readyState >= 2) {
+                drawFrame(video.currentTime);
+                onFrame(video.currentTime);
+                rendered++;
+              }
+              if (typeof vv.requestVideoFrameCallback === "function") vv.requestVideoFrameCallback(step);
+              else requestAnimationFrame(step);
+            };
+            step();
+            return () => { active = false; };
+          },
+        });
+        const fps = rendered / (result.recordedMs / 1000);
+        setStatus((s) => `${s ?? ""}${s ? " · " : ""}exported in real time, ${fps.toFixed(0)} fps rendered (${result.codec})`);
+        try {
+          await shareOrDownload(result.blob, `${fileNameRef.current}-stabilized.${result.blob.type === "video/webm" ? "webm" : "mp4"}`);
+        } catch (err) {
+          setError("Save failed: " + (err instanceof Error ? err.message : String(err)));
+        }
+        return;
+      }
       const result = await exportWithCodec(file, renderExportFrame, {
         bitrate,
         opfsPrefix: MOTION_FIX_BRAND.opfsPrefix,
