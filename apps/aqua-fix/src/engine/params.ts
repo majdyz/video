@@ -31,6 +31,8 @@ export type UserSettings = {
   look: number;
   /** Scene preset (prior on the estimate). */
   preset: ScenePreset;
+  /** Debug (?hazeauto=0): disables the haze-adaptive default for A/B runs. */
+  hazeAuto?: boolean;
 };
 
 /**
@@ -203,7 +205,8 @@ export function lookParams(p: GradeParams, s: UserSettings): GradeParams {
  * levels stretch on their own (no balance push), so a murky clip clears up
  * at the default Intensity while clear scenes are untouched.
  */
-export const HAZE_AUTO = { dehaze: 0.5, clarity: 0.3, levels: 0.15 };
+// clarity 0.3 cost ~35 % temporal grain on hazy clips (review A/B, 4 Oct); 0.15 keeps most of the clearing.
+export const HAZE_AUTO = { dehaze: 0.5, clarity: 0.15, levels: 0.15 };
 export function hazeSettings(g: GradeSettings, p: GradeParams): GradeSettings {
   const hw = hazeWeight(p);
   if (hw <= 0) return g;
@@ -422,8 +425,9 @@ export function packUniforms(
   split: number,
 ): Float32Array {
   const u = new Float32Array(UNIFORM_FLOATS);
-  params = lookParams(hazeParams(presetParams(boostParams(params, pushOf(settings)), settings)), settings);
-  const s = lookSettings(hazeSettings(presetSettings(resolveSettings(settings), settings), params), params);
+  const hz = settings.hazeAuto !== false;
+  params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(params, pushOf(settings)), settings)), settings);
+  const s = lookSettings(hz ? hazeSettings(presetSettings(resolveSettings(settings), settings), params) : presetSettings(resolveSettings(settings), settings), params);
   u.set([rotation, split, s.strength, 0], 0);
   u.set([...params.binf, s.veil], 4);
   u.set([...params.betaB, s.look], 8);

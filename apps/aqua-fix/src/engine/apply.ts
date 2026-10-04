@@ -21,8 +21,9 @@ export type ApplyContext = {
 type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings };
 
 export function resolveContext(ctx: ApplyContext): PixelContext {
-  const params = lookParams(hazeParams(presetParams(boostParams(ctx.params, pushOf(ctx.settings)), ctx.settings)), ctx.settings);
-  return { ...ctx, params, settings: lookSettings(hazeSettings(presetSettings(resolveSettings(ctx.settings), ctx.settings), params), params) };
+  const hz = ctx.settings.hazeAuto !== false;
+  const params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(ctx.params, pushOf(ctx.settings)), ctx.settings)), ctx.settings);
+  return { ...ctx, params, settings: lookSettings(hz ? hazeSettings(presetSettings(resolveSettings(ctx.settings), ctx.settings), params) : presetSettings(resolveSettings(ctx.settings), ctx.settings), params) };
 }
 
 /**

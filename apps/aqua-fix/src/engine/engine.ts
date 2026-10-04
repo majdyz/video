@@ -21,7 +21,6 @@ import {
   DEFAULT_SETTINGS,
   IDENTITY_PARAMS,
   lerpParams,
-  medianParams,
   packUniforms,
   type ClaheLuts,
   type DepthMap,
@@ -70,6 +69,9 @@ function toGpuPacket(raw: AnalysisPacket): GpuPacket {
 }
 
 export type PersonState = "off" | "loading" | "on" | "failed";
+/** One locked estimate, valid from `from` seconds until the next segment. */
+export type LockSegment = { from: number; params: GradeParams };
+export { SCENE_CUT_MEAN_DIFF };
 export type EngineStats = {
   backend: "webgpu" | "webgl2";
   analysisMs: number;
@@ -120,8 +122,12 @@ export class GradeEngine {
   private hasAnalysis = false;
   private dirtyData = false;
   private stats: EngineStats;
-  /** Clip-wide global parameters; when set, per-frame packets keep only their maps and range normalisation. */
-  private locked: GradeParams | null = null;
+  /**
+   * Locked global parameters per time segment (a clip cut from several
+   * dives gets one estimate per segment); when set, per-frame packets keep
+   * only their maps and range normalisation.
+   */
+  private locked: LockSegment[] | null = null;
   private resolveWaiters: ((p: AnalysisPacket) => void)[] = [];
   private rejectWaiters: ((e: Error) => void)[] = [];
   private onError: (e: Error) => void;
@@ -163,8 +169,8 @@ export class GradeEngine {
    * median of `samples` for the rest of the clip; null unlocks. Maps stay
    * per frame.
    */
-  lockGlobals(samples: GradeParams[] | null): void {
-    this.locked = samples && samples.length > 0 ? medianParams(samples) : null;
+  lockGlobals(segments: LockSegment[] | null): void {
+    this.locked = segments && segments.length > 0 ? [...segments].sort((a, b) => a.from - b.from) : null;
     if (this.locked) {
       this.current = this.applyLock(this.current);
       if (this.target) this.target = this.applyLock(this.target);
@@ -175,12 +181,30 @@ export class GradeEngine {
     return this.locked !== null;
   }
 
-  private applyLock(p: GradeParams): GradeParams {
-    return this.locked ? { ...this.locked, zLo: p.zLo, zHi: p.zHi } : p;
+  /** Number of locked segments (0 when unlocked) — diagnostics. */
+  get lockSegments(): number {
+    return this.locked?.length ?? 0;
   }
 
-  /** Runs one analysis of the current source and returns its raw parameters (clip profiling). */
-  async analyzeRaw(timeoutMs = 10_000): Promise<GradeParams> {
+  /** The locked estimate in force at `timeSec` (null when unlocked) — tests/diagnostics. */
+  lockedParamsAt(timeSec: number): GradeParams | null {
+    return this.lockedAt(timeSec);
+  }
+
+  private lockedAt(timeSec: number): GradeParams | null {
+    if (!this.locked) return null;
+    let seg = this.locked[0];
+    for (const s of this.locked) if (timeSec >= s.from) seg = s;
+    return seg.params;
+  }
+
+  private applyLock(p: GradeParams): GradeParams {
+    const l = this.lockedAt(this.lastTickSec);
+    return l ? { ...l, zLo: p.zLo, zHi: p.zHi } : p;
+  }
+
+  /** Runs one analysis of the current source and returns its raw parameters and mean colour (clip profiling). */
+  async analyzeRaw(timeoutMs = 10_000): Promise<{ params: GradeParams; mean: Vec3 }> {
     const p = new Promise<AnalysisPacket>((resolve, reject) => {
       this.resolveWaiters.push(resolve);
       this.rejectWaiters.push(reject);
@@ -195,7 +219,7 @@ export class GradeEngine {
       const t = setTimeout(() => reject(new Error("Frame analysis timed out")), timeoutMs);
       q.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
     });
-    return packet.params;
+    return { params: packet.params, mean: packet.mean };
   }
 
   /** Current (eased) person map at the fields' resolution — diagnostics. */
@@ -303,7 +327,14 @@ export class GradeEngine {
    */
   tick(timeSec: number, force = false): boolean {
     const dt = Math.max(0, Math.min(0.5, timeSec - this.lastTickSec));
+    const prevLock = this.lockedAt(this.lastTickSec);
     this.lastTickSec = timeSec;
+    const nextLock = this.lockedAt(timeSec);
+    if (prevLock !== nextLock && nextLock) {
+      // Crossed a segment boundary (a cut): snap the globals to the new estimate.
+      this.current = { ...nextLock, zLo: this.current.zLo, zHi: this.current.zHi };
+      if (this.target) this.target = { ...nextLock, zLo: this.target.zLo, zHi: this.target.zHi };
+    }
     this.smooth(dt);
     const nowMs = performance.now();
     if (!this.inflight && (force || nowMs - this.lastAnalysisAt >= this.analysisIntervalMs)) {

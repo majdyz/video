@@ -28,8 +28,8 @@ import {
 import "@dive-tools/shared/theme.css";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
 import { GradeEngine } from "./engine/engine";
-import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, type GradeParams, type UserSettings } from "./engine/params";
-import { ANALYSIS_INTERVAL_MS } from "./engine/engine";
+import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, medianParams, type GradeParams, type UserSettings } from "./engine/params";
+import { ANALYSIS_INTERVAL_MS, SCENE_CUT_MEAN_DIFF } from "./engine/engine";
 import type { Rotation } from "./engine/backend";
 
 type Mode = "idle" | "photo" | "video";
@@ -107,7 +107,7 @@ export default function App() {
     // Debug/testing: ?intensity=1.5&look=1 preset the controls (headless runs).
     const q = new URLSearchParams(location.search);
     const num = (k: string) => { const v = parseFloat(q.get(k) ?? ""); return Number.isFinite(v) ? v : undefined; };
-    return { ...DEFAULT_SETTINGS, intensity: num("intensity") ?? DEFAULT_SETTINGS.intensity, look: num("look") ?? DEFAULT_SETTINGS.look };
+    return { ...DEFAULT_SETTINGS, intensity: num("intensity") ?? DEFAULT_SETTINGS.intensity, look: num("look") ?? DEFAULT_SETTINGS.look, hazeAuto: q.get("hazeauto") !== "0" };
   });
   const [compareActive, setCompareActive] = useState(false);
   const [compareSplit, setCompareSplit] = useState(0.5);
@@ -128,7 +128,7 @@ export default function App() {
       const e = engineRef.current;
       if (!e) return;
       const st = e.getStats();
-      setDiag(`${st.backend} · analysis ${st.analysisMs.toFixed(0)} ms (${st.analyses} runs, ${st.sceneCuts} cuts) · people ${st.person}${st.person === "on" ? ` ${st.personMs.toFixed(0)} ms, ${(st.personCoverage * 100).toFixed(0)}%` : ""}${e.isLocked ? " · clip-locked" : ""}`);
+      setDiag(`${st.backend} · analysis ${st.analysisMs.toFixed(0)} ms (${st.analyses} runs, ${st.sceneCuts} cuts) · people ${st.person}${st.person === "on" ? ` ${st.personMs.toFixed(0)} ms, ${(st.personCoverage * 100).toFixed(0)}%` : ""}${e.isLocked ? ` · clip-locked (${e.lockSegments} seg)` : ""}`);
     };
     update();
     const id = setInterval(update, 500);
@@ -421,7 +421,7 @@ export default function App() {
     const dur = video.duration;
     if (!e || !Number.isFinite(dur) || dur < 0.5) return;
     const n = Math.min(12, Math.max(4, Math.round(dur)));
-    const samples: GradeParams[] = [];
+    const samples: { t: number; params: GradeParams; mean: [number, number, number] }[] = [];
     const wasPaused = video.paused;
     const resumeAt = video.currentTime;
     previewActiveRef.current = false;
@@ -434,14 +434,39 @@ export default function App() {
         await seekVideoTo(video, t);
         e.upload(video, video.videoWidth, video.videoHeight, 0);
         try {
-          samples.push(await e.analyzeRaw());
+          const r = await e.analyzeRaw();
+          samples.push({ t, params: r.params, mean: r.mean });
         } catch {
           // a failed sample just doesn't vote
         }
       }
       if (myGen !== fileGenRef.current) return;
-      if (samples.length >= 3) e.lockGlobals(samples);
-      console.info(`[profile] ${samples.length >= 3 ? "locked" : "skipped"}: ${samples.length}/${n} samples, wb ${samples.map((p) => p.wb[0].toFixed(2)).join("/")}`);
+      if (samples.length >= 3) {
+        // Split at real cuts only: samples are ~0.5–1 s apart, so a pan from
+        // sunlit surface to dark rock already moves the mean colour by more
+        // than the frame-to-frame cut threshold. A split needs a large jump,
+        // or a moderate one together with a genuinely different estimate —
+        // if the estimates agree there is nothing to gain from splitting
+        // (and a mid-clip snap is exactly the inconsistency the lock exists
+        // to remove). Each segment with ≥ 2 samples locks its own median; a
+        // lone sample joins the previous segment.
+        const segs: { from: number; items: typeof samples }[] = [{ from: 0, items: [samples[0]] }];
+        for (let i = 1; i < samples.length; i++) {
+          const a = samples[i - 1].mean, b = samples[i].mean;
+          const diff = Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+          const wa = samples[i - 1].params.wb, wb = samples[i].params.wb;
+          const wbDiff = Math.max(Math.abs(Math.log(wa[0] / wb[0])), Math.abs(Math.log(wa[2] / wb[2])));
+          const cut = diff > 2 * SCENE_CUT_MEAN_DIFF || (diff > SCENE_CUT_MEAN_DIFF && wbDiff > 0.2);
+          if (cut) segs.push({ from: (samples[i - 1].t + samples[i].t) / 2, items: [] });
+          segs[segs.length - 1].items.push(samples[i]);
+        }
+        for (let i = segs.length - 1; i > 0; i--) if (segs[i].items.length < 2) { segs[i - 1].items.push(...segs[i].items); segs.splice(i, 1); }
+        const lock = segs.map((s) => ({ from: s.from, params: medianParams(s.items.map((x) => x.params)) }));
+        e.lockGlobals(lock);
+        console.info(`[profile] locked ${lock.length} segment(s): ${samples.length}/${n} samples, wb ${samples.map((p) => p.params.wb[0].toFixed(2)).join("/")}, cuts at ${lock.slice(1).map((s) => s.from.toFixed(1) + "s").join(", ") || "none"}`);
+      } else {
+        console.info(`[profile] skipped: ${samples.length}/${n} samples`);
+      }
     } finally {
       setBusy(null);
       if (myGen === fileGenRef.current && !exportingRef.current) {
