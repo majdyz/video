@@ -1,6 +1,6 @@
-# video — Aqua Fix + Motion Fix
+# video — Aqua Fix + Motion Fix + Dewarp
 
-Two on-device PWAs for diver-shot footage, in one monorepo.
+Three on-device PWAs for diver-shot footage, in one monorepo.
 
 - **Aqua Fix** · https://majdyz.github.io/video/aqua-fix/ — underwater colour
   correction. One adaptive engine, no modes: a linear-light Sea-thru-style
@@ -28,9 +28,16 @@ Two on-device PWAs for diver-shot footage, in one monorepo.
   UV-warp mesh for preview and export, analysis in a worker over WebCodecs
   decode. Offline WebCodecs export, or real-time canvas recording with the
   original audio remuxed on WebKit.
+- **Dewarp** · https://majdyz.github.io/video/dewarp/ — fisheye to
+  rectilinear for action cameras. Calibrated OpenCV-fisheye (Kannala-Brandt
+  k1..k4, principal point, fx/fy) lens profiles from the Gyroflow database
+  (Osmo Action Wide / Ultra Wide, GoPro HERO11-13 Wide), scaled to the clip
+  size; straight lines at 100 % by default, a Natural-shapes (stereographic)
+  option, strength and zoom, advanced focal trim and k1 tweak. One WebGPU (or
+  WebGL2) pass, WebCodecs export, AAC audio copied through.
 - Landing page · https://majdyz.github.io/video/
 
-Both run entirely in the browser, install as standalone PWAs, and process
+All three run entirely in the browser, install as standalone PWAs, and process
 video at native resolution (4K supported, capped at 30 Mbps to stay under
 Safari's MediaRecorder ceiling).
 
@@ -81,6 +88,19 @@ shader and writes before/after comparisons.
   zoom, rolling maximum, Gaussian smoothing).
 
 Tests: `node --experimental-strip-types apps/motion-fix/test/*.test.ts`.
+
+### Dewarp
+
+- Kannala & Brandt (2006) — A generic camera model and calibration method
+  for conventional, wide-angle, and fish-eye lenses (the OpenCV `fisheye`
+  model: θd = θ (1 + k1 θ² + k2 θ⁴ + k3 θ⁶ + k4 θ⁸)).
+- Lens calibrations from the [Gyroflow lens-profile
+  database](https://github.com/gyroflow/lens_profiles) (CC0-1.0); the Osmo
+  Action 4 / 5 Pro use the Action 3's 155° f/2.8 lens, the HERO12/13 the
+  HERO11's. The shader maths is unit-tested against an independent OpenCV
+  `projectPoints`.
+
+Tests: `pnpm --filter dewarp test`.
 
 The "How it works" button in each app's header opens a modal with the same
 explanation and links.
