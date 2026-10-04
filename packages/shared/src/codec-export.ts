@@ -173,7 +173,9 @@ export async function exportWithCodec(
         throwIfAborted(signal);
         const ts = packet.timestamp - t0;
         if (ts + packet.duration <= 0) continue;
-        const shifted = t0 === 0 ? packet : new EncodedPacket(packet.data, packet.type, Math.max(0, ts), packet.duration, packet.sequenceNumber);
+        // iPhone .mov files carry audio priming: the first packet sits a few
+        // ms before zero even when the video starts at 0 — always clamp.
+        const shifted = ts === packet.timestamp && ts >= 0 ? packet : new EncodedPacket(packet.data, packet.type, Math.max(0, ts), packet.duration, packet.sequenceNumber);
         await packetSource.add(shifted, first && decoderConfig ? { decoderConfig } : undefined);
         first = false;
       }

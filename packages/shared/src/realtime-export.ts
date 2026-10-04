@@ -269,7 +269,8 @@ async function remux(
     let first = true;
     for await (const packet of vSink.packets()) {
       throwIfAborted(signal);
-      const shifted = vt0 === 0 ? packet : new EncodedPacket(packet.data, packet.type, Math.max(0, packet.timestamp - vt0), packet.duration, packet.sequenceNumber);
+      const vts = packet.timestamp - vt0;
+      const shifted = vts === packet.timestamp && vts >= 0 ? packet : new EncodedPacket(packet.data, packet.type, Math.max(0, vts), packet.duration, packet.sequenceNumber);
       await vSource.add(shifted, first && vDecoderConfig ? { decoderConfig: vDecoderConfig } : undefined);
       first = false;
     }
@@ -285,7 +286,7 @@ async function remux(
         throwIfAborted(signal);
         const ts = packet.timestamp - at0;
         if (ts + packet.duration <= 0) continue;
-        const shifted = at0 === 0 ? packet : new EncodedPacket(packet.data, packet.type, Math.max(0, ts), packet.duration, packet.sequenceNumber);
+        const shifted = ts === packet.timestamp && ts >= 0 ? packet : new EncodedPacket(packet.data, packet.type, Math.max(0, ts), packet.duration, packet.sequenceNumber);
         await aSource.add(shifted, firstA && decoderConfig ? { decoderConfig } : undefined);
         firstA = false;
       }
