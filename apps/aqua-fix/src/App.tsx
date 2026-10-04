@@ -568,8 +568,11 @@ export default function App() {
               if (!active || !exportingRef.current) return;
               if (video.readyState >= 2) {
                 e.upload(video, video.videoWidth, video.videoHeight, 0);
+                // First frame snaps to its own analysis; afterwards tick()
+                // starts analyses at the preview's cadence (~70 ms) — forcing
+                // one per frame cost a GPU readback per frame and starved the
+                // renderer (choppy real-time exports on the phone).
                 if (rendered === 0) void e.analyzeNow(true).catch(() => undefined);
-                else e.analyzeSoon();
                 e.tick(video.currentTime);
                 e.render();
                 onFrame(video.currentTime);
