@@ -6,18 +6,28 @@ Two on-device PWAs for diver-shot footage, in one monorepo.
   correction. One adaptive engine, no modes: a linear-light Sea-thru-style
   pipeline (per-pixel range proxy → backscatter removal → range-adaptive
   compensation → white balance on the de-scattered image → local contrast →
-  Oklab chroma control) estimated per frame from a 256×144 thumbnail in a
-  worker, smoothed over time, and applied at native resolution in one WebGPU
-  (or WebGL2) pass. Video export decodes/encodes offline with WebCodecs and
-  copies the original audio through.
+  Oklab chroma control) estimated from 256×144 thumbnails in a worker and
+  applied at native resolution in one WebGPU (or WebGL2) pass. For video the
+  global correction is locked to the median over ~12 frames of the clip
+  (a subject passing through can't swing it); the per-pixel water/object
+  maps still follow the content. An on-device person model (MediaPipe)
+  keeps skin on the restoration path and pulls it toward a skin tone.
+  Controls: Intensity (50 % = the estimate), scene presets (Auto / Green
+  water / Deep blue / Shallow reef) as priors, a Deep-blue look fitted to
+  reference grades, and advanced sliders. Export decodes/encodes offline
+  with WebCodecs and copies the original audio through; on WebKit, where the
+  canvas capture is slow, it plays the clip and records the graded canvas in
+  real time, then remuxes the original audio.
 - **Motion Fix** · https://majdyz.github.io/video/motion-fix/ — stabilisation.
   One pipeline, no modes: dependency-free KLT tracking (Shi-Tomasi corners
   bucketed on a grid, pyramidal Lucas-Kanade with a forward–backward check,
   per-cell translational RANSAC, MSAC similarity + Tukey IRLS), Grundmann's
   L1-optimal camera path solved exactly by a banded primal-dual interior
   point (1000 frames in under a second), adaptive zoom within the crop
-  budget, a 32×18 WebGL UV-warp mesh for preview and export, analysis in a
-  worker over WebCodecs decode, offline WebCodecs export.
+  budget, Grundmann wobble suppression between keyframes, a 32×18 WebGL
+  UV-warp mesh for preview and export, analysis in a worker over WebCodecs
+  decode. Offline WebCodecs export, or real-time canvas recording with the
+  original audio remuxed on WebKit.
 - Landing page · https://majdyz.github.io/video/
 
 Both run entirely in the browser, install as standalone PWAs, and process

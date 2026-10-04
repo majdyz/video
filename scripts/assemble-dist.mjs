@@ -69,12 +69,12 @@ writeFileSync(
     <a class="card aqua" href="./aqua-fix/">
       <span class="arrow">→</span>
       <h2>Aqua Fix</h2>
-      <p>Underwater colour correction. Physically-based: removes the backscatter veil, restores colour by range, keeps water looking like water. One adaptive engine, native 4K, WebGPU.</p>
+      <p>Underwater colour correction. Physically-based: removes the backscatter veil, restores colour by range, keeps water looking like water. One estimate per clip, on-device person detection for skin, scene presets, native 4K, WebGPU. Real-time export on iPhone with the original audio.</p>
     </a>
     <a class="card motion" href="./motion-fix/">
       <span class="arrow">→</span>
       <h2>Motion Fix</h2>
-      <p>Stabilize shaky clips. KLT tracking with outlier rejection, L1-optimal camera path (interior-point solver), adaptive zoom, WebCodecs export.</p>
+      <p>Stabilize shaky clips. KLT tracking with outlier rejection, L1-optimal camera path (interior-point solver), wobble suppression, adaptive zoom. WebCodecs export; real-time export on iPhone with the original audio.</p>
     </a>
     <a class="card dewarp" href="./dewarp/">
       <span class="arrow">→</span>
