@@ -5,7 +5,8 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, VIVID } from "./params.ts";
+import { GAMUT_SCALE_MIN } from "./color.ts";
 
 // Look constants shared by both shaders, emitted as literals.
 const LOOK_CONSTS_GLSL = `
@@ -15,6 +16,10 @@ const float PERSON_LUM_LO = ${PERSON_LUM.lo.toFixed(4)};
 const float PERSON_LUM_HI = ${PERSON_LUM.hi.toFixed(4)};
 const float DEHAZE_LUM_LO = ${DEHAZE_LUM.lo.toFixed(4)};
 const float DEHAZE_LUM_HI = ${DEHAZE_LUM.hi.toFixed(4)};
+const float VIVID_C_LO = ${VIVID.cLo.toFixed(4)};
+const float VIVID_C_HI = ${VIVID.cHi.toFixed(4)};
+const float VIVID_KEEP = ${VIVID.keep.toFixed(4)};
+const float GAMUT_SCALE_MIN = ${GAMUT_SCALE_MIN.toFixed(4)};
 const float LOOK_GAMMA = ${LOOK.gamma.toFixed(4)};
 const float LOOK_WATER_DIM = ${LOOK.waterDim.toFixed(4)};
 const float LOOK_HAZE_CHROMA = ${LOOK.hazeChroma.toFixed(4)};
@@ -92,6 +97,7 @@ vec3 oklabToLinear(vec3 lab) {
     -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
 }
 // Constant-luminance gamut compression (see color.ts).
+vec3 fitToGamut(vec3 c);
 vec3 compressToGamut(vec3 c) {
   float Y = clamp(lum(c), 0.0, 1.0);
   float t = 1.0;
@@ -103,6 +109,12 @@ vec3 compressToGamut(vec3 c) {
   if (t >= 1.0) return c;
   t = max(0.0, t);
   return vec3(Y) + t * (c - vec3(Y));
+}
+// Over-range: scale first (keeps hue/saturation, up to GAMUT_SCALE_MIN darker), then compress (see color.ts).
+vec3 fitToGamut(vec3 c) {
+  float m = max(c.r, max(c.g, c.b));
+  if (m > 1.0) c *= max(GAMUT_SCALE_MIN, 1.0 / m);
+  return compressToGamut(c);
 }
 // Joint bilateral upsample of (z, conf, d, veilScale) guided by the pixel's
 // linear colour. kOut is the guide-match weight: 0 when no neighbour
@@ -300,9 +312,13 @@ vec3 grade(vec3 src, vec2 uv) {
   vec3 lab = linearToOklab(max(o, vec3(0.0)));
   float C = length(lab.yz);
   float cMax = chromaK * cSrc + chromaC0;
-  float scale = (C > cMax ? cMax / C : 1.0) * saturation;
+  float scale = (C > cMax ? cMax / C : 1.0);
+  float vividW = smoothstepf(VIVID_C_LO, VIVID_C_HI, cSrc) * hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma);
+  float cMin = VIVID_KEEP * cSrc * vividW;
+  if (C > 1e-6 && C * scale < cMin) scale = cMin / C;
+  scale *= saturation;
   vec3 o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x));
-  vec3 o2 = compressToGamut(o1);
+  vec3 o2 = fitToGamut(o1);
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
 }`;
@@ -353,6 +369,12 @@ fn compressToGamut(c: vec3<f32>) -> vec3<f32> {
   if (t >= 1.0) { return c; }
   t = max(0.0, t);
   return vec3(Y) + t * (c - vec3(Y));
+}
+fn fitToGamut(cIn: vec3<f32>) -> vec3<f32> {
+  var c = cIn;
+  let m = max(c.r, max(c.g, c.b));
+  if (m > 1.0) { c *= max(GAMUT_SCALE_MIN, 1.0 / m); }
+  return compressToGamut(c);
 }
 // Returns (z, conf, d, veilScale) and the guide-match weight k in .w of the second value.
 fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> array<vec4<f32>, 2> {
@@ -529,9 +551,13 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let lab = linearToOklab(max(o, vec3(0.0)));
   let C = length(lab.yz);
   let cMax = chromaK * cSrc + chromaC0;
-  let scale = select(1.0, cMax / C, C > cMax) * saturation;
+  var scale = select(1.0, cMax / C, C > cMax);
+  let vividW = smoothstepf(VIVID_C_LO, VIVID_C_HI, cSrc) * hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma);
+  let cMin = VIVID_KEEP * cSrc * vividW;
+  if (C > 1e-6 && C * scale < cMin) { scale = cMin / C; }
+  scale *= saturation;
   let o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x));
-  let o2 = compressToGamut(o1);
+  let o2 = fitToGamut(o1);
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);
 }`;

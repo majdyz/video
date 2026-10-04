@@ -29,6 +29,7 @@ import "@dive-tools/shared/theme.css";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
 import { GradeEngine } from "./engine/engine";
 import { DEFAULT_SETTINGS, INTENSITY_MAX, type GradeParams, type UserSettings } from "./engine/params";
+import { ANALYSIS_INTERVAL_MS } from "./engine/engine";
 import type { Rotation } from "./engine/backend";
 
 type Mode = "idle" | "photo" | "video";
@@ -411,7 +412,8 @@ export default function App() {
     // Clip profile: analyse a dozen frames spread over the clip and lock the
     // global correction to their median, so a subject passing through (an
     // orange fish filling the frame) can't swing the balance mid-video.
-    void profileClip(video, myGen);
+    // ?lock=0 keeps per-frame estimation (A/B testing).
+    if (new URLSearchParams(location.search).get("lock") !== "0") void profileClip(video, myGen);
   }
 
   async function profileClip(video: HTMLVideoElement, myGen: number) {
@@ -551,6 +553,11 @@ export default function App() {
         // keep up with playback. Start at full size; if the first seconds
         // render well below the capture rate, restart at a smaller scale.
         const SCALES = [1, 0.75, 0.5];
+        // Lighter per-frame load while recording: the globals are locked per
+        // clip anyway, so analyses can run at a lower cadence and person
+        // passes less often; both restored in the finally below.
+        e.analysisIntervalMs = 150;
+        e.personEvery = 4;
         // Capture at the clip's own frame rate (60 fps phones), capped to what
         // the recorder can take; "too slow" is judged relative to it.
         const srcFps = Math.min(60, Math.max(24, Math.round(await probeFrameRate(file))));
@@ -674,6 +681,8 @@ export default function App() {
         setError("Export failed: " + (err instanceof Error ? err.message : String(err)));
       }
     } finally {
+      e.analysisIntervalMs = ANALYSIS_INTERVAL_MS;
+      e.personEvery = 2;
       exportAbortRef.current = null;
       exportingRef.current = false;
       releaseWakeLock();

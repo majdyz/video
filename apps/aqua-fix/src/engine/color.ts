@@ -65,6 +65,22 @@ export function oklabHueDeg(a: number, b: number): number {
  * Channel ratios shrink together, so hue is held (no per-channel clipping
  * that turns bright reds orange or sand magenta).
  */
+/**
+ * Over-range pixels first scale down (hue and saturation kept, up to
+ * GAMUT_SCALE_MIN darker) and only the remainder is compressed at constant
+ * luminance. Pure constant-luminance compression turned a saturated orange
+ * whose red overshot 1.0 into pale pink — brightness was kept, colour lost.
+ */
+export const GAMUT_SCALE_MIN = 0.7;
+export function fitToGamut(r: number, g: number, b: number): [number, number, number] {
+  const m = Math.max(r, g, b);
+  if (m > 1) {
+    const s = Math.max(GAMUT_SCALE_MIN, 1 / m);
+    r *= s; g *= s; b *= s;
+  }
+  return compressToGamut(r, g, b);
+}
+
 export function compressToGamut(r: number, g: number, b: number): [number, number, number] {
   const Y = Math.min(1, Math.max(0, luminance(r, g, b)));
   let t = 1;

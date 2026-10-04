@@ -2,8 +2,8 @@
 // constants as GLSL/WGSL in grade-shader.ts — used by the Node harness and
 // the unit tests, never in the render path.
 
-import { compressToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, boostParams, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, boostParams, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
@@ -195,6 +195,10 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   let C = Math.hypot(a, b);
   const cMax = p.chromaK * cSrc + p.chromaC0;
   let scale = C > cMax ? cMax / C : 1;
+  // Vivid far-hue pixels keep (most of) their source chroma.
+  const vividW = smoothstep(VIVID.cLo, VIVID.cHi, cSrc) * hueFar(a0, bb0, p);
+  const cMin = VIVID.keep * cSrc * vividW;
+  if (C > 1e-6 && C * scale < cMin) scale = cMin / C;
   scale *= s.saturation;
   const skinned = skinTone(L, a * scale, b * scale, person);
   // Water-likeness for the look comes from the pixel's own hue (the mask or
@@ -203,7 +207,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const [r1, g1, b1] = oklabToLinear(looked[0], looked[1], looked[2]);
   void C;
 
-  const [r2, g2, b2] = compressToGamut(r1, g1, b1);
+  const [r2, g2, b2] = fitToGamut(r1, g1, b1);
   const rs = linearToSrgb(r2), gs = linearToSrgb(g2), bs = linearToSrgb(b2);
   if (ctx.trace) {
     const f3 = (v: number[]) => v.map((x) => +x.toFixed(3));

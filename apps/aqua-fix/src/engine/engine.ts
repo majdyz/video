@@ -89,6 +89,9 @@ export class GradeEngine {
   private worker: Worker | null = null;
   private inflight = false;
   private reqId = 0;
+  /** Analysis cadence (ms) and how many analyses per person pass; the real-time export relaxes both. */
+  analysisIntervalMs = ANALYSIS_INTERVAL_MS;
+  personEvery = PERSON_EVERY;
   private personWorker: Worker | null = null;
   private personInflight = false;
   private personReqId = 0;
@@ -303,7 +306,7 @@ export class GradeEngine {
     this.lastTickSec = timeSec;
     this.smooth(dt);
     const nowMs = performance.now();
-    if (!this.inflight && (force || nowMs - this.lastAnalysisAt >= ANALYSIS_INTERVAL_MS)) {
+    if (!this.inflight && (force || nowMs - this.lastAnalysisAt >= this.analysisIntervalMs)) {
       void this.startAnalysis();
       return true;
     }
@@ -363,7 +366,7 @@ export class GradeEngine {
       // quadrant at 2× detail, cycling through PERSON_RECTS. Both readbacks
       // finish before anything is posted: once the analysis reply lands,
       // `inflight` clears and the next tick may start a new readback.
-      const wantPerson = !this.personFailed && !this.personInflight && this.personCount++ % PERSON_EVERY === 0;
+      const wantPerson = !this.personFailed && !this.personInflight && this.personCount++ % this.personEvery === 0;
       const rect = PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
       const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.backend.analyze(ANALYSIS_W, ANALYSIS_H, rect);
       const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H };

@@ -74,6 +74,14 @@ export const PERSON_LUM = { lo: 0.06, hi: 0.18 };
  */
 export const DEHAZE_LUM = { lo: 0.05, hi: 0.2 };
 
+/**
+ * Vivid objects keep their colour: a pixel that is strongly chromatic in the
+ * source and far from the veil hue (an orange fish, a red sea fan) has
+ * already escaped the cast, and the grade must not wash it out — its output
+ * chroma is floored at `keep` × the source chroma.
+ */
+export const VIVID = { cLo: 0.06, cHi: 0.12, keep: 0.95 };
+
 /** Deep-blue look constants (fitted to a reference grade in Oklab). */
 export const LOOK = {
   // Measured against the user's references: hazy scenes come out ≈0.65×
