@@ -17,6 +17,7 @@ import {
   exportWithCodec,
   isRealtimeExportSupported,
   isWebKit,
+  probeFrameRate,
   isWebCodecsSupported,
   pickBitrate,
   shareOrDownload,
@@ -550,6 +551,10 @@ export default function App() {
         // keep up with playback. Start at full size; if the first seconds
         // render well below the capture rate, restart at a smaller scale.
         const SCALES = [1, 0.75, 0.5];
+        // Capture at the clip's own frame rate (60 fps phones), capped to what
+        // the recorder can take; "too slow" is judged relative to it.
+        const srcFps = Math.min(60, Math.max(24, Math.round(await probeFrameRate(file))));
+        console.info(`[export] source ${srcFps} fps`);
         for (let si = 0; si < SCALES.length; si++) {
           const scale = SCALES[si];
           const canRetry = si < SCALES.length - 1;
@@ -566,7 +571,7 @@ export default function App() {
             const result = await exportRealtime(file, video, canvasEl, {
               bitrate,
               opfsPrefix: AQUA_FIX_BRAND.opfsPrefix,
-              fps: 30,
+              fps: srcFps,
               signal: rtCtrl.signal,
               log: (line) => console.info("[export]", line),
               onProgress: (p) => {
@@ -574,7 +579,7 @@ export default function App() {
                 setExportTime(p * total);
                 const secs = (performance.now() - rtStart) / 1000;
                 if (secs > 0.5) setExportDetail(`real-time · ${(rendered / secs).toFixed(1)} fps rendered${scale < 1 ? ` · ${Math.round(scale * 100)}% size` : ""} · ${e.backend.kind}`);
-                if (canRetry && secs > 2.5 && rendered / secs < 22 && !slow) {
+                if (canRetry && secs > 2.5 && rendered / secs < srcFps * 0.72 && !slow) {
                   slow = true;
                   console.info(`[export] ${(rendered / secs).toFixed(1)} fps at ${scale}× — restarting smaller`);
                   rtCtrl.abort();

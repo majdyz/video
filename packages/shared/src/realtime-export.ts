@@ -27,6 +27,21 @@ import { openOutputSink, type OutputSink } from "./output-sink";
 
 type CanvasWithCapture = HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream };
 
+/** Average frame rate of the file's primary video track (falls back to 30). */
+export async function probeFrameRate(file: File): Promise<number> {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  try {
+    const track = await input.getPrimaryVideoTrack();
+    const stats = track ? await track.computePacketStats(200).catch(() => null) : null;
+    const r = stats?.averagePacketRate;
+    return r && Number.isFinite(r) && r > 1 ? r : 30;
+  } catch {
+    return 30;
+  } finally {
+    input.dispose();
+  }
+}
+
 /** True when the browser can record a canvas (MediaRecorder + captureStream). */
 export function isRealtimeExportSupported(canvas: HTMLCanvasElement): boolean {
   return typeof MediaRecorder !== "undefined" && typeof (canvas as CanvasWithCapture).captureStream === "function";
@@ -159,6 +174,12 @@ export async function exportRealtime(
   };
   document.addEventListener("visibilitychange", onVisibility);
   const ended = new Promise<void>((resolve) => video.addEventListener("ended", () => resolve(), { once: true }));
+  // An abort (user cancel, or the app restarting at a smaller size) must
+  // interrupt the wait for "ended" — the paused video never ends.
+  const aborted = new Promise<never>((_, reject) => {
+    if (signal?.aborted) reject(new DOMException("Aborted", "AbortError"));
+    signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+  });
   try {
     await new Promise<void>((resolve, reject) => {
       const onSeeked = () => { video.removeEventListener("seeked", onSeeked); resolve(); };
@@ -170,7 +191,7 @@ export async function exportRealtime(
     stopRender = opts.startRendering(onFrame);
     recorder.start(1000);
     await video.play();
-    await ended;
+    await Promise.race([ended, aborted]);
     throwIfAborted(signal);
     finish();
     await stopped;
