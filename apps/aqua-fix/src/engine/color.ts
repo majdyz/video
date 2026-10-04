@@ -72,6 +72,48 @@ export function oklabHueDeg(a: number, b: number): number {
  * whose red overshot 1.0 into pale pink — brightness was kept, colour lost.
  */
 export const GAMUT_SCALE_MIN = 0.7;
+/** Chroma knee: above this share of the gamut's chroma at (L, hue) the chroma rolls off toward (never reaching) the edge. */
+export const GAMUT_CHROMA_KNEE = 0.7;
+/** … and asymptotically approaches this share of it, so every channel keeps a little headroom. */
+export const GAMUT_CHROMA_EDGE = 0.94;
+const GAMUT_CHROMA_HI = 0.4;
+const GAMUT_CHROMA_STEPS = 10;
+
+function inGamut(rgb: [number, number, number]): boolean {
+  return rgb[0] >= 0 && rgb[1] >= 0 && rgb[2] >= 0 && rgb[0] <= 1 && rgb[1] <= 1 && rgb[2] <= 1;
+}
+
+/** Largest Oklab chroma inside sRGB at this lightness along this hue direction (unit a, b). */
+export function gamutChroma(L: number, ha: number, hb: number): number {
+  let lo = 0, hi = GAMUT_CHROMA_HI;
+  for (let i = 0; i < GAMUT_CHROMA_STEPS; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (inGamut(oklabToLinear(L, ha * mid, hb * mid))) lo = mid; else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Keeps a colour's chroma short of the gamut edge: a chroma push on an
+ * already-saturated hue (pushed intensity on cyan water) would otherwise
+ * land exactly on the edge, where one channel is 0 — neon. Mirrors the
+ * shaders' capChroma.
+ */
+export function capChroma(L: number, a: number, b: number, cSrc = 0): [number, number] {
+  const C = Math.hypot(a, b);
+  if (C < 1e-5) return [a, b];
+  const ha = a / C, hb = b / C;
+  const cMax = gamutChroma(L, ha, hb);
+  const knee = GAMUT_CHROMA_KNEE * cMax;
+  if (C <= knee || cMax <= 1e-5) return [a, b];
+  const room = GAMUT_CHROMA_EDGE * cMax - knee;
+  // Only chroma the grade added is rolled off: a colour that arrived this vivid (a Garibaldi) keeps
+  // it — unless even that sits past the edge at the new lightness.
+  const floor = Math.min(C, cSrc, GAMUT_CHROMA_EDGE * cMax);
+  const c2 = Math.max(floor, knee + room * (1 - Math.exp(-(C - knee) / room)));
+  return [ha * c2, hb * c2];
+}
+
 export function fitToGamut(r: number, g: number, b: number): [number, number, number] {
   const m = Math.max(r, g, b);
   if (m > 1) {

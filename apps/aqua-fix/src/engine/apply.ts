@@ -2,7 +2,7 @@
 // constants as GLSL/WGSL in grade-shader.ts — used by the Node harness and
 // the unit tests, never in the render path.
 
-import { fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
+import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
 import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, boostParams, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
@@ -205,7 +205,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // Water-likeness for the look comes from the pixel's own hue (the mask or
   // the water/object split would cut one garment into differently treated parts).
   const looked = deepBlueLook(L, skinned[0], skinned[1], s.look, 1 - hueConf(pa, pb, p), hazeWeight(p));
-  const [r1, g1, b1] = oklabToLinear(looked[0], looked[1], looked[2]);
+  const capped = capChroma(looked[0], looked[1], looked[2], cSrc);
+  const [r1, g1, b1] = oklabToLinear(looked[0], capped[0], capped[1]);
   void C;
 
   const [r2, g2, b2] = fitToGamut(r1, g1, b1);

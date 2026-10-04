@@ -6,7 +6,7 @@
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
 import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, VIVID } from "./params.ts";
-import { GAMUT_SCALE_MIN } from "./color.ts";
+import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 
 // Look constants shared by both shaders, emitted as literals.
 const LOOK_CONSTS_GLSL = `
@@ -20,6 +20,8 @@ const float VIVID_C_LO = ${VIVID.cLo.toFixed(4)};
 const float VIVID_C_HI = ${VIVID.cHi.toFixed(4)};
 const float VIVID_KEEP = ${VIVID.keep.toFixed(4)};
 const float GAMUT_SCALE_MIN = ${GAMUT_SCALE_MIN.toFixed(4)};
+const float GAMUT_CHROMA_KNEE = ${GAMUT_CHROMA_KNEE.toFixed(4)};
+const float GAMUT_CHROMA_EDGE = ${GAMUT_CHROMA_EDGE.toFixed(4)};
 const float LOOK_GAMMA = ${LOOK.gamma.toFixed(4)};
 const float LOOK_WATER_DIM = ${LOOK.waterDim.toFixed(4)};
 const float LOOK_HAZE_CHROMA = ${LOOK.hazeChroma.toFixed(4)};
@@ -95,6 +97,28 @@ vec3 oklabToLinear(vec3 lab) {
     4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
     -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
     -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+}
+bool inGamut(vec3 c) { return all(greaterThanEqual(c, vec3(0.0))) && all(lessThanEqual(c, vec3(1.0))); }
+// Largest in-gamut Oklab chroma at this lightness along this hue (bisection).
+float gamutChroma(float L, vec2 h) {
+  float lo = 0.0, hi = 0.4;
+  for (int i = 0; i < 10; i++) {
+    float mid = 0.5 * (lo + hi);
+    if (inGamut(oklabToLinear(vec3(L, h * mid)))) lo = mid; else hi = mid;
+  }
+  return lo;
+}
+// Chroma knee short of the gamut edge (see color.ts capChroma).
+vec3 capChroma(vec3 lab, float cSrc) {
+  float C = length(lab.yz);
+  if (C < 1e-5) return lab;
+  vec2 h = lab.yz / C;
+  float cMax = gamutChroma(lab.x, h);
+  float knee = GAMUT_CHROMA_KNEE * cMax;
+  if (C <= knee || cMax <= 1e-5) return lab;
+  float room = GAMUT_CHROMA_EDGE * cMax - knee;
+  float c2 = max(min(min(C, cSrc), GAMUT_CHROMA_EDGE * cMax), knee + room * (1.0 - exp(-(C - knee) / room)));
+  return vec3(lab.x, h * c2);
 }
 // Constant-luminance gamut compression (see color.ts).
 vec3 fitToGamut(vec3 c);
@@ -317,7 +341,7 @@ vec3 grade(vec3 src, vec2 uv) {
   float cMin = VIVID_KEEP * cSrc * vividW;
   if (C > 1e-6 && C * scale < cMin) scale = cMin / C;
   scale *= saturation;
-  vec3 o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x));
+  vec3 o1 = oklabToLinear(capChroma(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x), cSrc));
   vec3 o2 = fitToGamut(o1);
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
@@ -369,6 +393,27 @@ fn compressToGamut(c: vec3<f32>) -> vec3<f32> {
   if (t >= 1.0) { return c; }
   t = max(0.0, t);
   return vec3(Y) + t * (c - vec3(Y));
+}
+fn inGamut(c: vec3<f32>) -> bool { return all(c >= vec3(0.0)) && all(c <= vec3(1.0)); }
+fn gamutChroma(L: f32, h: vec2<f32>) -> f32 {
+  var lo = 0.0;
+  var hi = 0.4;
+  for (var i = 0; i < 10; i++) {
+    let mid = 0.5 * (lo + hi);
+    if (inGamut(oklabToLinear(vec3(L, h * mid)))) { lo = mid; } else { hi = mid; }
+  }
+  return lo;
+}
+fn capChroma(lab: vec3<f32>, cSrc: f32) -> vec3<f32> {
+  let C = length(lab.yz);
+  if (C < 1e-5) { return lab; }
+  let h = lab.yz / C;
+  let cMax = gamutChroma(lab.x, h);
+  let knee = GAMUT_CHROMA_KNEE * cMax;
+  if (C <= knee || cMax <= 1e-5) { return lab; }
+  let room = GAMUT_CHROMA_EDGE * cMax - knee;
+  let c2 = max(min(min(C, cSrc), GAMUT_CHROMA_EDGE * cMax), knee + room * (1.0 - exp(-(C - knee) / room)));
+  return vec3(lab.x, h * c2);
 }
 fn fitToGamut(cIn: vec3<f32>) -> vec3<f32> {
   var c = cIn;
@@ -556,7 +601,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let cMin = VIVID_KEEP * cSrc * vividW;
   if (C > 1e-6 && C * scale < cMin) { scale = cMin / C; }
   scale *= saturation;
-  let o1 = oklabToLinear(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x));
+  let o1 = oklabToLinear(capChroma(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x), cSrc));
   let o2 = fitToGamut(o1);
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);
