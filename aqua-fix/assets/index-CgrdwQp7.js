@@ -409,7 +409,8 @@ vec3 grade(vec3 src, vec2 uv) {
     float sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
     float yt = max(yo, sf * lumI * ew);
     if (yt > knee) yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee)));
-    if (yo > 1e-6) o *= yt / yo;
+    // A pixel levels clipped to nothing is rebuilt from the source at the floor (see apply.ts).
+    if (yo > 1e-6) o *= yt / yo; else o = lin * (yt / lumI);
   }
 
   // Chroma ceiling relative to the source, then saturation.
@@ -669,7 +670,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     let sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
     var yt = max(yo, sf * lumI * ew);
     if (yt > knee) { yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee))); }
-    if (yo > 1e-6) { o *= yt / yo; }
+    if (yo > 1e-6) { o *= yt / yo; } else { o = lin * (yt / lumI); }
   }
   let cSrc = length(lab0.yz);
   let lab = linearToOklab(max(o, vec3(0.0)));
