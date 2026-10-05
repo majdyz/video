@@ -564,8 +564,9 @@ export default function App() {
     // Per-stage timing for the overlay: where an export spends its time.
     const stage = { upload: 0, render: 0, draw: 0, capture: 0, frames: 0, started: performance.now(), lastUi: 0 };
     // Export has its own temporal state: start clean so the first frame
-    // snaps to its own analysis instead of inheriting the preview's.
-    e.reset();
+    // snaps to its own analysis instead of inheriting the preview's (the
+    // person verdict carries over: same clip).
+    e.reset({ keepPerson: true });
     dropStill();
     e.setPreviewScale(1);
     let frames = 0;
@@ -593,7 +594,7 @@ export default function App() {
         for (let si = 0; si < SCALES.length; si++) {
           const scale = SCALES[si];
           const canRetry = si < SCALES.length - 1;
-          e.reset();
+          e.reset({ keepPerson: true });
           e.setPreviewScale(scale);
           setExportDetail(`real-time · playing the clip and recording the graded canvas${scale < 1 ? ` · ${Math.round(scale * 100)}% size` : ""}`);
           let rendered = 0;

@@ -309,6 +309,7 @@ export class GradeEngine {
       this.personBoxesAt = this.lastTickSec;
       this.stats.personBoxes = this.personBoxes.length;
       this.stats.personDetectMs = p.ms;
+      console.info(`[person] verdict ${this.personBoxes.length} box(es) in ${p.ms.toFixed(0)} ms at t=${this.lastTickSec.toFixed(2)}s`);
       this.rebuildPerson();
       return;
     }
@@ -348,7 +349,13 @@ export class GradeEngine {
     let cov = 0;
     for (let i = 0; i < map.length; i++) cov += map[i];
     this.stats.personCoverage = cov / map.length;
-    if (!this.person || this.person.length !== map.length) {
+    // A person appearing where there was none (the clip's first verdict, a
+    // diver entering) snaps in rather than easing over TAU_MAPS: the ramp
+    // left skin neutral for the first ~10 frames of every export.
+    let prevCov = 0;
+    if (this.person && this.person.length === map.length) for (let i = 0; i < map.length; i++) prevCov += this.person[i];
+    if (!this.person || this.person.length !== map.length || (prevCov < 1e-6 && cov > 0)) {
+      if (cov > 0) console.info(`[person] mask snapped in at t=${this.lastTickSec.toFixed(2)}s (${(cov / map.length * 100).toFixed(0)}% coverage)`);
       this.person = map;
       this.personTarget = null;
       this.dirtyData = true;
@@ -562,7 +569,13 @@ export class GradeEngine {
   }
 
   /** Reset temporal state for a new file. */
-  reset(): void {
+  /**
+   * Forgets all temporal state. `keepPerson` (an export of the clip that was
+   * just previewed) keeps the detector's verdict so the first person pass is
+   * a mask, not a detection: without it skin tone arrived ~10 frames late.
+   */
+  reset(opts: { keepPerson?: boolean } = {}): void {
+    const verdict = opts.keepPerson ? this.personBoxes : null;
     this.reqId++;
     this.inflight = false;
     this.hasAnalysis = false;
@@ -583,12 +596,13 @@ export class GradeEngine {
     this.personTiles = null;
     this.personRectIdx = 0;
     this.personCount = 0;
-    this.personBoxes = null;
-    this.personBoxesAt = -Infinity;
-    this.personPasses = 0;
+    this.personBoxes = verdict;
+    this.personBoxesAt = verdict ? 0 : -Infinity;
+    // With a verdict in hand the first pass segments; detection follows on the third.
+    this.personPasses = verdict ? 1 : 0;
     this.personDetectInflight = false;
     this.stats.personCoverage = 0;
-    this.stats.personBoxes = -1;
+    this.stats.personBoxes = verdict ? verdict.length : -1;
     this.settlePerson();
   }
 
