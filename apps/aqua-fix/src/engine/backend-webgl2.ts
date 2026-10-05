@@ -29,6 +29,9 @@ export class WebGL2Backend implements GpuBackend {
   private rotation: Rotation = 0;
   private srcW = 0;
   private srcH = 0;
+  private srcKind = "";
+  private viaCanvas = false;
+  private scratch: OffscreenCanvas | null = null;
   private analysisFbo: WebGLFramebuffer | null = null;
   private analysisTex: WebGLTexture | null = null;
   private analysisW = 0;
@@ -118,15 +121,41 @@ export class WebGL2Backend implements GpuBackend {
     gl.bindTexture(gl.TEXTURE_2D, this.source);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
     gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
-    if (width !== this.srcW || height !== this.srcH) {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, src as TexImageSource);
+    // Anamorphic sources (sample aspect ratio ≠ 1): Chrome hands WebGL the
+    // coded picture (e.g. 1280×720) while the element reports the displayed
+    // size (1280×960), so a sized upload fails with INVALID_OPERATION and the
+    // texture keeps its old content — a frozen export. Every new source size
+    // or kind is probed once; a failure routes that kind through a 2D canvas,
+    // whose drawImage applies the pixel aspect.
+    const kind = isVideoFrame(src) ? "frame" : src instanceof HTMLVideoElement ? "video" : "image";
+    const fresh = width !== this.srcW || height !== this.srcH || kind !== this.srcKind;
+    let source = src as TexImageSource;
+    if (!fresh && this.viaCanvas) source = this.throughCanvas(src, width, height);
+    if (fresh) {
+      while (gl.getError() !== gl.NO_ERROR) { /* clear stale errors before probing */ }
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      // Chrome accepts the oversized texImage2D but rejects the per-frame texSubImage2D: probe that too.
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      const err = gl.getError();
+      this.viaCanvas = err !== gl.NO_ERROR;
+      if (this.viaCanvas) {
+        console.warn(`WebGL direct upload of ${kind} at ${width}x${height} failed (0x${err.toString(16)}); resampling through a canvas`);
+        source = this.throughCanvas(src, width, height);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      }
       this.srcW = width;
       this.srcH = height;
+      this.srcKind = kind;
     } else {
       // Same size as last upload: texSubImage2D re-uses the GPU storage.
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, src as TexImageSource);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, source);
     }
-    void isVideoFrame;
+  }
+
+  private throughCanvas(src: SourceInput, width: number, height: number): OffscreenCanvas {
+    if (!this.scratch || this.scratch.width !== width || this.scratch.height !== height) this.scratch = new OffscreenCanvas(width, height);
+    this.scratch.getContext("2d")!.drawImage(src as CanvasImageSource, 0, 0, width, height);
+    return this.scratch;
   }
 
   setPreviewScale(scale: number): void {

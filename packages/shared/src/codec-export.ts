@@ -38,6 +38,29 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 }
 
+/**
+ * Decoded frames of anamorphic sources (a sample aspect ratio other than 1:1,
+ * e.g. a 1280×720 picture meant to show as 1280×960) keep their coded pixel
+ * grid: `displayWidth/Height` differ from `visibleRect`, and uploading such
+ * a frame into a texture allocated at the display size fails silently — the
+ * export then repeats its first picture. This resamples the frame to the
+ * display size through a canvas when (and only when) the two differ; the
+ * returned frame replaces the input, which is closed.
+ */
+export function squarePixels(frame: VideoFrame): VideoFrame {
+  const vw = frame.visibleRect?.width ?? frame.codedWidth;
+  const vh = frame.visibleRect?.height ?? frame.codedHeight;
+  const dw = frame.displayWidth, dh = frame.displayHeight;
+  if (!dw || !dh || (vw === dw && vh === dh)) return frame;
+  const canvas = new OffscreenCanvas(dw, dh);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return frame;
+  ctx.drawImage(frame, 0, 0, dw, dh);
+  const out = new VideoFrame(canvas, { timestamp: frame.timestamp, duration: frame.duration ?? undefined });
+  frame.close();
+  return out;
+}
+
 export type ExportFrameInfo = {
   /** Presentation time in seconds. */
   timeSec: number;

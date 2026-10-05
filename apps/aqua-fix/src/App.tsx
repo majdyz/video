@@ -15,6 +15,7 @@ import {
   bitrateFromSource,
   exportRealtime,
   exportWithCodec,
+  squarePixels,
   isRealtimeExportSupported,
   isWebKit,
   probeFrameRate,
@@ -657,7 +658,7 @@ export default function App() {
       const result = await exportWithCodec(
         file,
         async (sample, info) => {
-          const frame = sample.toVideoFrame();
+          const frame = squarePixels(sample.toVideoFrame());
           try {
             const rot = (info.rotation / 90) as Rotation;
             const t0 = performance.now();
@@ -666,8 +667,10 @@ export default function App() {
             // snaps; after that the analysis runs alongside the frame loop —
             // waiting on it cost a GPU readback round-trip per frame on
             // iPhone (up ≈ 100 ms), and the eased maps hide a frame of lag.
-            if (frames === 0) await e.analyzeNow(true);
-            else e.analyzeSoon();
+            if (frames === 0) {
+              console.info(`[export] first frame coded ${frame.codedWidth}x${frame.codedHeight} visible ${frame.visibleRect?.width ?? "?"}x${frame.visibleRect?.height ?? "?"} display ${frame.displayWidth}x${frame.displayHeight} ${frame.format ?? ""}`);
+              await e.analyzeNow(true);
+            } else e.analyzeSoon();
             e.tick(info.timeSec);
             frames++;
             const t1 = performance.now();

@@ -6,6 +6,7 @@ import {
   CompareWipe,
   exportRealtime,
   exportWithCodec,
+  squarePixels,
   isRealtimeExportSupported,
   isWebKit,
   probeFrameRate,
@@ -326,7 +327,7 @@ export default function App() {
     // Fast path: the VideoFrame goes straight to the GPU in coded
     // orientation; the renderer folds the container rotation into the UVs.
     let rotation: Rotation = info.rotation;
-    const frame = sample.toVideoFrame();
+    const frame = squarePixels(sample.toVideoFrame());
     let uploaded = false;
     try {
       uploaded = renderer.upload(frame, frame.displayWidth, frame.displayHeight);
