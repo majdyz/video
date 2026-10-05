@@ -182,9 +182,17 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
     const yMin = shadowFloorAt(lumI, p.shadowFloor) * lumI * ew;
     let yt = Math.max(yo, yMin);
     if (yt > p.knee) yt = p.knee + (1 - p.knee) * (1 - Math.exp(-(yt - p.knee) / (1 - p.knee)));
-    if (yo > 1e-6 && yt !== yo) {
-      const sc = yt / yo;
-      out[0] *= sc; out[1] *= sc; out[2] *= sc;
+    if (yo > 1e-6) {
+      if (yt !== yo) {
+        const sc = yt / yo;
+        out[0] *= sc; out[1] *= sc; out[2] *= sc;
+      }
+    } else {
+      // Levels clipped this pixel to nothing (its luminance sat below a
+      // black point locked from brighter frames): rebuild it from the source
+      // at the floor luminance instead of leaving a hole of pure black.
+      const sc = yt / lumI;
+      out[0] = src[0] * sc; out[1] = src[1] * sc; out[2] = src[2] * sc;
     }
   }
 

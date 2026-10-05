@@ -100,3 +100,21 @@ function noise(seed: number): number {
   assert.deepEqual(a.params, b.params);
   console.log("ok  deterministic");
 }
+
+// 5. A dark seabed under a black point locked from brighter frames: levels
+//    would clip everything below the black point to exactly 0 and leave a
+//    hard-edged hole; the shadow floor must rebuild those pixels instead.
+{
+  const px = frame((u, v) => {
+    const k = 0.02 + 0.06 * v; // very dark, slightly brighter toward the bottom
+    return [k * 0.3, k * 0.8, k];
+  });
+  const a = analyzeThumbnail(px, W, H);
+  const params = { ...a.params, black: 0.015 };
+  const out = applyGrade({ params, settings: DEFAULT_SETTINGS, depth: a.depth, clahe: a.clahe }, px, W, H);
+  let holes = 0;
+  for (let i = 0; i < out.length; i += 4) if (out[i] + out[i + 1] + out[i + 2] <= 3) holes++;
+  assert.equal(holes, 0, `pure-black pixels under a locked black point: ${holes}`);
+  console.log("ok  no crushed blacks under a locked black point");
+}
+
