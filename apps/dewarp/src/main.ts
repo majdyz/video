@@ -1,7 +1,7 @@
 import "./style.css";
 
 declare const __BUILD__: string;
-import { lensDiagonalFov, warpUniforms, type WarpUniforms, type Projection } from "./fisheye";
+import { fitZoom, lensDiagonalFov, warpUniforms, type WarpUniforms, type Projection } from "./fisheye";
 import { Warper } from "./gpu";
 
 import { decodeFrameAt, describeBoxes, exportClip, indexTopLevelBoxes, probe, type ProbeResult } from "./pipeline";
@@ -114,6 +114,9 @@ async function main() {
   projectionSelect.append(el("option", { value: "rectilinear" }, "Straight lines"), el("option", { value: "stereographic" }, "Natural shapes"));
   const strength = slider("Strength", -100, 100, 1, 100, v => `${v}%`);
   const zoom = slider("Zoom", 60, 160, 1, 100, v => `${(v / 100).toFixed(2)}x`);
+  // Widest zoom that still fills the frame from the source (no black corners).
+  const fitBtn = el("button", { class: "secondary small", type: "button" }, "Fit: widest view without black corners") as HTMLButtonElement;
+  const fitRow = el("div", { class: "row" }, el("span"), fitBtn, el("span"));
   const fov = slider("Source FOV", 100, 180, 1, PROFILES[DEFAULT_PROFILE].fovDeg, v => `${v}°`);
   const k1 = slider("Edge tweak", -0.3, 0.3, 0.01, 0, v => v.toFixed(2));
   const profileNote = el("p", { class: "hint" });
@@ -149,7 +152,7 @@ async function main() {
         el("div", { class: "row" }, el("span", {}, "Camera"), profileSelect, el("span")),
         profileNote,
         el("div", { class: "row" }, el("span", {}, "Projection"), projectionSelect, el("span")),
-        strength.row, zoom.row,
+        strength.row, zoom.row, fitRow,
         el("details", {}, el("summary", {}, "Advanced"), fov.row, k1.row)),
       el("div", { class: "card" }, el("h2", {}, "Export"),
         el("p", {}, "Same size and frame rate, audio copied through. The file lands in Downloads; save it to Photos from there. Keep this page in front the whole time: switching apps or locking the phone stops the export, and it cannot resume."),
@@ -293,6 +296,19 @@ async function main() {
   for (const s of [strength, zoom, fov, k1]) s.input.addEventListener("input", renderPreview);
   projectionSelect.addEventListener("change", renderPreview);
   profileSelect.addEventListener("change", syncProfile);
+  fitBtn.addEventListener("click", () => {
+    const z = fitZoom({
+      srcWidth: info?.width ?? 1920,
+      srcHeight: info?.height ?? 1080,
+      fovDeg: fov.input.valueAsNumber,
+      k1: k1.input.valueAsNumber,
+      strength: strength.input.valueAsNumber / 100,
+      projection: projectionSelect.value as Projection,
+      lens: PROFILES[profileSelect.value]?.lens,
+    }, 0.6);
+    zoom.input.value = String(Math.ceil(z * 100));
+    zoom.input.dispatchEvent(new Event("input"));
+  });
   scrub.input.addEventListener("input", () => {
     window.clearTimeout(scrubTimer);
     scrubTimer = window.setTimeout(() => void loadPreview(scrub.input.valueAsNumber), 250);

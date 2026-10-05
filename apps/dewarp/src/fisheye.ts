@@ -164,3 +164,31 @@ export function packUniforms(u: WarpUniforms): Float32Array {
     u.center[0], u.center[1], u.thetaMax, 0,
   ]);
 }
+
+/**
+ * Smallest zoom (most of the view) at which every output pixel still samples
+ * inside the source, so no black corners: bisection on the zoom with the
+ * output border checked at `steps` points per edge. Clamped to [lo, 1].
+ */
+export function fitZoom(p: Omit<WarpParams, "zoom">, lo = 0.5, steps = 48): number {
+  const inside = (zoom: number): boolean => {
+    const u = warpUniforms({ ...p, zoom });
+    const W = p.srcWidth, H = p.srcHeight;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      for (const [x, y] of [[t * W, 0], [t * W, H], [0, t * H], [W, t * H]] as [number, number][]) {
+        const [sx, sy] = samplePoint(u, x, y);
+        if (sx < 0 || sy < 0 || sx > W || sy > H) return false;
+      }
+    }
+    return true;
+  };
+  if (!inside(1)) return 1;
+  let a = lo, b = 1;
+  if (inside(a)) return a;
+  for (let k = 0; k < 24; k++) {
+    const m = 0.5 * (a + b);
+    if (inside(m)) b = m; else a = m;
+  }
+  return b;
+}

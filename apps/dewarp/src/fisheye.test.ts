@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lensDiagonalFov, packUniforms, samplePoint, scaleLens, thetaD, thetaMaxOf, warpUniforms, type Lens } from "./fisheye";
+import { fitZoom, lensDiagonalFov, packUniforms, samplePoint, scaleLens, thetaD, thetaMaxOf, warpUniforms, type Lens } from "./fisheye";
 import { PROFILES } from "./profiles";
 
 const base = { srcWidth: 3840, srcHeight: 2160, fovDeg: 155, k1: 0, zoom: 1, projection: "rectilinear" as const };
@@ -159,5 +159,30 @@ describe("calibrated lens", () => {
       return [bx, by] as [number, number];
     });
     expect(sag(out)).toBeLessThan(6);
+  });
+});
+
+describe("fitZoom", () => {
+  const lens = PROFILES["osmo-action-wide"].lens!;
+  const p = { srcWidth: 3840, srcHeight: 2160, fovDeg: lensDiagonalFov(lens, 3840, 2160), k1: 0, strength: 1, projection: "rectilinear" as const, lens };
+  it("finds a zoom below 1 for straight lines and keeps every border sample inside the source", () => {
+    const z = fitZoom(p);
+    expect(z).toBeLessThan(1);
+    expect(z).toBeGreaterThan(0.5);
+    const u = warpUniforms({ ...p, zoom: z });
+    for (const [x, y] of [[0, 0], [3840, 0], [0, 2160], [3840, 2160], [1920, 0], [0, 1080]]) {
+      const [sx, sy] = samplePoint(u, x, y);
+      expect(sx).toBeGreaterThanOrEqual(-1e-6);
+      expect(sy).toBeGreaterThanOrEqual(-1e-6);
+      expect(sx).toBeLessThanOrEqual(3840 + 1e-6);
+      expect(sy).toBeLessThanOrEqual(2160 + 1e-6);
+    }
+    // A touch further out and a corner leaves the source.
+    const u2 = warpUniforms({ ...p, zoom: z - 0.02 });
+    const outside = [[0, 0], [3840, 0], [0, 2160], [3840, 2160], [1920, 0], [1920, 2160], [0, 1080], [3840, 1080]].some(([x, y]) => { const [sx, sy] = samplePoint(u2, x, y); return sx < 0 || sy < 0 || sx > 3840 || sy > 2160; });
+    expect(outside).toBe(true);
+  });
+  it("is 1 when the picture is untouched", () => {
+    expect(fitZoom({ ...p, strength: 0 })).toBe(1);
   });
 });
