@@ -81,8 +81,15 @@ export type RealtimeExportOptions = {
   bitrate: number;
   /** Storage prefix for the temporary output file. */
   opfsPrefix: string;
-  /** Capture rate for the canvas stream (the renderer should keep up with it). */
+  /** The clip's frame rate: the output's timeline is kept on this grid. */
   fps?: number;
+  /**
+   * Playback rate while recording (0 < rate ≤ 1). Below 1 the clip plays in
+   * slow motion so a renderer that can't hold the clip's frame rate still
+   * paints every frame; the recording is re-timed back to full speed in the
+   * remux, so the file has every frame and only the export takes longer.
+   */
+  rate?: number;
   signal?: AbortSignal;
   onProgress: (p: number) => void;
   log?: (line: string) => void;
@@ -122,19 +129,23 @@ export async function exportRealtime(
   const mime = pickRealtimeMime();
   if (!mime) throw new Error("This browser can't record a canvas (MediaRecorder)");
   const fps = opts.fps ?? 30;
-  const stream = (canvas as CanvasWithCapture).captureStream!(fps);
+  const rate = Math.min(1, Math.max(0.1, opts.rate ?? 1));
+  // At a slowed playback the canvas changes fps·rate times a second: capture
+  // at that rate so every painted frame is taken once and nothing is duplicated.
+  const captureFps = Math.max(1, Math.round(fps * rate));
+  const stream = (canvas as CanvasWithCapture).captureStream!(captureFps);
   const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: bitrate });
   const chunks: Blob[] = [];
   recorder.ondataavailable = (ev) => {
     if (ev.data && ev.data.size > 0) chunks.push(ev.data);
   };
-  log(`realtime capture → ${mime}, ${Math.round(bitrate / 1e6)} Mbps, ${fps} fps`);
+  log(`realtime capture → ${mime}, ${Math.round(bitrate / 1e6)} Mbps, ${captureFps} fps${rate < 1 ? ` (playback ×${rate}, re-timed to ${fps} fps)` : ""}`);
 
   // Playback setup: silent (audio comes from the file), from the start.
   const wasMuted = video.muted;
   const wasRate = video.playbackRate;
   video.muted = true;
-  video.playbackRate = 1;
+  video.playbackRate = rate;
   video.loop = false;
   const t0 = performance.now();
   let stopRender: (() => void) | null = null;
@@ -216,7 +227,7 @@ export async function exportRealtime(
   // when the recorded codec can't live in MP4).
   const r0 = performance.now();
   log(`first rendered frame at ${(firstFrameSec ?? 0).toFixed(3)} s`);
-  const { blob, audioIncluded, codec } = await remux(recorded, file, firstFrameSec ?? 0, opts.opfsPrefix, signal, log);
+  const { blob, audioIncluded, codec } = await remux(recorded, file, firstFrameSec ?? 0, rate, fps, opts.opfsPrefix, signal, log);
   onProgress(1);
   return { blob, audioIncluded, codec, recordedMs, remuxMs: performance.now() - r0 };
 }
@@ -225,6 +236,8 @@ async function remux(
   recorded: Blob,
   original: File,
   audioOffsetSec: number,
+  rate: number,
+  fps: number,
   opfsPrefix: string,
   signal: AbortSignal | undefined,
   log: (line: string) => void,
@@ -246,7 +259,7 @@ async function remux(
     output = new Output({ format, target: new StreamTarget(writable, { chunked: true, chunkSize: 4 * 1024 * 1024 }) });
     const vSource = new EncodedVideoPacketSource(vCodec);
     const vStats = await vTrack.computePacketStats(100).catch(() => null);
-    output.addVideoTrack(vSource, { frameRate: vStats?.averagePacketRate ?? 30, rotation: await vTrack.getRotation() });
+    output.addVideoTrack(vSource, { frameRate: rate < 1 ? fps : (vStats?.averagePacketRate ?? 30), rotation: await vTrack.getRotation() });
 
     const aTrack = await origIn.getPrimaryAudioTrack();
     let aSource: EncodedAudioPacketSource | null = null;
@@ -267,10 +280,16 @@ async function remux(
     const vSink = new EncodedPacketSink(vTrack);
     const vt0 = await vTrack.getFirstTimestamp();
     let first = true;
+    let prevTs = -1;
     for await (const packet of vSink.packets()) {
       throwIfAborted(signal);
-      const vts = packet.timestamp - vt0;
-      const shifted = vts === packet.timestamp && vts >= 0 ? packet : new EncodedPacket(packet.data, packet.type, Math.max(0, vts), packet.duration, packet.sequenceNumber);
+      // Recording time → clip time: the clip played at `rate`, so the
+      // recording's clock runs 1/rate slower than the clip's.
+      let vts = Math.max(0, (packet.timestamp - vt0) * rate);
+      if (vts <= prevTs) vts = prevTs + 1e-4;
+      prevTs = vts;
+      const dur = packet.duration * rate;
+      const shifted = vts === packet.timestamp && dur === packet.duration ? packet : new EncodedPacket(packet.data, packet.type, vts, dur, packet.sequenceNumber);
       await vSource.add(shifted, first && vDecoderConfig ? { decoderConfig: vDecoderConfig } : undefined);
       first = false;
     }

@@ -8,7 +8,6 @@ import {
   exportWithCodec,
   squarePixels,
   isRealtimeExportSupported,
-  isWebKit,
   probeFrameRate,
   FilePickerButton,
   Hero,
@@ -384,7 +383,8 @@ export default function App() {
       // ?rt=1 / ?rt=0 force it on or off.
       const rtParam = new URLSearchParams(location.search).get("rt");
       const canvasEl = canvasRef.current;
-      const useRealtime = !!canvasEl && (rtParam === "1" || (rtParam !== "0" && isWebKit() && isRealtimeExportSupported(canvasEl)));
+      // Offline export by default (every frame rendered once; survives tab switches); the recorder is ?rt=1 only.
+      const useRealtime = !!canvasEl && rtParam === "1" && isRealtimeExportSupported(canvasEl);
       if (useRealtime && canvasEl) {
         const srcFps = Math.min(60, Math.max(24, Math.round(analysisRef.current?.frameRate ?? (await probeFrameRate(file)))));
         let rendered = 0;

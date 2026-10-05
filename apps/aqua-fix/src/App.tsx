@@ -17,7 +17,6 @@ import {
   exportWithCodec,
   squarePixels,
   isRealtimeExportSupported,
-  isWebKit,
   probeFrameRate,
   isWebCodecsSupported,
   pickBitrate,
@@ -570,33 +569,42 @@ export default function App() {
     dropStill();
     e.setPreviewScale(1);
     let frames = 0;
-    // Real-time path: WebKit's canvas → VideoFrame copy pins the offline
-    // exporter to ~10 fps, so there we play the clip and record the graded
-    // canvas (MediaRecorder), then remux the original audio. ?rt=1/0 forces.
+    // Export path. The offline WebCodecs exporter renders every frame exactly
+    // once, so it survives tab switches and UI stalls; it is the default
+    // everywhere. The real-time recorder (play the clip, record the canvas,
+    // remux the audio) is faster on WebKit but drops whatever the renderer
+    // misses — opt in with ?rt=1.
     const rtParam = new URLSearchParams(location.search).get("rt");
     const canvasEl = e.backend.canvas;
-    const useRealtime = rtParam === "1" || (rtParam !== "0" && isWebKit() && isRealtimeExportSupported(canvasEl));
+    const useRealtime = rtParam === "1" && isRealtimeExportSupported(canvasEl);
+    // Lighter per-frame load while exporting: the globals are locked per
+    // clip anyway, so analyses can run at a lower cadence and person passes
+    // less often; both restored in the finally below.
+    e.analysisIntervalMs = 150;
+    e.personEvery = 4;
     try {
       if (useRealtime) {
         // The recorder captures whatever gets painted, so the renderer must
-        // keep up with playback. Start at full size; if the first seconds
-        // render well below the capture rate, restart at a smaller scale.
-        const SCALES = [1, 0.75, 0.5];
-        // Lighter per-frame load while recording: the globals are locked per
-        // clip anyway, so analyses can run at a lower cadence and person
-        // passes less often; both restored in the finally below.
-        e.analysisIntervalMs = 150;
-        e.personEvery = 4;
+        // keep up with playback. Start at full size and speed; if the first
+        // seconds render below the capture rate, restart with the clip
+        // slowed down (every frame still lands in the file, re-timed), and
+        // only then at a smaller size.
+        const STEPS: { scale: number; rate: number }[] = [
+          { scale: 1, rate: 1 }, { scale: 1, rate: 0.5 }, { scale: 1, rate: 0.25 }, { scale: 0.5, rate: 0.25 },
+        ];
+        const speedLabel = (rate: number) => (rate >= 1 ? "" : rate === 0.5 ? " · ½ speed" : rate === 0.25 ? " · ¼ speed" : ` · ×${rate}`);
         // Capture at the clip's own frame rate (60 fps phones), capped to what
         // the recorder can take; "too slow" is judged relative to it.
         const srcFps = Math.min(60, Math.max(24, Math.round(await probeFrameRate(file))));
         console.info(`[export] source ${srcFps} fps`);
-        for (let si = 0; si < SCALES.length; si++) {
-          const scale = SCALES[si];
-          const canRetry = si < SCALES.length - 1;
+        for (let si = 0; si < STEPS.length; si++) {
+          const { scale, rate } = STEPS[si];
+          const canRetry = si < STEPS.length - 1;
+          const need = srcFps * rate;
+          const tag = `${speedLabel(rate)}${scale < 1 ? ` · ${Math.round(scale * 100)}% size` : ""}`;
           e.reset({ keepPerson: true });
           e.setPreviewScale(scale);
-          setExportDetail(`real-time · playing the clip and recording the graded canvas${scale < 1 ? ` · ${Math.round(scale * 100)}% size` : ""}`);
+          setExportDetail(`real-time · playing the clip and recording the graded canvas${tag}`);
           let rendered = 0;
           let slow = false;
           const rtStart = performance.now();
@@ -608,16 +616,18 @@ export default function App() {
               bitrate,
               opfsPrefix: AQUA_FIX_BRAND.opfsPrefix,
               fps: srcFps,
+              rate,
               signal: rtCtrl.signal,
               log: (line) => console.info("[export]", line),
               onProgress: (p) => {
                 setExportProgress(p);
                 setExportTime(p * total);
                 const secs = (performance.now() - rtStart) / 1000;
-                if (secs > 0.5) setExportDetail(`real-time · ${(rendered / secs).toFixed(1)} fps rendered${scale < 1 ? ` · ${Math.round(scale * 100)}% size` : ""} · ${e.backend.kind}`);
-                if (canRetry && secs > 2.5 && rendered / secs < srcFps * 0.72 && !slow) {
+                if (secs > 0.5) setExportDetail(`real-time · ${(rendered / secs).toFixed(1)} fps rendered of ${need.toFixed(0)}${tag} · ${e.backend.kind}`);
+                // Judged against what this step needs; a miss restarts at the next step.
+                if (canRetry && secs > 2.5 && rendered / secs < need * 0.9 && !slow) {
                   slow = true;
-                  console.info(`[export] ${(rendered / secs).toFixed(1)} fps at ${scale}× — restarting smaller`);
+                  console.info(`[export] ${(rendered / secs).toFixed(1)} fps rendered, needed ${need.toFixed(0)} (×${rate}, ${scale}× size) — restarting slower`);
                   rtCtrl.abort();
                 }
               },
@@ -648,7 +658,7 @@ export default function App() {
             await shareOrDownload(result.blob, `${fileNameRef.current}-aqua.${result.blob.type === "video/webm" ? "webm" : "mp4"}`);
             return;
           } catch (err) {
-            if (slow && !ctrl.signal.aborted) continue; // retry at the next scale
+            if (slow && !ctrl.signal.aborted) continue; // retry at the next step
             throw err;
           } finally {
             ctrl.signal.removeEventListener("abort", onOuterAbort);
@@ -702,6 +712,8 @@ export default function App() {
         {
           bitrate,
           opfsPrefix: AQUA_FIX_BRAND.opfsPrefix,
+          // Three renders in flight: matches the WebGPU readback ring, so a frame can map while the next two draw.
+          pipelineDepth: 3,
           signal: ctrl.signal,
           onProgress: (p) => {
             setExportProgress(p);

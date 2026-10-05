@@ -376,7 +376,7 @@ export class WebGPUBackend implements GpuBackend {
       this.upload(ext, this.srcW, this.srcH, this.rotation);
       this.externalOk = true;
     }
-    const N = 3;
+    const N = 4;
     const results: string[] = [];
     let best: { mode: "canvas" | "bitmap" | "readback"; ms: number } | null = null;
     for (const mode of ["canvas", "bitmap", "readback"] as const) {
@@ -384,13 +384,13 @@ export class WebGPUBackend implements GpuBackend {
         let lit = false;
         const t0 = performance.now();
         if (mode === "readback") {
-          // The exporter keeps two renders in flight: score the readback by
-          // its overlapped throughput, not its single-frame latency (a
-          // mapAsync may only resolve at the next vsync).
+          // The exporter keeps three renders in flight (the ring size):
+          // score the readback by its overlapped throughput, not its
+          // single-frame latency (a mapAsync may only resolve at the next vsync).
           const inflight: Promise<VideoFrame>[] = [];
           for (let i = 0; i < N; i++) {
             inflight.push(this.captureAs(mode, timestampUs, durationUs));
-            if (inflight.length >= 2) {
+            if (inflight.length >= 3) {
               const f = await inflight.shift()!;
               lit = lit || frameIsLit(f);
               f.close();
