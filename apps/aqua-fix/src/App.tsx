@@ -453,18 +453,18 @@ export default function App() {
         // (and a mid-clip snap is exactly the inconsistency the lock exists
         // to remove). Each segment with ≥ 2 samples locks its own median; a
         // lone sample joins the previous segment.
-        const segs: { from: number; items: typeof samples }[] = [{ from: 0, items: [samples[0]] }];
+        const segs: { from: number; window?: [number, number]; items: typeof samples }[] = [{ from: 0, items: [samples[0]] }];
         for (let i = 1; i < samples.length; i++) {
           const a = samples[i - 1].mean, b = samples[i].mean;
           const diff = Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
           const wa = samples[i - 1].params.wb, wb = samples[i].params.wb;
           const wbDiff = Math.max(Math.abs(Math.log(wa[0] / wb[0])), Math.abs(Math.log(wa[2] / wb[2])));
           const cut = diff > 2 * SCENE_CUT_MEAN_DIFF || (diff > SCENE_CUT_MEAN_DIFF && wbDiff > 0.2);
-          if (cut) segs.push({ from: (samples[i - 1].t + samples[i].t) / 2, items: [] });
+          if (cut) segs.push({ from: (samples[i - 1].t + samples[i].t) / 2, window: [samples[i - 1].t, samples[i].t] as [number, number], items: [] });
           segs[segs.length - 1].items.push(samples[i]);
         }
         for (let i = segs.length - 1; i > 0; i--) if (segs[i].items.length < 2) { segs[i - 1].items.push(...segs[i].items); segs.splice(i, 1); }
-        const lock = segs.map((s) => ({ from: s.from, params: medianParams(s.items.map((x) => x.params)) }));
+        const lock = segs.map((s) => ({ from: s.from, window: s.window, params: medianParams(s.items.map((x) => x.params)) }));
         e.lockGlobals(lock);
         console.info(`[profile] locked ${lock.length} segment(s): ${samples.length}/${n} samples, wb ${samples.map((p) => p.params.wb[0].toFixed(2)).join("/")}, cuts at ${lock.slice(1).map((s) => s.from.toFixed(1) + "s").join(", ") || "none"}`);
       } else {
@@ -671,6 +671,9 @@ export default function App() {
             if (frames === 0) {
               console.info(`[export] first frame coded ${frame.codedWidth}x${frame.codedHeight} visible ${frame.visibleRect?.width ?? "?"}x${frame.visibleRect?.height ?? "?"} display ${frame.displayWidth}x${frame.displayHeight} ${frame.format ?? ""}`);
               await e.analyzeNow(true);
+            } else if (e.inCutWindow(info.timeSec)) {
+              // Near a profiled cut the exact frame matters: wait for this frame's analysis.
+              await e.analyzeNow(true).catch(() => undefined);
             } else e.analyzeSoon();
             e.tick(info.timeSec);
             frames++;

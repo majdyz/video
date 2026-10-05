@@ -25,3 +25,24 @@ assert.deepEqual(lockedAt(segs, -1).wb, A.wb);
 const med = medianParams([A, A, { ...A, wb: [2.4, 1, 0.9] }]);
 assert.deepEqual(med.wb, A.wb);
 console.log("ok  lock segments");
+
+// Windowed segments: a cut profiled between two samples switches at the
+// observed cut, or at the window's end when none is seen.
+{
+  const { segmentAt, inCutWindow, noteCut } = await import("../src/engine/lock.ts");
+  const A = { ...IDENTITY_PARAMS, exposure: 1 }, B = { ...IDENTITY_PARAMS, exposure: 2 };
+  const segs = [{ from: 0, params: A }, { from: 4.1, window: [3.7, 4.5] as [number, number], params: B }];
+  const seen = new Map<number, number>();
+  assert.equal(segmentAt(segs, seen, 4.2).params, A, "before the window ends and no cut seen: still A");
+  assert.equal(segmentAt(segs, seen, 4.5).params, B, "window end: B");
+  assert.equal(inCutWindow(segs, seen, 3.9), true);
+  assert.equal(inCutWindow(segs, seen, 3.0), false);
+  noteCut(segs, seen, 3.0); // outside the window: ignored
+  assert.equal(seen.size, 0);
+  noteCut(segs, seen, 4.2);
+  assert.equal(segmentAt(segs, seen, 4.19).params, A);
+  assert.equal(segmentAt(segs, seen, 4.2).params, B, "from the observed cut: B");
+  assert.equal(inCutWindow(segs, seen, 4.3), false, "cut seen: no longer waiting");
+  console.log("ok  windowed segments");
+}
+

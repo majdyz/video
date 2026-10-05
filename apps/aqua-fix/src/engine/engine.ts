@@ -13,6 +13,7 @@ import { ANALYSIS_H, ANALYSIS_W } from "./analyze.ts";
 import type { AnalysisPacket, AnalysisRequest } from "./analysis-worker.ts";
 import type { PersonPacket, PersonRequest } from "./person-worker.ts";
 import { boxGate, PERSON_BOX_MIN_SCORE, type PersonBox } from "./person-gate.ts";
+import { inCutWindow as lockInCutWindow, noteCut as lockNoteCut, segmentAt, type LockSegment } from "./lock.ts";
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
 import { linearToOklab } from "./color.ts";
 import {
@@ -77,7 +78,7 @@ function toGpuPacket(raw: AnalysisPacket): GpuPacket {
 
 export type PersonState = "off" | "loading" | "on" | "failed";
 /** One locked estimate, valid from `from` seconds until the next segment. */
-export type LockSegment = { from: number; params: GradeParams };
+export type { LockSegment };
 export { SCENE_CUT_MEAN_DIFF };
 export type EngineStats = {
   backend: "webgpu" | "webgl2";
@@ -146,6 +147,8 @@ export class GradeEngine {
    * only their maps and range normalisation.
    */
   private locked: LockSegment[] | null = null;
+  /** Media time at which the cut of each windowed segment was actually observed (by segment index). */
+  private cutSeen = new Map<number, number>();
   private resolveWaiters: ((p: AnalysisPacket) => void)[] = [];
   private rejectWaiters: ((e: Error) => void)[] = [];
   private onError: (e: Error) => void;
@@ -189,6 +192,7 @@ export class GradeEngine {
    */
   lockGlobals(segments: LockSegment[] | null): void {
     this.locked = segments && segments.length > 0 ? [...segments].sort((a, b) => a.from - b.from) : null;
+    this.cutSeen.clear();
     if (this.locked) {
       this.current = this.applyLock(this.current);
       if (this.target) this.target = this.applyLock(this.target);
@@ -211,9 +215,17 @@ export class GradeEngine {
 
   private lockedAt(timeSec: number): GradeParams | null {
     if (!this.locked) return null;
-    let seg = this.locked[0];
-    for (const s of this.locked) if (timeSec >= s.from) seg = s;
-    return seg.params;
+    return segmentAt(this.locked, this.cutSeen, timeSec).params;
+  }
+
+  /** True while `timeSec` lies inside a segment's cut window whose cut hasn't been seen yet (callers may analyse every frame there). */
+  inCutWindow(timeSec: number): boolean {
+    return this.locked ? lockInCutWindow(this.locked, this.cutSeen, timeSec) : false;
+  }
+
+  /** Records that the per-frame analysis saw a scene cut at `timeSec`; a windowed segment waiting for it switches there. */
+  noteSceneCut(timeSec: number): void {
+    if (this.locked) lockNoteCut(this.locked, this.cutSeen, timeSec);
   }
 
   /** Debug (?lockz=1): also lock the range normalisation (zLo/zHi) — A/B for flicker. */
@@ -488,6 +500,7 @@ export class GradeEngine {
     if (!this.hasAnalysis || cut) {
       if (cut) {
         this.stats.sceneCuts++;
+        this.noteSceneCut(this.lastTickSec);
         // New scene: the detector must speak again before any mask counts.
         this.personBoxes = null;
         this.personPasses = 0;
@@ -587,6 +600,7 @@ export class GradeEngine {
     this.lastMean = null;
     this.lastAnalysisAt = -Infinity;
     this.lastTickSec = 0;
+    this.cutSeen.clear();
     this.settle({ id: -1 } as AnalysisPacket, null);
     this.personReqId++;
     this.personInflight = false;
