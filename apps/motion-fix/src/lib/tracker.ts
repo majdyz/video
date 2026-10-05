@@ -241,10 +241,17 @@ export type PyramidLevel = {
 /** [1 4 6 4 1]/16 blur + decimate by two, borders replicated. */
 function downsample(src: Float32Array, sw: number, sh: number, dst: Float32Array, dw: number, dh: number, tmp: Float32Array): void {
   // Horizontal pass evaluated at even columns only (tmp is sh x dw).
+  // Interior columns need no clamps: 2x-2 >= 0 for x >= 1 and 2x+2 < sw for 2x+2 <= sw-1.
+  const xEnd = Math.min(dw, Math.floor((sw - 3) / 2) + 1);
   for (let y = 0; y < sh; y++) {
     const r = y * sw;
     const o = y * dw;
+    for (let x = 1; x < xEnd; x++) {
+      const c = r + 2 * x;
+      tmp[o + x] = (src[c - 2] + 4 * src[c - 1] + 6 * src[c] + 4 * src[c + 1] + src[c + 2]) * 0.0625;
+    }
     for (let x = 0; x < dw; x++) {
+      if (x >= 1 && x < xEnd) continue;
       const c = 2 * x;
       const xm2 = c >= 2 ? c - 2 : 0;
       const xm1 = c >= 1 ? c - 1 : 0;
@@ -278,7 +285,14 @@ function gradients(level: PyramidLevel): void {
     const r = y * w;
     const up = (y > 0 ? y - 1 : 0) * w;
     const dn = (y < h - 1 ? y + 1 : h - 1) * w;
-    for (let x = 0; x < w; x++) {
+    // Interior columns without the clamps (the two border columns below).
+    for (let x = 1; x < w - 1; x++) {
+      const xl = x - 1;
+      const xr = x + 1;
+      gx[r + x] = (img[up + xr] - img[up + xl] + 2 * (img[r + xr] - img[r + xl]) + img[dn + xr] - img[dn + xl]) * 0.125;
+      gy[r + x] = (img[dn + xl] - img[up + xl] + 2 * (img[dn + x] - img[up + x]) + img[dn + xr] - img[up + xr]) * 0.125;
+    }
+    for (const x of [0, w - 1]) {
       const xl = x > 0 ? x - 1 : 0;
       const xr = x < w - 1 ? x + 1 : w - 1;
       gx[r + x] = (img[up + xr] - img[up + xl] + 2 * (img[r + xr] - img[r + xl]) + img[dn + xr] - img[dn + xl]) * 0.125;
@@ -387,6 +401,7 @@ export class LucasKanade {
     const w01 = (1 - fx) * fy;
     const w11 = fx * fy;
     const { wi, wx, wy } = this;
+    const Iimg = I.img, Igx = I.gx, Igy = I.gy;
     let gxx = 0;
     let gxy = 0;
     let gyy = 0;
@@ -394,9 +409,9 @@ export class LucasKanade {
     for (let j = -hw; j <= hw; j++) {
       let idx = (iy0 + j) * w + ix0 - hw;
       for (let i = 0; i < side; i++, idx++, k++) {
-        const v = I.img[idx] * w00 + I.img[idx + 1] * w10 + I.img[idx + w] * w01 + I.img[idx + w + 1] * w11;
-        const gx = I.gx[idx] * w00 + I.gx[idx + 1] * w10 + I.gx[idx + w] * w01 + I.gx[idx + w + 1] * w11;
-        const gy = I.gy[idx] * w00 + I.gy[idx + 1] * w10 + I.gy[idx + w] * w01 + I.gy[idx + w + 1] * w11;
+        const v = Iimg[idx] * w00 + Iimg[idx + 1] * w10 + Iimg[idx + w] * w01 + Iimg[idx + w + 1] * w11;
+        const gx = Igx[idx] * w00 + Igx[idx + 1] * w10 + Igx[idx + w] * w01 + Igx[idx + w + 1] * w11;
+        const gy = Igy[idx] * w00 + Igy[idx + 1] * w10 + Igy[idx + w] * w01 + Igy[idx + w + 1] * w11;
         wi[k] = v;
         wx[k] = gx;
         wy[k] = gy;
@@ -410,10 +425,11 @@ export class LucasKanade {
     if (det < 1e-3 || (gxx + gyy - Math.sqrt((gxx - gyy) ** 2 + 4 * gxy * gxy)) * 0.5 < 1e-2 * this.winN) return null;
     const invDet = 1 / det;
     const eps2 = this.opts.epsilon * this.opts.epsilon;
+    const Jimg = J.img, Jw = J.w, Jh = J.h;
     for (let it = 0; it < this.opts.maxIterations; it++) {
       const qx = px + dx;
       const qy = py + dy;
-      if (qx - hw < 1 || qy - hw < 1 || qx + hw >= J.w - 2 || qy + hw >= J.h - 2) return null;
+      if (qx - hw < 1 || qy - hw < 1 || qx + hw >= Jw - 2 || qy + hw >= Jh - 2) return null;
       const jx0 = Math.floor(qx);
       const jy0 = Math.floor(qy);
       const gx = qx - jx0;
@@ -426,9 +442,9 @@ export class LucasKanade {
       let by = 0;
       k = 0;
       for (let j = -hw; j <= hw; j++) {
-        let idx = (jy0 + j) * J.w + jx0 - hw;
+        let idx = (jy0 + j) * Jw + jx0 - hw;
         for (let i = 0; i < side; i++, idx++, k++) {
-          const jv = J.img[idx] * v00 + J.img[idx + 1] * v10 + J.img[idx + J.w] * v01 + J.img[idx + J.w + 1] * v11;
+          const jv = Jimg[idx] * v00 + Jimg[idx + 1] * v10 + Jimg[idx + Jw] * v01 + Jimg[idx + Jw + 1] * v11;
           const d = wi[k] - jv;
           bx += d * wx[k];
           by += d * wy[k];
