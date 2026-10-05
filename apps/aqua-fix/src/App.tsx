@@ -666,9 +666,18 @@ export default function App() {
         }
         return;
       }
+      // Canvas/bitmap captures snapshot the export canvas, which only shows a
+      // draw once the browser presents it: overlapping such frames captures
+      // duplicates and skips others (stutter on Safari). Those modes run one
+      // frame at a time; the readback mode has its own buffer per frame and
+      // keeps the pipeline full.
+      let renderGate: Promise<unknown> = Promise.resolve();
       const result = await exportWithCodec(
         file,
         async (sample, info) => {
+          const captureMode = (e.backend as unknown as { capture?: string | null }).capture;
+          if (captureMode !== "readback") await renderGate;
+          const job = (async () => {
           const frame = squarePixels(sample.toVideoFrame());
           try {
             const rot = (info.rotation / 90) as Rotation;
@@ -708,6 +717,9 @@ export default function App() {
           } finally {
             frame.close();
           }
+          })();
+          renderGate = job.catch(() => undefined);
+          return job;
         },
         {
           bitrate,
