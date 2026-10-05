@@ -230,8 +230,12 @@ export function boostParams(p: GradeParams, t: number): GradeParams {
   if (t <= 0) return p;
   const e = 1 + 0.8 * t;
   const wb = p.wb.map((g) => Math.min(5, Math.max(0.25, Math.pow(g, e)))) as Vec3;
-  const waterMax = 1.6 + 0.4 * t;
-  const waterWb = wb.map((g) => Math.min(waterMax, Math.max(1 / waterMax, Math.pow(g, 0.6)))) as Vec3;
+  // The water path (pixels that share the water's hue and brightness) gets a
+  // toned-down balance; a push lets it follow the full balance much further,
+  // which is what a deep blue-green scene with no neutral reference needs.
+  const waterMax = 1.6 + 1.4 * t;
+  const waterPow = 0.6 + 0.3 * t;
+  const waterWb = wb.map((g) => Math.min(waterMax, Math.max(1 / waterMax, Math.pow(g, waterPow)))) as Vec3;
   return {
     ...p,
     wb,
