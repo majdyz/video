@@ -672,6 +672,18 @@ export default function App() {
       // frame at a time; the readback mode has its own buffer per frame and
       // keeps the pipeline full.
       let renderGate: Promise<unknown> = Promise.resolve();
+      // The offline export draws into its own target; show the frames going
+      // by on the stage as well (a few times a second, at the preview's own
+      // size) so the export is watchable rather than a bare counter.
+      {
+        const stage = stageRef.current;
+        const sw = e.backend.outputWidth, sh = e.backend.outputHeight;
+        if (stage && sw && sh) {
+          const dpr = Math.min(3, window.devicePixelRatio || 1);
+          e.setPreviewScale(Math.min(1, Math.min(PREVIEW_MAX_WIDTH, stage.clientWidth * dpr) / sw, (stage.clientHeight * dpr) / sh));
+        }
+      }
+      let lastShownAt = 0;
       const result = await exportWithCodec(
         file,
         async (sample, info) => {
@@ -701,6 +713,10 @@ export default function App() {
             // timestamp (WebKit emits negative ones; the muxer rejects those).
             const out = await e.renderToFrame(rot, Math.round(info.timeSec * 1e6), frame.duration ?? undefined);
             const t2 = performance.now();
+            if (t2 - lastShownAt > 80) {
+              lastShownAt = t2;
+              e.render(rot);
+            }
             stage.upload += t1 - t0;
             stage.render += t2 - t1;
             stage.draw += e.backend.lastDrawMs;
