@@ -355,7 +355,14 @@ export class WebGPUBackend implements GpuBackend {
       for (const r of this.readbackRing) r.buffer.destroy();
       this.readbackRing = [];
     }
-    if (this.capture === null) await this.benchmarkCapture(timestampUs, durationUs);
+    if (this.capture === null) {
+      // Debug: ?capture=canvas|bitmap|readback skips the benchmark (phone A/B of the export paths).
+      const forced = new URLSearchParams(location.search).get("capture");
+      if (forced === "canvas" || forced === "bitmap" || forced === "readback") {
+        this.capture = forced;
+        this.captureBench = `forced ${forced}`;
+      } else await this.benchmarkCapture(timestampUs, durationUs);
+    }
     return this.captureAs(this.capture ?? "readback", timestampUs, durationUs);
   }
 

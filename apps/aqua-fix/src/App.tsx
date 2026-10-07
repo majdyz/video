@@ -741,7 +741,8 @@ export default function App() {
           bitrate,
           opfsPrefix: AQUA_FIX_BRAND.opfsPrefix,
           // Three renders in flight: matches the WebGPU readback ring, so a frame can map while the next two draw.
-          pipelineDepth: 3,
+          // Debug: ?depth=N overrides (phone A/B of the export pipeline).
+          pipelineDepth: Math.min(6, Math.max(1, Number(new URLSearchParams(location.search).get("depth")) || 3)),
           signal: ctrl.signal,
           onProgress: (p) => {
             setExportProgress(p);
