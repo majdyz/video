@@ -63,6 +63,16 @@ function audioSpecificConfig(entry: SampleEntry): Uint8Array | undefined {
   return entry.esds?.esd?.descs?.[0]?.descs?.[0]?.data;
 }
 
+/** WebCodecs codec string for an mp4 audio sample-entry type that is not AAC. */
+function webCodecsAudioCodec(mp4Codec: string): string | null {
+  const c = mp4Codec.toLowerCase();
+  if (c.startsWith("opus")) return "opus";
+  if (c.startsWith("flac")) return "flac";
+  if (c.startsWith("alac")) return "alac";
+  if (c.startsWith("mp3") || c.startsWith(".mp3")) return "mp3";
+  return null;
+}
+
 function rotationFromMatrix(matrix: ArrayLike<number> | undefined): 0 | 90 | 180 | 270 {
   if (!matrix || matrix.length < 9) return 0;
   // 16.16 fixed point a, b, c, d in the mp4 track matrix.
@@ -343,6 +353,11 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
   let encodedFrames = 0;
   let decodedFrames = 0;
   let pendingAudioConfig: { codec: string; description?: Uint8Array; numberOfChannels: number; sampleRate: number } | undefined;
+  // Non-AAC audio (Opus, FLAC, ALAC in an mp4) is decoded and re-encoded to
+  // AAC when this browser can; otherwise the export is silent, as before.
+  let audioDecoder: AudioDecoder | undefined;
+  let audioEncoder: AudioEncoder | undefined;
+  let pendingAudioMeta: EncodedAudioChunkMetadata | undefined;
   let failure: Error | undefined;
   let roomWaiters: (() => void)[] = [];
   // The reader pauses while the codecs are being configured, so no sample arrives before its decoder exists.
@@ -468,7 +483,7 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
         log(`decoder ${decoderConfig.codec} (${decoderConfig.hardwareAcceleration}), encoder ${encoderConfig.codec} (${encoderConfig.hardwareAcceleration}) ${Math.round((encoderConfig.bitrate ?? 0) / 1e6)} Mbps`);
 
         const at = info.audioTracks[0];
-        const audio = at?.audio && /mp4a/.test(at.codec) ? at.audio : undefined;
+        let audio = at?.audio && /mp4a/.test(at.codec) ? at.audio : undefined;
         if (at && audio) {
           const aEntry = sampleEntry(mp4, at.id);
           const asc = audioSpecificConfig(aEntry);
@@ -478,6 +493,33 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
             numberOfChannels: audio.channel_count,
             sampleRate: audio.sample_rate,
           };
+          log(`audio ${at.codec} → copied`);
+        } else if (at?.audio) {
+          const webCodec = webCodecsAudioCodec(at.codec);
+          const decCfg: AudioDecoderConfig | null = webCodec ? { codec: webCodec, numberOfChannels: at.audio.channel_count, sampleRate: at.audio.sample_rate } : null;
+          const encCfg: AudioEncoderConfig = { codec: "mp4a.40.2", numberOfChannels: at.audio.channel_count, sampleRate: at.audio.sample_rate, bitrate: 160_000 };
+          const canDecode = decCfg && typeof AudioDecoder !== "undefined" ? (await AudioDecoder.isConfigSupported(decCfg).catch(() => ({ supported: false }))).supported : false;
+          const canEncode = typeof AudioEncoder !== "undefined" ? (await AudioEncoder.isConfigSupported(encCfg).catch(() => ({ supported: false }))).supported : false;
+          if (canDecode && canEncode && decCfg) {
+            audioEncoder = new AudioEncoder({
+              output: (chunk, meta) => {
+                if (meta?.decoderConfig) pendingAudioMeta = meta;
+                muxer!.addAudioChunk(chunk, pendingAudioMeta);
+                pendingAudioMeta = undefined;
+              },
+              error: fail,
+            });
+            audioEncoder.configure(encCfg);
+            audioDecoder = new AudioDecoder({
+              output: (data) => { try { audioEncoder!.encode(data); } finally { data.close(); } },
+              error: fail,
+            });
+            audioDecoder.configure(decCfg);
+            audio = at.audio;
+            log(`audio ${at.codec} → re-encoded to AAC`);
+          } else {
+            log(`audio ${at.codec} → dropped (${!webCodec ? "no WebCodecs name for it" : !canDecode ? "this browser cannot decode it" : "this browser cannot encode AAC"})`);
+          }
         }
 
         muxer = new Muxer({
@@ -545,6 +587,8 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
           const duration = Math.round((s.duration * 1e6) / s.timescale);
           if (user === "video") {
             decoder!.decode(new EncodedVideoChunk({ type: s.is_sync ? "key" : "delta", timestamp, duration, data: s.data }));
+          } else if (audioDecoder) {
+            audioDecoder.decode(new EncodedAudioChunk({ type: s.is_sync ? "key" : "delta", timestamp, duration, data: s.data }));
           } else {
             const meta = pendingAudioConfig ? { decoderConfig: pendingAudioConfig } : undefined;
             pendingAudioConfig = undefined;
@@ -564,6 +608,8 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
     await decoder.flush();
     await drained();
     await encoder.flush();
+    if (audioDecoder) await audioDecoder.flush();
+    if (audioEncoder) await audioEncoder.flush();
     if (failure) throw failure;
     if (encodedFrames === 0) throw new Error(`No frames came out of the encoder (decoded ${decodedFrames} of ${totalFrames}, encoder ${encoder.state}).`);
     muxer.finalize();
@@ -574,6 +620,8 @@ export async function exportClip(opts: ExportOptions): Promise<Blob> {
     signal.removeEventListener("abort", wakeRoom);
     if (decoder?.state !== "closed") decoder?.close();
     if (encoder?.state !== "closed") encoder?.close();
+    if (audioDecoder && audioDecoder.state !== "closed") audioDecoder.close();
+    if (audioEncoder && audioEncoder.state !== "closed") audioEncoder.close();
   }
 
   const blob = await sink.finish();

@@ -24,7 +24,7 @@ const width = Number(wStr);
 const height = Number(hStr);
 const [num, den] = rate.split("/").map(Number);
 const fps = num / (den || 1);
-const aw = 640;
+const aw = Number(process.env.AW ?? 640); // analysis long edge (AW=480 to test a cheaper analysis)
 const ah = Math.round((height * aw) / width / 2) * 2;
 const raw = spawnSync("ffmpeg", ["-v", "error", "-i", file, "-vf", `scale=${aw}:${ah}`, "-pix_fmt", "gray", "-f", "rawvideo", "-"], { maxBuffer: 2 ** 31 });
 if (raw.status !== 0) throw new Error(raw.stderr.toString());
@@ -34,6 +34,7 @@ const n = Math.floor(bytes.length / frameSize);
 
 // Track at the analysis size itself, so source px == analysis px.
 const tracker = new MotionTracker(aw, ah);
+const trackT0 = performance.now();
 const gray = new Float32Array(frameSize);
 const motion = new Float64Array(4 * n);
 const cumulative = new Float64Array(4 * n);
@@ -61,6 +62,7 @@ for (let t = 0; t < n; t++) {
   homographyState[t] = HOMOGRAPHY_STATE[m.homographyState];
   if (m.homography) upgrades++;
 }
+console.log(`tracking ${aw}x${ah}: ${((performance.now() - trackT0) / n).toFixed(1)} ms/frame over ${n} frames`);
 const analysis: MotionAnalysis = { width: aw, height: ah, analysisWidth: aw, analysisHeight: ah, frameCount: n, frameRate: fps, times, motion, cumulative, inliers, tracked, rms, model, homography, homographyState, trackMsPerFrame: 0 };
 const params = { smoothing: Number(smoothingArg ?? 0.8), maxCrop: Number(cropArg ?? 0.15) };
 console.log(`${file}: ${n} frames ${width}x${height}@${fps.toFixed(2)} (analysed at ${aw}x${ah}); homography kept on ${upgrades}/${n - 1} pairs`);
