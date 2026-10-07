@@ -113,14 +113,17 @@ export const LOOK = {
   // uniform, scaled by the frame's haze (see lookParams); gamma is a mild
   // per-pixel shadow crush.
   gamma: 0.0,
-  dim: 0.3,
-  hazeDehaze: 0.7, // hazy frames: the look also dehazes the water path …
+  dim: 0.5, // refit 7 Oct: both hazy references sit ≈0.82× below the 0.3 result
+  hazeDehaze: 0.4, // hazy frames: the look also dehazes the water path …
   hazeClarity: 0.4, // … local contrast (dark garments are safe now that dehaze skips them; more than this does nothing visible — CLAHE_CLIP caps it) …
   hazeLevels: 0.15, // … and a slightly fuller levels stretch
   waterDim: 0.25, // in clear frames water-coloured pixels (by hue, never by mask) go darker; hazy frames already dim globally
   hazeLo: 0.05, // lifted-black haze below which nothing dims …
   hazeHi: 0.3, // … and above which the full dim applies
-  hazeChroma: 0.8, // water tint chroma target rises with haze (murky refs are more saturated)
+  hazeChroma: 2.0, // water tint chroma target rises with haze (murky ref: C ≈ 0.13 at mid L vs our 0.08 at 0.8)
+  deepLo: 0.35, // lifted-black haze above which "objects" stop being told apart from water in the look (a murky frame is water everywhere) …
+  deepHi: 0.8, // … fully by here
+  objChroma: 0.045, // in hazy frames pixels that are not water-hued (reef, rock) settle at this chroma: the references turn the reef grey-blue, not saturated blue
   neutralDesat: 0.8, // light near-neutral pixels (sand, white coral) lose chroma …
   neutralLo: 0.025, // … below this chroma fully …
   neutralHi: 0.05, // … fading out by this (surface water sits above it) …
@@ -129,8 +132,9 @@ export const LOOK = {
   warmHue: (65 * Math.PI) / 180, // warm band (skin, sand: ~20°–110°) never takes the tint …
   warmIn: (45 * Math.PI) / 180,
   warmOut: (70 * Math.PI) / 180,
-  warmLo: 0.006, // … once it has any chroma at all
+  warmLo: 0.006, // … once it has any chroma at all …
   warmHi: 0.015,
+  warmHaze: 0.06, // … but in hazy frames dull warm pixels (brown reef, rubble) need this much more chroma to escape the tint; skin after its memory colour sits above it, and detected people skip the look anyway
   brightLo: 0.6, // light pixels (pale skin, white coral, hands) keep their colour …
   brightHi: 0.8,
   keepLo: 0.09, // vivid in-band colours (blue fins) are kept …
@@ -140,10 +144,11 @@ export const LOOK = {
   c1: 0.11,
   darkLo: 0.08, // … and dark pixels (wetsuits, shadows) take no tint below this lightness
   darkHi: 0.45, // (a wide ramp: one garment must not split into tinted and untinted parts)
+  darkHaze: 0.6, // in hazy frames the ramp's top drops by this share (dark reef takes the tint like the references; wetsuits below darkLo still don't)
   farLo: (50 * Math.PI) / 180, // hues far from the target (greens, browns) …
   farHi: (110 * Math.PI) / 180,
   farKeep: 0.55, // … keep this much of their own hue, so the reef keeps colour variety
-  mix: 0.7, // how far (a, b) move toward the target
+  mix: 0.8, // how far (a, b) move toward the target
 };
 
 /** Push amount above the estimate, 0..1. */
@@ -171,6 +176,12 @@ export function resolveSettings(s: UserSettings): GradeSettings {
  * levels / chroma ceilings open up.
  */
 /** How much of the look's haze-dependent behaviour applies to this frame, 0..1. */
+/** 1 when the frame is so hazy that the references tint everything like water (see LOOK.deepLo/deepHi). */
+export function deepHaze(p: GradeParams): number {
+  const t = Math.min(1, Math.max(0, (p.haze - LOOK.deepLo) / (LOOK.deepHi - LOOK.deepLo)));
+  return t * t * (3 - 2 * t);
+}
+
 export function hazeWeight(p: GradeParams): number {
   const t = Math.min(1, Math.max(0, (p.haze - LOOK.hazeLo) / (LOOK.hazeHi - LOOK.hazeLo)));
   return t * t * (3 - 2 * t);
@@ -416,7 +427,7 @@ export const CLAHE_BINS = 32;
  *  p11: waterWb.rgb, hueFarHi
  *  p12: confLo, confHi, cosLo, cosHi
  *  p15: knee, subLo, subHi, hueFarLo
- *  p16: hazeWeight, 0, 0, 0
+ *  p16: hazeWeight, deepHaze, 0, 0
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -454,7 +465,7 @@ export function packUniforms(
     u.set([a / c, b / c, params.waterExposure, params.zMean], 56);
   }
   u.set([params.knee, params.subLo, params.subHi, params.hueFarLo], 60);
-  u.set([hazeWeight(params), 0, 0, 0], 64);
+  u.set([hazeWeight(params), deepHaze(params), 0, 0], 64);
   return u;
 }
 

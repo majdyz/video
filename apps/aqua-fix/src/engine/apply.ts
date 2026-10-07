@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, boostParams, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, boostParams, deepHaze, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
@@ -212,7 +212,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const skinned = skinTone(L, a * scale, b * scale, person);
   // Water-likeness for the look comes from the pixel's own hue (the mask or
   // the water/object split would cut one garment into differently treated parts).
-  const looked = deepBlueLook(L, skinned[0], skinned[1], s.look, 1 - hueConf(pa, pb, p), hazeWeight(p));
+  const looked = deepBlueLook(L, skinned[0], skinned[1], s.look, 1 - hueConf(pa, pb, p), hazeWeight(p), deepHaze(p));
   const capped = capChroma(looked[0], looked[1], looked[2], cSrc);
   const [r1, g1, b1] = oklabToLinear(looked[0], capped[0], capped[1]);
   void C;
@@ -254,7 +254,7 @@ export function skinTone(L: number, a: number, b: number, person: number): [numb
 }
 
 /** Deep-blue look in Oklab (mirrors the shaders; see LOOK in params.ts). */
-export function deepBlueLook(L: number, a: number, b: number, look: number, water: number, hazeW: number): [number, number, number] {
+export function deepBlueLook(L: number, a: number, b: number, look: number, water: number, hazeW: number, deep = 0): [number, number, number] {
   if (look <= 0) return [L, a, b];
   const C = Math.hypot(a, b);
   const h = Math.atan2(b, a);
@@ -264,13 +264,22 @@ export function deepBlueLook(L: number, a: number, b: number, look: number, wate
   // alone. Tinting by the water/object split instead left object patches
   // in their graded colour inside a blue frame (a halo around people).
   const vivid = smoothstep(LOOK.keepLo, LOOK.keepHi, C);
-  const warm = (1 - smoothstep(LOOK.warmIn, LOOK.warmOut, Math.abs(wrap(h - LOOK.warmHue)))) * smoothstep(LOOK.warmLo, LOOK.warmHi, C);
+  const warm = (1 - smoothstep(LOOK.warmIn, LOOK.warmOut, Math.abs(wrap(h - LOOK.warmHue)))) * smoothstep(LOOK.warmLo + LOOK.warmHaze * hazeW, LOOK.warmHi + LOOK.warmHaze * hazeW, C);
   const far = smoothstep(LOOK.farLo, LOOK.farHi, Math.abs(wrap(h - LOOK.targetHue)));
-  const wTint = (1 - vivid) * (1 - warm) * (1 - smoothstep(LOOK.brightLo, LOOK.brightHi, L)) * smoothstep(LOOK.darkLo, LOOK.darkHi, L) * (1 - LOOK.farKeep * far);
+  // Far hues keep part of their own hue in clear frames (reef variety); in
+  // hazy frames the references tint everything, so the keep fades with haze.
+  const darkHi = LOOK.darkLo + (LOOK.darkHi - LOOK.darkLo) * (1 - LOOK.darkHaze * hazeW);
+  const wTint = (1 - vivid) * (1 - warm) * (1 - smoothstep(LOOK.brightLo, LOOK.brightHi, L)) * smoothstep(LOOK.darkLo, darkHi, L) * (1 - LOOK.farKeep * (1 - hazeW) * far);
   const w = wTint * look * LOOK.mix;
   const L2 = Math.pow(Math.max(0, L), 1 + LOOK.gamma * look) * (1 - LOOK.waterDim * look * water * (1 - hazeW));
-  // The tint never desaturates: an already-blue pixel keeps its chroma.
-  const Ct = Math.max(C, (LOOK.c0 + LOOK.c1 * L2) * (1 + LOOK.hazeChroma * hazeW));
+  // Chroma target: in clear frames the tint never desaturates (an
+  // already-blue pixel keeps its chroma); in hazy frames water goes to a
+  // saturated deep blue while everything else (reef, rock) settles at a
+  // grey-blue, as in the references.
+  const keep = Math.max(C, LOOK.c0 + LOOK.c1 * L2);
+  const ctWater = Math.max(C, (LOOK.c0 + LOOK.c1 * L2) * (1 + LOOK.hazeChroma * hazeW));
+  const ctObj = keep + (LOOK.objChroma - keep) * hazeW;
+  const Ct = ctObj + (ctWater - ctObj) * Math.max(water, deep);
   // Light near-neutral pixels (sand, white coral) go fully neutral.
   const ds = 1 - look * LOOK.neutralDesat * (1 - smoothstep(LOOK.neutralLo, LOOK.neutralHi, C)) * smoothstep(LOOK.neutralLLo, LOOK.neutralLHi, L);
   return [L2, (a + (Ct * Math.cos(LOOK.targetHue) - a) * w) * ds, (b + (Ct * Math.sin(LOOK.targetHue) - b) * w) * ds];
