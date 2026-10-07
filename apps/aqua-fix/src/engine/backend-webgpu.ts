@@ -336,6 +336,14 @@ export class WebGPUBackend implements GpuBackend {
   // first export frame probes canvas → bitmap → readback and keeps the first
   // path that produces a lit picture.
   private capture: "canvas" | "bitmap" | "readback" | null = null;
+  /** Export capture path chosen by the user (Advanced); null = benchmark and pick. */
+  private forceCapture: "canvas" | "bitmap" | "readback" | null = null;
+
+  /** Sets the capture path for the next export: "auto" re-benchmarks, else the given path is used as is. */
+  setCaptureMode(mode: "auto" | "canvas" | "bitmap" | "readback"): void {
+    this.forceCapture = mode === "auto" ? null : mode;
+    this.capture = null;
+  }
   // Readback ring: the exporter keeps two renders in flight, so a frame can
   // be mapping while the next one is copied into another slot.
   private readbackRing: { buffer: GPUBuffer; busy: boolean }[] = [];
@@ -356,8 +364,8 @@ export class WebGPUBackend implements GpuBackend {
       this.readbackRing = [];
     }
     if (this.capture === null) {
-      // Debug: ?capture=canvas|bitmap|readback skips the benchmark (phone A/B of the export paths).
-      const forced = new URLSearchParams(location.search).get("capture");
+      // Advanced "Export capture" (or ?capture=canvas|bitmap|readback) skips the benchmark.
+      const forced = this.forceCapture ?? new URLSearchParams(location.search).get("capture");
       if (forced === "canvas" || forced === "bitmap" || forced === "readback") {
         this.capture = forced;
         this.captureBench = `forced ${forced}`;

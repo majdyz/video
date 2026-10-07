@@ -37,6 +37,16 @@ type Mode = "idle" | "photo" | "video";
 
 // Preview renders at the stage's device-pixel size (capped), never at 4K.
 const PREVIEW_MAX_WIDTH = 1600;
+type CaptureChoice = "auto" | "readback" | "bitmap" | "canvas";
+type ExportOpts = { capture: CaptureChoice; depth: number };
+const DEFAULT_EXPORT_OPTS: ExportOpts = { capture: "auto", depth: 3 };
+const EXPORT_OPTS_KEY = "aqua-fix.exportOpts";
+const CAPTURE_CHOICES: { id: CaptureChoice; label: string; hint: string }[] = [
+  { id: "auto", label: "Auto", hint: "Benchmark the paths on the first frame and keep the fastest lit one" },
+  { id: "readback", label: "Readback", hint: "GPU → buffer → frame; pipelines well" },
+  { id: "bitmap", label: "Bitmap", hint: "Canvas → ImageBitmap → frame" },
+  { id: "canvas", label: "Canvas", hint: "Canvas → frame directly" },
+];
 
 function waitForEvent(el: HTMLMediaElement, ok: string[], bad: string[], timeoutMs: number, failMsg: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
@@ -98,6 +108,20 @@ export default function App() {
   const exportAbortRef = useRef<AbortController | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const settingsRef = useRef<UserSettings>(DEFAULT_SETTINGS);
+  // Export pipeline options (Advanced): capture path and frames in flight.
+  // Remembered per device so a phone that prefers one path keeps it.
+  const [exportOpts, setExportOpts] = useState<ExportOpts>(() => {
+    try {
+      const raw = localStorage.getItem(EXPORT_OPTS_KEY);
+      if (raw) { const v = JSON.parse(raw) as Partial<ExportOpts>; return { ...DEFAULT_EXPORT_OPTS, ...v }; }
+    } catch { /* storage unavailable */ }
+    return DEFAULT_EXPORT_OPTS;
+  });
+  const exportOptsRef = useRef<ExportOpts>(exportOpts);
+  useEffect(() => {
+    exportOptsRef.current = exportOpts;
+    try { localStorage.setItem(EXPORT_OPTS_KEY, JSON.stringify(exportOpts)); } catch { /* ignore */ }
+  }, [exportOpts]);
   // Bumped per file so async work for a stale file can't paint the new one.
   const fileGenRef = useRef(0);
   const modeRef = useRef<Mode>("idle");
@@ -672,6 +696,9 @@ export default function App() {
       // frame at a time; the readback mode has its own buffer per frame and
       // keeps the pipeline full.
       let renderGate: Promise<unknown> = Promise.resolve();
+      // Capture path from the Advanced options (the backend re-benchmarks on "auto").
+      const be0 = e.backend as unknown as { setCaptureMode?: (m: CaptureChoice) => void };
+      be0.setCaptureMode?.(exportOptsRef.current.capture);
       // The offline export draws into its own target; show the frames going
       // by on the stage as well (a few times a second, at the preview's own
       // size) so the export is watchable rather than a bare counter.
@@ -740,9 +767,8 @@ export default function App() {
         {
           bitrate,
           opfsPrefix: AQUA_FIX_BRAND.opfsPrefix,
-          // Three renders in flight: matches the WebGPU readback ring, so a frame can map while the next two draw.
-          // Debug: ?depth=N overrides (phone A/B of the export pipeline).
-          pipelineDepth: Math.min(6, Math.max(1, Number(new URLSearchParams(location.search).get("depth")) || 3)),
+          // Renders in flight (Advanced "Frames in flight", default 3 = the WebGPU readback ring; ?depth=N overrides).
+          pipelineDepth: Math.min(6, Math.max(1, Number(new URLSearchParams(location.search).get("depth")) || exportOptsRef.current.depth)),
           signal: ctrl.signal,
           onProgress: (p) => {
             setExportProgress(p);
@@ -924,6 +950,17 @@ export default function App() {
                 onChange={(v) => setSettings((s) => ({ ...s, clarity: v }))} disabled={exporting} />
               <Slider label="Veil removal" value={settings.veil} min={0} max={1.2} step={0.01}
                 onChange={(v) => setSettings((s) => ({ ...s, veil: v }))} disabled={exporting} />
+              <p className="hint">Export pipeline (for speed experiments; the status line under the progress bar shows the result).</p>
+              <div className="optswitch" role="radiogroup" aria-label="Export capture">
+                {CAPTURE_CHOICES.map((c) => (
+                  <button key={c.id} type="button" role="radio" aria-checked={exportOpts.capture === c.id} title={c.hint}
+                    className={exportOpts.capture === c.id ? "on" : ""} disabled={exporting}
+                    onClick={() => setExportOpts((o) => ({ ...o, capture: c.id }))}>{c.label}</button>
+                ))}
+              </div>
+              <Slider label="Frames in flight" value={exportOpts.depth} min={1} max={6} step={1}
+                format={(v) => String(v)}
+                onChange={(v) => setExportOpts((o) => ({ ...o, depth: Math.round(v) }))} disabled={exporting} />
             </AdvancedDisclosure>
 
             <div className="actions">
