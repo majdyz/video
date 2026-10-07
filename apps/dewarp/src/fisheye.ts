@@ -168,9 +168,11 @@ export function packUniforms(u: WarpUniforms): Float32Array {
 /**
  * Smallest zoom (most of the view) at which every output pixel still samples
  * inside the source, so no black corners: bisection on the zoom with the
- * output border checked at `steps` points per edge. Clamped to [lo, 1].
+ * output border checked at `steps` points per edge. Searches [lo, hi] in
+ * both directions: straight lines usually allow zooming out a little, the
+ * stereographic projection needs zooming in.
  */
-export function fitZoom(p: Omit<WarpParams, "zoom">, lo = 0.5, steps = 48): number {
+export function fitZoom(p: Omit<WarpParams, "zoom">, lo = 0.5, steps = 48, hi = 2): number {
   const inside = (zoom: number): boolean => {
     const u = warpUniforms({ ...p, zoom });
     const W = p.srcWidth, H = p.srcHeight;
@@ -183,9 +185,9 @@ export function fitZoom(p: Omit<WarpParams, "zoom">, lo = 0.5, steps = 48): numb
     }
     return true;
   };
-  if (!inside(1)) return 1;
-  let a = lo, b = 1;
+  let a = lo, b = hi;
   if (inside(a)) return a;
+  if (!inside(b)) return b;
   for (let k = 0; k < 24; k++) {
     const m = 0.5 * (a + b);
     if (inside(m)) b = m; else a = m;

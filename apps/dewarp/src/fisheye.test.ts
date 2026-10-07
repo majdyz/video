@@ -183,6 +183,18 @@ describe("fitZoom", () => {
     expect(outside).toBe(true);
   });
   it("is 1 when the picture is untouched", () => {
-    expect(fitZoom({ ...p, strength: 0 })).toBe(1);
+    expect(fitZoom({ ...p, strength: 0 })).toBeCloseTo(1, 4);
+  });
+  it("zooms in for natural shapes, whose edges would otherwise sample outside the source", () => {
+    const q = { ...p, projection: "stereographic" as const };
+    const z = fitZoom(q);
+    expect(z).toBeGreaterThan(1);
+    expect(z).toBeLessThan(1.3);
+    const u = warpUniforms({ ...q, zoom: z });
+    for (const [x, y] of [[0, 0], [1920, 0], [0, 1080], [3840, 2160]]) {
+      const [sx, sy] = samplePoint(u, x, y);
+      expect(sx).toBeGreaterThanOrEqual(-1e-6);
+      expect(sy).toBeGreaterThanOrEqual(-1e-6);
+    }
   });
 });

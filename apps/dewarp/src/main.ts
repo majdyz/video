@@ -296,7 +296,7 @@ async function main() {
   for (const s of [strength, zoom, fov, k1]) s.input.addEventListener("input", renderPreview);
   projectionSelect.addEventListener("change", renderPreview);
   profileSelect.addEventListener("change", syncProfile);
-  fitBtn.addEventListener("click", () => {
+  const applyFit = () => {
     const z = fitZoom({
       srcWidth: info?.width ?? 1920,
       srcHeight: info?.height ?? 1080,
@@ -308,7 +308,13 @@ async function main() {
     }, 0.6);
     zoom.input.value = String(Math.ceil(z * 100));
     zoom.input.dispatchEvent(new Event("input"));
-  });
+  };
+  fitBtn.addEventListener("click", applyFit);
+  // A new projection or profile changes where the edges land: refit so the
+  // frame never shows black corners by default (the user can still zoom).
+  projectionSelect.addEventListener("change", applyFit);
+  profileSelect.addEventListener("change", applyFit);
+  strength.input.addEventListener("change", applyFit);
   scrub.input.addEventListener("input", () => {
     window.clearTimeout(scrubTimer);
     scrubTimer = window.setTimeout(() => void loadPreview(scrub.input.valueAsNumber), 250);
@@ -341,6 +347,7 @@ async function main() {
     if (warper && modeReady) warper.prepareOutput(info.width, info.height);
     orientPreview(info.width, info.height, info.rotation);
     syncProfile();
+    applyFit();
     meta.textContent = `${info.width}×${info.height}, ${info.fps.toFixed(2)} fps, ${fmtTime(info.durationS)}, ${info.codec}${info.hasAudio ? ", audio" : ", no audio"}${info.rotation ? `, rotated ${info.rotation}°` : ""}`;
     scrub.input.max = String(Math.max(0.1, info.durationS - 0.1));
     scrub.input.value = String(Math.min(1, info.durationS / 2));
