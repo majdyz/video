@@ -10,6 +10,14 @@ export type FisheyeProfile = {
   lens?: Lens;
   /** Where the calibration comes from. */
   source?: string;
+  /**
+   * Default Strength (0..1). The Osmo's default "Wide" footage already carries
+   * part of the camera's own dewarp, so the full calibrated correction
+   * over-shoots it: on a public Osmo Action 5 Pro clip the roofline was
+   * straightest at ≈0.55 (RMS 0.67 px vs 2.2 px at 1.0). Raw-lens footage
+   * (camera dewarp off) wants 1.0.
+   */
+  strength?: number;
 };
 
 /**
@@ -35,8 +43,12 @@ const GOPRO_HERO11_WIDE_16_9: Lens = {
 
 export const PROFILES: Record<string, FisheyeProfile> = {
   "osmo-action-wide": {
-    label: "Osmo Action 3 / 4 / 5 Pro, Wide 16:9",
-    fovDeg: 148, k1: 0, lens: OSMO_ACTION_WIDE_16_9, source: "Gyroflow lens profile (Action 3, 155° lens)",
+    label: "Osmo Action 3 / 4 / 5 Pro, Wide 16:9 (camera dewarp on, the default)",
+    fovDeg: 148, k1: 0, lens: OSMO_ACTION_WIDE_16_9, source: "Gyroflow lens profile (Action 3, 155° lens), strength fitted on a public Action 5 Pro clip", strength: 0.55,
+  },
+  "osmo-action-wide-raw": {
+    label: "Osmo Action 3 / 4 / 5 Pro, Wide 16:9 (camera dewarp off)",
+    fovDeg: 148, k1: 0, lens: OSMO_ACTION_WIDE_16_9, source: "Gyroflow lens profile (Action 3, 155° lens)", strength: 1,
   },
   "osmo-action-ultra-wide": {
     label: "Osmo Action 3 / 4 / 5 Pro, Ultra Wide 4:3",

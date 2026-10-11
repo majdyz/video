@@ -210,6 +210,8 @@ async function main() {
     fov.input.dispatchEvent(new Event("input"));
     k1.input.value = String(p.k1);
     k1.input.dispatchEvent(new Event("input"));
+    strength.input.value = String(Math.round((p.strength ?? 1) * 100));
+    strength.input.dispatchEvent(new Event("input"));
     const aspectOff = p.lens && info ? Math.abs(info.width / info.height - p.lens.width / p.lens.height) > 0.02 : false;
     profileNote.textContent = p.lens
       ? `${p.source}, ${fovDeg}° diagonal${aspectOff ? " — this clip has a different aspect ratio than the calibration; check the preview edges" : ""}`
