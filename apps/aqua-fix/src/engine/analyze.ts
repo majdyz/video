@@ -8,11 +8,14 @@
 //      (Sea-thru's dark-pixel fit against a range proxy instead of SfM depth)
 //   3. de-scatter + clamped range-adaptive attenuation compensation
 //   4. white balance on the de-scattered image (Shades-of-Gray, p = 6),
-//      with a memory-colour guardrail that backs the red gain off when warm
-//      tones drift into magenta
+//      pulled toward neutralising a sand / white-rubble reference when one
+//      fills enough of the frame, with a memory-colour guardrail that backs
+//      the red gain off when warm tones drift into magenta
+//   (+) do-no-harm evidence (calm.ts): already-balanced / topside scores
 //   5. auto exposure / levels in linear luminance
 //   6. CLAHE tile LUTs on the encoded luminance for local contrast
 
+import { calmEvidence, calmScores } from "./calm.ts";
 import { SRGB_TO_LINEAR_LUT, linearToOklab, linearToSrgb, luminance, oklabHueDeg } from "./color.ts";
 import {
   CLAHE_BINS,
@@ -24,7 +27,7 @@ import {
   type FrameAnalysis,
   type GradeParams,
   type Vec3,
- CONF_BRIGHT, HAZE_AUTO, hazeLiftRatio, hazeWeightOf } from "./params.ts";
+ CONF_BRIGHT, DEFAULT_SETTINGS, HAZE_AUTO, hazeLiftRatio, hazeWeightOf } from "./params.ts";
 
 /** Thumbnail size the engine analyses at (upright, 16:9 box). */
 export const ANALYSIS_W = 256;
@@ -241,8 +244,14 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // Spatial veil scale from water-hued pixels (see VEIL_CELLS_*).
   const hueObj = temp("hueObj", n);
   const hueFarArr = temp("hueFar", n);
+  // Chroma and cosine of the hue angle to the veil, kept for the sand reference.
+  const chroma = temp("chroma", n);
+  const veilCos = temp("veilCos", n);
   for (let i = 0; i < n; i++) {
     const [, pa, pb] = linearToOklab(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
+    const pc = Math.hypot(pa, pb);
+    chroma[i] = pc;
+    veilCos[i] = pc > 1e-6 ? (pa * veilHue[0] + pb * veilHue[1]) / pc : 1;
     hueObj[i] = hueConfidence(pa, pb, veilHue, HUE_LO, HUE_HI, ACHROMA);
     hueFarArr[i] = hueFarness(pa, pb, veilHue, HUE_FAR_LO, HUE_FAR_HI, ACHROMA);
   }
@@ -325,6 +334,56 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   const wbConf = smoothstep(WB_CONF_LO, WB_CONF_HI, sw / n);
   wb[0] = 1 + (wb[0] - 1) * wbConf;
   wb[2] = 1 + (wb[2] - 1) * wbConf;
+  // Neutral reference: a large, bright, smooth patch on the cast side of
+  // neutral (sand, white rubble) is the best white point a reef offers.
+  // Gray-world averages it with seagrass and green reef and stops short
+  // (sand stays beige-green); where such a patch exists the balance moves
+  // toward neutralising it.
+  // The reference colour is de-scattered the way the shader will do it at
+  // the default veil amount: per-pixel range detail (bright sand reads
+  // nearer than the smoothed prior) and DEFAULT_SETTINGS.veil of the fit.
+  // Solving on the analysis' own J (smoothed range, full veil) removed more
+  // green veil than the render does and left the sand green.
+  const sandSub = (i: number, out: Vec3): number => {
+    const zs = Math.min(1.15, Math.max(0, z[i] + Math.min(0.25, Math.max(-0.25, (DEPTH_GUIDE * (d[i] - ds[i])) / zRange))));
+    const lumI = Math.max(1e-5, lum[i]);
+    let lumBc = 0, lumBs = 0;
+    const bs: Vec3 = [0, 0, 0];
+    for (let c = 0; c < 3; c++) {
+      const bf = DEFAULT_SETTINGS.veil * binf[c] * (1 - Math.exp(-(betaB[c] * zs + cB[c])));
+      const wl = c === 0 ? 0.2126 : c === 1 ? 0.7152 : 0.0722;
+      bs[c] = Math.min(1, veilScale[i]) * bf;
+      lumBc += veilScale[i] * bf * wl;
+      lumBs += bs[c] * wl;
+    }
+    // Same blend as the shader: per channel where the signal is healthy,
+    // proportional (hue-preserving) where it is weak.
+    const wSub = smoothstep(SUB_LO, SUB_HI, Math.max(0, (lumI - lumBc) / lumI)) * (1 - hueFarArr[i]);
+    const prop = Math.max(FLOOR_FRAC, 1 - lumBs / lumI);
+    for (let c = 0; c < 3; c++) {
+      const I = lin[i * 3 + c];
+      const per = Math.max(I - bs[c], I * FLOOR_FRAC);
+      out[c] = I * prop + (per - I * prop) * wSub;
+    }
+    return zs;
+  };
+  const sandMask = new Uint8Array(n);
+  const sand = sandReference(sandSub, conf, hueObj, chroma, veilCos, lum, w, h, sandMask);
+  if (sand.weight > 0) {
+    const veilGB = binf[1] / Math.max(1e-4, binf[2]);
+    // Under a green veil blue is genuinely attenuated; the sand may ask for
+    // more blue than the gray-world cap (that cap guards against yellow
+    // algae, which never passes the cast-side test below).
+    const bMax = veilGB > 1 ? Math.min(SAND_B_MAX, veilGB * veilGB) : 1;
+    // The range compensation then multiplies channel c by wb_c^(γ·rc·(z − zMean)):
+    // solve for the balance that neutralises the sand after it.
+    const e = 1 / Math.max(0.5, 1 + ATTN_GAMMA * smoothstep(RANGE_SPREAD_LO, RANGE_SPREAD_HI, zHi - zLo) * (sand.z - zMean));
+    const gR = Math.min(WB_R_MAX, Math.max(WB_R_MIN, Math.pow(sand.mean[1] / Math.max(1e-5, sand.mean[0]), e)));
+    const gB = Math.min(bMax, Math.max(WB_B_MIN, Math.pow((SAND_BLUE_TARGET * sand.mean[1]) / Math.max(1e-5, sand.mean[2]), e)));
+    const mixLog = (a: number, b: number) => Math.exp(Math.log(a) + (Math.log(b) - Math.log(a)) * sand.weight);
+    wb[0] = mixLog(wb[0], gR);
+    wb[2] = mixLog(wb[2], gB);
+  }
   // Memory-colour guardrail.
   for (let step = 0; step < GUARD_STEPS; step++) {
     if (magentaFraction(J, wbWeight, n, wb) <= MAGENTA_MAX_FRACTION) break;
@@ -441,6 +500,9 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   const clahe = buildClahe(enc, w, h);
 
   const depth = buildMaps(z, conf, ds, veilScale, lin, w, h);
+  const haze = clamp01(black / HAZE_BLACK_REF);
+  const evidence = calmEvidence(lin, n);
+  const { calm, calmTone } = calmScores(evidence, haze);
   const params: GradeParams = {
     binf,
     betaB,
@@ -460,7 +522,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     // Haze for the look: how lifted the blacks are after exposure (the
     // references stretch hazy frames down to a real black point and leave
     // clear, contrasty frames alone).
-    haze: clamp01(black / HAZE_BLACK_REF),
+    haze,
     hazeBlack: black,
     hazeFloor,
     achroma: ACHROMA,
@@ -479,8 +541,80 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     knee: KNEE,
     subLo: SUB_LO,
     subHi: SUB_HI,
+    calm,
+    calmTone,
   };
-  return { params, depth, clahe, mean };
+  return { params, depth, clahe, mean, diag: { sandWeight: sand.weight, sandFrac: sand.frac, sandMask, calm: evidence } };
+}
+
+// Neutral reference (sand / white rubble) for the balance, see sandReference.
+const SAND_CONF = 0.5; // object pixels only
+const SAND_LUM = 0.12; // source linear luminance (Oklab L ≈ 0.5) …
+const SAND_C_MAX = 0.13; // … not strongly coloured in the source …
+const SAND_HUE_MAX = (75 * Math.PI) / 180; // … and on the cast side: within this angle of the veil hue (or nearly neutral)
+const SAND_ACHROMA = 0.03;
+const SAND_HUE_COS = Math.cos(SAND_HUE_MAX);
+const SAND_HUE_OBJ = 0.3; // hue-test object confidence (analyze HUE_LO/HUE_HI) at least this
+const SAND_TEXTURE = 0.22; // local luminance std / mean (r = 2) below this: smooth …
+const SAND_TEXTURE_MIN = 0.045; // … but grainy: open water (bright, smooth, off the deep veil hue near the surface) is smoother still
+const SAND_FRAC_LO = 0.05; // candidate share of the frame where the reference starts to count …
+const SAND_FRAC_HI = 0.15; // … and fully
+const SAND_WEIGHT = 0.95; // how far the balance moves toward neutralising it
+const SAND_TOP = 0.7; // the reference is the brightest 30 % of the candidates
+const SAND_BLUE_TARGET = 0.94; // sand is a touch warm: B ends at 0.94·G
+const SAND_B_MAX = 1.8;
+
+/**
+ * Bright, smooth (yet grainy), low-chroma object pixels on the cast side of
+ * neutral; the brightest SAND_TOP share of them is the reference. Returns
+ * its mean de-scattered colour (before the balance), mean range and a
+ * weight from the candidates' share of the frame; `maskOut` (diagnostics)
+ * marks the reference pixels.
+ */
+export function sandReference(
+  descatter: (i: number, out: Vec3) => number, conf: Float32Array, hueObj: Float32Array, chroma: Float32Array, veilCos: Float32Array, lum: Float32Array, w: number, h: number,
+  maskOut: Uint8Array,
+): { weight: number; frac: number; mean: Vec3; z: number } {
+  const n = w * h;
+  const sq = temp("sandSq", n);
+  for (let i = 0; i < n; i++) sq[i] = lum[i] * lum[i];
+  const mL = boxBlur(lum, w, h, 2, temp("sandM", n), temp("blurT", n));
+  const mS = boxBlur(sq, w, h, 2, temp("sandS", n), temp("blurT", n));
+  const cand = temp("sandCand", n);
+  let cnt = 0;
+  for (let i = 0; i < n; i++) {
+    cand[i] = -1;
+    // Not water-hued: sunlit open water is bright and smooth too, but it
+    // shares the veil's hue; sand under a cast sits off it toward neutral.
+    if (conf[i] < SAND_CONF || hueObj[i] < SAND_HUE_OBJ || lum[i] < SAND_LUM) continue;
+    const sd = Math.sqrt(Math.max(0, mS[i] - mL[i] * mL[i]));
+    if (sd > SAND_TEXTURE * mL[i] || sd < SAND_TEXTURE_MIN * mL[i]) continue;
+    const c = chroma[i];
+    if (c > SAND_C_MAX) continue;
+    if (c > SAND_ACHROMA && veilCos[i] < SAND_HUE_COS) continue;
+    cand[i] = lum[i];
+    cnt++;
+  }
+  const frac = cnt / n;
+  const weight = SAND_WEIGHT * smoothstep(SAND_FRAC_LO, SAND_FRAC_HI, frac);
+  const mean: Vec3 = [0, 0, 0];
+  if (weight <= 0) return { weight: 0, frac, mean, z: 0 };
+  // Brightest share of the candidates (shadowed sand carries more veil error).
+  // Quantile among the candidates only (non-candidates sit at −1, below all).
+  const [med] = percentiles(cand, [1 - (1 - SAND_TOP) * frac]);
+  let k = 0;
+  const px: Vec3 = [0, 0, 0];
+  let zSum = 0;
+  for (let i = 0; i < n; i++) {
+    if (cand[i] < med) continue;
+    zSum += descatter(i, px);
+    mean[0] += px[0]; mean[1] += px[1]; mean[2] += px[2];
+    k++;
+  }
+  if (k === 0) return { weight: 0, frac, mean, z: 0 };
+  mean[0] /= k; mean[1] /= k; mean[2] /= k;
+  for (let i = 0; i < n; i++) maskOut[i] = cand[i] >= med ? 1 : 0;
+  return { weight, frac, mean, z: zSum / k };
 }
 
 function lum3(lin: Float32Array, i: number): number {
