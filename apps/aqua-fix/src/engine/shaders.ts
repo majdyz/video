@@ -1,7 +1,7 @@
 // Shader sources for both backends. The grading maths lives in GRADE_GLSL /
 // GRADE_WGSL (see grade-shader.ts); this file holds the plumbing: full-screen
 // triangle, source rotation, and the analysis downscale pass.
-import { GRADE_GLSL, GRADE_WGSL } from "./grade-shader.ts";
+import { DETAIL_GLSL, DETAIL_WGSL, GRADE_GLSL, GRADE_WGSL } from "./grade-shader.ts";
 
 // Upright uv → source uv for a clockwise quarter-turn count r (0..3).
 // r=1: the source must be rotated 90° CW to appear upright, so upright
@@ -35,11 +35,12 @@ in vec2 v_uv;
 out vec4 o_color;
 ${ROTATE_GLSL}
 ${GRADE_GLSL}
+${DETAIL_GLSL}
 void main() {
   int rot = int(p[0].x + 0.5);
   vec2 suv = rotateUV(v_uv, rot);
   vec3 src = texture(u_source, suv).rgb;
-  o_color = vec4(grade(src, v_uv), 1.0);
+  o_color = vec4(gradeD(src, detailBase(suv, src), v_uv), 1.0);
 }`;
 
 // Box-filtered downscale of the (rotated) source for CPU analysis. Taps a
@@ -94,11 +95,12 @@ struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 }
 ${ROTATE_WGSL}
 ${GRADE_WGSL}
+${DETAIL_WGSL}
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let rot = u32(params.p[0].x + 0.5);
   let suv = rotateUV(in.uv, rot);
   let src = textureSampleLevel(u_source, samp, suv, 0.0).rgb;
-  return vec4(grade(src, in.uv), 1.0);
+  return vec4(gradeD(src, detailBase(suv, src), in.uv), 1.0);
 }`;
 
 export const WGSL_DOWNSCALE = `

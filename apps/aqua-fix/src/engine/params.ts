@@ -146,6 +146,38 @@ export function hazeLiftRatio(Y: number, t: number): number {
 }
 
 /**
+ * Artifact guard (compression blocks, sensor noise). Every gain stage of the
+ * grade (haze-lift toe, levels, CLAHE, dehaze, white balance) amplifies
+ * whatever sits in a dark, flat region along with the signal - on a heavily
+ * compressed clip that is 8x8/16x16 macroblock steps and grain, which then
+ * crawl from frame to frame. The grade therefore runs on an edge-preserving
+ * base of the source (a sigma filter: taps whose colour differs from the
+ * pixel by more than the noise floor drop out) and the pixel's own residual
+ * detail is put back as a luminance ratio at unit gain. Edges and texture
+ * above the floor are in the base and get the full grade; detail below the
+ * floor is neither amplified nor removed (chroma noise below it goes).
+ *  sigma: noise floor as RMS sRGB difference per channel (~2.3 codes; 3.3 lost
+ *  some murky-reef texture, 1.7 let macroblock steps through);
+ *  k = 1 / (2*3*sigma^2) per squared RGB distance; eps: luminance offset of
+ *  the detail ratio (tames it in near-black); rMin/rMax clamp it.
+ */
+export const DETAIL_GUARD = { sigma: 0.009, k: 1 / (2 * 3 * 0.009 * 0.009), eps: 0.004, rMin: 0.5, rMax: 2 };
+/**
+ * Guard taps (source texels, half-texel offsets -> each is a 2x2 mean), with
+ * spatial weight. Closed under 90-degree rotation/reflection so the result
+ * does not depend on the source orientation.
+ */
+export const DETAIL_TAPS: readonly (readonly [number, number, number])[] = [
+  [-2.5, -2.5, 1], [2.5, -2.5, 1], [-2.5, 2.5, 1], [2.5, 2.5, 1],
+  [-6.5, -1.5, 0.7], [6.5, 1.5, 0.7], [-1.5, 6.5, 0.7], [1.5, -6.5, 0.7],
+  [-6.5, 1.5, 0.7], [6.5, -1.5, 0.7], [1.5, 6.5, 0.7], [-1.5, -6.5, 0.7],
+];
+/** Guard strength for a frame (uniform p16.z; 0 = off, 1 = noise floor DETAIL_GUARD.sigma). */
+export function detailGuardOf(_p: GradeParams): number {
+  return 1;
+}
+
+/**
  * Vivid objects keep their colour: a pixel that is strongly chromatic in the
  * source and far from the veil hue (an orange fish, a red sea fan) has
  * already escaped the cast, and the grade must not wash it out — its output
@@ -500,7 +532,7 @@ export const CLAHE_BINS = 32;
  *  p11: waterWb.rgb, hueFarHi
  *  p12: confLo, confHi, cosLo, cosHi
  *  p15: knee, subLo, subHi, hueFarLo
- *  p16: hazeWeight, deepHaze, 0, 0
+ *  p16: hazeWeight, deepHaze, detail guard, 0
  *  p17: haze-lift subtraction per channel (hazeLiftT), neutral subtraction (hazeLift·hazeBlack)
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
@@ -540,7 +572,7 @@ export function packUniforms(
     u.set([a / c, b / c, params.waterExposure, params.zMean], 56);
   }
   u.set([params.knee, params.subLo, params.subHi, params.hueFarLo], 60);
-  u.set([hazeWeight(params), deepHaze(params), 0, 0], 64);
+  u.set([hazeWeight(params), deepHaze(params), detailGuardOf(params), 0], 64);
   u.set([...hazeLiftT(params, s.hazeLift), s.hazeLift * params.hazeBlack], 68);
   return u;
 }

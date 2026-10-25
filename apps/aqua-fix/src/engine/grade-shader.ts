@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, HAZE_LIFT, LOOK, PERSON_LUM, SKIN, VIVID } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, LOOK, PERSON_LUM, SKIN, VIVID } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 
 // Look constants shared by both shaders, emitted as literals.
@@ -67,6 +67,10 @@ const float SKIN_MIX = ${SKIN.mix.toFixed(4)};
 const float SKIN_W_LO = ${SKIN.wLo.toFixed(4)};
 const float SKIN_W_HI = ${SKIN.wHi.toFixed(4)};
 const float SKIN_C_MIN = ${SKIN.cMin.toFixed(4)};
+const float DG_K = ${DETAIL_GUARD.k.toFixed(4)};
+const float DG_EPS = ${DETAIL_GUARD.eps.toFixed(5)};
+const float DG_R_MIN = ${DETAIL_GUARD.rMin.toFixed(4)};
+const float DG_R_MAX = ${DETAIL_GUARD.rMax.toFixed(4)};
 `;
 const LOOK_CONSTS_WGSL = LOOK_CONSTS_GLSL.replace(/const float (\w+) = ([^;]+);/g, "const $1: f32 = $2;");
 
@@ -260,7 +264,12 @@ float sampleClahe(vec2 uv, float value, int tilesX, int tilesY, int bins) {
   return mix(top, bot, t.y);
 }
 
-vec3 grade(vec3 src, vec2 uv) {
+// Artifact guard: the source pixel's luminance against its base's (see DETAIL_GUARD; apply.ts detailRatio).
+float detailRatio(vec3 src, vec3 baseLin) {
+  float ys = lum(srgbToLinear(src));
+  return clamp((ys + DG_EPS) / (lum(baseLin) + DG_EPS), DG_R_MIN, DG_R_MAX);
+}
+vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   float split = p[0].y;
   float strength = p[0].z;
   if (uv.x < split || strength <= 0.0) return src;
@@ -281,10 +290,11 @@ vec3 grade(vec3 src, vec2 uv) {
   vec2 veilHue = p[14].xy;
   float waterExposure = p[14].z, zMean = p[14].w;
 
-  vec3 lin = srgbToLinear(src);
+  // The grade runs on the artifact guard's base (see DETAIL_GUARD).
+  vec3 lin = srgbToLinear(base);
   // Range proxy: joint-bilateral fields where the map still matches the
   // pixel, the per-pixel prior where it doesn't.
-  float dPix = mu.x + mu.y * max(src.g, src.b) + mu.z * src.r;
+  float dPix = mu.x + mu.y * max(base.g, base.b) + mu.z * base.r;
   float k, personMap;
   vec4 fld = sampleFields(uv, lin, k, personMap);
   float person = clamp(personMap, 0.0, 1.0);
@@ -372,10 +382,11 @@ vec3 grade(vec3 src, vec2 uv) {
   if (C > 1e-6 && C * scale < cMin) scale = cMin / C;
   scale *= saturation;
   vec3 o1 = oklabToLinear(capChroma(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y), cSrc));
-  vec3 o2 = fitToGamut(o1);
+  vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
-}`;
+}
+vec3 grade(vec3 src, vec2 uv) { return gradeD(src, src, uv); }`;
 
 export const GRADE_WGSL = `${LOOK_CONSTS_WGSL}
 const JBU_SIGMA: f32 = 0.12;
@@ -557,7 +568,12 @@ fn sampleClahe(uv: vec2<f32>, value: f32, tilesX: i32, tilesY: i32, bins: i32) -
   return mix(top, bot, t.y);
 }
 
-fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+fn detailRatio(src: vec3<f32>, baseLin: vec3<f32>) -> f32 {
+  let ys = lum(srgbToLinear(src));
+  return clamp((ys + DG_EPS) / (lum(baseLin) + DG_EPS), DG_R_MIN, DG_R_MAX);
+}
+fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> { return gradeD(src, src, uv); }
+fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let p = params.p;
   let split = p[0].y;
   let strength = p[0].z;
@@ -579,8 +595,8 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let veilHue = p[14].xy;
   let waterExposure = p[14].z; let zMean = p[14].w;
 
-  let lin = srgbToLinear(src);
-  let dPix = mu.x + mu.y * max(src.g, src.b) + mu.z * src.r;
+  let lin = srgbToLinear(base);
+  let dPix = mu.x + mu.y * max(base.g, base.b) + mu.z * base.r;
   let sf = sampleFields(uv, lin);
   let fld = sf[0];
   let k = sf[1].w;
@@ -652,7 +668,47 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   if (C > 1e-6 && C * scale < cMin) { scale = cMin / C; }
   scale *= saturation;
   let o1 = oklabToLinear(capChroma(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y), cSrc));
-  let o2 = fitToGamut(o1);
+  let o2 = fitToGamut(o1 * detailRatio(src, lin));
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);
+}`;
+
+// Artifact guard base (see DETAIL_GUARD in params.ts; mirrors apply.ts
+// detailBase tap for tap): needs the source texture, so it lives with the
+// fragment plumbing in shaders.ts, which includes these after the bindings.
+const tapsGlsl = DETAIL_TAPS.map(([x, y, w]) => `  dgTap(suv + vec2(${x.toFixed(1)}, ${y.toFixed(1)}) * tx, src, ${w.toFixed(4)}, kk, acc, sw);`).join("\n");
+const tapsWgsl = DETAIL_TAPS.map(([x, y, w]) => `  acc += dgTap(suv + vec2<f32>(${x.toFixed(1)}, ${y.toFixed(1)}) * tx, src, ${w.toFixed(4)}, kk);`).join("\n");
+export const DETAIL_GLSL = `
+void dgTap(vec2 uv, vec3 src, float ws, float kk, inout vec3 acc, inout float sw) {
+  vec3 c = textureLod(u_source, uv, 0.0).rgb;
+  vec3 d = c - src;
+  float w = ws * exp(-dot(d, d) * kk);
+  acc += w * c;
+  sw += w;
+}
+vec3 detailBase(vec2 suv, vec3 src) {
+  float guard = p[16].z;
+  if (guard <= 0.0) return src;
+  vec2 tx = 1.0 / vec2(textureSize(u_source, 0));
+  float kk = DG_K / (guard * guard);
+  vec3 acc = src;
+  float sw = 1.0;
+${tapsGlsl}
+  return acc / sw;
+}`;
+export const DETAIL_WGSL = `
+fn dgTap(uv: vec2<f32>, src: vec3<f32>, ws: f32, kk: f32) -> vec4<f32> {
+  let c = textureSampleLevel(u_source, samp, uv, 0.0).rgb;
+  let d = c - src;
+  let w = ws * exp(-dot(d, d) * kk);
+  return vec4<f32>(c * w, w);
+}
+fn detailBase(suv: vec2<f32>, src: vec3<f32>) -> vec3<f32> {
+  let guard = params.p[16].z;
+  if (guard <= 0.0) { return src; }
+  let tx = 1.0 / vec2<f32>(textureDimensions(u_source));
+  let kk = DG_K / (guard * guard);
+  var acc = vec4<f32>(src, 1.0);
+${tapsWgsl}
+  return acc.xyz / acc.w;
 }`;

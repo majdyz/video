@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 
@@ -89,13 +89,20 @@ function sampleClahe(c: ClaheLuts, u: number, v: number, value: number): number 
   return top * (1 - ty) + bot * ty;
 }
 
-/** Grades one sRGB pixel (0..1) at upright uv. Returns sRGB 0..1. */
-export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number, u: number, v: number): [number, number, number] {
+/**
+ * Grades one sRGB pixel (0..1) at upright uv. Returns sRGB 0..1.
+ * `base` (optional) is the artifact guard's edge-preserving base of the
+ * source at this pixel (see detailBase): the grade runs on the base and the
+ * pixel's own sub-noise detail is put back at unit gain, so compression
+ * blocks and noise are never amplified. Without it the pixel is its own base.
+ */
+export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number, u: number, v: number, base?: readonly [number, number, number]): [number, number, number] {
   const { params: p, settings: s } = ctx;
-  const r0 = srgbToLinear(sr), g0 = srgbToLinear(sg), b0 = srgbToLinear(sb);
+  const er = base ? base[0] : sr, eg = base ? base[1] : sg, eb = base ? base[2] : sb;
+  const r0 = srgbToLinear(er), g0 = srgbToLinear(eg), b0 = srgbToLinear(eb);
 
   // Range proxy: coarse map plus guided per-pixel detail from the prior.
-  const dPix = ULAP.mu0 + ULAP.mu1 * Math.max(sg, sb) + ULAP.mu2 * sr;
+  const dPix = ULAP.mu0 + ULAP.mu1 * Math.max(eg, eb) + ULAP.mu2 * er;
   const [zc, confMap, dc, veilMap, k, personMap] = sampleFields(ctx.depth, u, v, r0, g0, b0);
   const person = clamp(personMap, 0, 1);
   const zRange = Math.max(0.02, p.zHi - p.zLo);
@@ -235,7 +242,9 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const [r1, g1, b1] = oklabToLinear(looked[0], capped[0], capped[1]);
   void C;
 
-  const [r2, g2, b2] = fitToGamut(r1, g1, b1);
+  // Artifact guard: the pixel's detail against its base, at unit gain.
+  const dr = base ? detailRatio(sr, sg, sb, r0, g0, b0) : 1;
+  const [r2, g2, b2] = fitToGamut(r1 * dr, g1 * dr, b1 * dr);
   const rs = linearToSrgb(r2), gs = linearToSrgb(g2), bs = linearToSrgb(b2);
   if (ctx.trace) {
     const f3 = (v: number[]) => v.map((x) => +x.toFixed(3));
@@ -329,15 +338,52 @@ function hueConf(a: number, b: number, p: GradeParams): number {
 }
 
 
+/** Luminance ratio of the source pixel (sRGB) to its base (linear), clamped (see DETAIL_GUARD). */
+export function detailRatio(sr: number, sg: number, sb: number, br: number, bg: number, bb: number): number {
+  const ys = luminance(srgbToLinear(sr), srgbToLinear(sg), srgbToLinear(sb));
+  const yb = luminance(br, bg, bb);
+  return clamp((ys + DETAIL_GUARD.eps) / (yb + DETAIL_GUARD.eps), DETAIL_GUARD.rMin, DETAIL_GUARD.rMax);
+}
+
+/**
+ * Artifact guard base: an edge-preserving (sigma-filter) average of the
+ * source around pixel (x, y), mirroring the shaders' detailBase tap for tap.
+ * Each tap is a bilinear sample at a half-texel offset, i.e. the mean of a
+ * 2x2 texel block (exact in 8-bit filtering); taps whose colour differs from
+ * the pixel by more than the noise floor drop out, so real edges stay sharp
+ * while block steps and grain below the floor are averaged away. `guard` = 0
+ * returns the pixel itself.
+ */
+export function detailBase(rgba: Uint8ClampedArray, w: number, h: number, x: number, y: number, guard: number): [number, number, number] {
+  const i0 = (y * w + x) * 4;
+  const sr = rgba[i0] / 255, sg = rgba[i0 + 1] / 255, sb = rgba[i0 + 2] / 255;
+  if (guard <= 0) return [sr, sg, sb];
+  const kk = DETAIL_GUARD.k / (guard * guard);
+  let ar = sr, ag = sg, ab = sb, sw = 1;
+  const cx = (q: number) => (q < 0 ? 0 : q >= w ? w - 1 : q), cy = (q: number) => (q < 0 ? 0 : q >= h ? h - 1 : q);
+  for (const [ox, oy, ws] of DETAIL_TAPS) {
+    // half-texel offsets: texels floor(x + o) and floor(x + o) + 1, weight 1/2 each
+    const fx = Math.floor(x + ox), fy = Math.floor(y + oy);
+    const xa = cx(fx), xb = cx(fx + 1), ya = cy(fy), yb = cy(fy + 1);
+    const a = (ya * w + xa) * 4, b = (ya * w + xb) * 4, c = (yb * w + xa) * 4, d = (yb * w + xb) * 4;
+    const tr = (rgba[a] + rgba[b] + rgba[c] + rgba[d]) / 1020, tg = (rgba[a + 1] + rgba[b + 1] + rgba[c + 1] + rgba[d + 1]) / 1020, tb = (rgba[a + 2] + rgba[b + 2] + rgba[c + 2] + rgba[d + 2]) / 1020;
+    const dr = tr - sr, dg = tg - sg, db = tb - sb;
+    const wt = ws * Math.exp(-(dr * dr + dg * dg + db * db) * kk);
+    ar += wt * tr; ag += wt * tg; ab += wt * tb; sw += wt;
+  }
+  return [ar / sw, ag / sw, ab / sw];
+}
+
 /** Grades a whole RGBA8 image (upright). */
 export function applyGrade(ctxIn: ApplyContext, rgba: Uint8ClampedArray, w: number, h: number): Uint8ClampedArray {
   const ctx = resolveContext(ctxIn);
+  const guard = detailGuardOf(ctx.params);
   const out = new Uint8ClampedArray(rgba.length);
   for (let y = 0; y < h; y++) {
     const v = (y + 0.5) / h;
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
-      const [r, g, b] = gradePixel(ctx, rgba[i] / 255, rgba[i + 1] / 255, rgba[i + 2] / 255, (x + 0.5) / w, v);
+      const [r, g, b] = gradePixel(ctx, rgba[i] / 255, rgba[i + 1] / 255, rgba[i + 2] / 255, (x + 0.5) / w, v, guard > 0 ? detailBase(rgba, w, h, x, y, guard) : undefined);
       out[i] = r * 255 + 0.5;
       out[i + 1] = g * 255 + 0.5;
       out[i + 2] = b * 255 + 0.5;
