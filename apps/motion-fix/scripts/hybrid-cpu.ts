@@ -179,7 +179,7 @@ const tg = new Float32Array(track.w * track.h);
 function residualPass(withBob: boolean, cache: string | undefined): ResidualMotion {
   if (cache && existsSync(cache)) {
     const j = JSON.parse(readFileSync(cache, "utf8"));
-    return { ...j, times: Float64Array.from(j.times), air: Float32Array.from(j.air), water: Float32Array.from(j.water), points: Uint16Array.from(j.points) };
+    return { ...j, times: Float64Array.from(j.times), air: Float32Array.from(j.air), water: Float32Array.from(j.water), points: Uint16Array.from(j.points), ...(j.airHalves ? { airHalves: Float32Array.from(Object.values(j.airHalves) as number[]), waterHalves: Float32Array.from(Object.values(j.waterHalves) as number[]) } : {}) };
   }
   const rc = new ResidualCollector(motion, track.w, track.h, WATER_INDEX);
   const t0 = performance.now();
@@ -190,7 +190,7 @@ function residualPass(withBob: boolean, cache: string | undefined): ResidualMoti
   }
   const r = rc.finish();
   console.log(`  residual tracking ${track.w}x${track.h}: ${r.trackMsPerFrame.toFixed(1)} ms/frame, ${((performance.now() - t0) / 1000).toFixed(1)} s`);
-  if (cache) writeFileSync(cache, JSON.stringify({ ...r, times: [...r.times], air: [...r.air], water: [...r.water], points: [...r.points] }));
+  if (cache) writeFileSync(cache, JSON.stringify({ ...r, times: [...r.times], air: [...r.air], water: [...r.water], points: [...r.points], airHalves: r.airHalves ? [...r.airHalves] : undefined, waterHalves: r.waterHalves ? [...r.waterHalves] : undefined }));
   return r;
 }
 const cache = process.env.CACHE;

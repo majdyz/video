@@ -327,8 +327,9 @@ export type GateOptions = {
   /**
    * Turns: frames whose rotation moves the picture by more than this
    * (analysis px per frame) are not measured. Any lens, sync or rolling-
-   * shutter error scales with the rotation and would read as translation
-   * (Avata turn: +20 px of false drift).
+   * shutter error scales with the rotation and would read as translation.
+   * 8 px at 480 px ≈ a 120°/s whip pan at 60 fps on a GoPro Wide; ordinary
+   * handheld rotation (HERO10 samples, 80-100°/s mean) stays measured.
    */
   maxRotFlow: number;
   /**
@@ -341,7 +342,7 @@ export type GateOptions = {
   bridgeSec: number;
 };
 
-export const DEFAULT_GATE: GateOptions = { minPoints: 20, minInlierFrac: 0.55, minCoverage: 5 / 16, maxSpeedPx: 160, maxRms: 1.5, maxZeroSupport: 0.3, maxRotFlow: 3, bridgeSec: 1 };
+export const DEFAULT_GATE: GateOptions = { minPoints: 20, minInlierFrac: 0.55, minCoverage: 5 / 16, maxSpeedPx: 160, maxRms: 1.5, maxZeroSupport: 0.3, maxRotFlow: 8, bridgeSec: 1 };
 
 export type GatedResidual = {
   /** Per plan frame: residual step (analysis px at the centre), 0 where rejected. */

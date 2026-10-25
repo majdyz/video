@@ -33,6 +33,8 @@ import { DEFAULT_GATE, gateResidual, jitter2, NO_HALF, smoothPath1D, TRANSLATION
 /** Hybrid kicks in only above these (analysis px): heave/sway RMS, and translation jitter. */
 export const HYBRID_MIN_WANDER = 0.3;
 export const HYBRID_MIN_JITTER = 0.15;
+/** Largest ratio between how far the upper and the lower half of the picture move (deeper scenes stay gyro-only). */
+export const HYBRID_MAX_DEPTH_CONTRAST = 1.6;
 
 export type GyroParams = {
   /** 0 = follow the camera, 1 = heaviest smoothing. */
@@ -674,6 +676,21 @@ function applyHybrid(geo: Geometry, virt: Float64Array, times: Float64Array, fps
     // the far half. Each half must come out no worse than gyro-only.
     const halves = medium === "water" ? residual.waterHalves : residual.airHalves;
     if (halves) {
+      // Depth contrast: how far each half travels. A shift that steadies a
+      // half moving 1.6x as fast as the other one moves that other one.
+      let lt = 0;
+      let lb = 0;
+      let both = 0;
+      for (let i = 1; i < n; i++) {
+        const j = g.index[i];
+        if (j < 0 || !g.accepted[i] || !(halves[4 * j] < NO_HALF) || !(halves[4 * j + 2] < NO_HALF)) continue;
+        lt += Math.hypot(halves[4 * j], halves[4 * j + 1]);
+        lb += Math.hypot(halves[4 * j + 2], halves[4 * j + 3]);
+        both++;
+      }
+      if (both > 0.3 * n && Math.max(lt, lb) > HYBRID_MAX_DEPTH_CONTRAST * Math.min(lt, lb)) {
+        return { ...base, jitterBefore, jitterAfter, wanderBefore, wanderAfter, applied: false, reason: `scene too deep: the ${lb > lt ? "lower" : "upper"} part moves ${(Math.max(lt, lb) / Math.max(1e-9, Math.min(lt, lb))).toFixed(1)}x as much as the other` };
+      }
       for (const off of [0, 2]) {
         const hx = new Float64Array(n);
         const hy = new Float64Array(n);

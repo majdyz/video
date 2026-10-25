@@ -229,16 +229,16 @@ const still = (): Vec3 => [0, 0, 0];
   console.log(`deep scene: ${p5.hybrid?.applied ? "applied" : "not applied"} (${p5.hybrid?.reason})`);
   assert.equal(p5.hybrid?.applied, false, "deep scene: not applied");
   assert.match(p5.hybrid!.reason, /deep/);
-  // A sudden 120°/s turn with a lens profile 4 % off: during the turn the
+  // A sudden 200°/s whip pan with a lens profile 4 % off: during the turn the
   // model error reads as translation; those frames are not measured.
-  const turn = (t: number): Vec3 => [shake(t)[0], (t < 2 ? 0 : t < 2.6 ? (t - 2) * 120 * deg : 72 * deg) + shake(t)[1] * 0.1, shake(t)[2]];
+  const turn = (t: number): Vec3 => [shake(t)[0], (t < 2 ? 0 : t < 2.6 ? (t - 2) * 200 * deg : 120 * deg) + shake(t)[1] * 0.1, shake(t)[2]];
   const turning: Scene = { rot: turn, pos: bob, depth: 2 };
   const m6 = motionOf(n, fps, turning, hero);
   const off: LensModel = { ...hero, fx: hero.fx * 1.04, fy: hero.fy * 1.04 };
   const r6 = residualOf({ ...m6, lens: off }, turning, hero);
   const times6 = frameTimesOf(m6);
   const p6 = computeGyroPlan(m6, params, r6);
-  const g6 = gateResidual(r6, "air", times6, fps, DEFAULT_GATE, Float64Array.from(times6, (t) => (t >= 2 && t < 2.6 ? (120 * deg) / fps : 0.2 / fps) * r6.unitPx));
+  const g6 = gateResidual(r6, "air", times6, fps, DEFAULT_GATE, Float64Array.from(times6, (t) => (t >= 2 && t < 2.6 ? (200 * deg) / fps : 0.2 / fps) * r6.unitPx));
   assert.ok(g6.rejected.turn >= 30, `turn frames not measured (${g6.rejected.turn})`);
   assert.ok(p6.hybrid!.rejected.turn >= 30, `the plan's own turn check (${p6.hybrid!.rejected.turn})`);
   console.log(`sudden turn: ${p6.hybrid!.rejected.turn} frames skipped, ${p6.hybrid!.applied ? "applied" : "not applied"} (${p6.hybrid!.reason}), wander ${p6.hybrid!.wanderBefore.toFixed(2)} -> ${p6.hybrid!.wanderAfter.toFixed(2)} px`);
