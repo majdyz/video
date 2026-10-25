@@ -15,6 +15,7 @@
 //   5. auto exposure / levels in linear luminance
 //   6. CLAHE tile LUTs on the encoded luminance for local contrast
 
+import { BACKDROP, backdropObjectness, growSubjects } from "./backdrop.ts";
 import { calmEvidence, calmScores } from "./calm.ts";
 import { SRGB_TO_LINEAR_LUT, linearToOklab, linearToSrgb, luminance, oklabHueDeg } from "./color.ts";
 import {
@@ -70,6 +71,9 @@ const ACHROMA = 0.025;
 // fit overstates its veil — per-channel subtraction turns yellow orange).
 const HUE_FAR_LO = (60 * Math.PI) / 180;
 const HUE_FAR_HI = (110 * Math.PI) / 180;
+// Backdrop fit votes: pixels whose hue is this far from the veil's cannot be water.
+const BACKDROP_HUE_LO = (30 * Math.PI) / 180;
+const BACKDROP_HUE_HI = (60 * Math.PI) / 180;
 // The water path keeps most of its original brightness.
 const WATER_EXPOSURE = 0.8;
 // How much of the white balance the water path gets (exponent on the gains).
@@ -247,8 +251,11 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // Chroma and cosine of the hue angle to the veil, kept for the sand reference.
   const chroma = temp("chroma", n);
   const veilCos = temp("veilCos", n);
+  const okL = temp("okL", n), okA = temp("okA", n), okB = temp("okB", n), bdWater = temp("bdWater", n);
   for (let i = 0; i < n; i++) {
-    const [, pa, pb] = linearToOklab(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
+    const [pl, pa, pb] = linearToOklab(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
+    okL[i] = pl; okA[i] = pa; okB[i] = pb;
+    bdWater[i] = 1 - hueFarness(pa, pb, veilHue, BACKDROP_HUE_LO, BACKDROP_HUE_HI, ACHROMA);
     const pc = Math.hypot(pa, pb);
     chroma[i] = pc;
     veilCos[i] = pc > 1e-6 ? (pa * veilHue[0] + pb * veilHue[1]) / pc : 1;
@@ -264,7 +271,28 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     bfArr[i * 3 + 1] = binf[1] * (1 - Math.exp(-(betaB[1] * zi + cB[1])));
     bfArr[i * 3 + 2] = binf[2] * (1 - Math.exp(-(betaB[2] * zi + cB[2])));
   }
-  const veilScale = veilScaleMap(lin, hueObj, bfArr, w, h, temp("veilScale", n));
+  // Subjects that share the water's hue but depart from the smooth water
+  // backdrop (see backdrop.ts) are objects too: they neither vote for the
+  // local veil scale nor take the water path.
+  const backdrop = temp("backdrop", n);
+  const backdropFit = new Float32Array(18);
+  const bdDev = temp("bdDev", n);
+  // Clear blue open water only (veil B/G well above 1): in green or cyan murk the
+  // hue test and the existing grade already separate the reef, and the
+  // open-water treatment cost them local contrast.
+  const openBlue = smoothstep(BACKDROP.blueLo, BACKDROP.blueHi, veilColor[2] / Math.max(1e-4, veilColor[1]));
+  const backdropValidity = openBlue > 0 ? backdropObjectness(okL, okA, okB, bdWater, w, h, backdrop, backdropFit, bdDev) * openBlue : 0;
+  if (openBlue <= 0) backdrop.fill(0, 0, n);
+  else if (openBlue < 1) for (let i = 0; i < n; i++) backdrop[i] *= openBlue;
+  const objHue = temp("objHue", n);
+  // Where the backdrop holds it alone tells subject from water: the hue test
+  // calls the deeper blue near the bottom of an open-water frame an object
+  // (23° off the brightest water), and the object path then paints it as a
+  // dark mottled band that moves with the camera.
+  // Only pixels the surface predicts as water lose the hue verdict (a dark reef
+  // in green murk departs from the surface and keeps it).
+  for (let i = 0; i < n; i++) objHue[i] = Math.max(hueObj[i] * (1 - backdropValidity * (1 - bdDev[i])), backdrop[i]);
+  const veilScale = veilScaleMap(lin, objHue, bfArr, w, h, temp("veilScale", n));
   const J = temp("J", n * 3);
   const conf = temp("conf", n);
   const wbWeight = temp("wbWeight", n);
@@ -294,8 +322,11 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     }
     const confSignal = smoothstep(CONF_LO, CONF_HI, sig);
     // Far brighter than the water at its range → object, whatever the hue.
-    const confBright = smoothstep(CONF_BRIGHT.lo, CONF_BRIGHT.hi, sig);
-    conf[i] = Math.min(confSignal, Math.max(hueObj[i], confBright));
+    // Where the water backdrop holds, brightness alone is not enough: a sun
+    // glow under the surface is brighter water without an outline, and only
+    // what the backdrop calls a subject keeps the brightness rule.
+    const confBright = smoothstep(CONF_BRIGHT.lo, CONF_BRIGHT.hi, sig) * (1 - backdropValidity + backdrop[i]);
+    conf[i] = Math.min(confSignal, Math.max(objHue[i], confBright));
 
     // The balance vote uses the signal test alone: in a blue scene nearly
     // every object shares the water's hue and the hue test would starve the
@@ -406,6 +437,11 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // turn grey-white.
   const waterGain = (g: number) => Math.min(WATER_WB_MAX, Math.max(1 / WATER_WB_MAX, Math.pow(g, WATER_WB_POWER)));
   const waterWb: Vec3 = [waterGain(wb[0]), 1, waterGain(wb[2])];
+  // Open blue water keeps its blue: a gray-world blue cut on the water path
+  // (asked for by a yellow subject) turns clean blue water teal. Only where
+  // the backdrop model says the frame is open water, and only under a blue
+  // (not cyan or green) veil.
+  if (waterWb[2] < 1) waterWb[2] += (1 - waterWb[2]) * backdropValidity * smoothstep(1, 1.25, binf[2] / Math.max(1e-4, binf[1]));
   // Final per-pixel signal before exposure: mix(water, physics, conf). The
   // exposure is solved below on the physics path; the water path takes
   // exposure^WATER_EXPOSURE, which the shader applies per pixel.
@@ -499,7 +535,23 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   void mixY;
   const clahe = buildClahe(enc, w, h);
 
-  const depth = buildMaps(z, conf, ds, veilScale, lin, w, h);
+  // Open water: the stored object map is dilated (the subject moves before
+  // the next analysis lands and the map eases); the shaders' per-pixel
+  // backdrop test (backdropSubject) cuts it back to the subject itself.
+  // In open water the stored map is the whole-animal subject map (growSubjects:
+  // back, fins and tail join the bright flank; small fish drop out and keep
+  // the normal colour) — the shaders' colour path still multiplies by the
+  // per-pixel signal test, so a dark back stays on the water path's colour
+  // and only takes the subject tone.
+  let confMap = conf;
+  let subjectTone = 0;
+  if (backdropValidity > 0) {
+    const subj = temp("subjMap", n);
+    subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit);
+    confMap = temp("confMap", n);
+    for (let i = 0; i < n; i++) confMap[i] = conf[i] + (subj[i] - conf[i]) * backdropValidity;
+  }
+  const depth = buildMaps(z, confMap, ds, veilScale, lin, w, h);
   const haze = clamp01(black / HAZE_BLACK_REF);
   const evidence = calmEvidence(lin, n);
   const { calm, calmTone } = calmScores(evidence, haze);
@@ -543,8 +595,11 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     subHi: SUB_HI,
     calm,
     calmTone,
+    backdrop: backdropValidity,
+    backdropFit: Array.from(backdropFit),
+    subjectTone,
   };
-  return { params, depth, clahe, mean, diag: { sandWeight: sand.weight, sandFrac: sand.frac, sandMask, calm: evidence } };
+  return { params, depth, clahe, mean, diag: { sandWeight: sand.weight, sandFrac: sand.frac, sandMask, calm: evidence, backdrop: backdropValidity } };
 }
 
 // Neutral reference (sand / white rubble) for the balance, see sandReference.

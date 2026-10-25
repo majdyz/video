@@ -172,6 +172,35 @@ export const DETAIL_TAPS: readonly (readonly [number, number, number])[] = [
   [-6.5, -1.5, 0.7], [6.5, 1.5, 0.7], [-1.5, 6.5, 0.7], [1.5, -6.5, 0.7],
   [-6.5, 1.5, 0.7], [6.5, -1.5, 0.7], [1.5, 6.5, 0.7], [-1.5, -6.5, 0.7],
 ];
+/**
+ * Object neutral tone. Under water the red channel of a far object is gone,
+ * and white balance cannot restore what is not there: after the veil is
+ * subtracted a grey shark or a white belly comes out green-cyan (the colour
+ * of "grey minus red"), which reads as a colour the subject never had. Object
+ * pixels whose corrected hue lies on that red-deficit side (within bandIn of
+ * the cyan axis, fading out by bandOut; the band opens to every hue when
+ * the source red is fully gone, since a red gain over nothing turns a belly
+ * orange just as its absence leaves it cyan) and
+ * whose source red is negligible next to green/blue (r/max(g, b) below rLo,
+ * fading by rHi) and that are light (Oklab L from lLo to lHi: a dark far
+ * reef keeps the water's tint) and whose source hue is within farLo..farHi
+ * of the veil's (a yellow fish already escaped the cast) lose up to `mix` of their chroma, so the subject reads as a
+ * natural neutral against the water instead of as more water. Water-path
+ * pixels are never touched (weighted by object confidence). In the same
+ * frames object mid-tones gain up to `lift` Oklab lightness (fading out
+ * toward black and white), so the subject steps forward from the water.
+ */
+export const OBJECT_NEUTRAL = { hue: (195 * Math.PI) / 180, bandIn: (45 * Math.PI) / 180, bandOut: (85 * Math.PI) / 180, rLo: 0.08, rHi: 0.3, mix: 0.92, silver: 0.022, lLo: 0.12, lHi: 0.32, farLo: (30 * Math.PI) / 180, farHi: (60 * Math.PI) / 180, lift: 0.05, confLo: 0.05, confHi: 0.5, warmHue: (80 * Math.PI) / 180, warmLo: -0.2, warmHi: 0.4 };
+/**
+ * Object-neutral strength for a frame (uniform p16.w): only frames that are
+ * mostly open water with subjects in them (backdrop validity) — on a reef
+ * that fills the frame, green coral is a real colour, not a red deficit.
+ */
+export function objectNeutralOf(p: GradeParams): number {
+  // Not on frames without a cast at all (topside: a smooth sky is a backdrop too).
+  return Math.min(1, Math.max(0, p.backdrop ?? 0)) * (1 - Math.min(1, Math.max(0, p.calmTone ?? 0)));
+}
+
 /** Guard strength for a frame (uniform p16.z; 0 = off, 1 = noise floor DETAIL_GUARD.sigma). */
 export function detailGuardOf(_p: GradeParams): number {
   return 1;
@@ -421,6 +450,16 @@ export type GradeParams = {
    */
   calm?: number;
   calmTone?: number;
+  /**
+   * Validity of the smooth-water backdrop model (backdrop.ts), 0..1: the
+   * frame is mostly open water with subjects in it. Drives the object
+   * neutral tone (see OBJECT_NEUTRAL). Optional for older packets.
+   */
+  backdrop?: number;
+  /** The backdrop surface (18 coefficients: Oklab L, a, b over upright uv; backdrop.ts). Per frame, never clip-locked. */
+  backdropFit?: number[];
+  /** 1 when the frame holds an open-water animal with a lit side (backdrop.ts growSubjects); clip-locked, it gates the subject tone. */
+  subjectTone?: number;
 };
 
 export const IDENTITY_PARAMS: GradeParams = {
@@ -508,7 +547,7 @@ export type FrameAnalysis = {
   /** Mean sRGB of the thumbnail, for scene-cut detection. */
   mean: Vec3;
   /** Diagnostics (harness only; the worker does not post it). */
-  diag?: { sandWeight: number; sandFrac: number; sandMask: Uint8Array; calm: CalmEvidence };
+  diag?: { sandWeight: number; sandFrac: number; sandMask: Uint8Array; calm: CalmEvidence; backdrop?: number };
 };
 
 export const CLAHE_TILES_X = 8;
@@ -532,8 +571,9 @@ export const CLAHE_BINS = 32;
  *  p11: waterWb.rgb, hueFarHi
  *  p12: confLo, confHi, cosLo, cosHi
  *  p15: knee, subLo, subHi, hueFarLo
- *  p16: hazeWeight, deepHaze, detail guard, 0
+ *  p16: hazeWeight, deepHaze, detail guard, object-neutral strength
  *  p17: haze-lift subtraction per channel (hazeLiftT), neutral subtraction (hazeLift·hazeBlack)
+ *  p18–p22: backdrop surface (18 coefficients, L / a / b; backdrop.ts), p22.z subject tone, 1 spare
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -572,8 +612,10 @@ export function packUniforms(
     u.set([a / c, b / c, params.waterExposure, params.zMean], 56);
   }
   u.set([params.knee, params.subLo, params.subHi, params.hueFarLo], 60);
-  u.set([hazeWeight(params), deepHaze(params), detailGuardOf(params), 0], 64);
+  u.set([hazeWeight(params), deepHaze(params), detailGuardOf(params), objectNeutralOf(params)], 64);
   u.set([...hazeLiftT(params, s.hazeLift), s.hazeLift * params.hazeBlack], 68);
+  if (params.backdropFit && params.backdropFit.length === 18) u.set(params.backdropFit, 72);
+  u[90] = Math.min(1, Math.max(0, params.subjectTone ?? 0));
   return u;
 }
 
@@ -661,5 +703,8 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     subHi: m(a.subHi, b.subHi),
     calm: m(a.calm ?? 0, b.calm ?? 0),
     calmTone: m(a.calmTone ?? 0, b.calmTone ?? 0),
+    backdrop: m(a.backdrop ?? 0, b.backdrop ?? 0),
+    subjectTone: m(a.subjectTone ?? 0, b.subjectTone ?? 0),
+    backdropFit: a.backdropFit && b.backdropFit && a.backdropFit.length === b.backdropFit.length ? a.backdropFit.map((x, i) => m(x, b.backdropFit![i])) : b.backdropFit,
   };
 }

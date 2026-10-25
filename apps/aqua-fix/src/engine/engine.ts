@@ -41,6 +41,10 @@ const TAU_PARAMS_S = 0.6;
 const TAU_MAPS_S = 0.4;
 // Local-contrast tiles describe tone, not geometry: they can lag longer.
 const TAU_CLAHE_S = 0.7;
+// In open water the object channel is the whole-animal subject map: it must
+// follow a swimming animal (a lagging map leaves a toned ghost where it was
+// and untoned parts where it went); the shaders trim it per pixel.
+const TAU_CONF_OPEN_S = 0.05;
 const SCENE_CUT_MEAN_DIFF = 0.16;
 // Person segmentation runs on every Nth analysis (it costs ~25–40 ms of
 // worker CPU on the same thumbnail the analysis uses).
@@ -235,7 +239,9 @@ export class GradeEngine {
   private applyLock(p: GradeParams): GradeParams {
     const l = this.lockedAt(this.lastTickSec);
     if (!l) return p;
-    return this.lockRange ? { ...l } : { ...l, zLo: p.zLo, zHi: p.zHi };
+    // The backdrop surface describes this frame's view of the water (it moves with the camera): never locked.
+    const fit = p.backdropFit ?? l.backdropFit;
+    return this.lockRange ? { ...l, backdropFit: fit } : { ...l, zLo: p.zLo, zHi: p.zHi, backdropFit: fit };
   }
 
   /** Runs one analysis of the current source and returns its raw parameters and mean colour (clip profiling). */
@@ -540,16 +546,19 @@ export class GradeEngine {
     }
     const am = 1 - Math.exp(-dt / TAU_MAPS_S);
     const ac = 1 - Math.exp(-dt / TAU_CLAHE_S);
-    const ease = (cur: Packed | null, tgt: Packed | null, rate = am): Packed | null => {
+    const ease = (cur: Packed | null, tgt: Packed | null, rate = am, rate1 = rate): Packed | null => {
       if (!tgt) return cur;
       if (!cur || cur.width !== tgt.width || cur.height !== tgt.height || cur.data.length !== tgt.data.length) return tgt;
       // Blend into a private copy so the packet's buffer stays pristine.
       const out = cur === this.lastEased.get(tgt) ? cur : { ...cur, data: new Float32Array(cur.data) };
-      lerpInto(out.data, tgt.data, rate);
+      if (rate1 === rate) lerpInto(out.data, tgt.data, rate);
+      else lerpInto4(out.data, tgt.data, rate, rate1);
       this.lastEased.set(tgt, out);
       return out;
     };
-    const f = ease(this.fields, this.fieldsTarget);
+    const open = Math.min(1, Math.max(0, this.current.backdrop ?? 0));
+    const aConf = am + (1 - Math.exp(-dt / TAU_CONF_OPEN_S) - am) * open;
+    const f = ease(this.fields, this.fieldsTarget, am, aConf);
     const g = ease(this.guide, this.guideTarget);
     const c = ease(this.clahe, this.claheTarget, ac);
     if (f !== this.fields || g !== this.guide || c !== this.clahe) this.dirtyData = true;
@@ -730,6 +739,11 @@ function growMask(raw: Float32Array, fw: number, fh: number, guide: Float32Array
 
 function lerpInto(dst: Float32Array, src: Float32Array, t: number): void {
   for (let i = 0; i < dst.length; i++) dst[i] += (src[i] - dst[i]) * t;
+}
+
+/** lerpInto on RGBA texels, channel 1 (the object channel) at its own rate. */
+function lerpInto4(dst: Float32Array, src: Float32Array, t: number, t1: number): void {
+  for (let i = 0; i < dst.length; i++) dst[i] += (src[i] - dst[i]) * ((i & 3) === 1 ? t1 : t);
 }
 
 function meanDiff(a: Vec3, b: Vec3): number {

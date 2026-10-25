@@ -3,9 +3,10 @@
 // the unit tests, never in the render path.
 
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
+import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
 
 export type ApplyContext = {
   /** When set, gradePixel returns (k, confPix, confMap) instead of a colour. */
@@ -135,7 +136,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // global fit overstates its veil. Per-channel subtraction would push it
   // past its own colour (yellow → orange), so it is de-scattered
   // proportionally instead.
-  const [, pa, pb] = linearToOklab(r0, g0, b0);
+  const lab0 = linearToOklab(r0, g0, b0);
+  const pa = lab0[1], pb = lab0[2];
   const wSub = smoothstep(p.subLo, p.subHi, sig) * (1 - hueFar(pa, pb, p));
   const prop = Math.max(p.floorFrac, 1 - lumBs / lumI);
   const full = [0, 0, 0];
@@ -150,13 +152,23 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // the signal fraction, the same tests the analysis runs on the thumbnail.
   const confSignal = smoothstep(p.confLo, p.confHi, sig);
   const confBright = smoothstep(CONF_BRIGHT.lo, CONF_BRIGHT.hi, sig);
-  const confPix = Math.min(confSignal, Math.max(hueConf(pa, pb, p), confBright));
+  // In open water (backdrop frames) the hue test does not decide (see analyze.ts).
+  const ow = objectNeutralOf(p);
+  const fit = p.backdropFit;
+  const bsub = ow > 0 && fit && fit.length === 18 ? backdropSubject(lab0[0], pa, pb, u, v, fit) : 1;
+  const confPix = Math.min(confSignal, Math.max(hueConf(pa, pb, p) * (1 + (bsub - 1) * ow), confBright));
   // A pixel the veil model would nearly erase takes the water path whatever
   // the map says (see grade-shader.ts).
   // A detected person is an object whatever the colour tests say (the
   // "tiny D" protection via confSignal still applies).
   const personW = person * smoothstep(PERSON_LUM.lo, PERSON_LUM.hi, lumI);
-  const conf = Math.max(clamp(confMap, 0, 1) * k + confPix * (1 - k), personW) * confSignal;
+  // Open water: the map lags a moving subject (ghosts where it was); a pixel
+  // the backdrop surface predicts as plain water vetoes the map's verdict.
+  const veto = 1 + (bsub - 1) * ow;
+  const conf = Math.max(Math.min(clamp(confMap, 0, 1), veto) * k + confPix * (1 - k), personW) * confSignal;
+  // Subject tone weight (open water): the whole-animal map trimmed per pixel, without the signal test (a dark back is part of the shark).
+  const tone = clamp(p.subjectTone ?? 0, 0, 1);
+  const subj = ow > 0 && tone > 0 && fit && fit.length === 18 ? subjectWeight(ctx.depth, u, v, clamp(confMap, 0, 1) * k, backdropDev(lab0[0], pa, pb, u, v, fit)) * ow * tone : 0;
   if (ctx.debug) return [k, confPix, clamp(confMap, 0, 1)];
   const out = [0, 0, 0];
   const ew = Math.pow(p.exposure, p.waterExposure);
@@ -234,10 +246,22 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const cMin = VIVID.keep * cSrc * vividW;
   if (C > 1e-6 && C * scale < cMin) scale = cMin / C;
   scale *= s.saturation;
-  const skinned = skinTone(L, a * scale, b * scale, person);
+  const onFar = hueFarAt(a0, bb0, p, OBJECT_NEUTRAL.farLo, OBJECT_NEUTRAL.farHi);
+  // Red-starved subject chroma goes to a cool silver (a faint tint of the
+  // water's own hue): a dead-neutral or greenish grey next to saturated blue
+  // water reads peach by simultaneous contrast.
+  const tN = objectNeutral(L, a, b, r0, g0, b0, onFar, objectWeight(subj), objectNeutralOf(p));
+  scale *= warmClamp(a, b, r0, g0, b0, onFar, person, objectNeutralOf(p));
+  const [, vla, vlb] = linearToOklab(p.veilColor[0], p.veilColor[1], p.veilColor[2]);
+  const vln = Math.hypot(vla, vlb) || 1;
+  const na = a * scale + ((vla / vln) * OBJECT_NEUTRAL.silver - a * scale) * tN;
+  const nb = b * scale + ((vlb / vln) * OBJECT_NEUTRAL.silver - b * scale) * tN;
+  // Subjects in open water also step forward a little in lightness.
+  const Ls = L + objectLift(L, objectWeight(subj), objectNeutralOf(p));
+  const skinned = skinTone(Ls, na, nb, person);
   // Water-likeness for the look comes from the pixel's own hue (the mask or
   // the water/object split would cut one garment into differently treated parts).
-  const looked = deepBlueLook(L, skinned[0], skinned[1], s.look, 1 - hueConf(pa, pb, p), hazeWeight(p), deepHaze(p));
+  const looked = deepBlueLook(Ls, skinned[0], skinned[1], s.look, 1 - hueConf(pa, pb, p), hazeWeight(p), deepHaze(p));
   const capped = capChroma(looked[0], looked[1], looked[2], cSrc);
   const [r1, g1, b1] = oklabToLinear(looked[0], capped[0], capped[1]);
   void C;
@@ -264,6 +288,58 @@ function clamp(x: number, lo: number, hi: number): number {
 function smoothstep(e0: number, e1: number, x: number): number {
   const t = clamp((x - e0) / (e1 - e0), 0, 1);
   return t * t * (3 - 2 * t);
+}
+
+/**
+ * Object neutral tone (see OBJECT_NEUTRAL in params.ts): the share of chroma
+ * an object pixel loses because its corrected colour sits on the red-deficit
+ * side (greens, cyans, blues) while the source had no red to restore it from.
+ * (L, a, b) = corrected Oklab; r, g, bl = linear source; srcFar = source hue
+ * farness from the veil (hueFar); conf = object confidence.
+ */
+export function objectNeutral(L: number, a: number, b: number, r: number, g: number, bl: number, srcFar: number, conf: number, strength: number): number {
+  if (strength <= 0 || conf <= 0) return 0;
+  const C = Math.hypot(a, b);
+  if (C < 1e-5) return 0;
+  // Angle to the cyan (red-deficit) axis, compared through cosines (see hueConf).
+  const cosang = (a * Math.cos(OBJECT_NEUTRAL.hue) + b * Math.sin(OBJECT_NEUTRAL.hue)) / C;
+  const band = smoothstep(Math.cos(OBJECT_NEUTRAL.bandOut), Math.cos(OBJECT_NEUTRAL.bandIn), cosang);
+  const redDef = 1 - smoothstep(OBJECT_NEUTRAL.rLo, OBJECT_NEUTRAL.rHi, r / Math.max(1e-4, g, bl));
+  // Light objects only (a dark far reef keeps the water's tint instead of
+  // turning into a grey-black mass), and never a source colour that already
+  // escaped the cast (yellow fish: srcFar = hue far from the veil).
+  const light = smoothstep(OBJECT_NEUTRAL.lLo, OBJECT_NEUTRAL.lHi, L);
+  // With no source red at all every hue is unreliable (a red gain over noise
+  // turns the belly orange just as its absence leaves it cyan): the band opens.
+  return strength * OBJECT_NEUTRAL.mix * conf * (band + (1 - band) * redDef) * redDef * light * (1 - srcFar);
+}
+
+/** Object-confidence weight of the open-water subject treatment: saturates early, so a map that lags a moving subject still gives it (nearly) the full treatment. */
+export function objectWeight(conf: number): number {
+  return smoothstep(OBJECT_NEUTRAL.confLo, OBJECT_NEUTRAL.confHi, conf);
+}
+
+/**
+ * Warm clamp for red-starved pixels in open-water frames: a source with no
+ * red cannot be orange, so whatever warm chroma the red gain made of noise is
+ * removed (the result is never pushed past neutral). Independent of the
+ * object confidence (a lagging map leaves partial confidence, i.e. a partial
+ * red gain, on a moving subject). Not for detected people (skin) or source
+ * colours that already escaped the cast. Returns the chroma scale.
+ */
+export function warmClamp(a: number, b: number, r: number, g: number, bl: number, srcFar: number, person: number, strength: number): number {
+  if (strength <= 0) return 1;
+  const C = Math.hypot(a, b);
+  if (C < 1e-5) return 1;
+  const cosw = (a * Math.cos(OBJECT_NEUTRAL.warmHue) + b * Math.sin(OBJECT_NEUTRAL.warmHue)) / C;
+  const redDef = 1 - smoothstep(OBJECT_NEUTRAL.rLo, OBJECT_NEUTRAL.rHi, r / Math.max(1e-4, g, bl));
+  return 1 - strength * redDef * smoothstep(OBJECT_NEUTRAL.warmLo, OBJECT_NEUTRAL.warmHi, cosw) * (1 - srcFar) * (1 - clamp(person, 0, 1));
+}
+
+/** Oklab lightness added to an object pixel in an open-water frame (see OBJECT_NEUTRAL.lift). */
+export function objectLift(L: number, conf: number, strength: number): number {
+  if (strength <= 0 || conf <= 0) return 0;
+  return OBJECT_NEUTRAL.lift * strength * conf * smoothstep(OBJECT_NEUTRAL.lLo - 0.1, OBJECT_NEUTRAL.lHi - 0.1, L) * (1 - smoothstep(0.82, 0.95, L));
 }
 
 /** Skin memory colour on person pixels (mirrors the shaders; see SKIN in params.ts). Returns (a, b). */
@@ -314,12 +390,15 @@ export function deepBlueLook(L: number, a: number, b: number, look: number, wate
 
 /** Mirrors analyze.ts hueFarness: 1 when the hue is ≥ hueFarHi from the veil's. */
 function hueFar(a: number, b: number, p: GradeParams): number {
+  return hueFarAt(a, b, p, p.hueFarLo, p.hueFarHi);
+}
+function hueFarAt(a: number, b: number, p: GradeParams, lo: number, hi: number): number {
   const c = Math.hypot(a, b);
   if (c < p.achroma) return 0;
   const [, va, vb] = linearToOklab(p.veilColor[0], p.veilColor[1], p.veilColor[2]);
   const vn = Math.hypot(va, vb) || 1;
   const cosang = Math.max(-1, Math.min(1, (a * va / vn + b * vb / vn) / c));
-  const t = 1 - smoothstep(Math.cos(p.hueFarHi), Math.cos(p.hueFarLo), cosang);
+  const t = 1 - smoothstep(Math.cos(hi), Math.cos(lo), cosang);
   return t * smoothstep(p.achroma, p.achroma * 2, c);
 }
 
@@ -337,6 +416,42 @@ function hueConf(a: number, b: number, p: GradeParams): number {
   return t + (1 - t) * (1 - kk);
 }
 
+
+/** Plain bilinear sample of the fields map's object channel (mirrors the shaders' mapConf). */
+function mapConfAt(d: DepthMap, u: number, v: number): number {
+  const fx = Math.min(Math.max(u * d.width - 0.5, 0), d.width - 1);
+  const fy = Math.min(Math.max(v * d.height - 0.5, 0), d.height - 1);
+  const x0 = Math.floor(fx), y0 = Math.floor(fy);
+  const x1 = Math.min(x0 + 1, d.width - 1), y1 = Math.min(y0 + 1, d.height - 1);
+  const tx = fx - x0, ty = fy - y0;
+  const at = (x: number, y: number) => d.fields[(y * d.width + x) * 4 + 1];
+  return (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
+}
+const RING: readonly (readonly [number, number])[] = [[1, 0], [-1, 0], [0, 1], [0, -1], [0.7071, 0.7071], [-0.7071, 0.7071], [0.7071, -0.7071], [-0.7071, -0.7071]];
+/**
+ * Open-water subject weight: the whole-animal map at the pixel (one strength
+ * over the animal, smooth at its outline), or — where the animal has moved
+ * since the map was made — the map's maximum within BACKDROP.ringR texels,
+ * trimmed to pixels that depart from the water surface (lenient ramp).
+ */
+function subjectWeight(d: DepthMap, u: number, v: number, coreJbu: number, dev: number): number {
+  // Core: the colour-guided (joint bilateral) map times its guide match k: where
+  // the animal has swum away the pixel no longer resembles the map's guide
+  // colour (k → 0), so the lagging map leaves no toned ghost, while a stretch of
+  // body that merely matches the water still matches its own guide (k ≈ 1).
+  const core = Math.min(1, Math.max(0, coreJbu));
+  let ring = 0;
+  for (const [ox, oy] of RING) ring = Math.max(ring, mapConfAt(d, u + (ox * BACKDROP.ringR) / d.width, v + (oy * BACKDROP.ringR) / d.height));
+  // Inside the animal (core ≈ 1) one strength; where the coarse map fades
+  // (its outline, ~1 texel) the pixel's own departure decides, so the water
+  // just outside the animal is never toned.
+  // (A stretch of body lit exactly like the water stays toned; the engine
+  // eases this channel fast in open water, so the map does not leave a toned
+  // ghost where the animal was.)
+  const trim = smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, dev);
+  const inner = smoothstep(BACKDROP.coreIn, 1, core);
+  return Math.max(core * (trim + (1 - trim) * inner), Math.min(Math.min(1, ring), trim));
+}
 
 /** Luminance ratio of the source pixel (sRGB) to its base (linear), clamped (see DETAIL_GUARD). */
 export function detailRatio(sr: number, sg: number, sb: number, br: number, bg: number, bb: number): number {
