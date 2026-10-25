@@ -70,3 +70,46 @@
   color: var(--text);
   box-shadow: 0 0 0 1px var(--line-strong) inset, 0 4px 12px -4px rgba(255, 139, 74, 0.4);
 }
+
+/* Which stabiliser ran (gyro telemetry vs visual tracking) */
+.stab-badge {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  background: rgba(0, 0, 0, 0.25);
+}
+.stab-badge .dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.stab-badge.is-gyro {
+  border-color: rgba(94, 230, 160, 0.55);
+  background: rgba(94, 230, 160, 0.1);
+}
+.stab-badge.is-gyro .dot {
+  background: #5ee6a0;
+  box-shadow: 0 0 8px #5ee6a0;
+}
+.stab-badge.is-visual .dot {
+  background: var(--accent);
+}
+.stab-warning {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #ffd9a8;
+  background: rgba(255, 170, 60, 0.08);
+  border: 1px solid rgba(255, 170, 60, 0.4);
+  border-radius: 12px;
+}

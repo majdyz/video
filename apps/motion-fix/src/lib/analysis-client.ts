@@ -2,9 +2,9 @@
 // callbacks, cancellation, and an in-thread fallback for browsers whose
 // workers lack WebCodecs (the same analyze/solve code runs either way).
 
-import { analyzeVideoFile } from "./analyze.ts";
+import { analyzeAny, solveAny } from "./analysis-run.ts";
 import type { WorkerRequest, WorkerResponse } from "./analysis-worker.ts";
-import { computeStabilizedPath, type MotionAnalysis, type StabilizeParams, type StabilizedPath } from "./stabilize.ts";
+import type { AnalysisResult, Plan, SolveParams } from "./plan.ts";
 
 type Pending = { resolve: (v: never) => void; reject: (e: Error) => void; onProgress?: (fraction: number, frames: number) => void };
 
@@ -14,7 +14,7 @@ export class AnalysisClient {
   private readonly pending = new Map<number, Pending>();
   private workerBroken = false;
   /** Kept for the in-thread fallback solves. */
-  private fallbackAnalysis: MotionAnalysis | null = null;
+  private fallbackResult: AnalysisResult | null = null;
 
   private ensureWorker(): Worker | null {
     if (this.workerBroken) return null;
@@ -49,9 +49,9 @@ export class AnalysisClient {
       err.name = msg.name;
       p.reject(err);
     } else if (msg.type === "analysis") {
-      p.resolve(msg.analysis as never);
+      p.resolve(msg.result as never);
     } else {
-      p.resolve(msg.path as never);
+      p.resolve(msg.plan as never);
     }
   }
 
@@ -64,21 +64,25 @@ export class AnalysisClient {
     });
   }
 
-  /** Decodes and tracks the clip. Rejects with AbortError when cancelled. */
-  async analyze(file: File, onProgress: (fraction: number, frames: number) => void, signal?: AbortSignal): Promise<MotionAnalysis> {
-    this.fallbackAnalysis = null;
+  /**
+   * Reads the clip's motion: gyro telemetry when the file has usable motion
+   * data (and `forceVisual` is off), else decode + feature tracking.
+   * Rejects with AbortError when cancelled.
+   */
+  async analyze(file: File, onProgress: (fraction: number, frames: number) => void, signal?: AbortSignal, forceVisual = false): Promise<AnalysisResult> {
+    this.fallbackResult = null;
     const id = this.nextId++;
     const onAbort = (): void => this.worker?.postMessage({ type: "cancel" } satisfies WorkerRequest);
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      return await this.request<MotionAnalysis>({ type: "analyze", id, file }, onProgress);
+      return await this.request<AnalysisResult>({ type: "analyze", id, file, forceVisual }, onProgress);
     } catch (e) {
       if (signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw new DOMException("Aborted", "AbortError");
       if (!this.workerBroken && !(e instanceof Error && /VideoDecoder|worker/i.test(e.message))) throw e;
       // Worker could not decode here (older Safari): same code on the main thread.
       this.workerBroken = true;
-      const result = await analyzeVideoFile(file, onProgress, signal);
-      this.fallbackAnalysis = result;
+      const result = await analyzeAny(file, forceVisual, onProgress, signal ?? new AbortController().signal);
+      this.fallbackResult = result;
       return result;
     } finally {
       signal?.removeEventListener("abort", onAbort);
@@ -86,10 +90,10 @@ export class AnalysisClient {
   }
 
   /** Solves the path for the loaded analysis with new parameters. */
-  async solve(params: StabilizeParams): Promise<StabilizedPath> {
-    if (this.fallbackAnalysis) return computeStabilizedPath(this.fallbackAnalysis, params);
+  async solve(params: SolveParams): Promise<Plan> {
+    if (this.fallbackResult) return solveAny(this.fallbackResult, params);
     const id = this.nextId++;
-    return this.request<StabilizedPath>({ type: "solve", id, params });
+    return this.request<Plan>({ type: "solve", id, params });
   }
 
   dispose(): void {
