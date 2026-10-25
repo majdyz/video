@@ -64,6 +64,9 @@ export default function App() {
   const previewActiveRef = useRef(false);
   const exportingRef = useRef(false);
   const analysisAbortRef = useRef<AbortController | null>(null);
+  /** The hybrid pass (picture tracking after the gyro result is on screen). */
+  const refineAbortRef = useRef<AbortController | null>(null);
+  const refineStateRef = useRef<"idle" | "running" | "done" | "unavailable">("idle");
   const exportAbortRef = useRef<AbortController | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   // Sequence number of the latest solve request; older results are dropped.
@@ -84,6 +87,12 @@ export default function App() {
   const [horizonLock, setHorizonLock] = useState(0);
   const [lensOut, setLensOut] = useState<"lens" | "rectilinear">("lens");
   const [medium, setMedium] = useState<"auto" | "air" | "water">("auto");
+  // Hybrid gyro + visual: remove fin-kick bobbing / sway the gyro cannot see (?hybrid=0 starts with it off).
+  const [bobbing, setBobbing] = useState<"on" | "off">(() => (typeof location !== "undefined" && new URLSearchParams(location.search).get("hybrid") === "0" ? "off" : "on"));
+  const bobbingRef = useRef(bobbing);
+  const [refineNote, setRefineNote] = useState<string | null>(null);
+  /** Bumped when the hybrid measurements arrive, so the plan is re-solved with them. */
+  const [residualVersion, setResidualVersion] = useState(0);
   /** Which stabiliser runs, and what the user should know about the file's motion data. */
   const [badge, setBadge] = useState<{ kind: "gyro" | "visual"; text: string } | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -215,6 +224,10 @@ export default function App() {
     }
     teardownVideo();
     analysisAbortRef.current?.abort();
+    refineAbortRef.current?.abort();
+    refineAbortRef.current = null;
+    refineStateRef.current = "idle";
+    setRefineNote(null);
     const ctrl = new AbortController();
     analysisAbortRef.current = ctrl;
     fileRef.current = file;
@@ -271,13 +284,14 @@ export default function App() {
       setSmoothing(startSmoothing);
       setBusy("Solving camera path…");
       setMedium("auto");
-      const path = await client.solve(solveParams(startSmoothing, crop, horizonLock, lensOut, "auto"));
+      const path = await client.solve(solveParams(startSmoothing, crop, horizonLock, lensOut, "auto", bobbingRef.current));
       if (ctrl.signal.aborted) return;
       pathRef.current = path;
       setStatus(describe(analysis, path));
       setAnalysisReady(true);
       v.play().catch(() => undefined);
       startPreview();
+      if (analysis.mode === "gyro" && bobbingRef.current === "on") startRefine();
     } catch (e) {
       if (!isAbortError(e)) setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -286,7 +300,40 @@ export default function App() {
     }
   }
 
+  /**
+   * Hybrid pass in the background: the gyro result plays while the clip is
+   * tracked for bobbing; the plan is re-solved when the measurements land.
+   */
+  function startRefine() {
+    const client = clientRef.current;
+    if (!client || refineStateRef.current === "running" || refineStateRef.current === "done") return;
+    const ctrl = new AbortController();
+    refineAbortRef.current = ctrl;
+    refineStateRef.current = "running";
+    setRefineNote("Measuring bobbing…");
+    client
+      .refine((fraction) => setRefineNote(`Measuring bobbing ${Math.floor(fraction * 100)}%…`), ctrl.signal)
+      .then((ok) => {
+        if (ctrl.signal.aborted) return;
+        refineStateRef.current = ok ? "done" : "unavailable";
+        setRefineNote(ok ? null : "Bobbing fix unavailable for this clip (gyro only).");
+        if (ok) setResidualVersion((v) => v + 1);
+      })
+      .catch((e) => {
+        if (ctrl.signal.aborted || isAbortError(e)) return;
+        refineStateRef.current = "unavailable";
+        setRefineNote("Bobbing fix unavailable for this clip (gyro only).");
+      })
+      .finally(() => {
+        if (refineAbortRef.current === ctrl) refineAbortRef.current = null;
+      });
+  }
+
   function cancelAnalysis() {
+    refineAbortRef.current?.abort();
+    refineAbortRef.current = null;
+    refineStateRef.current = "idle";
+    setRefineNote(null);
     analysisAbortRef.current?.abort();
     analysisAbortRef.current = null;
     setBusy(null);
@@ -305,7 +352,7 @@ export default function App() {
       const client = clientRef.current;
       if (!client) return;
       try {
-        const path = await client.solve(solveParams(smoothing, crop, horizonLock, lensOut, medium));
+        const path = await client.solve(solveParams(smoothing, crop, horizonLock, lensOut, medium, bobbing));
         if (seq !== solveSeqRef.current) return;
         pathRef.current = path;
         if (analysisRef.current) setStatus(describe(analysisRef.current, path));
@@ -315,7 +362,7 @@ export default function App() {
       }
     }, 120);
     return () => clearTimeout(id);
-  }, [smoothing, crop, horizonLock, lensOut, medium, analysisReady, drawCurrentFrame]);
+  }, [smoothing, crop, horizonLock, lensOut, medium, bobbing, residualVersion, analysisReady, drawCurrentFrame]);
 
   // ---------------------------------------------------------------------
   // Playback controls
@@ -742,6 +789,19 @@ export default function App() {
                   onChange={setLensOut}
                   disabled={controlsDisabled}
                 />
+                {gyroResult.motion.video.rotation === 0 && (
+                  <Segment
+                    label="Bobbing"
+                    value={bobbing}
+                    options={[["on", "Remove"], ["off", "Gyro only"]]}
+                    onChange={(v) => {
+                      setBobbing(v);
+                      bobbingRef.current = v;
+                      if (v === "on") startRefine();
+                    }}
+                    disabled={controlsDisabled}
+                  />
+                )}
                 {gyroResult.motion.down && (
                   <Segment
                     label="Horizon"
@@ -766,6 +826,7 @@ export default function App() {
               />
             )}
             {status && <p className="note">{status}</p>}
+            {refineNote && gyroResult && <p className="note">{refineNote}</p>}
             <div className="actions">
               {!exporting && (
                 <button className="primary" onClick={exportVideo} disabled={controlsDisabled}>
@@ -798,8 +859,8 @@ export default function App() {
   );
 }
 
-function solveParams(smoothing: number, maxCrop: number, horizonLock: number, output: "lens" | "rectilinear", medium: "auto" | "air" | "water"): SolveParams {
-  return { smoothing, maxCrop, horizonLock, output, medium };
+function solveParams(smoothing: number, maxCrop: number, horizonLock: number, output: "lens" | "rectilinear", medium: "auto" | "air" | "water", bobbing: "on" | "off"): SolveParams {
+  return { smoothing, maxCrop, horizonLock, output, medium, hybrid: bobbing === "on" ? 1 : 0 };
 }
 
 function frameRateOf(r: AnalysisResult | null): number | null {
@@ -833,7 +894,9 @@ function describe(result: AnalysisResult, plan: Plan): string {
   if (result.mode === "gyro" && plan.kind === "gyro") {
     const m = result.motion;
     const s = plan.plan.stats;
-    return `${m.video.frameCount} frames · ${m.lens.source} · shake ${s.rawJitter.toFixed(3)} → ${s.virtJitter.toFixed(3)}°/frame² · zoom ${s.meanZoom.toFixed(2)}× (max ${s.maxUsedZoom.toFixed(2)}×)`;
+    const h = plan.plan.hybrid;
+    const bob = !h ? "" : h.applied ? ` · bobbing ${h.wanderBefore.toFixed(1)} → ${h.wanderAfter.toFixed(1)} px` : ` · bobbing: ${h.reason}`;
+    return `${m.video.frameCount} frames · ${m.lens.source} · shake ${s.rawJitter.toFixed(3)} → ${s.virtJitter.toFixed(3)}°/frame²${bob} · zoom ${s.meanZoom.toFixed(2)}× (max ${s.maxUsedZoom.toFixed(2)}×)`;
   }
   if (result.mode === "visual" && plan.kind === "visual") {
     const analysis = result.analysis;

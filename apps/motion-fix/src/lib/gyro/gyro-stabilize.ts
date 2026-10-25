@@ -28,6 +28,11 @@ import { maxTheta, thetaD, type LensModel } from "./lens.ts";
 import { qat, qconj, qcontinuous, qdot, qlog, qmat, qmul, qnorm, qrot, qslerp, sampleOrientation, type Quat, type Vec3 } from "./quat.ts";
 import type { CameraMotion } from "./telemetry.ts";
 import { rateLimitedZoom } from "../stabilize.ts";
+import { gateResidual, jitter2, smoothPath1D, TRANSLATION_WEIGHTS, wander2, type ResidualMotion } from "./hybrid.ts";
+
+/** Hybrid kicks in only above these (analysis px): heave/sway RMS, and translation jitter. */
+export const HYBRID_MIN_WANDER = 0.3;
+export const HYBRID_MIN_JITTER = 0.15;
 
 export type GyroParams = {
   /** 0 = follow the camera, 1 = heaviest smoothing. */
@@ -44,6 +49,32 @@ export type GyroParams = {
   zoomRate?: number;
   /** Tuning override (tests/scripts): angular speed, deg/s, at which smoothing halves. */
   omegaRefDeg?: number;
+  /**
+   * Hybrid gyro + visual (needs a ResidualMotion from the analysis): 0 off,
+   * 1 = the residual translation (bobbing, sway) may use the crop budget
+   * the rotation left over. Default 1 when a residual is given.
+   */
+  hybrid?: number;
+};
+
+/** What the hybrid translation pass did (absent when no residual was given). */
+export type HybridStats = {
+  /** False when it fell back to gyro-only; `reason` says why. */
+  applied: boolean;
+  reason: string;
+  /** Fraction of frames whose residual passed the confidence checks. */
+  acceptedFrac: number;
+  /** Jitter of the residual translation track (RMS second difference, analysis px at the centre) before (gyro only) and after. */
+  jitterBefore: number;
+  jitterAfter: number;
+  /** Heave/sway of the same track: RMS minus its 0.5 s Gaussian, analysis px, before and after. */
+  wanderBefore: number;
+  wanderAfter: number;
+  /** Largest view shift applied, analysis px. */
+  maxShift: number;
+  /** Frames whose shift was pulled back to fit the crop. */
+  limitedFrames: number;
+  rejected: Record<string, number>;
 };
 
 /** Default zoom drift limit, zoom units per second (2.5 % per second reads as static). */
@@ -77,6 +108,7 @@ export type GyroPlan = {
     rawJitter: number;
     virtJitter: number;
   };
+  hybrid?: HybridStats;
 };
 
 /** Presentation times of the video frames (media timeline; telemetry time = media time + timeOffset). */
@@ -411,7 +443,7 @@ export function mediumIndex(motion: CameraMotion, medium: GyroParams["medium"]):
 // ---------------------------------------------------------------------------
 // The solve
 
-export function computeGyroPlan(motion: CameraMotion, params: GyroParams): GyroPlan {
+export function computeGyroPlan(motion: CameraMotion, params: GyroParams, residual?: ResidualMotion | null): GyroPlan {
   const started = performance.now();
   const times = frameTimesOf(motion);
   const n = times.length;
@@ -502,6 +534,13 @@ export function computeGyroPlan(motion: CameraMotion, params: GyroParams): GyroP
   }
   qcontinuous(virt);
 
+  // 4b. hybrid: residual translation from the picture, as a small extra view rotation.
+  let hybrid: HybridStats | undefined;
+  if (residual && (params.hybrid ?? 1) > 0) {
+    hybrid = applyHybrid(geo, virt, times, fps, maxZoom, residual, index, Math.min(1, params.hybrid ?? 1), rowsAt);
+    qcontinuous(virt);
+  }
+
   // 5. zoom
   // Every frame: with high-frequency vibration the correction can change by
   // a degree between frames, so neighbours are no stand-in.
@@ -541,7 +580,119 @@ export function computeGyroPlan(motion: CameraMotion, params: GyroParams): GyroP
     n: index,
     maxZoom,
     stats: { meanZoom: meanZoom / Math.max(1, n), maxUsedZoom: maxUsed, limitedFrames: limited, solveMs: performance.now() - started, rawSpeed: (rs / Math.max(1, n)) * deg, virtSpeed: (vsum / Math.max(1, n)) * deg, rawJitter, virtJitter },
+    ...(hybrid ? { hybrid } : {}),
   };
+}
+
+/** View rotation that turns the virtual camera's axis toward gnomonic (ex, ey) (focal units). */
+export function viewShiftQuat(ex: number, ey: number): Quat {
+  const r = Math.hypot(ex, ey);
+  if (r < 1e-12) return [1, 0, 0, 0];
+  const ang = Math.atan(r);
+  // axis = z × (ex, ey, 1) = (−ey, ex, 0)
+  const s = Math.sin(ang / 2) / r;
+  return [Math.cos(ang / 2), -ey * s, ex * s, 0];
+}
+
+/**
+ * The hybrid pass (see hybrid.ts): gate the residual, accumulate it, find
+ * per-frame margins left in the crop budget, smooth with the L1 path and
+ * turn the difference into a view rotation, pulled back where a frame does
+ * not fit. Modifies `virt` in place; falls back (untouched) when the
+ * residual is not trustworthy or would not help.
+ */
+function applyHybrid(geo: Geometry, virt: Float64Array, times: Float64Array, fps: number, maxZoom: number, residual: ResidualMotion, index: number, strength: number, rowsAt: (i: number) => RowRotations): HybridStats {
+  const n = times.length;
+  const medium = index > 1.01 ? "water" : "air";
+  const g = gateResidual(residual, medium, times, fps);
+  const base = { acceptedFrac: g.acceptedFrac, rejected: g.rejected, jitterBefore: 0, jitterAfter: 0, wanderBefore: 0, wanderAfter: 0, maxShift: 0, limitedFrames: 0 };
+  if (n < 8) return { ...base, applied: false, reason: "clip too short" };
+  if (g.acceptedFrac < 0.3) return { ...base, applied: false, reason: `picture too unreliable (${Math.round(g.acceptedFrac * 100)}% of frames usable)` };
+  const u = residual.unitPx;
+  // Cumulative residual (analysis px at the centre): where the scene has drifted in the gyro-stabilised view.
+  const cx = new Float64Array(n);
+  const cy = new Float64Array(n);
+  for (let i = 1; i < n; i++) {
+    cx[i] = cx[i - 1] + g.dx[i];
+    cy[i] = cy[i - 1] + g.dy[i];
+  }
+  // Margins: how far the view may turn along ±x / ±y and still fit at the zoom cap.
+  const lim = 0.25;
+  const marginAlong = (i: number, rows: RowRotations, ax: number, ay: number): number => {
+    const q = qat(virt, i);
+    if (!fits(geo, q, rows, maxZoom)) return 0;
+    let a = 0;
+    let b = lim;
+    if (fits(geo, qmul(q, viewShiftQuat(ax * b, ay * b)), rows, maxZoom)) return b * u;
+    for (let k = 0; k < 10; k++) {
+      const m = (a + b) / 2;
+      if (fits(geo, qmul(q, viewShiftQuat(ax * m, ay * m)), rows, maxZoom)) a = m;
+      else b = m;
+    }
+    return a * u;
+  };
+  // View shift v = c − s, so s − c = −v lies in [−v⁺, v⁻].
+  const loX = new Float64Array(n), hiX = new Float64Array(n), loY = new Float64Array(n), hiY = new Float64Array(n);
+  // Keep some in reserve: the two axes share the corners.
+  const share = 0.7 * strength;
+  for (let i = 0; i < n; i++) {
+    const rows = rowsAt(i);
+    loX[i] = -share * marginAlong(i, rows, 1, 0);
+    hiX[i] = share * marginAlong(i, rows, -1, 0);
+    loY[i] = -share * marginAlong(i, rows, 0, 1);
+    hiY[i] = share * marginAlong(i, rows, 0, -1);
+  }
+  const sx = smoothPath1D(cx, loX, hiX, TRANSLATION_WEIGHTS);
+  const sy = smoothPath1D(cy, loY, hiY, TRANSLATION_WEIGHTS);
+  const sig = 0.5 * fps;
+  const jitterBefore = jitter2(cx, cy, g.accepted);
+  const wanderBefore = wander2(cx, cy, sig);
+  {
+    const jitterAfter = jitter2(sx, sy, g.accepted);
+    const wanderAfter = wander2(sx, sy, sig);
+    // Worth it only when the picture shows heave/sway or shake above the tracking noise that the path removes.
+    const wanderGain = wanderBefore >= HYBRID_MIN_WANDER && wanderAfter < 0.8 * wanderBefore;
+    const jitterGain = jitterBefore >= HYBRID_MIN_JITTER && jitterAfter < 0.8 * jitterBefore;
+    if (!wanderGain && !jitterGain) return { ...base, jitterBefore, jitterAfter, wanderBefore, wanderAfter, applied: false, reason: "no measurable bobbing to remove" };
+  }
+  // Shift per frame, pulled back (smoothly in time) where the combined shift does not fit.
+  const vx = new Float64Array(n);
+  const vy = new Float64Array(n);
+  const lam = new Float64Array(n).fill(1);
+  let limited = 0;
+  for (let i = 0; i < n; i++) {
+    vx[i] = (cx[i] - sx[i]) / u;
+    vy[i] = (cy[i] - sy[i]) / u;
+    const q = qat(virt, i);
+    const rows = rowsAt(i);
+    if (fits(geo, qmul(q, viewShiftQuat(vx[i], vy[i])), rows, maxZoom)) continue;
+    limited++;
+    let a = 0;
+    let b = 1;
+    for (let k = 0; k < 10; k++) {
+      const m = (a + b) / 2;
+      if (fits(geo, qmul(q, viewShiftQuat(vx[i] * m, vy[i] * m)), rows, maxZoom)) a = m;
+      else b = m;
+    }
+    lam[i] = a;
+  }
+  let ls: Float64Array = lam;
+  if (limited > 0) {
+    const rad = Math.max(2, Math.round(0.3 * fps));
+    ls = gaussian1d(windowMin(lam, rad), rad / 3);
+  }
+  let maxShift = 0;
+  // What the output's residual track is after the pull-back: c − applied shift.
+  const ox = new Float64Array(n);
+  const oy = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const l = Math.min(ls[i], lam[i]);
+    maxShift = Math.max(maxShift, Math.hypot(vx[i], vy[i]) * l * u);
+    ox[i] = cx[i] - vx[i] * l * u;
+    oy[i] = cy[i] - vy[i] * l * u;
+    virt.set(qmul(qat(virt, i), viewShiftQuat(vx[i] * l, vy[i] * l)), 4 * i);
+  }
+  return { ...base, jitterBefore, jitterAfter: jitter2(ox, oy, g.accepted), wanderBefore, wanderAfter: wander2(ox, oy, sig), maxShift, limitedFrames: limited, applied: true, reason: "bobbing removed" };
 }
 
 // ---------------------------------------------------------------------------

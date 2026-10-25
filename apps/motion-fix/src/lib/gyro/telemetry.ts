@@ -57,6 +57,8 @@ export type MediumCheck = {
   points: number;
   /** False when the gyro barely predicts the picture's motion (trimmed/edited file, EIS warp, sync off). */
   consistent: boolean;
+  /** Per-window votes (windows where the camera moved and the gyro explains it): how many, and how many each lens won clearly. */
+  windows?: { informative: number; air: number; water: number };
 };
 
 export type TelemetryProbe =

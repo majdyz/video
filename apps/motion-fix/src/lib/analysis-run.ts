@@ -1,15 +1,22 @@
 // The analysis entry points shared by the worker and the main-thread
 // fallback: telemetry first (ranged reads, no decode), feature tracking when
-// the file has no usable motion data.
+// the file has no usable motion data; optionally the hybrid pass (track the
+// picture too, for the translation the gyro cannot see).
 
 import { analyzeVideoFile } from "./analyze.ts";
 import { computeGyroPlan } from "./gyro/gyro-stabilize.ts";
 import { checkPicture } from "./gyro/check-file.ts";
 import { probeFile } from "./gyro/probe-file.ts";
+import { trackResidual } from "./gyro/residual-file.ts";
 import { noteFromProbe, type AnalysisResult, type Plan, type SolveParams } from "./plan.ts";
 import { computeStabilizedPath } from "./stabilize.ts";
 
-export async function analyzeAny(file: File, forceVisual: boolean, onProgress: (fraction: number, frames: number) => void, signal: AbortSignal): Promise<AnalysisResult> {
+export type AnalyzeOptions = {
+  /** Gyro clips: also run the hybrid pass before returning (see refineHybrid for the two-step flow). */
+  hybrid?: boolean;
+};
+
+export async function analyzeAny(file: File, forceVisual: boolean, onProgress: (fraction: number, frames: number) => void, signal: AbortSignal, options: AnalyzeOptions = {}): Promise<AnalysisResult> {
   const t0 = performance.now();
   const probe = await probeFile(file, signal);
   if (probe.status === "ok" && !forceVisual) {
@@ -20,13 +27,31 @@ export async function analyzeAny(file: File, forceVisual: boolean, onProgress: (
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") throw e;
     }
-    return { mode: "gyro", motion: probe.motion, probeMs: performance.now() - t0 };
+    const result: AnalysisResult = { mode: "gyro", motion: probe.motion, probeMs: performance.now() - t0 };
+    return options.hybrid ? refineHybrid(file, result, onProgress, signal) : result;
   }
   const analysis = await analyzeVideoFile(file, onProgress, signal);
   return { mode: "visual", analysis, telemetry: noteFromProbe(probe) };
 }
 
+/**
+ * Hybrid pass for a gyro result: decodes and tracks the clip, derotating
+ * every pair with the gyro, and returns the result with `residual` set.
+ * Visual results, rotated clips and decode failures come back unchanged
+ * (the gyro-only plan stays as it is). Rejects only with AbortError.
+ */
+export async function refineHybrid(file: File, result: AnalysisResult, onProgress: (fraction: number, frames: number) => void, signal: AbortSignal): Promise<AnalysisResult> {
+  if (result.mode !== "gyro") return result;
+  try {
+    const residual = await trackResidual(file, result.motion, onProgress, signal);
+    return residual ? { ...result, residual } : result;
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    return result;
+  }
+}
+
 export function solveAny(r: AnalysisResult, params: SolveParams): Plan {
-  if (r.mode === "gyro") return { kind: "gyro", plan: computeGyroPlan(r.motion, params) };
+  if (r.mode === "gyro") return { kind: "gyro", plan: computeGyroPlan(r.motion, params, r.residual) };
   return { kind: "visual", path: computeStabilizedPath(r.analysis, { smoothing: params.smoothing, maxCrop: params.maxCrop }) };
 }

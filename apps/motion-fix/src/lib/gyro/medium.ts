@@ -16,8 +16,13 @@ import { MotionTracker } from "../tracker.ts";
 /** Tracked points between two frames, in coded source pixels. */
 export type MatchPair = { t0: number; t1: number; px: Float32Array; py: Float32Array; qx: Float32Array; qy: Float32Array };
 
+/** Default window count: 4 for short clips, up to 12 for long ones (a long dive has long calm stretches). */
+export function checkWindowCount(duration: number): number {
+  return Math.min(12, Math.max(4, Math.round(duration / 10)));
+}
+
 /** Where to look: `count` short windows spread over the clip (start, end in media seconds). */
-export function checkWindows(duration: number, count = 4, length = 0.35): [number, number][] {
+export function checkWindows(duration: number, count = checkWindowCount(duration), length = 0.35): [number, number][] {
   const out: [number, number][] = [];
   for (let w = 0; w < count; w++) {
     const c = (duration * (w + 1)) / (count + 1);
@@ -116,6 +121,50 @@ export function checkMedium(motion: CameraMotion, pairs: MatchPair[]): MediumChe
     else if (eAir < 0.95 * eWater) detected = "air";
   }
   const best = Math.min(eAir, eWater);
-  const consistent = !informative || best < 0.6 * eStill;
-  return { detected, errAir: eAir, errWater: eWater, errStill: eStill, pairs: pairs.length, points, consistent };
+  let consistent = !informative || best < 0.6 * eStill;
+  // Per window: on real dives most windows are calm or full of swimmers,
+  // fish and bubbles, and the pooled median drowns the few windows where
+  // the camera turns enough to tell. Windows where the gyro clearly
+  // explains the motion each get a vote; a clear majority decides.
+  const votes = windowVotes(motion, air, water, pairs, scale);
+  if (votes.informative >= 2) {
+    const total = votes.air + votes.water;
+    if (total >= 2 && votes.water >= 0.75 * total) detected = "water";
+    else if (total >= 2 && votes.air >= 0.75 * total) detected = "air";
+    // The gyro does explain the picture where there is motion to explain.
+    consistent = true;
+  }
+  return { detected, errAir: eAir, errWater: eWater, errStill: eStill, pairs: pairs.length, points, consistent, windows: votes };
+}
+
+/**
+ * Splits pairs into their check windows (a gap of more than ~3 frames
+ * starts a new one) and lets every window where the camera moved (still
+ * error > 3 px per 1000 px) and the gyro explains at least half of it vote
+ * for the lens that explains it clearly better (10 %).
+ */
+export function windowVotes(motion: CameraMotion, air: LensModel, water: LensModel, pairs: MatchPair[], scale: number): { informative: number; air: number; water: number } {
+  const groups: MatchPair[][] = [];
+  let cur: MatchPair[] = [];
+  for (const p of pairs) {
+    const prev = cur[cur.length - 1];
+    if (prev && (p.t0 - prev.t1 > 3 * Math.max(1e-3, prev.t1 - prev.t0) || p.t0 < prev.t0)) {
+      groups.push(cur);
+      cur = [];
+    }
+    cur.push(p);
+  }
+  if (cur.length) groups.push(cur);
+  const out = { informative: 0, air: 0, water: 0 };
+  for (const g of groups) {
+    if (g.reduce((a, p) => a + p.px.length, 0) < 100) continue;
+    const st = median(reprojectionErrors(motion, air, g, false));
+    const ea = median(reprojectionErrors(motion, air, g));
+    const ew = median(reprojectionErrors(motion, water, g));
+    if (!(st > 3 * scale && Math.min(ea, ew) < 0.5 * st)) continue;
+    out.informative++;
+    if (ew < 0.9 * ea) out.water++;
+    else if (ea < 0.9 * ew) out.air++;
+  }
+  return out;
 }

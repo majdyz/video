@@ -2,23 +2,28 @@
 // path solves so the page stays responsive (sliders, scrubbing, the preview
 // loop) while a 4K clip is being analysed. Protocol in analysis-client.ts.
 
-import { analyzeAny, solveAny } from "./analysis-run.ts";
+import { analyzeAny, refineHybrid, solveAny } from "./analysis-run.ts";
 import type { AnalysisResult, Plan, SolveParams } from "./plan.ts";
 
 export type WorkerRequest =
-  | { type: "analyze"; id: number; file: File; forceVisual: boolean }
+  | { type: "analyze"; id: number; file: File; forceVisual: boolean; hybrid?: boolean }
+  /** Hybrid pass on the loaded gyro analysis (same file); later solves use it. */
+  | { type: "refine"; id: number }
   | { type: "solve"; id: number; params: SolveParams }
   | { type: "cancel" };
 
 export type WorkerResponse =
   | { type: "progress"; id: number; fraction: number; frames: number }
   | { type: "analysis"; id: number; result: AnalysisResult }
+  /** `residual`: whether the hybrid measurements are now loaded. */
+  | { type: "refined"; id: number; residual: boolean }
   | { type: "path"; id: number; plan: Plan }
   | { type: "error"; id: number; message: string; name: string };
 
 const scope = self as unknown as { postMessage: (msg: WorkerResponse, transfer?: Transferable[]) => void; onmessage: ((e: MessageEvent<WorkerRequest>) => void) | null };
 
 let result: AnalysisResult | null = null;
+let file: File | null = null;
 let abort: AbortController | null = null;
 
 function fail(id: number, e: unknown): void {
@@ -36,11 +41,30 @@ scope.onmessage = async (e: MessageEvent<WorkerRequest>) => {
     abort?.abort();
     abort = new AbortController();
     result = null;
+    file = msg.file;
     try {
-      const r = await analyzeAny(msg.file, msg.forceVisual, (fraction, frames) => scope.postMessage({ type: "progress", id: msg.id, fraction, frames }), abort.signal);
+      const r = await analyzeAny(msg.file, msg.forceVisual, (fraction, frames) => scope.postMessage({ type: "progress", id: msg.id, fraction, frames }), abort.signal, { hybrid: msg.hybrid });
       result = r;
       // Structured clone (no transfer): the worker keeps the arrays for solves.
       scope.postMessage({ type: "analysis", id: msg.id, result: r });
+    } catch (err) {
+      fail(msg.id, err);
+    }
+    return;
+  }
+  if (msg.type === "refine") {
+    if (!result || !file) {
+      fail(msg.id, new Error("No analysis loaded"));
+      return;
+    }
+    abort?.abort();
+    abort = new AbortController();
+    const base = result;
+    try {
+      const r = await refineHybrid(file, base, (fraction, frames) => scope.postMessage({ type: "progress", id: msg.id, fraction, frames }), abort.signal);
+      // A newer analysis may have replaced the one this pass refined.
+      if (result === base) result = r;
+      scope.postMessage({ type: "refined", id: msg.id, residual: r.mode === "gyro" && !!r.residual && result === r });
     } catch (err) {
       fail(msg.id, err);
     }
