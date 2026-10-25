@@ -47,7 +47,7 @@ public struct EncoderResult {
 public enum EncoderError: Error, CustomStringConvertible {
     case setup(String)
     case writer(String)
-    case timeout
+    case timeout(String)
     case cancelled
     case outOfOrder(last: Int64, got: Int64)
 
@@ -55,7 +55,7 @@ public enum EncoderError: Error, CustomStringConvertible {
         switch self {
         case .setup(let s): return "encoder setup: \(s)"
         case .writer(let s): return "encoder: \(s)"
-        case .timeout: return "encoder stalled"
+        case .timeout(let s): return "encoder stalled: \(s)"
         case .cancelled: return "export cancelled"
         case .outOfOrder(let l, let g): return "frame timestamps out of order (\(l) then \(g) µs)"
         }
@@ -249,7 +249,10 @@ public final class FrameEncoder {
         while !videoInput.isReadyForMoreMediaData {
             if writer.status == .failed { throw EncoderError.writer(writer.error?.localizedDescription ?? "failed") }
             if cancelled { throw EncoderError.cancelled }
-            if Date() > deadline { throw EncoderError.timeout }
+            if Date() > deadline {
+                let pending = pendingAudio.map { CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp($0)) }
+                throw EncoderError.timeout("frame \(frames) at \(CMTimeGetSeconds(t)) s, writer \(writer.status.rawValue), video ready \(videoInput.isReadyForMoreMediaData), audio input \(audioInput != nil) ready \(audioInput?.isReadyForMoreMediaData ?? false) finished \(audioFinished) failed \(audioFailed) reader \(audioReader?.status.rawValue ?? -1) pending \(String(describing: pending)) error \(String(describing: writer.error))")
+            }
             pumpAudio(upTo: audioAhead)
             usleep(1000)
         }
