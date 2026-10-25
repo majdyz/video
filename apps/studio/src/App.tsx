@@ -306,7 +306,7 @@ export default function App() {
       <input ref={fileInputRef} type="file" accept={ACCEPT} hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) openFile(f); }} />
 
       <Sheet open={advOpen} onClose={() => setAdvOpen(false)} title={`${TOOL_LABEL[tab]} · Advanced`}>
-        <AdvancedControls tool={tab} tools={tools} setTools={setTools} />
+        <AdvancedControls tool={tab} tools={tools} setTools={setTools} stab={s.stab} />
       </Sheet>
 
       <ExportSheet open={exportOpen} onClose={() => { setExportOpen(false); if (s.exp.state === "done" || s.exp.state === "error") studio.dismissExport(); }} studio={studio} snap={s} tools={tools} />

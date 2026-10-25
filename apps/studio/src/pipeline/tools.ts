@@ -4,6 +4,7 @@
 
 import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, type ScenePreset, type UserSettings } from "../../../aqua-fix/src/engine/params.ts";
 import type { StabilizeParams } from "../../../motion-fix/src/lib/stabilize.ts";
+import type { SolveParams } from "../../../motion-fix/src/lib/plan.ts";
 import type { Projection } from "../../../dewarp/src/fisheye.ts";
 import { DEFAULT_PROFILE, FROM_FILE, PROFILES } from "../../../dewarp/src/profiles.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
@@ -67,6 +68,12 @@ export type StabiliseState = {
   strength: number;
   /** Advanced: largest crop the path may use, 0.05..0.3. */
   maxCrop: number;
+  /** Advanced (gyro path): roll the virtual camera so the horizon stays level. */
+  keepLevel: boolean;
+  /** Advanced (gyro path): medium in front of the lens port; auto = the clip's picture check. */
+  lens: "auto" | "air" | "water";
+  /** Advanced: use visual tracking even when the file carries gyro data. */
+  visual: boolean;
 };
 
 export const STAB_PRESETS: (Chip<StabPreset> & { strength: number; maxCrop: number })[] = [
@@ -75,10 +82,36 @@ export const STAB_PRESETS: (Chip<StabPreset> & { strength: number; maxCrop: numb
   { id: "locked", label: "Locked", hint: "Tripod-like, crops more", strength: 100, maxCrop: 0.25 },
 ];
 
-export const DEFAULT_STABILISE: StabiliseState = { enabled: false, preset: "steady", strength: Math.round(STAB_DEFAULTS.smoothing * 100), maxCrop: STAB_DEFAULTS.maxCrop };
+export const DEFAULT_STABILISE: StabiliseState = { enabled: false, preset: "steady", strength: Math.round(STAB_DEFAULTS.smoothing * 100), maxCrop: STAB_DEFAULTS.maxCrop, keepLevel: false, lens: "auto", visual: false };
 
-export function stabiliseParams(s: StabiliseState): StabilizeParams {
+/** Motion Fix v3's gyro default smoothing (DEFAULT_GYRO_PARAMS.smoothing; test/tools.test.ts keeps it equal). */
+export const GYRO_DEFAULT_SMOOTHING = 0.6;
+
+/**
+ * Visual-path parameters (Motion Fix v2): Strength 0..100 → smoothing 0..1.
+ */
+export function stabiliseParams(s: Pick<StabiliseState, "strength" | "maxCrop">): StabilizeParams {
   return { smoothing: Math.min(1, Math.max(0, s.strength / 100)), maxCrop: Math.min(0.3, Math.max(0.02, s.maxCrop)) };
+}
+
+/**
+ * Solve parameters for either path. One Strength slider serves both: the
+ * gyro path's own default (0.6) sits where the visual default (0.8) does,
+ * so "Steady" means each path's tuned default and 100 is full smoothing on
+ * both. `output` is rectilinear when Dewarp is on (the gyro warp then
+ * undoes the lens itself), else the camera's lens look.
+ */
+export function solveParams(s: StabiliseState, mode: "gyro" | "visual", output: "lens" | "rectilinear"): SolveParams {
+  const v = stabiliseParams(s);
+  const k = STAB_DEFAULTS.smoothing;
+  const gyroSmoothing = v.smoothing <= k ? (v.smoothing / k) * GYRO_DEFAULT_SMOOTHING : GYRO_DEFAULT_SMOOTHING + ((v.smoothing - k) / (1 - k)) * (1 - GYRO_DEFAULT_SMOOTHING);
+  return {
+    smoothing: mode === "gyro" ? gyroSmoothing : v.smoothing,
+    maxCrop: v.maxCrop,
+    horizonLock: s.keepLevel ? 1 : 0,
+    output,
+    medium: s.lens,
+  };
 }
 
 export function applyStabPreset(s: StabiliseState, id: StabPreset): StabiliseState {

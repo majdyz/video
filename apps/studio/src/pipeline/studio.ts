@@ -23,7 +23,8 @@ import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometrySource } from "./geometry.ts";
 import type { GeometryParams, QuarterTurns } from "./geometry-math.ts";
 import type { ClipInfo } from "./probe.ts";
-import { colourSettings, DEFAULT_TOOLS, exportSuffix, stabiliseParams, type ToolsState } from "./tools.ts";
+import { colourSettings, DEFAULT_TOOLS, exportSuffix, solveParams, type ToolsState } from "./tools.ts";
+import { stabInfo, stabSummary, type StabInfo } from "./stab-info.ts";
 import { seekVideo, waitForEvent, waitForFirstFrame, type VideoWithRVFC } from "./video.ts";
 import { decodePhoto, encodeJpeg, isPhotoFile, photoLimits } from "./photo.ts";
 
@@ -32,8 +33,8 @@ type MediaMod = typeof import("./media.ts");
 type MotionMod = typeof import("./motion.ts");
 type DewarpMod = typeof import("./dewarp.ts");
 type Engine = import("./colour.ts").GradeEngine;
-type MotionAnalysis = import("./motion.ts").MotionAnalysis;
-type StabilizedPath = import("./motion.ts").StabilizedPath;
+type AnalysisResult = import("./motion.ts").AnalysisResult;
+type Plan = import("./motion.ts").Plan;
 type AnalysisClient = import("./motion.ts").AnalysisClient;
 
 const loadColour = (): Promise<ColourMod> => import("./colour.ts");
@@ -52,7 +53,14 @@ const LIVE_EVERY_MS = 250;
 export type MediaKind = "video" | "photo";
 export type ExportMode = "offline" | "realtime" | "photo";
 
-export type StabStatus = { state: "off" | "analysing" | "solving" | "ready" | "error"; progress: number; summary: string | null; message: string | null };
+export type StabStatus = {
+  state: "off" | "analysing" | "solving" | "ready" | "error";
+  progress: number;
+  summary: string | null;
+  message: string | null;
+  /** Which path ran (gyro / visual), why, and what the Advanced sheet can offer. */
+  info: StabInfo | null;
+};
 export type ExportStatus = {
   state: "idle" | "preparing" | "running" | "done" | "error";
   progress: number;
@@ -90,7 +98,7 @@ export type Snapshot = {
 };
 
 const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null };
-const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null };
+const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null };
 
 /** Real-time recorder default: WebKit (offline capture is ~10 fps there); `?rt=1` / `?rt=0` force it. */
 function wantRealtime(): boolean | null {
@@ -132,8 +140,8 @@ export class Studio {
   private geo: GeometryRenderer | null = null;
   private video: HTMLVideoElement | null = null;
   private stabClient: AnalysisClient | null = null;
-  private analysis: MotionAnalysis | null = null;
-  private path: StabilizedPath | null = null;
+  private analysis: AnalysisResult | null = null;
+  private path: Plan | null = null;
   private stabAbort: AbortController | null = null;
   private solveSeq = 0;
   private solveTimer = 0;
@@ -302,7 +310,18 @@ export class Studio {
     if (this.snap.phase === "ready" && video) {
       if (next.colour.enabled && !this.snap.colourProfiled && !this.profiling) void this.profileColour();
       if (next.stabilise.enabled && !this.analysis && !this.stabAbort) void this.analyseMotion();
-      if (next.stabilise.enabled && this.analysis && (next.stabilise.strength !== prev.stabilise.strength || next.stabilise.maxCrop !== prev.stabilise.maxCrop)) this.scheduleSolve();
+      const a = next.stabilise, b = prev.stabilise;
+      if (a.visual !== b.visual && (this.analysis || this.stabAbort)) {
+        // Gyro data ↔ visual tracking: a different analysis, not just a re-solve.
+        this.stabAbort?.abort();
+        this.stabAbort = null;
+        this.analysis = null;
+        this.path = null;
+        if (a.enabled) void this.analyseMotion();
+      } else if (a.enabled && this.analysis) {
+        const outputChanged = this.analysis.mode === "gyro" && next.dewarp.enabled !== prev.dewarp.enabled;
+        if (a.strength !== b.strength || a.maxCrop !== b.maxCrop || a.keepLevel !== b.keepLevel || a.lens !== b.lens || outputChanged) this.scheduleSolve();
+      }
     }
     this.set({ visible: next.colour.enabled ? "colour" : "geo" });
     // A photo has no frame loop: a framing change needs a fresh analysis.
@@ -514,11 +533,21 @@ export class Studio {
   // ------------------------------------------------------------ drawing
 
   private stabActive(): boolean {
-    return this.snap.kind === "video" && this.tools.stabilise.enabled && !!this.path && !!this.motion;
+    return this.snap.kind === "video" && this.tools.stabilise.enabled && !!this.path && !!this.analysis && !!this.motion;
   }
 
   private geometryActive(): boolean {
     return this.stabActive() || (this.tools.dewarp.enabled && !!this.dewarpU);
+  }
+
+  /** Gyro path active and rendering straight lines itself (Dewarp on). */
+  private gyroRectilinear(): boolean {
+    return this.stabActive() && this.path?.kind === "gyro" && this.path.plan.output === "rectilinear";
+  }
+
+  /** The stabiliser's output projection: straight lines when Dewarp is on (gyro path only). */
+  private stabOutput(): "lens" | "rectilinear" {
+    return this.tools.dewarp.enabled ? "rectilinear" : "lens";
   }
 
   private geoParams(t: number, rot: QuarterTurns): GeometryParams {
@@ -527,8 +556,10 @@ export class Studio {
       rot,
       displayW: info.displayW,
       displayH: info.displayH,
-      stab: this.stabActive() ? this.motion!.warpFnAtTime(this.path!, t) : null,
-      dewarp: this.tools.dewarp.enabled ? this.dewarpU : null,
+      stab: this.stabActive() ? this.motion!.planWarpFn(this.analysis!, this.path!, t, info.displayW, info.displayH) : null,
+      // With gyro data and Dewarp on, the gyro warp renders rectilinear through the clip's own
+      // lens model (rotation-exact): the separate lens pass would undo the lens twice.
+      dewarp: this.tools.dewarp.enabled && !this.gyroRectilinear() ? this.dewarpU : null,
     };
   }
 
@@ -734,12 +765,14 @@ export class Studio {
           last = now;
           this.setStab({ progress: fraction });
         }
-      }, ctrl.signal);
-      if (gen !== this.gen) return;
+      }, ctrl.signal, this.tools.stabilise.visual);
+      if (gen !== this.gen || ctrl.signal.aborted) return;
       this.analysis = analysis;
-      this.setStab({ state: "solving", progress: 1 });
-      const path = await client.solve(stabiliseParams(this.tools.stabilise));
-      if (gen !== this.gen) return;
+      const info = stabInfo(analysis);
+      console.info(`[stabilise] ${info.badge}${info.warning ? ` (${info.warning})` : ""}`);
+      this.setStab({ state: "solving", progress: 1, info });
+      const path = await client.solve(solveParams(this.tools.stabilise, analysis.mode, this.stabOutput()));
+      if (gen !== this.gen || ctrl.signal.aborted) return;
       this.path = path;
       this.setStab({ state: "ready", summary: this.stabSummary() });
       this.repaint();
@@ -752,10 +785,7 @@ export class Studio {
   }
 
   private stabSummary(): string | null {
-    if (!this.analysis || !this.path || !this.motion) return null;
-    const before = this.motion.rawMotion(this.analysis).jitterRms;
-    const after = this.motion.residualMotion(this.analysis, this.path).jitterRms;
-    return `Jitter ${before.toFixed(1)} → ${after.toFixed(1)} px · zoom ${this.path.stats.maxUsedZoom.toFixed(2)}×`;
+    return this.analysis && this.path ? stabSummary(this.analysis, this.path) : null;
   }
 
   private scheduleSolve(): void {
@@ -763,9 +793,11 @@ export class Studio {
     const seq = ++this.solveSeq;
     this.solveTimer = window.setTimeout(async () => {
       const client = this.stabClient;
-      if (!client || !this.analysis) return;
+      const analysis = this.analysis;
+      if (!client || !analysis) return;
       try {
-        const path = await client.solve(stabiliseParams(this.tools.stabilise));
+        const path = await client.solve(solveParams(this.tools.stabilise, analysis.mode, this.stabOutput()));
+        if (analysis !== this.analysis) return;
         if (seq !== this.solveSeq) return;
         this.path = path;
         this.setStab({ state: "ready", summary: this.stabSummary() });

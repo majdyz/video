@@ -11,7 +11,10 @@ import {
   profileAspectMismatch,
   profileDefaults,
   stabiliseParams,
+  solveParams,
+  GYRO_DEFAULT_SMOOTHING,
 } from "../src/pipeline/tools.ts";
+import { DEFAULT_GYRO_PARAMS } from "../../motion-fix/src/lib/gyro/gyro-stabilize.ts";
 import { dewarpParams, dewarpUniforms } from "../src/pipeline/dewarp.ts";
 import { DEFAULT_SETTINGS } from "../../aqua-fix/src/engine/params.ts";
 import { DEFAULT_PARAMS } from "../../motion-fix/src/lib/stabilize.ts";
@@ -31,6 +34,14 @@ assert.deepEqual(stabiliseParams(DEFAULT_TOOLS.stabilise), DEFAULT_PARAMS);
 const locked = applyStabPreset(DEFAULT_TOOLS.stabilise, "locked");
 assert.equal(locked.preset, "locked");
 assert.deepEqual(stabiliseParams(locked), { smoothing: 1, maxCrop: 0.25 });
+// Motion Fix v3: one Strength drives both paths; Steady = each path's tuned default.
+assert.equal(GYRO_DEFAULT_SMOOTHING, DEFAULT_GYRO_PARAMS.smoothing);
+assert.ok(Math.abs(solveParams(DEFAULT_TOOLS.stabilise, "gyro", "lens").smoothing - DEFAULT_GYRO_PARAMS.smoothing) < 1e-9);
+assert.equal(solveParams(DEFAULT_TOOLS.stabilise, "visual", "lens").smoothing, DEFAULT_PARAMS.smoothing);
+assert.equal(solveParams(locked, "gyro", "lens").smoothing, 1);
+assert.equal(solveParams({ ...locked, keepLevel: true, lens: "water" }, "gyro", "rectilinear").horizonLock, 1);
+assert.equal(solveParams({ ...locked, lens: "water" }, "gyro", "rectilinear").medium, "water");
+assert.equal(solveParams({ ...DEFAULT_TOOLS.stabilise, strength: 0 }, "gyro", "lens").smoothing, 0);
 
 // Dewarp: the Osmo profile's fitted 55 % strength is the default; auto-fit leaves no black corners.
 assert.equal(DEFAULT_TOOLS.dewarp.strength, 55);

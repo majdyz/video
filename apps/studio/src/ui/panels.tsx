@@ -53,6 +53,7 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
   if (tool === "stabilise" && enabled) {
     if (stab.state === "analysing") status = <span className="status-live">Analysing motion · {Math.round(stab.progress * 100)}%</span>;
     else if (stab.state === "solving") status = <span className="status-live">Planning a smooth path…</span>;
+    else if (stab.state === "ready" && stab.info) status = <span className="status-good">{stab.info.badge}</span>;
     else if (stab.state === "ready" && stab.summary) status = <span className="status-good">{stab.summary}</span>;
     else if (stab.state === "error") status = <span className="status-bad">Analysis failed: {stab.message}</span>;
   }
@@ -60,6 +61,10 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
   const detected = cameraLabel(camera);
   if (tool === "dewarp" && detected) status = <span className="status-good">Detected: {detected}</span>;
   if (tool === "dewarp" && enabled && info && profileAspectMismatch(tools.dewarp.profile, info.codedW, info.codedH)) status = <span className="status-warn">Calibrated for a different aspect ratio</span>;
+  // Gyro stabilisation + Dewarp: the gyro warp straightens through the clip's own lens model.
+  const gyroLens = tool === "dewarp" && enabled && tools.stabilise.enabled && stab.state === "ready" && stab.info?.mode === "gyro";
+  if (gyroLens) status = <span className="status-good">Straightened with the gyro data's lens ({stab.info?.camera})</span>;
+  const note = tool === "stabilise" && enabled && stab.info?.warning ? stab.info.warning : null;
 
   return (
     <div className={`panel${enabled ? "" : " is-off"}`}>
@@ -71,6 +76,7 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
         </div>
         <Switch checked={enabled} onChange={setEnabled} label={`${TOOL_LABEL[tool]} on`} disabled={disabled} />
       </div>
+      {note && <p className="panel__note" role="note">{note}</p>}
       {tool === "stabilise" && stab.state === "analysing" && enabled && (
         <div className="progress-line"><div style={{ width: `${Math.round(stab.progress * 100)}%` }} /></div>
       )}
@@ -109,7 +115,7 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
 }
 
 /** Everything that isn't the main Strength. */
-export function AdvancedControls({ tool, tools, setTools }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void }) {
+export function AdvancedControls({ tool, tools, setTools, stab }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus }) {
   if (tool === "colour") {
     const c = tools.colour;
     const up = (patch: Partial<typeof c>) => setTools((t) => ({ ...t, colour: { ...t.colour, ...patch } }));
@@ -132,7 +138,32 @@ export function AdvancedControls({ tool, tools, setTools }: { tool: ToolId; tool
         <Slider label="Maximum crop" value={s.maxCrop * 100} min={4} max={30} defaultValue={DEFAULT_STABILISE.maxCrop * 100} format={(v) => `${Math.round(v)}%`}
           onChange={(v) => setTools((t) => ({ ...t, stabilise: { ...t.stabilise, maxCrop: v / 100, preset: "custom" } }))} />
         <p className="adv__hint">The camera path may zoom in this far to hide the moving edges. More crop allows a calmer path.</p>
-        <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, stabilise: { ...DEFAULT_STABILISE, enabled: t.stabilise.enabled } }))}>Reset stabilise</button>
+        {stab?.info?.canSwitch && (
+          <div className="adv__field">
+            <span className="adv__label">Motion source <small>{stab.info.mode === "gyro" ? `gyro data from ${stab.info.camera}` : "tracking the picture"}</small></span>
+            <Segmented label="Motion source" value={s.visual ? "visual" : "gyro"} onChange={(v) => setTools((t) => ({ ...t, stabilise: { ...t.stabilise, visual: v === "visual" } }))}
+              items={[{ id: "gyro", label: "Gyro data" }, { id: "visual", label: "Visual tracking" }]} />
+          </div>
+        )}
+        {stab?.info?.mode === "gyro" && (
+          <div className="adv__field">
+            <span className="adv__label">Lens port <small>refraction of a flat port underwater changes the lens</small></span>
+            <Segmented label="Lens port" value={s.lens} onChange={(v) => setTools((t) => ({ ...t, stabilise: { ...t.stabilise, lens: v } }))}
+              items={[
+                { id: "auto", label: `Auto${stab.info.mediumDetected ? ` (${stab.info.mediumDetected === "water" ? "underwater" : "air"})` : ""}` },
+                { id: "air", label: "Air" },
+                { id: "water", label: "Underwater" },
+              ]} />
+          </div>
+        )}
+        {stab?.info?.mode === "gyro" && stab.info.canLevel && (
+          <div className="adv__field adv__field--row">
+            <span className="adv__label">Keep level <small>rolls the view so the horizon stays straight</small></span>
+            <Switch checked={s.keepLevel} onChange={(v) => setTools((t) => ({ ...t, stabilise: { ...t.stabilise, keepLevel: v } }))} label="Keep level" />
+          </div>
+        )}
+        {stab?.summary && <p className="adv__hint">{stab.summary}</p>}
+        <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, stabilise: { ...DEFAULT_STABILISE, enabled: t.stabilise.enabled, visual: t.stabilise.visual } }))}>Reset stabilise</button>
       </div>
     );
   }
