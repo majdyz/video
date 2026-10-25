@@ -16,7 +16,8 @@ import { computeGyroPlan, frameTimesOf, gyroWarpFnAtTime, DEFAULT_GYRO_PARAMS, W
 import { ResidualCollector, type ResidualMotion } from "../src/lib/gyro/hybrid.ts";
 import { checkMedium, checkWindows, PairCollector } from "../src/lib/gyro/medium.ts";
 import type { RangeReader } from "../src/lib/gyro/mp4-index.ts";
-import { probeTelemetry } from "../src/lib/gyro/telemetry.ts";
+import { probeTelemetry, type CameraMotion } from "../src/lib/gyro/telemetry.ts";
+import { pinholeFromFov } from "../src/lib/gyro/lens.ts";
 import { renderThroughMesh } from "../test/synth.ts";
 import { measure } from "./shake-metric.ts";
 import { MotionTracker } from "../src/lib/tracker.ts";
@@ -80,13 +81,29 @@ const read: RangeReader = async (off, len) => {
   await fh.read(b, 0, n, off);
   return new Uint8Array(b.buffer, b.byteOffset, n);
 };
-const probe = await probeTelemetry(read, size);
-await fh.close();
-if (probe.status !== "ok") {
-  console.log(`${file}: telemetry ${probe.status}: ${"reason" in probe ? probe.reason : ""}`);
-  process.exit(1);
+// FAKE_GYRO=<diagonal FOV°>: a clip without telemetry, treated as if the gyro
+// said "no rotation" (tripod-like footage: fish, particles, blue water) — the
+// hybrid must not invent motion from moving subjects.
+async function fakeMotion(fov: number): Promise<CameraMotion> {
+  const pr = spawnSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries", "stream=width,height,nb_read_packets,r_frame_rate", "-of", "csv=p=0", file], { encoding: "utf8" });
+  const [w, h, rate, frames] = pr.stdout.trim().split(",");
+  const [a, b] = rate.split("/").map(Number);
+  const fps = a / (b || 1);
+  const n = Number(frames);
+  const lens = pinholeFromFov(Number(w), Number(h), fov, "fake");
+  return { source: "gopro", camera: "no telemetry (gyro = still)", times: Float64Array.of(-1, n / fps + 1), quats: Float64Array.of(1, 0, 0, 0, 1, 0, 0, 0), readout: 0, timeOffset: 0, lens, down: null, eis: { active: false, label: "off" }, video: { width: Number(w), height: Number(h), rotation: 0, frameCount: n, duration: n / fps, fps }, notes: [] };
 }
-const motion = probe.motion;
+let motion: CameraMotion;
+if (process.env.FAKE_GYRO) motion = await fakeMotion(Number(process.env.FAKE_GYRO));
+else {
+  const probe = await probeTelemetry(read, size);
+  if (probe.status !== "ok") {
+    console.log(`${file}: telemetry ${probe.status}: ${"reason" in probe ? probe.reason : ""}`);
+    process.exit(1);
+  }
+  motion = probe.motion;
+}
+await fh.close();
 console.log(`${file}: ${motion.camera}, lens ${motion.lens.kind} f=${motion.lens.fx.toFixed(1)} (${motion.lens.source}), EIS ${motion.eis.label}, ${motion.video.width}x${motion.video.height} ${motion.video.fps.toFixed(2)} fps, ${motion.video.frameCount} frames`);
 if (motion.video.rotation !== 0) throw new Error("rotated clips are not handled by this script");
 // START=s DUR=s: work on a stretch of a long clip (telemetry shifted to match).

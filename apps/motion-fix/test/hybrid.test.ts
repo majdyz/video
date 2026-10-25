@@ -17,7 +17,7 @@ const H = 1080;
 const hero: LensModel = { kind: "fisheye", width: W, height: H, fx: 910, fy: 910, cx: W / 2, cy: H / 2, k: [...GOPRO_WIDE_K], source: "test" };
 const params: GyroParams = { smoothing: 0.6, maxCrop: 0.15, horizonLock: 0, output: "lens" };
 
-type Scene = { rot: (t: number) => Vec3; pos: (t: number) => Vec3; depth: number };
+type Scene = { rot: (t: number) => Vec3; pos: (t: number) => Vec3; depth: number; /** Depth by source row instead (deep scenes). */ depthAt?: (y: number) => number };
 
 function motionOf(n: number, fps: number, scene: Scene, lens: LensModel): CameraMotion {
   const m = 4 * n + 8;
@@ -61,8 +61,9 @@ function matches(scene: Scene, lens: LensModel, t0: number, t1: number, rng: () 
     const y = 60 + rng() * (lens.height - 120);
     const r = qrot(q0, unproject(lens, x, y));
     if (r[2] < 0.2) continue;
-    const lam = (scene.depth - p0[2]) / r[2];
-    const X: Vec3 = [p0[0] + lam * r[0], p0[1] + lam * r[1], scene.depth];
+    const depth = scene.depthAt ? scene.depthAt(y) : scene.depth;
+    const lam = (depth - p0[2]) / r[2];
+    const X: Vec3 = [p0[0] + lam * r[0], p0[1] + lam * r[1], depth];
     const d: Vec3 = [X[0] - p1[0], X[1] - p1[1], X[2] - p1[2]];
     const c: Vec3 = [m1[0] * d[0] + m1[3] * d[1] + m1[6] * d[2], m1[1] * d[0] + m1[4] * d[1] + m1[7] * d[2], m1[2] * d[0] + m1[5] * d[1] + m1[8] * d[2]];
     const p = project(lens, c);
@@ -220,8 +221,16 @@ const still = (): Vec3 => [0, 0, 0];
   const g4 = gateResidual(r4, "air", frameTimesOf(m2), fps);
   console.log(`fallbacks: calm "${p1.hybrid?.reason}", featureless "${p2.hybrid?.reason}", fish half-clip accepted ${(g3.acceptedFrac * 100).toFixed(0)}% ${JSON.stringify(g3.rejected)}, fish everywhere accepted ${(g4.acceptedFrac * 100).toFixed(0)}%`);
   assert.ok(g4.acceptedFrac < 0.3, "two equal motions everywhere: not trusted");
+  // Deep scene: open water / far reef 12 m away in the upper half, the bottom 1.2 m below in the lower half.
+  // Steadying the near half would sway the far half: stays gyro-only.
+  const deep: Scene = { rot: shake, pos: bob, depth: 2, depthAt: (y) => (y < H / 2 ? 12 : 1.2) };
+  const m5 = motionOf(n, fps, deep, hero);
+  const p5 = computeGyroPlan(m5, params, residualOf(m5, deep, hero));
+  console.log(`deep scene: ${p5.hybrid?.applied ? "applied" : "not applied"} (${p5.hybrid?.reason})`);
+  assert.equal(p5.hybrid?.applied, false, "deep scene: not applied");
+  assert.match(p5.hybrid!.reason, /deep/);
   // Gate defaults are sane.
-  assert.ok(DEFAULT_GATE.minPoints >= 10 && DEFAULT_GATE.bridge <= 5);
+  assert.ok(DEFAULT_GATE.minPoints >= 10 && DEFAULT_GATE.bridgeSec <= 2);
 }
 
 // ---------------------------------------------------------------- view shift

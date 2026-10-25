@@ -28,7 +28,7 @@ import { maxTheta, thetaD, type LensModel } from "./lens.ts";
 import { qat, qconj, qcontinuous, qdot, qlog, qmat, qmul, qnorm, qrot, qslerp, sampleOrientation, type Quat, type Vec3 } from "./quat.ts";
 import type { CameraMotion } from "./telemetry.ts";
 import { rateLimitedZoom } from "../stabilize.ts";
-import { gateResidual, jitter2, smoothPath1D, TRANSLATION_WEIGHTS, wander2, type ResidualMotion } from "./hybrid.ts";
+import { gateResidual, jitter2, NO_HALF, smoothPath1D, TRANSLATION_WEIGHTS, wander2, type ResidualMotion } from "./hybrid.ts";
 
 /** Hybrid kicks in only above these (analysis px): heave/sway RMS, and translation jitter. */
 export const HYBRID_MIN_WANDER = 0.3;
@@ -616,6 +616,13 @@ function applyHybrid(geo: Geometry, virt: Float64Array, times: Float64Array, fps
     cx[i] = cx[i - 1] + g.dx[i];
     cy[i] = cy[i - 1] + g.dy[i];
   }
+  // Every measured step carries ~0.05 px of tracking noise, and whatever the
+  // correction follows lands 1:1 in the output, where the gyro-only result
+  // had none of it. Heave and sway live below ~2 Hz, so the track the
+  // correction follows is low-passed at ~2.5 Hz (Gaussian, fps/15 frames).
+  const lp = Math.max(0.5, fps / 15);
+  const fx = gaussian1d(cx, lp);
+  const fy = gaussian1d(cy, lp);
   // Margins: how far the view may turn along ±x / ±y and still fit at the zoom cap.
   const lim = 0.25;
   const marginAlong = (i: number, rows: RowRotations, ax: number, ay: number): number => {
@@ -642,14 +649,52 @@ function applyHybrid(geo: Geometry, virt: Float64Array, times: Float64Array, fps
     loY[i] = -share * marginAlong(i, rows, 0, 1);
     hiY[i] = share * marginAlong(i, rows, 0, -1);
   }
-  const sx = smoothPath1D(cx, loX, hiX, TRANSLATION_WEIGHTS);
-  const sy = smoothPath1D(cy, loY, hiY, TRANSLATION_WEIGHTS);
+  const sx = smoothPath1D(fx, loX, hiX, TRANSLATION_WEIGHTS);
+  const sy = smoothPath1D(fy, loY, hiY, TRANSLATION_WEIGHTS);
   const sig = 0.5 * fps;
-  const jitterBefore = jitter2(cx, cy, g.accepted);
+  // Judged on the measured track (noise included on both sides): the
+  // output keeps c − (c̃ − s), so filtered-away noise and anything the
+  // correction gets wrong count against the hybrid.
+  const jitterBefore = jitter2(cx, cy);
   const wanderBefore = wander2(cx, cy, sig);
   {
-    const jitterAfter = jitter2(sx, sy, g.accepted);
-    const wanderAfter = wander2(sx, sy, sig);
+    const px = new Float64Array(n);
+    const py = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      px[i] = cx[i] - (fx[i] - sx[i]);
+      py[i] = cy[i] - (fy[i] - sy[i]);
+    }
+    const jitterAfter = jitter2(px, py);
+    const wanderAfter = wander2(px, py, sig);
+    // Deep scenes (near reef below, open water or a far landscape above):
+    // one shift cannot steady both, and steadying the near half would move
+    // the far half. Each half must come out no worse than gyro-only.
+    const halves = medium === "water" ? residual.waterHalves : residual.airHalves;
+    if (halves) {
+      for (const off of [0, 2]) {
+        const hx = new Float64Array(n);
+        const hy = new Float64Array(n);
+        const ax = new Float64Array(n);
+        const ay = new Float64Array(n);
+        for (let i = 1; i < n; i++) {
+          const j = g.index[i];
+          const ok = j >= 0 && g.accepted[i] && halves[4 * j + off] < NO_HALF;
+          hx[i] = hx[i - 1] + (ok ? halves[4 * j + off] * u : g.dx[i]);
+          hy[i] = hy[i - 1] + (ok ? halves[4 * j + off + 1] * u : g.dy[i]);
+        }
+        for (let i = 0; i < n; i++) {
+          ax[i] = hx[i] - (fx[i] - sx[i]);
+          ay[i] = hy[i] - (fy[i] - sy[i]);
+        }
+        const wb = wander2(hx, hy, sig);
+        const wa = wander2(ax, ay, sig);
+        const jb = jitter2(hx, hy);
+        const ja = jitter2(ax, ay);
+        if (wa > 1.05 * wb + 0.05 || ja > 1.1 * jb + 0.02) {
+          return { ...base, jitterBefore, jitterAfter, wanderBefore, wanderAfter, applied: false, reason: `scene too deep: steadying one part would move the ${off ? "lower" : "upper"} part` };
+        }
+      }
+    }
     // Worth it only when the picture shows heave/sway or shake above the tracking noise that the path removes.
     const wanderGain = wanderBefore >= HYBRID_MIN_WANDER && wanderAfter < 0.8 * wanderBefore;
     const jitterGain = jitterBefore >= HYBRID_MIN_JITTER && jitterAfter < 0.8 * jitterBefore;
@@ -661,8 +706,8 @@ function applyHybrid(geo: Geometry, virt: Float64Array, times: Float64Array, fps
   const lam = new Float64Array(n).fill(1);
   let limited = 0;
   for (let i = 0; i < n; i++) {
-    vx[i] = (cx[i] - sx[i]) / u;
-    vy[i] = (cy[i] - sy[i]) / u;
+    vx[i] = (fx[i] - sx[i]) / u;
+    vy[i] = (fy[i] - sy[i]) / u;
     const q = qat(virt, i);
     const rows = rowsAt(i);
     if (fits(geo, qmul(q, viewShiftQuat(vx[i], vy[i])), rows, maxZoom)) continue;
@@ -692,7 +737,7 @@ function applyHybrid(geo: Geometry, virt: Float64Array, times: Float64Array, fps
     oy[i] = cy[i] - vy[i] * l * u;
     virt.set(qmul(qat(virt, i), viewShiftQuat(vx[i] * l, vy[i] * l)), 4 * i);
   }
-  return { ...base, jitterBefore, jitterAfter: jitter2(ox, oy, g.accepted), wanderBefore, wanderAfter: wander2(ox, oy, sig), maxShift, limitedFrames: limited, applied: true, reason: "bobbing removed" };
+  return { ...base, jitterBefore, jitterAfter: jitter2(ox, oy), wanderBefore, wanderAfter: wander2(ox, oy, sig), maxShift, limitedFrames: limited, applied: true, reason: "bobbing removed" };
 }
 
 // ---------------------------------------------------------------------------

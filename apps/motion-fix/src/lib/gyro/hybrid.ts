@@ -40,6 +40,9 @@ export type ResidualMotion = {
   /** Per frame and medium (air, water): dx, dy (focal units, camera at t), log scale, then the fit quality. */
   air: Float32Array;
   water: Float32Array;
+  /** Per frame and medium: top-half dx, dy, bottom-half dx, dy (focal units; NO_HALF = too few points). Absent in older data. */
+  airHalves?: Float32Array;
+  waterHalves?: Float32Array;
   /** Tracked points per pair. */
   points: Uint16Array;
   /** Analysis px per focal unit (gnomonic -> analysis pixels at the centre). */
@@ -53,9 +56,24 @@ export type ResidualMotion = {
 export const RESIDUAL_STRIDE = 7;
 // Layout: 0 dx, 1 dy, 2 log s, 3 inlier fraction, 4 rms (analysis px), 5 coverage (0..1), 6 zero support (0..1).
 
-export type PairResidual = { dx: number; dy: number; logS: number; points: number; inlierFrac: number; rms: number; coverage: number; zeroSupport: number };
+export type PairResidual = {
+  dx: number;
+  dy: number;
+  logS: number;
+  points: number;
+  inlierFrac: number;
+  rms: number;
+  coverage: number;
+  zeroSupport: number;
+  /** The shift measured on the top and the bottom half of the frame alone (same scale), NO_HALF when a half has too few points. */
+  top: [number, number];
+  bottom: [number, number];
+};
 
-const EMPTY: PairResidual = { dx: 0, dy: 0, logS: 0, points: 0, inlierFrac: 0, rms: Infinity, coverage: 0, zeroSupport: 0 };
+/** Marks a half without enough points in PairResidual.top/.bottom and ResidualMotion halves. */
+export const NO_HALF = 1e6;
+
+const EMPTY: PairResidual = { dx: 0, dy: 0, logS: 0, points: 0, inlierFrac: 0, rms: Infinity, coverage: 0, zeroSupport: 0, top: [NO_HALF, NO_HALF], bottom: [NO_HALF, NO_HALF] };
 
 function medianOf(v: Float64Array, n: number): number {
   if (n === 0) return 0;
@@ -173,13 +191,32 @@ export function pairResidual(motion: CameraMotion, lens: LensModel, t0: number, 
   }
   let cov = 0;
   for (let i = 0; i < 16; i++) cov += cells[i];
-  return { dx, dy, logS: Math.log(s), points: k, inlierFrac: inl / k, rms: inl ? Math.sqrt(ss / inl) : Infinity, coverage: cov / 16, zeroSupport: zero / k };
+  // Per half (rows of cells 0-1 vs 2-3): near ground and far water or sky
+  // differ here when the scene is deep, and one shift cannot steady both.
+  const half = (top: boolean): [number, number] => {
+    let sw = 0, hx = 0, hy = 0, cnt = 0;
+    const c = 3 * Math.max(noise, sigma);
+    for (let i = 0; i < k; i++) {
+      if ((cell[i] < 8) !== top) continue;
+      const rx = bx[i] - s * ax[i];
+      const ry = by[i] - s * ay[i];
+      const r = Math.hypot(rx - dx, ry - dy) / (2 * c);
+      const wi = r < 1 ? (1 - r * r) ** 2 : 0;
+      if (!wi) continue;
+      sw += wi;
+      hx += wi * rx;
+      hy += wi * ry;
+      cnt++;
+    }
+    return cnt >= 6 ? [hx / sw, hy / sw] : [NO_HALF, NO_HALF];
+  };
+  return { dx, dy, logS: Math.log(s), points: k, inlierFrac: inl / k, rms: inl ? Math.sqrt(ss / inl) : Infinity, coverage: cov / 16, zeroSupport: zero / k, top: half(true), bottom: half(false) };
 }
 
 /**
  * Tracks the whole clip (gray 0..255 frames at the analysis size, in coded
  * orientation) and records each pair's residual for the air and the water
- * lens. Memory: 14 floats per frame.
+ * lens. Memory: 22 floats per frame.
  */
 export class ResidualCollector {
   private readonly tracker: MotionTracker;
@@ -192,6 +229,8 @@ export class ResidualCollector {
   private readonly air: number[] = [];
   private readonly water: number[] = [];
   private readonly points: number[] = [];
+  private readonly airHalves: number[] = [];
+  private readonly waterHalves: number[] = [];
   private trackMs = 0;
   readonly aw: number;
   readonly ah: number;
@@ -241,6 +280,8 @@ export class ResidualCollector {
     if (prev === null || !m) {
       rec(this.air, EMPTY);
       rec(this.water, EMPTY);
+      this.airHalves.push(NO_HALF, NO_HALF, NO_HALF, NO_HALF);
+      this.waterHalves.push(NO_HALF, NO_HALF, NO_HALF, NO_HALF);
       this.points.push(0);
       return;
     }
@@ -248,6 +289,8 @@ export class ResidualCollector {
     const rw = pairResidual(this.motion, this.lenses[1], prev, time, m.px, m.py, m.qx, m.qy, this.noise);
     rec(this.air, ra);
     rec(this.water, rw);
+    this.airHalves.push(...ra.top, ...ra.bottom);
+    this.waterHalves.push(...rw.top, ...rw.bottom);
     this.points.push(Math.min(65535, ra.points));
   }
 
@@ -257,6 +300,8 @@ export class ResidualCollector {
       indices: [1, this.lenses[1].n ?? 1],
       air: Float32Array.from(this.air),
       water: Float32Array.from(this.water),
+      airHalves: Float32Array.from(this.airHalves),
+      waterHalves: Float32Array.from(this.waterHalves),
       points: Uint16Array.from(this.points),
       unitPx: this.unitPx,
       analysisWidth: this.aw,
@@ -279,25 +324,34 @@ export type GateOptions = {
   maxRms: number;
   /** A group this large that stays put while the fit moves vetoes the frame (fish over a static scene). */
   maxZeroSupport: number;
-  /** Rejected runs up to this many frames are bridged by interpolation. */
-  bridge: number;
+  /**
+   * Rejected stretches between usable frames are filled by interpolating
+   * the step (constant-velocity guess) up to this long, seconds; longer
+   * ones fade the neighbours' step to zero over half a second from each side.
+   * Zero steps inside a steady drift would turn every rejected frame into a
+   * jerk in the output.
+   */
+  bridgeSec: number;
 };
 
-export const DEFAULT_GATE: GateOptions = { minPoints: 20, minInlierFrac: 0.55, minCoverage: 5 / 16, maxSpeedPx: 160, maxRms: 1.5, maxZeroSupport: 0.3, bridge: 3 };
+export const DEFAULT_GATE: GateOptions = { minPoints: 20, minInlierFrac: 0.55, minCoverage: 5 / 16, maxSpeedPx: 160, maxRms: 1.5, maxZeroSupport: 0.3, bridgeSec: 1 };
 
 export type GatedResidual = {
   /** Per plan frame: residual step (analysis px at the centre), 0 where rejected. */
   dx: Float64Array;
   dy: Float64Array;
   accepted: Uint8Array;
+  /** Residual frame measured for each plan frame (-1: none). */
+  index: Int32Array;
   acceptedFrac: number;
   /** Why frames were dropped (counts). */
   rejected: { missing: number; points: number; inliers: number; coverage: number; rms: number; speed: number; still: number; spike: number };
 };
 
 /**
- * Per plan frame residual steps, with frames that fail any check set to
- * zero (gyro-only behaviour for them) and short gaps bridged.
+ * Per plan frame residual steps. Frames that fail a check get an
+ * interpolated step (bridgeSec), or one fading to zero (gyro-only
+ * behaviour) in long stretches and at the ends of the clip.
  */
 export function gateResidual(res: ResidualMotion, medium: "air" | "water", frameTimes: Float64Array, fps: number, opts: GateOptions = DEFAULT_GATE): GatedResidual {
   const n = frameTimes.length;
@@ -306,6 +360,7 @@ export function gateResidual(res: ResidualMotion, medium: "air" | "water", frame
   const dx = new Float64Array(n);
   const dy = new Float64Array(n);
   const ok = new Uint8Array(n);
+  const index = new Int32Array(n).fill(-1);
   const rej = { missing: 0, points: 0, inliers: 0, coverage: 0, rms: 0, speed: 0, still: 0, spike: 0 };
   const dt = 1 / Math.max(1, fps);
   const maxStep = opts.maxSpeedPx * dt;
@@ -319,6 +374,7 @@ export function gateResidual(res: ResidualMotion, medium: "air" | "water", frame
       rej.missing++;
       continue;
     }
+    index[i] = j;
     const o = S * j;
     const x = data[o] * u;
     const y = data[o + 1] * u;
@@ -360,8 +416,10 @@ export function gateResidual(res: ResidualMotion, medium: "air" | "water", frame
     dx[i] = 0;
     dy[i] = 0;
   }
-  // Bridge short gaps between accepted frames (motion blur in a kick): linear in the step.
+  // Fill rejected stretches (blur in a kick, a fish crossing, a turn).
   let accepted = 0;
+  const maxBridge = Math.max(1, Math.round(opts.bridgeSec * fps));
+  const fade = Math.max(1, Math.round(0.5 * fps));
   for (let i = 1; i < n; i++) {
     if (keep[i]) {
       accepted++;
@@ -370,16 +428,24 @@ export function gateResidual(res: ResidualMotion, medium: "air" | "water", frame
     let e = i;
     while (e < n && !keep[e]) e++;
     const len = e - i;
-    if (i - 1 >= 1 && keep[i - 1] && e < n && len <= opts.bridge) {
-      for (let k = i; k < e; k++) {
+    const hasL = i - 1 >= 1 && keep[i - 1];
+    const hasR = e < n;
+    for (let k = i; k < e; k++) {
+      if (hasL && hasR && len <= maxBridge) {
         const f = (k - i + 1) / (len + 1);
         dx[k] = dx[i - 1] + (dx[e] - dx[i - 1]) * f;
         dy[k] = dy[i - 1] + (dy[e] - dy[i - 1]) * f;
+      } else {
+        // Fade each neighbour's step out over `fade` frames.
+        const wl = hasL ? Math.max(0, 1 - (k - i + 1) / fade) : 0;
+        const wr = hasR ? Math.max(0, 1 - (e - k) / fade) : 0;
+        dx[k] = (hasL ? dx[i - 1] * wl : 0) + (hasR ? dx[e] * wr : 0);
+        dy[k] = (hasL ? dy[i - 1] * wl : 0) + (hasR ? dy[e] * wr : 0);
       }
     }
     i = e - 1;
   }
-  return { dx, dy, accepted: keep, acceptedFrac: accepted / Math.max(1, n - 1), rejected: rej };
+  return { dx, dy, accepted: keep, index, acceptedFrac: accepted / Math.max(1, n - 1), rejected: rej };
 }
 
 // ---------------------------------------------------------------------------

@@ -88,6 +88,25 @@ are cross-checked against [telemetry-parser](https://github.com/AdrianEddy/telem
 output (MIT/Apache) in `apps/motion-fix/test/gyro-parsers.test.ts`.
 Phone and re-encoded clips use the visual path below.
 
+Hybrid gyro + visual ("Bobbing: Remove", on by default): the gyro removes
+rotation only, but a diver's camera also heaves and sways with every fin
+kick. After the gyro result is on screen the clip is decoded and tracked in
+the background (480 px); every point pair is derotated with the telemetry
+at its row times and a robust g' = s·g + d fit in gnomonic coordinates (the
+exact model for a sideways / forward camera step in front of a plane) gives
+the residual translation per frame. Pairs are gated (enough points spread
+over the frame, inlier share, fit residual, plausible speed, no large
+"still" group — fish or particles over a static scene — no spikes), the
+cumulative residual is smoothed by a 1-D L1 path (same LP core) inside the
+margins the rotation left in the crop budget, and the difference is applied
+as a small extra rotation of the virtual camera. Clips where under 30 % of
+the frames are usable, or where nothing measurable would be removed, stay
+gyro-only. Real underwater test material: GoPro HERO5 Black originals with
+`gpmd` (raw GYRO) from the archive.org item
+[GOPR0507](https://archive.org/details/GOPR0507) (underwater hockey,
+pool, 2017; no license stated — used for local tests only, not
+redistributed).
+
 - Grundmann, Kwatra & Essa (2011) —
   [Auto-Directed Video Stabilization with Robust L1 Optimal Camera Paths](https://research.google.com/pubs/archive/37041.pdf)
   (CVPR). The path model: w = (10, 1, 100) on first/second/third
@@ -105,6 +124,10 @@ Phone and re-encoded clips use the visual path below.
   zoom, rolling maximum, Gaussian smoothing).
 
 Tests: `node --experimental-strip-types apps/motion-fix/test/run-all.ts`.
+Gyro-only vs hybrid on a clip (renders both, prints shake / heave metrics;
+`BOB=ax,ay,f` adds a synthetic bob the gyro cannot see, `FAKE_GYRO=<fov>`
+treats a clip without telemetry as if the gyro said "still"):
+`node --experimental-strip-types apps/motion-fix/scripts/hybrid-cpu.ts <clip> <out-prefix>`.
 
 ### Dewarp
 
