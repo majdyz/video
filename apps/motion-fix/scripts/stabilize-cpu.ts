@@ -62,7 +62,7 @@ for (let t = 0; t < n; t++) {
   if (m.homography) upgrades++;
 }
 const analysis: MotionAnalysis = { width: aw, height: ah, analysisWidth: aw, analysisHeight: ah, frameCount: n, frameRate: fps, times, motion, cumulative, inliers, tracked, rms, model, homography, homographyState, trackMsPerFrame: 0 };
-const params = { smoothing: Number(smoothingArg ?? 0.8), maxCrop: Number(cropArg ?? 0.15), ...(process.env.ZOOM_WINDOW ? { zoomWindowSec: Number(process.env.ZOOM_WINDOW) } : {}), ...(process.env.FIDELITY ? { fidelityWeight: Number(process.env.FIDELITY) } : {}) };
+const params = { smoothing: Number(smoothingArg ?? 0.8), maxCrop: Number(cropArg ?? 0.15), ...(process.env.ZOOM_WINDOW ? { zoomWindowSec: Number(process.env.ZOOM_WINDOW) } : {}), ...(process.env.FIDELITY ? { fidelityWeight: Number(process.env.FIDELITY) } : {}), ...(process.env.ZOOM_RATE ? { zoomRate: Number(process.env.ZOOM_RATE) } : {}) };
 console.log(`${file}: ${n} frames ${width}x${height}@${fps.toFixed(2)} (analysed at ${aw}x${ah}); homography kept on ${upgrades}/${n - 1} pairs`);
 
 function render(path: StabilizedPath, out: string): void {

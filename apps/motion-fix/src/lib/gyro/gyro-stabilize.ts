@@ -24,7 +24,7 @@
 // orientation at the row's capture time (rolling shutter) -> source lens ->
 // source pixel.
 
-import { maxTheta, project, thetaD, unproject, type LensModel } from "./lens.ts";
+import { maxTheta, thetaD, type LensModel } from "./lens.ts";
 import { qat, qconj, qcontinuous, qdot, qlog, qmat, qmul, qnorm, qrot, qslerp, sampleOrientation, type Quat, type Vec3 } from "./quat.ts";
 import type { CameraMotion } from "./telemetry.ts";
 import { rateLimitedZoom } from "../stabilize.ts";
@@ -312,25 +312,6 @@ export class RowRotations {
   }
 }
 
-/** Output ray (camera frame of the virtual camera) -> source pixel, rolling shutter by fixed-point on the row. */
-function mapRay(ray: Vec3, virtMat: number[], rows: RowRotations, src: LensModel, srcThMax: number, out: [number, number]): [number, number] {
-  const w: Vec3 = [
-    virtMat[0] * ray[0] + virtMat[1] * ray[1] + virtMat[2] * ray[2],
-    virtMat[3] * ray[0] + virtMat[4] * ray[1] + virtMat[5] * ray[2],
-    virtMat[6] * ray[0] + virtMat[7] * ray[1] + virtMat[8] * ray[2],
-  ];
-  const s: Vec3 = [0, 0, 0];
-  let fy = 0.5;
-  const iters = rows.count > 1 ? 3 : 1;
-  for (let k = 0; k < iters; k++) {
-    rows.toSource(w, fy, s);
-    project(src, s, out, srcThMax);
-    if (!Number.isFinite(out[1])) return out;
-    fy = out[1] / src.height;
-  }
-  return out;
-}
-
 function borderPoints(width: number, height: number, perEdge: number): Float64Array {
   const pts: number[] = [];
   for (let i = 0; i <= perEdge; i++) {
@@ -351,14 +332,12 @@ type Geometry = {
 
 function fits(g: Geometry, virt: Quat, rows: RowRotations, zoom: number): boolean {
   const { src } = g;
-  const outL = outputLens(src, g.output, g.rectBase, zoom, src.width, src.height);
-  const vm = qmat(virt);
+  const map = frameMapper(src, g.output, g.rectBase, virt, zoom, rows);
   const px: [number, number] = [0, 0];
   // Half a pixel inside: the border between samples bulges slightly through the lens.
   const m = 0.5;
   for (let i = 0; i < g.border.length; i += 2) {
-    const ray = unproject(outL, g.border[i], g.border[i + 1]);
-    mapRay(ray, vm, rows, src, g.srcThMax, px);
+    if (!map(g.border[i], g.border[i + 1], px)) return false;
     if (!(px[0] >= m && px[0] <= src.width - m && px[1] >= m && px[1] <= src.height - m)) return false;
   }
   return true;
@@ -370,7 +349,7 @@ function requiredZoom(g: Geometry, virt: Quat, rows: RowRotations, lo: number, h
   if (!fits(g, virt, rows, hi)) return hi + 1;
   let a = lo;
   let b = hi;
-  for (let i = 0; i < 18; i++) {
+  for (let i = 0; i < 13; i++) {
     const m = (a + b) / 2;
     if (fits(g, virt, rows, m)) b = m;
     else a = m;
@@ -503,8 +482,11 @@ export function computeGyroPlan(motion: CameraMotion, params: GyroParams): GyroP
   qcontinuous(virt);
 
   // 5. zoom
+  // Every frame: with high-frequency vibration the correction can change by
+  // a degree between frames, so neighbours are no stand-in.
   const required = new Float32Array(n);
   for (let i = 0; i < n; i++) required[i] = Math.min(maxZoom, requiredZoom(geo, qat(virt, i), rowsAt(i), 1, maxZoom));
+
   // Rate-limited: the crop drifts at most ZOOM_RATE per second, so it never visibly pumps.
   const zoom = params.zoomRate === 0 ? smoothZoomTrack(required, Math.max(8, Math.round(fps * 3)), maxZoom) : rateLimitedZoom(required, fps, params.zoomRate ?? ZOOM_RATE, maxZoom);
 
@@ -564,10 +546,16 @@ export type WarpFnLike = (x: number, y: number) => readonly [number, number];
 /** θd -> θ lookup for a fisheye polynomial (uniform in θd), cached per k. */
 type ThetaLut = { table: Float64Array; step: number; tdMax: number; thMax: number };
 const lutCache = new Map<string, ThetaLut>();
+const lutByArray = new WeakMap<readonly number[], ThetaLut>();
 function thetaLut(k: readonly number[]): ThetaLut {
+  const quick = lutByArray.get(k);
+  if (quick) return quick;
   const key = k.join(",");
   const hit = lutCache.get(key);
-  if (hit) return hit;
+  if (hit) {
+    lutByArray.set(k, hit);
+    return hit;
+  }
   const thMax = maxTheta(k);
   const tdMax = thetaD(k, thMax);
   const N = 4096;
@@ -592,39 +580,31 @@ function thetaLut(k: readonly number[]): ThetaLut {
   const lut = { table, step, tdMax, thMax };
   if (lutCache.size > 16) lutCache.clear();
   lutCache.set(key, lut);
+  lutByArray.set(k, lut);
   return lut;
 }
 
 /**
- * The per-vertex warp at media time t: output centred display px -> source
- * centred display px (the renderer's WarpFn contract). Rays the lens cannot
- * see map far outside the frame so the renderer paints them black.
+ * Output coded pixel -> source coded pixel for one frame: output lens at
+ * `zoom` -> ray in the virtual camera -> world -> source camera at the
+ * row's capture time (fixed point on the row) -> source lens. Writes the
+ * result into `out` and returns false for rays the lens cannot see.
  *
- * Hot path (2405 vertices per frame, every preview / export frame): scalar
- * maths only, a lookup table instead of Newton for the fisheye inverse, and
- * one reused result tuple — the renderer reads it before the next call.
+ * Hot path (2405 vertices per rendered frame, ~40 border points per zoom
+ * probe in the solve): scalar maths only and a lookup table instead of
+ * Newton for the fisheye inverse.
  */
-export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number, outW?: number, outH?: number): WarpFnLike {
-  const { i0, i1, f } = bracket(plan.frameTimes, t);
-  const virt = qslerp(qat(plan.virt, i0), qat(plan.virt, i1), f);
-  const zoom = plan.zoom[i0] + (plan.zoom[i1] - plan.zoom[i0]) * f;
-  const src: LensModel = { ...motion.lens, n: plan.n };
-  const rot = motion.video.rotation;
+export type FrameMapper = (u: number, v: number, out: [number, number]) => boolean;
+
+export function frameMapper(src: LensModel, output: "lens" | "rectilinear", rectBase: number, virt: Quat, zoom: number, rows: RowRotations): FrameMapper {
   const cw = src.width;
   const ch = src.height;
-  // The renderer's canvas is the display size; scale if it differs from the coded size.
-  const dispW = rot === 90 || rot === 270 ? ch : cw;
-  const dispH = rot === 90 || rot === 270 ? cw : ch;
-  const sxs = outW ? dispW / outW : 1;
-  const sys = outH ? dispH / outH : 1;
-  const outL = outputLens(src, plan.output, plan.rectBase, zoom, cw, ch);
+  const outL = outputLens(src, output, rectBase, zoom, cw, ch);
   const outPin = outL.kind === "pinhole";
   const outLut = outPin ? null : thetaLut(outL.k);
   const srcFish = src.kind === "fisheye";
-  const srcLut = srcFish ? thetaLut(src.k) : null;
-  const srcThMax = srcLut ? srcLut.thMax : Math.PI / 2;
+  const srcThMax = srcFish ? thetaLut(src.k).thMax : Math.PI / 2;
   const [k1, k2, k3, k4] = src.k;
-  const rows = new RowRotations(motion, t);
   const R = rows.mats;
   const nRows = rows.count;
   const m = qmat(virt);
@@ -633,20 +613,8 @@ export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number
   // Flat-port refraction: the source sees through water; a fisheye-look output keeps that look.
   const srcN = src.n ?? 1;
   const outN = outPin ? 1 : (outL.n ?? 1);
-  const out: [number, number] = [0, 0];
-  const far = (): readonly [number, number] => {
-    out[0] = 1e6;
-    out[1] = 1e6;
-    return out;
-  };
-  return (xd, yd) => {
-    const x = xd * sxs;
-    const y = yd * sys;
-    let u: number, v: number;
-    if (rot === 90) { u = y + cw / 2; v = -x + ch / 2; }
-    else if (rot === 180) { u = -x + cw / 2; v = -y + ch / 2; }
-    else if (rot === 270) { u = -y + cw / 2; v = x + ch / 2; }
-    else { u = x + cw / 2; v = y + ch / 2; }
+  const iters = nRows > 1 ? 2 : 1;
+  return (u, v, out) => {
     // Output pixel -> ray in the virtual camera.
     const mx = (u - ocx) / ofx;
     const my = (v - ocy) / ofy;
@@ -674,10 +642,9 @@ export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number
     const wx = m[0] * rx + m[1] * ry + m[2] * rz;
     const wy = m[3] * rx + m[4] * ry + m[5] * rz;
     const wz = m[6] * rx + m[7] * ry + m[8] * rz;
-    // World -> source camera at the row's capture time (fixed point on the row), -> source pixel.
+    // World -> source camera at the row's capture time, -> source pixel.
     let fy = 0.5;
     let pu = 0, pv = 0;
-    const iters = nRows > 1 ? 2 : 1;
     for (let it = 0; it < iters; it++) {
       let o0 = 0, o1 = 0, a = 0;
       if (nRows > 1) {
@@ -697,10 +664,10 @@ export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number
         let th = Math.atan2(r, sz);
         if (srcN !== 1) {
           const sn = srcN * Math.sin(th);
-          if (sn >= 1) return far();
+          if (sn >= 1) return false;
           th = Math.asin(sn);
         }
-        if (th > srcThMax) return far();
+        if (th > srcThMax) return false;
         if (r < 1e-12) { pu = scx; pv = scy; }
         else {
           const t2 = th * th;
@@ -709,13 +676,13 @@ export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number
           pv = scy + sfy * k * sy;
         }
       } else if (srcN === 1) {
-        if (sz <= 1e-9) return far();
+        if (sz <= 1e-9) return false;
         pu = scx + (sfx * sx) / sz;
         pv = scy + (sfy * sy) / sz;
       } else {
         const r = Math.sqrt(sx * sx + sy * sy);
         const sn = srcN * Math.sin(Math.atan2(r, sz));
-        if (sn >= 0.9999) return far();
+        if (sn >= 0.9999) return false;
         if (r < 1e-12) { pu = scx; pv = scy; }
         else {
           const k = Math.tan(Math.asin(sn)) / r;
@@ -725,9 +692,50 @@ export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number
       }
       fy = pv / ch;
     }
+    out[0] = pu;
+    out[1] = pv;
+    return true;
+  };
+}
+
+/**
+ * The per-vertex warp at media time t: output centred display px -> source
+ * centred display px (the renderer's WarpFn contract). Rays the lens cannot
+ * see map far outside the frame so the renderer paints them black. One
+ * reused result tuple: the renderer reads it before the next call.
+ */
+export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number, outW?: number, outH?: number): WarpFnLike {
+  const { i0, i1, f } = bracket(plan.frameTimes, t);
+  const virt = qslerp(qat(plan.virt, i0), qat(plan.virt, i1), f);
+  const zoom = plan.zoom[i0] + (plan.zoom[i1] - plan.zoom[i0]) * f;
+  const src: LensModel = { ...motion.lens, n: plan.n };
+  const rot = motion.video.rotation;
+  const cw = src.width;
+  const ch = src.height;
+  // The renderer's canvas is the display size; scale if it differs from the coded size.
+  const dispW = rot === 90 || rot === 270 ? ch : cw;
+  const dispH = rot === 90 || rot === 270 ? cw : ch;
+  const sxs = outW ? dispW / outW : 1;
+  const sys = outH ? dispH / outH : 1;
+  const map = frameMapper(src, plan.output, plan.rectBase, virt, zoom, new RowRotations(motion, t));
+  const px: [number, number] = [0, 0];
+  const out: [number, number] = [0, 0];
+  return (xd, yd) => {
+    const x = xd * sxs;
+    const y = yd * sys;
+    let u: number, v: number;
+    if (rot === 90) { u = y + cw / 2; v = -x + ch / 2; }
+    else if (rot === 180) { u = -x + cw / 2; v = -y + ch / 2; }
+    else if (rot === 270) { u = -y + cw / 2; v = x + ch / 2; }
+    else { u = x + cw / 2; v = y + ch / 2; }
+    if (!map(u, v, px)) {
+      out[0] = 1e6;
+      out[1] = 1e6;
+      return out;
+    }
+    const a0 = px[0] - cw / 2;
+    const b0 = px[1] - ch / 2;
     let dx: number, dy: number;
-    const a0 = pu - cw / 2;
-    const b0 = pv - ch / 2;
     if (rot === 90) { dx = -b0; dy = a0; }
     else if (rot === 180) { dx = -a0; dy = -b0; }
     else if (rot === 270) { dx = b0; dy = -a0; }

@@ -64,6 +64,19 @@ shader and writes before/after comparisons.
 
 ### Motion Fix
 
+Gyro path (GoPro HERO8+ `gpmd`, DJI `djmd` originals): the camera
+orientation track is read with ranged `Blob.slice` reads (no decode), the
+image orientation is smoothed on the rotation sphere with a speed-adaptive
+zero-phase filter, the crop is computed through the lens model (GoPro
+HERO11+ in-file calibration or a measured HERO10 Wide profile; DJI's own
+calibration; flat-port refraction underwater, picked by a short picture
+check) and each mesh vertex is rotated from the virtual into the real camera
+at its sensor row's readout time. Axis conventions and profiles were
+measured by tracking features through the public Gyroflow samples; parsers
+are cross-checked against [telemetry-parser](https://github.com/AdrianEddy/telemetry-parser)
+output (MIT/Apache) in `apps/motion-fix/test/gyro-parsers.test.ts`.
+Phone and re-encoded clips use the visual path below.
+
 - Grundmann, Kwatra & Essa (2011) —
   [Auto-Directed Video Stabilization with Robust L1 Optimal Camera Paths](https://research.google.com/pubs/archive/37041.pdf)
   (CVPR). The path model: w = (10, 1, 100) on first/second/third
@@ -80,7 +93,7 @@ shader and writes before/after comparisons.
 - Adaptive zoom follows the approach used by Gyroflow (per-frame minimal
   zoom, rolling maximum, Gaussian smoothing).
 
-Tests: `node --experimental-strip-types apps/motion-fix/test/*.test.ts`.
+Tests: `node --experimental-strip-types apps/motion-fix/test/run-all.ts`.
 
 The "How it works" button in each app's header opens a modal with the same
 explanation and links.
