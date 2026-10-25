@@ -65,21 +65,41 @@ export async function extractGoPro(index: Mp4Index, track: Mp4Track, read: Range
   if (index.udtaGpmf) trees.push(parseKlv(index.udtaGpmf));
   if (payloads[0]) trees.push(parseKlv(payloads[0]));
   const globals = readGoProGlobals(trees);
-  const keys = ["CORI", "IORI", "GRAV", "GYRO", "ACCL"] as const;
+  const keys = ["CORI", "IORI", "GRAV", "GYRO", "ACCL", "SHUT"] as const;
+  const perPayload = payloads.map((p) => payloadStreams(p, keys));
+  // Video-associated clock origin: the first frame-rate stream's STMP
+  // (CORI, else the shutter stream) — the moment of video frame 0.
+  const first = perPayload[0];
+  const refStmp = first?.get("CORI")?.stmp ?? first?.get("SHUT")?.stmp ?? null;
   const acc: Record<string, { t: number[]; rows: number[][] }> = {};
   let gyroOrin: string | null = null;
   for (let i = 0; i < payloads.length; i++) {
     const s = track.samples[i];
-    const streams = payloadStreams(payloads[i], keys);
+    const streams = perPayload[i];
     for (const k of keys) {
+      if (k === "SHUT") continue;
       const st = streams.get(k);
       if (!st || !st.rows.length) continue;
       if (k === "GYRO" && st.orin) gyroOrin = st.orin;
       const a = (acc[k] ??= { t: [], rows: [] });
-      // Samples are spread evenly over the payload's MP4 duration — the
-      // same timing GoPro's own tools use. For CORI/IORI/GRAV that is one
-      // row per video frame, landing exactly on the frame times.
       const n = st.rows.length;
+      const nextStmp = perPayload[i + 1]?.get(k)?.stmp ?? null;
+      const prevStmp = perPayload[i - 1]?.get(k)?.stmp ?? null;
+      const prevN = perPayload[i - 1]?.get(k)?.rows.length ?? n;
+      if ((k === "GYRO" || k === "ACCL") && refStmp !== null && st.stmp !== null && (nextStmp !== null || prevStmp !== null)) {
+        // The IMU runs on its own clock (200.0 Hz against a 1.001 s payload),
+        // so spreading it over the MP4 duration drifts ~1 ms per second.
+        // Its STMP (µs) places every sample on the video clock instead.
+        const step = nextStmp !== null ? (nextStmp - st.stmp) / n : (st.stmp - (prevStmp as number)) / prevN;
+        for (let r = 0; r < n; r++) {
+          a.t.push((st.stmp - refStmp + r * step) / 1e6);
+          a.rows.push(st.rows[r]);
+        }
+        continue;
+      }
+      // Frame-rate streams (CORI/IORI/GRAV): spread evenly over the
+      // payload's MP4 duration — one row per video frame, landing exactly
+      // on the frame times (their STMP steps are exactly 1001/60000 s).
       for (let r = 0; r < n; r++) {
         a.t.push(s.time - track.editMediaTime + (r * s.duration) / n);
         a.rows.push(st.rows[r]);

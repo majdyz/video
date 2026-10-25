@@ -62,7 +62,7 @@ for (let t = 0; t < n; t++) {
   if (m.homography) upgrades++;
 }
 const analysis: MotionAnalysis = { width: aw, height: ah, analysisWidth: aw, analysisHeight: ah, frameCount: n, frameRate: fps, times, motion, cumulative, inliers, tracked, rms, model, homography, homographyState, trackMsPerFrame: 0 };
-const params = { smoothing: Number(smoothingArg ?? 0.8), maxCrop: Number(cropArg ?? 0.15) };
+const params = { smoothing: Number(smoothingArg ?? 0.8), maxCrop: Number(cropArg ?? 0.15), ...(process.env.ZOOM_WINDOW ? { zoomWindowSec: Number(process.env.ZOOM_WINDOW) } : {}), ...(process.env.FIDELITY ? { fidelityWeight: Number(process.env.FIDELITY) } : {}) };
 console.log(`${file}: ${n} frames ${width}x${height}@${fps.toFixed(2)} (analysed at ${aw}x${ah}); homography kept on ${upgrades}/${n - 1} pairs`);
 
 function render(path: StabilizedPath, out: string): void {
@@ -78,7 +78,7 @@ function render(path: StabilizedPath, out: string): void {
   if (enc.status !== 0) throw new Error(enc.stderr.toString());
 }
 
-const variants: [string, boolean][] = [["similarity", false], ["wobble", true]];
+const variants: [string, boolean][] = process.env.ONLY_WOBBLE ? [["wobble", true]] : [["similarity", false], ["wobble", true]];
 const outputs: [string, string][] = [["source", file]];
 for (const [name, wobble] of variants) {
   const path = computeStabilizedPath(analysis, { ...params, wobble });

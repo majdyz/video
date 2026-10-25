@@ -9,7 +9,7 @@ import { decodeDjiSample, protoFields } from "../src/lib/gyro/dji-meta.ts";
 import { extractDji, extractGoPro, telemetryTrackOf } from "../src/lib/gyro/extract.ts";
 import { klvNumbers, parseKlv, payloadStreams, readGoProGlobals } from "../src/lib/gyro/gpmf.ts";
 import { bytesReader, readMp4Index, readSamples, type Mp4Index, type Mp4Track, type RangeReader } from "../src/lib/gyro/mp4-index.ts";
-import { qmul, type Quat } from "../src/lib/gyro/quat.ts";
+import { qangle, qconj, qmul, sampleOrientation, type Quat } from "../src/lib/gyro/quat.ts";
 import { probeTelemetry } from "../src/lib/gyro/telemetry.ts";
 
 const close = (a: number, b: number, tol: number, msg: string): void => assert.ok(Math.abs(a - b) <= tol, `${msg}: ${a} vs ${b} (tol ${tol})`);
@@ -275,6 +275,26 @@ if (existsSync(`${SAMPLES}/hero10-hs-10s.mp4`)) {
   }
   const q = await probePath(`${SAMPLES}/hero10-10s.mp4`);
   assert.ok(q.status === "ok" && !q.motion.eis.active && Math.abs(q.motion.lens.fx - 907.5) < 15);
+  // Gyro integration (the HERO5–8 path) against CORI on the same clip: frame-to-frame rotations agree.
+  const buf = readFileSync(`${SAMPLES}/hero10-10s.mp4`);
+  const g = await probeTelemetry(bytesReader(new Uint8Array(buf.buffer, buf.byteOffset, buf.length)), buf.length, { ignoreCori: true });
+  assert.ok(g.status === "ok" && q.status === "ok");
+  if (g.status === "ok" && q.status === "ok") {
+    let err = 0;
+    let cnt = 0;
+    const qa = (m: typeof g.motion, t: number) => sampleOrientation(m.times, m.quats, t);
+    for (let i = 1; i < 590; i++) {
+      const t0 = i / 59.94;
+      const t1 = (i + 1) / 59.94;
+      const a = qmul(qconj(qa(q.motion, t0)), qa(q.motion, t1));
+      const b = qmul(qconj(qa(g.motion, t0)), qa(g.motion, t1));
+      err += qangle(qmul(qconj(a), b));
+      cnt++;
+    }
+    const meanDeg = ((err / cnt) * 180) / Math.PI;
+    assert.ok(meanDeg < 0.02, `integrated gyro vs CORI: ${meanDeg}°/frame`);
+    console.log(`integrated GYRO vs CORI: ${meanDeg.toFixed(4)}°/frame`);
+  }
   console.log("probe on HERO10 samples ok");
 } else console.log("(sample clips not found, probe test skipped)");
 if (existsSync(`${SAMPLES}/avata-12s-1080.mp4`)) {

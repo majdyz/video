@@ -21,7 +21,7 @@ import { extractDji, extractGoPro, telemetryTrackOf, videoTrackOf, type GoProRaw
 import { DJI_EIS_NAMES } from "./dji-meta.ts";
 import { fitFisheye, scaleLens, thetaD, type LensModel } from "./lens.ts";
 import { readMp4Index, type RangeReader } from "./mp4-index.ts";
-import { qangle, qconj, qcontinuous, qmul, qnorm, qrot, type Quat, type Vec3 } from "./quat.ts";
+import { qangle, qconj, qcontinuous, qexp, qmul, qnorm, qrot, type Quat, type Vec3 } from "./quat.ts";
 
 export type CameraMotion = {
   source: "gopro" | "dji";
@@ -121,7 +121,43 @@ function seriesQuat(v: Float64Array, i: number): Quat {
   return [v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3]];
 }
 
-export async function probeTelemetry(read: RangeReader, fileSize: number, opts: { signal?: AbortSignal; onProgress?: (f: number) => void } = {}): Promise<TelemetryProbe> {
+/**
+ * GoPro GYRO (rad/s, channels named by ORIN, lowercase = negated) -> camera
+ * orientation by integration. Measured on HERO10 against CORI: camera x =
+ * −X, y = −Z, z = −Y in GoPro's axis letters, and the integrated path lines
+ * up with CORI when the samples (timed by STMP) move 6 ms earlier — that
+ * includes the half-sample lag of this end-point integrator. Residual
+ * against CORI: 0.008°/frame.
+ */
+export const GOPRO_GYRO_LEAD = 0.006;
+export function integrateGoProGyro(times: Float64Array, values: Float64Array, orin: string | null): { times: Float64Array; quats: Float64Array } | null {
+  const o = orin && /^[XYZxyz]{3}$/.test(orin) ? orin : "ZXY";
+  // Camera axis (0 x, 1 y, 2 z) and sign for each GoPro letter.
+  const axisOf: Record<string, [number, number]> = { X: [0, -1], Z: [1, -1], Y: [2, -1] };
+  const map = [...o].map((ch) => {
+    const [axis, sign] = axisOf[ch.toUpperCase()];
+    return [axis, ch === ch.toUpperCase() ? sign : -sign] as [number, number];
+  });
+  if (new Set(map.map((m) => m[0])).size !== 3) return null;
+  const n = times.length;
+  if (n < 2) return null;
+  const outT = new Float64Array(n);
+  const outQ = new Float64Array(4 * n);
+  let q: Quat = [1, 0, 0, 0];
+  const w: Vec3 = [0, 0, 0];
+  for (let k = 0; k < n; k++) {
+    if (k > 0) {
+      const h = Math.min(0.05, Math.max(0, times[k] - times[k - 1]));
+      for (let c = 0; c < 3; c++) w[map[c][0]] = map[c][1] * values[3 * k + c] * h;
+      q = qnorm(qmul(q, qexp(w)));
+    }
+    outT[k] = times[k] - GOPRO_GYRO_LEAD;
+    outQ.set(q, 4 * k);
+  }
+  return { times: outT, quats: outQ };
+}
+
+export async function probeTelemetry(read: RangeReader, fileSize: number, opts: { signal?: AbortSignal; onProgress?: (f: number) => void; ignoreCori?: boolean } = {}): Promise<TelemetryProbe> {
   let index;
   try {
     index = await readMp4Index(read, fileSize);
@@ -144,8 +180,33 @@ export async function probeTelemetry(read: RangeReader, fileSize: number, opts: 
   if (found.kind === "gopro") {
     const g = await extractGoPro(index, found.track, read, opts);
     const camera = `GoPro ${g.globals.model ?? ""}`.trim();
+    if (opts.ignoreCori) g.cori = null;
     if (!g.cori || g.cori.times.length < 2) {
-      return { status: "unusable", source: "gopro", camera, reason: "this GoPro model records no camera orientation (CORI); HERO8 or newer needed", eisActive: false };
+      // Older bodies (HERO5–HERO8): integrate the raw gyro. Without IORI
+      // there is no record of what HyperSmooth did to the picture.
+      if (g.globals.eise === "Y") {
+        return { status: "unusable", source: "gopro", camera, reason: "HyperSmooth was on and this GoPro does not record its correction; turn HyperSmooth off for gyro stabilisation", eisActive: true };
+      }
+      const integrated = g.gyro ? integrateGoProGyro(g.gyro.times, g.gyro.values, g.gyroOrin) : null;
+      if (!integrated) return { status: "unusable", source: "gopro", camera, reason: "no usable gyro stream in the GoPro metadata", eisActive: false };
+      const lensR = goproLens(g, coded.w, coded.h, false);
+      if ("error" in lensR) return { status: "unusable", source: "gopro", camera, reason: lensR.error, eisActive: false };
+      return {
+        status: "ok",
+        motion: {
+          source: "gopro",
+          camera,
+          times: integrated.times,
+          quats: integrated.quats,
+          readout: 0,
+          timeOffset: 0,
+          lens: lensR.lens,
+          down: null,
+          eis: { active: false, label: "off" },
+          video: videoInfo,
+          notes: ["orientation integrated from the raw gyro"],
+        },
+      };
     }
     const n = g.cori.times.length;
     // HyperSmooth: EISE flag, or a non-trivial IORI correction.

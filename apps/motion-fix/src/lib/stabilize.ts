@@ -50,6 +50,10 @@ export type StabilizeParams = {
   maxCrop: number;
   /** Wobble suppression between keyframes; always on in the app, switchable for tests and reports. */
   wobble?: boolean;
+  /** Adaptive-zoom window (s): rolling maximum span; longer = slower, rarer crop changes. */
+  zoomWindowSec?: number;
+  /** L1 fidelity weight override (pull toward the real camera; Grundmann 0.1). */
+  fidelityWeight?: number;
 };
 
 export const DEFAULT_PARAMS: StabilizeParams = { smoothing: 0.8, maxCrop: 0.15 };
@@ -391,7 +395,7 @@ export function computeStabilizedPath(analysis: MotionAnalysis, params: Stabiliz
     halfHeight: hh,
     cropHalfWidth: hw * solverCropRatio,
     cropHalfHeight: hh * solverCropRatio,
-    weights: GRUNDMANN_WEIGHTS,
+    weights: params.fidelityWeight === undefined ? GRUNDMANN_WEIGHTS : { ...GRUNDMANN_WEIGHTS, fidelity: params.fidelityWeight },
   });
 
   // Back to source pixels.
@@ -455,7 +459,7 @@ export function computeStabilizedPath(analysis: MotionAnalysis, params: Stabiliz
       required[t] = z;
     }
   }
-  const windowFrames = Math.max(8, Math.round(analysis.frameRate * 2.5));
+  const windowFrames = Math.max(8, Math.round(analysis.frameRate * (params.zoomWindowSec ?? 2.5)));
   const zoom = smoothZoom(required, windowFrames, maxZoom);
 
   let meanZoom = 0;

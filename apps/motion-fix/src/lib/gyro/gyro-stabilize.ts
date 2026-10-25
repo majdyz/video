@@ -24,7 +24,7 @@
 // orientation at the row's capture time (rolling shutter) -> source lens ->
 // source pixel.
 
-import { maxTheta, project, unproject, type LensModel } from "./lens.ts";
+import { maxTheta, project, thetaD, unproject, type LensModel } from "./lens.ts";
 import { qat, qconj, qcontinuous, qdot, qlog, qmat, qmul, qnorm, qrot, qslerp, sampleOrientation, type Quat, type Vec3 } from "./quat.ts";
 import type { CameraMotion } from "./telemetry.ts";
 
@@ -532,33 +532,55 @@ function bracket(times: Float64Array, t: number): { i0: number; i1: number; f: n
   return { i0: lo, i1: hi, f: (t - times[lo]) / (times[hi] - times[lo]) };
 }
 
-/** Display-centred px <-> coded px for a track stored rotated `rot` degrees clockwise. */
-function displayToCoded(x: number, y: number, rot: number, cw: number, ch: number): [number, number] {
-  switch (rot) {
-    case 90: return [y + cw / 2, -x + ch / 2];
-    case 180: return [-x + cw / 2, -y + ch / 2];
-    case 270: return [-y + cw / 2, x + ch / 2];
-    default: return [x + cw / 2, y + ch / 2];
-  }
-}
-
-function codedToDisplay(u: number, v: number, rot: number, cw: number, ch: number): [number, number] {
-  const a = u - cw / 2;
-  const b = v - ch / 2;
-  switch (rot) {
-    case 90: return [-b, a];
-    case 180: return [-a, -b];
-    case 270: return [b, -a];
-    default: return [a, b];
-  }
-}
-
 export type WarpFnLike = (x: number, y: number) => readonly [number, number];
 
 /**
  * The per-vertex warp at media time t: output centred display px -> source
  * centred display px (the renderer's WarpFn contract). Rays the lens cannot
  * see map far outside the frame so the renderer paints them black.
+ */
+/** θd -> θ lookup for a fisheye polynomial (uniform in θd), cached per k. */
+type ThetaLut = { table: Float64Array; step: number; tdMax: number; thMax: number };
+const lutCache = new Map<string, ThetaLut>();
+function thetaLut(k: readonly number[]): ThetaLut {
+  const key = k.join(",");
+  const hit = lutCache.get(key);
+  if (hit) return hit;
+  const thMax = maxTheta(k);
+  const tdMax = thetaD(k, thMax);
+  const N = 4096;
+  const table = new Float64Array(N + 1);
+  const step = tdMax / N;
+  // Walk θ finely and fill the uniform θd grid by linear inversion (θd is monotonic up to thMax).
+  let th = 0;
+  const dth = thMax / (8 * N);
+  let prevTd = 0;
+  let prevTh = 0;
+  for (let i = 0; i <= N; i++) {
+    const target = i * step;
+    let td = thetaD(k, th);
+    while (td < target && th < thMax) {
+      prevTd = td;
+      prevTh = th;
+      th = Math.min(thMax, th + dth);
+      td = thetaD(k, th);
+    }
+    table[i] = td > prevTd ? prevTh + ((target - prevTd) / (td - prevTd)) * (th - prevTh) : th;
+  }
+  const lut = { table, step, tdMax, thMax };
+  if (lutCache.size > 16) lutCache.clear();
+  lutCache.set(key, lut);
+  return lut;
+}
+
+/**
+ * The per-vertex warp at media time t: output centred display px -> source
+ * centred display px (the renderer's WarpFn contract). Rays the lens cannot
+ * see map far outside the frame so the renderer paints them black.
+ *
+ * Hot path (2405 vertices per frame, every preview / export frame): scalar
+ * maths only, a lookup table instead of Newton for the fisheye inverse, and
+ * one reused result tuple — the renderer reads it before the next call.
  */
 export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number, outW?: number, outH?: number): WarpFnLike {
   const { i0, i1, f } = bracket(plan.frameTimes, t);
@@ -571,20 +593,107 @@ export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number
   // The renderer's canvas is the display size; scale if it differs from the coded size.
   const dispW = rot === 90 || rot === 270 ? ch : cw;
   const dispH = rot === 90 || rot === 270 ? cw : ch;
-  const sx = outW ? dispW / outW : 1;
-  const sy = outH ? dispH / outH : 1;
+  const sxs = outW ? dispW / outW : 1;
+  const sys = outH ? dispH / outH : 1;
   const outL = outputLens(src, plan.output, plan.rectBase, zoom, cw, ch);
-  const srcThMax = src.kind === "fisheye" ? maxTheta(src.k) : Math.PI / 2;
+  const outPin = outL.kind === "pinhole";
+  const outLut = outPin ? null : thetaLut(outL.k);
+  const srcFish = src.kind === "fisheye";
+  const srcLut = srcFish ? thetaLut(src.k) : null;
+  const srcThMax = srcLut ? srcLut.thMax : Math.PI / 2;
+  const [k1, k2, k3, k4] = src.k;
   const rows = new RowRotations(motion, t);
-  const vm = qmat(virt);
-  const px: [number, number] = [0, 0];
-  return (x, y) => {
-    const [u, v] = displayToCoded(x * sx, y * sy, rot, cw, ch);
-    const ray = unproject(outL, u, v);
-    mapRay(ray, vm, rows, src, srcThMax, px);
-    if (!Number.isFinite(px[0]) || !Number.isFinite(px[1])) return [1e6, 1e6];
-    const [dx, dy] = codedToDisplay(px[0], px[1], rot, cw, ch);
-    return [dx / sx, dy / sy];
+  const R = rows.mats;
+  const nRows = rows.count;
+  const m = qmat(virt);
+  const ofx = outL.fx, ofy = outL.fy, ocx = outL.cx, ocy = outL.cy;
+  const sfx = src.fx, sfy = src.fy, scx = src.cx, scy = src.cy;
+  const out: [number, number] = [0, 0];
+  const far = (): readonly [number, number] => {
+    out[0] = 1e6;
+    out[1] = 1e6;
+    return out;
+  };
+  return (xd, yd) => {
+    const x = xd * sxs;
+    const y = yd * sys;
+    let u: number, v: number;
+    if (rot === 90) { u = y + cw / 2; v = -x + ch / 2; }
+    else if (rot === 180) { u = -x + cw / 2; v = -y + ch / 2; }
+    else if (rot === 270) { u = -y + cw / 2; v = x + ch / 2; }
+    else { u = x + cw / 2; v = y + ch / 2; }
+    // Output pixel -> ray in the virtual camera.
+    const mx = (u - ocx) / ofx;
+    const my = (v - ocy) / ofy;
+    let rx: number, ry: number, rz: number;
+    if (outPin) {
+      rx = mx; ry = my; rz = 1;
+    } else {
+      const td = Math.sqrt(mx * mx + my * my);
+      if (td < 1e-12) { rx = 0; ry = 0; rz = 1; }
+      else {
+        const lut = outLut as ThetaLut;
+        let th: number;
+        if (td >= lut.tdMax) th = lut.thMax;
+        else {
+          const p = td / lut.step;
+          const i = p | 0;
+          th = lut.table[i] + (lut.table[i + 1] - lut.table[i]) * (p - i);
+        }
+        const s = Math.sin(th) / td;
+        rx = mx * s; ry = my * s; rz = Math.cos(th);
+      }
+    }
+    // Virtual camera -> world.
+    const wx = m[0] * rx + m[1] * ry + m[2] * rz;
+    const wy = m[3] * rx + m[4] * ry + m[5] * rz;
+    const wz = m[6] * rx + m[7] * ry + m[8] * rz;
+    // World -> source camera at the row's capture time (fixed point on the row), -> source pixel.
+    let fy = 0.5;
+    let pu = 0, pv = 0;
+    const iters = nRows > 1 ? 2 : 1;
+    for (let it = 0; it < iters; it++) {
+      let o0 = 0, o1 = 0, a = 0;
+      if (nRows > 1) {
+        const pp = Math.min(nRows - 1, Math.max(0, fy * (nRows - 1)));
+        const b = Math.min(nRows - 2, pp | 0);
+        a = pp - b;
+        o0 = 9 * b;
+        o1 = o0 + 9;
+      }
+      const c = 1 - a;
+      // Rᵀ w with R blended between two rows.
+      const sx = (R[o0] * c + R[o1] * a) * wx + (R[o0 + 3] * c + R[o1 + 3] * a) * wy + (R[o0 + 6] * c + R[o1 + 6] * a) * wz;
+      const sy = (R[o0 + 1] * c + R[o1 + 1] * a) * wx + (R[o0 + 4] * c + R[o1 + 4] * a) * wy + (R[o0 + 7] * c + R[o1 + 7] * a) * wz;
+      const sz = (R[o0 + 2] * c + R[o1 + 2] * a) * wx + (R[o0 + 5] * c + R[o1 + 5] * a) * wy + (R[o0 + 8] * c + R[o1 + 8] * a) * wz;
+      if (srcFish) {
+        const r = Math.sqrt(sx * sx + sy * sy);
+        const th = Math.atan2(r, sz);
+        if (th > srcThMax) return far();
+        if (r < 1e-12) { pu = scx; pv = scy; }
+        else {
+          const t2 = th * th;
+          const k = (th * (1 + t2 * (k1 + t2 * (k2 + t2 * (k3 + t2 * k4))))) / r;
+          pu = scx + sfx * k * sx;
+          pv = scy + sfy * k * sy;
+        }
+      } else {
+        if (sz <= 1e-9) return far();
+        pu = scx + (sfx * sx) / sz;
+        pv = scy + (sfy * sy) / sz;
+      }
+      fy = pv / ch;
+    }
+    let dx: number, dy: number;
+    const a0 = pu - cw / 2;
+    const b0 = pv - ch / 2;
+    if (rot === 90) { dx = -b0; dy = a0; }
+    else if (rot === 180) { dx = -a0; dy = -b0; }
+    else if (rot === 270) { dx = b0; dy = -a0; }
+    else { dx = a0; dy = b0; }
+    out[0] = dx / sxs;
+    out[1] = dy / sys;
+    return out;
   };
 }
 

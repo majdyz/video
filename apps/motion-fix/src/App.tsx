@@ -53,7 +53,9 @@ export default function App() {
   const clientRef = useRef<AnalysisClient | null>(null);
   const fileRef = useRef<File | null>(null);
   /** User chose visual tracking over the file's gyro data (kept across re-analysis of the same clip). */
-  const forceVisualRef = useRef(false);
+  // ?visual=1 starts every clip on visual tracking (A/B checks against the gyro path).
+  const visualByDefault = typeof location !== "undefined" && new URLSearchParams(location.search).get("visual") === "1";
+  const forceVisualRef = useRef(visualByDefault);
   const fileNameRef = useRef<string>(MOTION_FIX_BRAND.filenamePrefix);
   const sourceUrlRef = useRef<string | null>(null);
   const sourceBitrateRef = useRef<number | null>(null);
@@ -194,7 +196,7 @@ export default function App() {
   }
 
   async function handleFile(file: File, keepMode = false) {
-    if (!keepMode) forceVisualRef.current = false;
+    if (!keepMode) forceVisualRef.current = visualByDefault;
     setError(null);
     setStatus(null);
     setBadge(null);
@@ -503,7 +505,43 @@ export default function App() {
       <CapabilityBanner storageKey="motion-capnote-dismissed" />
 
       <Modal open={showInfo} onClose={() => setShowInfo(false)} title="How Motion Fix works">
-        <h4>Pipeline</h4>
+        <h4>Gyro path (GoPro, DJI originals)</h4>
+        <ul>
+          <li>
+            <b>Read</b> — GoPro (HERO8 and newer) and DJI action cameras /
+            drones record the camera's orientation in a metadata track next to
+            the video. Motion Fix reads only that track and the file index
+            (ranged reads, a few hundred KB even for a multi-GB file), so the
+            analysis takes a second and nothing is decoded. GoPro's
+            HyperSmooth correction (IORI) is read too and refined rather than
+            fought; DJI clips need RockSteady / HorizonSteady off, because
+            their warp cannot be undone from the file.
+          </li>
+          <li>
+            <b>Smooth</b> — the orientation is smoothed with a zero-phase
+            exponential filter on the rotation sphere whose time constant
+            shrinks when the camera turns fast, so fin-kick shake and drift
+            are flattened while a deliberate pan is followed without lag.
+            <i>Keep level</i> rolls the virtual camera so the horizon stays
+            level, using the camera's gravity sensor.
+          </li>
+          <li>
+            <b>Crop</b> — for every frame the border of the output is traced
+            through the lens model (GoPro's in-file calibration on HERO11+, a
+            measured HERO10 Wide profile otherwise; DJI's own calibration) to
+            find the zoom that keeps it inside the recorded picture. Frames
+            that would need more than <i>Max crop</i> follow the real camera a
+            little more instead, eased in and out over half a second.
+          </li>
+          <li>
+            <b>Render</b> — each output point is turned into a ray, rotated
+            from the virtual camera into the real one at the moment its sensor
+            row was read (rolling shutter, from the readout time in the file)
+            and projected through the lens. <i>Straight lines</i> outputs a
+            rectilinear view instead of the fisheye look.
+          </li>
+        </ul>
+        <h4>Visual path (phones, re-saved clips)</h4>
         <ul>
           <li>
             <b>Decode</b> — every frame is decoded with WebCodecs in a worker
@@ -564,7 +602,7 @@ export default function App() {
             for its worst second.
           </li>
           <li>
-            <b>Render</b> — a 32×18 WebGL mesh samples the source where the
+            <b>Render</b> — a 64×36 WebGL mesh samples the source where the
             warp says each output point came from, for the preview and the
             export alike. Export runs through WebCodecs faster than realtime,
             copies the original audio untouched and streams to on-device
@@ -583,10 +621,13 @@ export default function App() {
           The path is planned on similarities (rotation, zoom, translation);
           the wobble pass only corrects what a single plane-projective motion
           per frame can explain, so strong parallax from nearby coral stays.
-          Phones and action cameras already correct rolling shutter in-camera,
-          so no per-row readout model is applied: with a guessed readout time
-          it adds jello rather than removing it. Clips with a large moving
-          subject that fills the frame will follow the subject.
+          Phones correct rolling shutter in-camera, so the visual path applies
+          no per-row readout model: with a guessed readout time it adds jello
+          rather than removing it. Clips with a large moving subject that
+          fills the frame will follow the subject. The gyro path removes
+          rotation only: it cannot (and should not) undo the camera moving
+          through the water, and shared or re-encoded copies lose the motion
+          data — import the original file from the SD card.
         </p>
         <h4>References</h4>
         <ul>

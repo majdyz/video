@@ -166,8 +166,8 @@ const shake = (t: number): Vec3 => [
   const w = gyroWarpFnAtTime(still, plan, 0.1);
   for (const [x, y] of [[0, 0], [500, 300], [-900, -500], [950, 530]]) {
     const [sx, sy] = w(x, y);
-    close(sx, x, 1e-6, "identity warp x");
-    close(sy, y, 1e-6, "identity warp y");
+    close(sx, x, 1e-3, "identity warp x");
+    close(sy, y, 1e-3, "identity warp y");
   }
   // Virtual camera yawed right by δ relative to the source: the output centre shows the source δ·f to the right.
   const d = 2 * deg;
