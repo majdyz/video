@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, boostParams, deepHaze, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
@@ -158,6 +158,16 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
     const water = src[c] * p.waterWb[c] * ew * wd;
     out[c] = water + (full[c] * p.exposure - water) * conf;
   }
+  // Haze lift removal (murky frames): subtract a share of the frame's lifted
+  // black from the luminance with a soft toe — luminance and frame constants
+  // only, so no edges; the shadow floor below follows the same ratio.
+  const tLift = hazeLiftT(p, s.hazeLift);
+  let hf = 1;
+  if (tLift[0] + tLift[1] + tLift[2] > 0) {
+    const y0 = luminance(out[0], out[1], out[2]);
+    for (let c = 0; c < 3; c++) out[c] *= hazeLiftRatio(out[c], tLift[c]);
+    hf = y0 > 1e-6 ? luminance(out[0], out[1], out[2]) / y0 : 1;
+  }
   // Levels on luminance, ratio-preserving.
   let Y = luminance(out[0], out[1], out[2]);
   const Ylv = Y + ((Y - p.black) / (p.white - p.black) - Y) * p.levelsMix;
@@ -179,7 +189,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // source) and highlight shoulder — last, so levels/CLAHE can't undo them.
   {
     const yo = luminance(out[0], out[1], out[2]);
-    const yMin = shadowFloorAt(lumI, p.shadowFloor) * lumI * ew;
+    const yMin = shadowFloorAt(lumI, p.shadowFloor) * lumI * ew * hf;
     let yt = Math.max(yo, yMin);
     if (yt > p.knee) yt = p.knee + (1 - p.knee) * (1 - Math.exp(-(yt - p.knee) / (1 - p.knee)));
     if (yo > 1e-6) {

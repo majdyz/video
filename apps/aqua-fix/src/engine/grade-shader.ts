@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, VIVID } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, HAZE_LIFT, LOOK, PERSON_LUM, SKIN, VIVID } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 
 // Look constants shared by both shaders, emitted as literals.
@@ -16,6 +16,8 @@ const float PERSON_LUM_LO = ${PERSON_LUM.lo.toFixed(4)};
 const float PERSON_LUM_HI = ${PERSON_LUM.hi.toFixed(4)};
 const float DEHAZE_LUM_LO = ${DEHAZE_LUM.lo.toFixed(4)};
 const float DEHAZE_LUM_HI = ${DEHAZE_LUM.hi.toFixed(4)};
+const float HAZE_LIFT_FLOOR = ${HAZE_LIFT.floor.toFixed(4)};
+const float HAZE_LIFT_SOFT = ${HAZE_LIFT.soft.toFixed(4)};
 const float VIVID_C_LO = ${VIVID.cLo.toFixed(4)};
 const float VIVID_C_HI = ${VIVID.cHi.toFixed(4)};
 const float VIVID_KEEP = ${VIVID.keep.toFixed(4)};
@@ -175,6 +177,15 @@ vec4 sampleFields(vec2 uv, vec3 c, out float kOut, out float personOut) {
   return sum / sw;
 }
 float smoothstepf(float e0, float e1, float x) { float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
+// Haze-lift ratio at value y for subtraction t: smooth max((y − t)/((1 − t)·y), floor), unbiased at 1 (see params.ts hazeLiftRatio).
+float hazeLiftRatio(float y, float t) {
+  if (t <= 0.0) return 1.0;
+  float q = (y - t) / ((1.0 - t) * max(y, 1e-6));
+  float d = q - HAZE_LIFT_FLOOR;
+  float d1 = 1.0 - HAZE_LIFT_FLOOR;
+  float s2 = HAZE_LIFT_SOFT * HAZE_LIFT_SOFT;
+  return 0.5 * (q + HAZE_LIFT_FLOOR + sqrt(d * d + s2)) - 0.5 * (sqrt(d1 * d1 + s2) - d1);
+}
 // 1 for objects, 0 for water: Oklab hue distance to the veil, achromatic → object.
 // Skin memory colour on person pixels (see SKIN in params.ts; mirrors apply.ts).
 vec2 skinTone(float L, vec2 ab, float person) {
@@ -312,6 +323,14 @@ vec3 grade(vec3 src, vec2 uv) {
   float ew = pow(exposure, waterExposure);
   vec3 water = lin * waterWb * ew * (1.0 - dehaze * min(0.9, lumBs / lumI) * smoothstepf(DEHAZE_LUM_LO, DEHAZE_LUM_HI, lumI));
   vec3 o = water + (full * exposure - water) * conf;
+  // Haze lift removal (see apply.ts): per channel, soft toe.
+  vec3 tc = p[17].xyz;
+  float hf = 1.0;
+  if (tc.r + tc.g + tc.b > 0.0) {
+    float y0 = lum(o);
+    o *= vec3(hazeLiftRatio(o.r, tc.r), hazeLiftRatio(o.g, tc.g), hazeLiftRatio(o.b, tc.b));
+    hf = y0 > 1e-6 ? lum(o) / y0 : 1.0;
+  }
   // Levels on luminance, ratio-preserving.
   float Y = lum(o);
   float Ylv = Y + ((Y - black) / (white - black) - Y) * levelsMix;
@@ -333,7 +352,7 @@ vec3 grade(vec3 src, vec2 uv) {
   {
     float yo = lum(o);
     float sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
-    float yt = max(yo, sf * lumI * ew);
+    float yt = max(yo, sf * lumI * ew * hf);
     if (yt > knee) yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee)));
     // A pixel levels clipped to nothing is rebuilt from the source at the floor (see apply.ts).
     if (yo > 1e-6) o *= yt / yo; else o = lin * (yt / lumI);
@@ -459,6 +478,14 @@ fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> array<vec4<f32>, 2> {
   return array<vec4<f32>, 2>(sum / sw, vec4(sp / sw, 0.0, 0.0, min(1.0, sw / 0.08)));
 }
 fn smoothstepf(e0: f32, e1: f32, x: f32) -> f32 { let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
+fn hazeLiftRatio(y: f32, t: f32) -> f32 {
+  if (t <= 0.0) { return 1.0; }
+  let q = (y - t) / ((1.0 - t) * max(y, 1e-6));
+  let d = q - HAZE_LIFT_FLOOR;
+  let d1 = 1.0 - HAZE_LIFT_FLOOR;
+  let s2 = HAZE_LIFT_SOFT * HAZE_LIFT_SOFT;
+  return 0.5 * (q + HAZE_LIFT_FLOOR + sqrt(d * d + s2)) - 0.5 * (sqrt(d1 * d1 + s2) - d1);
+}
 fn skinTone(L: f32, ab: vec2<f32>, person: f32) -> vec2<f32> {
   if (person <= 0.0) { return ab; }
   let C = length(ab);
@@ -582,6 +609,13 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let ew = pow(exposure, waterExposure);
   let water = lin * waterWb * ew * (1.0 - dehaze * min(0.9, lumBs / lumI) * smoothstepf(DEHAZE_LUM_LO, DEHAZE_LUM_HI, lumI));
   var o = water + (full * exposure - water) * conf;
+  let tc = p[17].xyz;
+  var hf = 1.0;
+  if (tc.r + tc.g + tc.b > 0.0) {
+    let y0 = lum(o);
+    o *= vec3(hazeLiftRatio(o.r, tc.r), hazeLiftRatio(o.g, tc.g), hazeLiftRatio(o.b, tc.b));
+    hf = select(1.0, lum(o) / y0, y0 > 1e-6);
+  }
   var Y = lum(o);
   let Ylv = Y + ((Y - black) / (white - black) - Y) * levelsMix;
   var ratio = select(1.0, max(0.0, Ylv) / Y, Y > 1e-5);
@@ -600,7 +634,7 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   {
     let yo = lum(o);
     let sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
-    var yt = max(yo, sf * lumI * ew);
+    var yt = max(yo, sf * lumI * ew * hf);
     if (yt > knee) { yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee))); }
     if (yo > 1e-6) { o *= yt / yo; } else { o = lin * (yt / lumI); }
   }
