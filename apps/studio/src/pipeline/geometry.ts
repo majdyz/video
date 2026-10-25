@@ -5,6 +5,7 @@
 
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import { stabilisedPoint, type GeometryParams, type QuarterTurns } from "./geometry-math.ts";
+import { FOOTAGE_GLSL } from "./footage.ts";
 
 const GRID_W = 32;
 const GRID_H = 18;
@@ -40,6 +41,7 @@ uniform float projection;
 uniform float fy;
 uniform vec2 center;
 uniform float thetaMax;
+${FOOTAGE_GLSL}
 in vec2 v_mid;
 in vec2 v_id;
 out vec4 color;
@@ -74,10 +76,22 @@ void main() {
   vec2 c = displayToCoded(before ? v_id : v_mid);
   if (u_dewarp && !before) c = dewarp(c * srcSize) / srcSize;
   if (c.x < 0.0 || c.y < 0.0 || c.x > 1.0 || c.y > 1.0) { color = vec4(0.0, 0.0, 0.0, 1.0); return; }
-  color = texture(u_tex, u_texCoded ? c : codedToDisplay(c));
+  vec4 s = texture(u_tex, u_texCoded ? c : codedToDisplay(c));
+  // Footage profile (log / HDR / wide gamut → Rec.709 SDR); the "before" side stays the untouched signal.
+  color = vec4(before ? clamp(s.rgb, 0.0, 1.0) : footageToSdr(s.rgb), 1.0);
 }`;
 
 export type GeometrySource = HTMLVideoElement | VideoFrame | ImageBitmap | HTMLCanvasElement | OffscreenCanvas;
+
+export type GeometryRenderOptions = {
+  /** Source stored in coded orientation (decoded VideoFrames) vs upright (<video>, stills). */
+  texCoded: boolean;
+  split: number | null;
+  /** Footage transform (FOOTAGE_MODE in footage.ts); 0 / omitted = none. */
+  footage?: number;
+  /** Upload into a half-float texture so a 10-bit source keeps its precision through the transform. */
+  highPrecision?: boolean;
+};
 
 type Loc = Record<string, WebGLUniformLocation | null>;
 
@@ -90,6 +104,8 @@ export class GeometryRenderer {
   private readonly mid = new Float32Array(VW * VH * 2);
   private readonly loc: Loc;
   private readonly vao: WebGLVertexArrayObject;
+  /** Half-float uploads failed once on this device: stay on 8-bit. */
+  private floatBroken = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -110,7 +126,7 @@ export class GeometryRenderer {
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error("geometry link: " + gl.getProgramInfoLog(prog));
     this.prog = prog;
     gl.useProgram(prog);
-    const names = ["u_tex", "u_rot", "u_texCoded", "u_split", "u_dewarp", "srcSize", "fFish", "fOut", "k", "strength", "zoom", "projection", "fy", "center", "thetaMax"];
+    const names = ["u_tex", "u_rot", "u_texCoded", "u_split", "u_dewarp", "srcSize", "fFish", "fOut", "k", "strength", "zoom", "projection", "fy", "center", "thetaMax", "u_footage"];
     this.loc = Object.fromEntries(names.map((n) => [n, gl.getUniformLocation(prog, n)]));
 
     this.vao = gl.createVertexArray()!;
@@ -169,7 +185,7 @@ export class GeometryRenderer {
    * coded orientation (decoded VideoFrames); the <video> element and stills
    * grabbed from it are already upright.
    */
-  render(src: GeometrySource, p: GeometryParams, opts: { texCoded: boolean; split: number | null }): void {
+  render(src: GeometrySource, p: GeometryParams, opts: GeometryRenderOptions): void {
     const gl = this.gl;
     for (let vy = 0, i = 0; vy < VH; vy++) {
       for (let vx = 0; vx < VW; vx++, i += 2) {
@@ -180,7 +196,18 @@ export class GeometryRenderer {
     }
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src as TexImageSource);
+    if (opts.highPrecision && !this.floatBroken) {
+      while (gl.getError() !== gl.NO_ERROR) { /* drain */ }
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, src as TexImageSource);
+      const err = gl.getError();
+      if (err !== gl.NO_ERROR) {
+        console.warn(`geometry: half-float upload failed (0x${err.toString(16)}), using 8-bit`);
+        this.floatBroken = true;
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src as TexImageSource);
+      }
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src as TexImageSource);
+    }
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.useProgram(this.prog);
     gl.bindVertexArray(this.vao);
@@ -193,6 +220,7 @@ export class GeometryRenderer {
     gl.uniform1f(L.u_split, opts.split === null ? -1 : opts.split);
     const d: WarpUniforms | null = p.dewarp;
     gl.uniform1i(L.u_dewarp, d ? 1 : 0);
+    gl.uniform1i(L.u_footage, opts.footage ?? 0);
     if (d) {
       gl.uniform2f(L.srcSize, d.srcSize[0], d.srcSize[1]);
       gl.uniform1f(L.fFish, d.fFish);
@@ -208,6 +236,25 @@ export class GeometryRenderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.drawElements(gl.TRIANGLES, GRID_W * GRID_H * 6, gl.UNSIGNED_SHORT, 0);
     gl.bindVertexArray(null);
+  }
+
+  /**
+   * Uploads `src` exactly as `render` does (half-float, no footage transform,
+   * no geometry) and reads back RGB at normalised points of the source:
+   * the signal-calibration probe (signal-probe.ts). Leaves the canvas at the
+   * source size; the next render resizes it.
+   */
+  sample(src: GeometrySource, w: number, h: number, texCoded: boolean, points: [number, number][]): number[][] {
+    const gl = this.gl;
+    this.resize(w, h);
+    const identity: GeometryParams = { rot: 0, displayW: w, displayH: h, stab: null, dewarp: null };
+    this.render(src, identity, { texCoded, split: null, footage: 0, highPrecision: true });
+    const px = new Uint8Array(4);
+    return points.map(([x, y]) => {
+      // Canvas row 0 is the bottom; the picture's y runs down.
+      gl.readPixels(Math.min(w - 1, Math.floor(x * w)), Math.min(h - 1, Math.floor((1 - y) * h)), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      return [px[0] / 255, px[1] / 255, px[2] / 255];
+    });
   }
 
   dispose(): void {

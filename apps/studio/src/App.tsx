@@ -11,6 +11,7 @@ import { Sheet } from "./ui/sheet";
 import { IconButton, Segmented } from "./ui/controls";
 import { IconClose, IconCompare, IconExport, IconMore, IconPlus, IconWarning } from "./ui/icons";
 import { useMedia } from "./ui/use-media";
+import { FootageField } from "./ui/footage";
 
 type Theme = "abyss" | "coral" | "depth";
 const THEMES: { id: Theme; label: string }[] = [
@@ -248,6 +249,12 @@ export default function App() {
             )}
             {!wide && bar}
             <div className="controls__panel" id="tool-panel" role="tabpanel" aria-labelledby={`tab-${tab}`} hidden={!wide && !dockOpen}>
+              {s.kind === "video" && s.footage.note && (
+                <p className="panel__note footage-note" role="note">
+                  {s.footage.note}
+                  <button type="button" className="link-btn" onClick={() => { setTab("colour"); setAdvOpen(true); }} disabled={exporting}>Change</button>
+                </p>
+              )}
               <ToolPanel tool={tab} tools={tools} setTools={setTools} stab={s.stab} info={s.info} colourProfiled={s.colourProfiled} photo={photo} camera={s.camera} disabled={exporting || !ready} onAdvanced={() => setAdvOpen(true)} />
             </div>
             <div className="tabs" role="tablist" aria-label="Tool">
@@ -307,6 +314,7 @@ export default function App() {
 
       <Sheet open={advOpen} onClose={() => setAdvOpen(false)} title={`${TOOL_LABEL[tab]} · Advanced`}>
         <AdvancedControls tool={tab} tools={tools} setTools={setTools} stab={s.stab} />
+        {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
       </Sheet>
 
       <ExportSheet open={exportOpen} onClose={() => { setExportOpen(false); if (s.exp.state === "done" || s.exp.state === "error") studio.dismissExport(); }} studio={studio} snap={s} tools={tools} />
@@ -322,7 +330,8 @@ export default function App() {
             <li><b>Colour</b> physically based underwater correction (backscatter removal, range-adaptive white balance), locked per scene across the clip.</li>
             <li><b>Stabilise</b> feature tracking with an L1-optimal camera path and wobble suppression.</li>
             <li><b>Dewarp</b> calibrated fisheye lens profiles (Gyroflow, CC0) to straight lines.</li>
-            <li><b>Photos</b> JPEG, PNG and HEIC (where the browser reads it) get Colour and Dewarp, saved as a full-resolution JPEG.</li>
+            <li><b>Photos</b> JPEG, PNG and HEIC (where the browser reads it) get Colour and Dewarp, saved as a full-resolution JPEG that keeps the original's date, location and camera details.</li>
+            <li><b>10-bit, HDR and log</b> HLG / PQ (iPhone, GoPro, Osmo HDR), DJI D-Log M and Apple Log are converted to standard Rec.709 before the tools run; exports are 8-bit SDR.</li>
           </ul>
           <p className="about__fine">
             {s.engine === "webgpu" ? "WebGPU" : s.engine === "webgl2" ? "WebGL2" : s.engine === "failed" ? "No GPU" : "GPU starting"}

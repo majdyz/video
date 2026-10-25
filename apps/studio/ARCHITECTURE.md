@@ -119,9 +119,33 @@ Two paths, picked per browser when a clip opens (`Studio.pickExportMode`):
   re-times it, so every frame still lands in the file), then at half
   size. The first frame is analysed before recording starts.
   `?rt=1` / `?rt=0` force the path on or off anywhere.
-* **Photos**: one full-size render (`renderToFrame`, or the geometry
-  canvas with colour off) drawn into a 2D canvas and encoded as JPEG
-  (quality 0.92).
+* **Photos**: one full-size render (the WebGL2 engine's canvas, the
+  WebGPU engine's `renderToFrame`, or the geometry canvas with colour off)
+  drawn into a 2D canvas and encoded as JPEG (quality 0.92), with the
+  source's EXIF carried over (see Photos).
+
+Output is always 8-bit SDR Rec.709 (H.264, HEVC when H.264 can't be
+encoded), whatever the source: 10-bit / HDR / log clips are converted on
+the way in (see Footage profiles). HDR or 10-bit export is not offered.
+
+WebKit fixes on the offline path (it is Safari's fallback when
+MediaRecorder is missing, and `?rt=0`):
+
+* WebKit reports an untagged stream's colour space as `primaries:
+  "unspecified"`, a value outside the WebCodecs enums; mediabunny validates
+  the enum when it wraps a decoded frame and threw "colorSpace.primaries
+  must be one of …" on the first frame. `packages/shared/src/videoframe-
+  colorspace.ts` patches `VideoFrame.prototype.colorSpace` (page and the
+  motion worker) so out-of-spec values read as null.
+* Canvas-wrapped VideoFrames encoded upside down in Playwright's WebKit.
+  `frame-orientation.ts` measures it end to end once per page (a two-colour
+  WebGL canvas → VideoEncoder → VideoDecoder → read back) and, when
+  flipped, re-wraps each output frame through a vertically flipped 2D
+  canvas (a flipped ImageBitmap did not survive the round trip). Chrome and
+  Firefox pass the check and pay nothing per frame.
+* The decoding `<video>` is a 1 px transparent box, not `display: none`:
+  WebKit neither advances nor decodes a `display: none` video (black
+  uploads, so the colour analysis graded black frames).
 
 Before any export or engine reset, `Studio.settleEngine()` waits for the
 engine's in-flight analysis readback: `GradeEngine.reset()` clears its flag
@@ -136,7 +160,78 @@ bitmap is EXIF-oriented and bounded to the browser's limits (WebKit's
 16.7 Mpx canvas cap, WebGPU's 8192 px textures; the sheet says when a
 48 Mpx photo was scaled). Colour and Dewarp apply (Stabilise is hidden);
 there is no frame loop, so the photo is analysed once, snapped, and
-re-analysed (debounced) when the framing changes. Output keeps no EXIF.
+re-analysed (debounced) when the framing changes.
+
+EXIF (`pipeline/photo-exif.ts`, tested in `test/exif.test.ts`): the
+source's EXIF is read from JPEG (APP1), HEIC / HEIF / AVIF (the ISOBMFF
+`Exif` item via iinf / iloc), PNG (`eXIf`) or WebP (`EXIF`), and written as
+an APP1 segment right after SOI of the exported JPEG (the encoder's JFIF
+APP0 is dropped). Orientation is set to 1 (the bitmap is already upright),
+PixelX/YDimension to the exported size, IFD1 (the unedited thumbnail) is
+dropped. Date, GPS, camera, lens and exposure tags are kept byte for byte.
+A block too big for one segment (64 KB, e.g. large maker notes) is
+re-packed without the maker note; GPS and the rest survive.
+
+## Footage profiles (10-bit, HDR, log)
+
+`pipeline/footage.ts` (maths + detection, no DOM), the GLSL twin
+`FOOTAGE_GLSL` in the geometry pass, `pipeline/signal-probe.ts`
+(per-browser calibration). The source is converted to Rec.709 SDR **before
+every tool**: whenever a profile other than Standard is active the
+geometry pass runs (even with Dewarp / Stabilise off) and its fragment
+shader applies `footageToSdr` after the lens lookup, so dewarp,
+stabilise, the colour engine's analysis and the export all see a normal
+picture. 10-bit sources are uploaded into a half-float texture (RGBA16F)
+so the log / HDR expansion doesn't band; the "before" side of the split
+shows the untouched signal.
+
+| Profile    | Detected from                                                     | Conversion (source signal → Rec.709 signal) |
+|------------|-------------------------------------------------------------------|---------------------------------------------|
+| Standard   | everything else (8-bit, GoPro Natural / Flat / Vibrant, DJI Normal) | none |
+| D-Log M    | DJI djmd metadata: StreamMeta 2 → ColorMode 4 → 19 (Osmo Action 4/5 Pro, Pocket 3; DJI tags these files plain bt709). Fallback: 10-bit DJI with no colour mode | fit to DJI's free "D-Log M to Rec.709" LUT (Action 4 and 5 Pro ship the same table): 3×3 mix in a 10^(0.859·code) domain, then a degree-7 neutral curve. The LUT is not shipped. Natural colours: RMS 0.015, max 0.072 vs the LUT; on a real Osmo Action 5 Pro frame RMS 0.006 (99.5 % of values within 0.025) |
+| HDR HLG    | transfer `hlg` in the codec config (iPhone HDR / Dolby Vision 8.4, GoPro / Osmo HLG) | BT.2100 inverse OETF, OOTF at 1000 cd/m² (γ 1.2), ÷ 203 cd/m² (BT.2408 reference white), BT.2020 → BT.709 (BT.2087), highlight roll-off, BT.1886 (γ 2.4) encode |
+| HDR PQ     | transfer `pq`                                                      | BT.2100 EOTF ÷ 203 cd/m², same gamut / roll-off / encode (peak assumed 1000 cd/m²) |
+| Apple Log  | Apple metadata naming it, or an iPhone BT.2020 clip without an HDR transfer | Apple Log white paper decode (constants as in colour-science, BSD-3), BT.2020 → BT.709, scene 18 % grey → display 0.128 (= 26/203, the same place HDR puts grey), roll-off to Apple Log's peak |
+| BT.2020    | primaries `bt2020` with an SDR transfer                            | γ 2.4 → linear, BT.2020 → BT.709, re-encode |
+
+Roll-off: identity below 0.5 (display-linear, 1 = SDR white), then a
+rational curve, C¹ at the joint, reaching 1 exactly at the source's peak,
+so HDR reference white lands at ≈ 0.89 signal and every level up to
+1000 cd/m² stays separated (a tanh shoulder squeezed them into the top
+codes: 12 % of an iPhone frame clipped). Grey cards land at 0.43 signal
+(BT.2408's 26 cd/m²) from HLG, PQ and Apple Log alike. Not covered:
+GoPro GP-Log (no published curve; detected from GPMF `PTCL` and reported,
+shown as Rec.709), DJI D-Log (non-M) and D-Log2.
+
+**What the browser hands over.** Measured, not assumed: Chrome uploads a
+`<video>` frame's raw signal but converts a WebCodecs VideoFrame to sRGB
+(BT.2020 → BT.709, HLG / PQ clipped at SDR white); Playwright WebKit
+uploads raw from both. So when a clip's tags aren't plain Rec.709, the
+Studio plays a tiny calibration clip with known patches, tagged the same
+way and in the same codec family (`public/calib/*`, 128×64, 10-bit,
+built by `scripts/calibration-clips.mjs`), through both paths and reads
+it back (`signal-probe.ts`). Raw → the shader converts. Converted frames →
+each decoded frame is copied out and re-wrapped tagged Rec.709 (keeping
+its matrix and range), which makes the upload raw; verified by the same
+read-back. If neither works, the browser's own conversion is kept on that
+path and the shader skips the HDR transform there (the UI note says so).
+A paused still (`createImageBitmap(video)`) that reads differently from
+the element (Chrome converts it) is not used; the element is drawn
+instead. Log profiles are tagged Rec.709, so they are never affected.
+
+**Decoding.** 10-bit HEVC plays where the platform decodes it: Safari on
+macOS / iOS / iPadOS, Chrome / Edge with hardware HEVC on macOS, Windows
+and Android (not Linux). VP9 profile 2 and AV1 10-bit decode in Chrome
+everywhere. When the `<video>` can't load a clip the error names the codec
+and where it plays (`codecHelp`); when the element plays it but WebCodecs
+can't decode it (offline export), Export is disabled with the reason
+logged. ProRes (iPhone Apple Log) decodes only in Safari on a Mac.
+
+The **Footage profile** chooser (Colour → Advanced, videos only) offers
+Auto (with the evidence) and every profile as a manual override; a line
+above the tool panel says what is converted ("DJI D-Log M → Rec.709 ·
+Change"). Changing it re-profiles the colour (its input changed).
+`?footage=<profile>` forces one (headless checks).
 
 ## Stabilise (Motion Fix v3)
 
@@ -230,6 +325,7 @@ deploy gets a new cache name and old caches are deleted on activate.
 
 ## Debug URL flags
 
+`?footage=auto|standard|dlogm|hlg|pq|applelog|wide` (footage profile),
 `?webgl2` (force the WebGL2 colour backend: headless screenshots),
 `?tools=colour,stabilise,dewarp` (initial tool set), `?tab=dewarp`,
 `?person=0`, `?lock=0` (as in Aqua Fix), `?rt=1|0` (real-time export on /
@@ -243,17 +339,25 @@ off), `?dock=open|closed` (phone dock).
   isolated; it only matters if someone renders the engine canvas on the
   stage during an export again.
 * Playwright's Linux WebKit has no MediaRecorder, so the real-time path was
-  verified in Chrome (`?rt=1`) and the WebKit run fell back to the offline
-  path, which fails there inside mediabunny's VideoFrame init
-  ("colorSpace.primaries must be one of …"). iOS/macOS Safari have
-  MediaRecorder and take the real-time path; the offline fallback on
-  WebKit still needs a fix before it can be relied on (drawing decoded
-  samples through a 2D canvas did not avoid it: the rejected colour space
-  is set later in the shared encode path).
+  verified in Chrome (`?rt=1`); the WebKit offline fallback now exports
+  (colour-space patch, orientation round-trip, visible `<video>`), checked
+  with Playwright WebKit on an untagged H.264 clip and a 10-bit HEVC
+  D-Log M clip. Real Safari's VideoToolbox encoder may not flip at all;
+  the round-trip check then costs one tiny encode.
+* Footage profiles were validated on CPU against independent references
+  (DJI's LUT through ffmpeg `lut3d`; ffmpeg zscale + tonemap for HLG) and
+  in the browser (GLSL twin = CPU to 1e-5 in Chrome; full export of a
+  D-Log M clip and of synthetic HLG patches). The HLG rendering is
+  display-referred (BT.1886): brighter mid-tones than a scene-referred
+  BT.709-OETF conversion (ffmpeg's), by design. The HEVC calibration clips
+  and the Safari / Chrome-with-HW-HEVC upload paths could not be run here
+  (no HEVC decode in headless Linux Chrome, no Safari): those platforms
+  fall back to "assume raw" only if the calibration clip fails to load.
+* Chrome decodes BT.2020 YCbCr blue ~6 % low on its WebCodecs and
+  `<video>` paths (a 0.5 blue patch reads 0.47); the conversion is exact
+  on what it receives.
 * MediaPipe's person detector does not start in Playwright WebKit (no
   WebGL2 in its worker); the grade runs without the person mask there.
-* Exported photos carry no EXIF (date, location, camera). Copying the
-  source's EXIF block into the JPEG is a small follow-up.
 * HEIC decoding was not exercised headless (Chrome cannot decode it; the
   Linux WebKit build was not tried with a HEIC file).
 * Real-time export on a slow renderer: after the ¼-speed half-size step

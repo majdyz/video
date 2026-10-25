@@ -376,7 +376,8 @@ async function main() {
     scrub.input.value = String(Math.min(1, info.durationS / 2));
     if (info.tenBit) {
       status.className = "status error";
-      status.textContent = "This is a 10-bit (D-Log M) clip. Version 1 only handles 8-bit; shoot in Normal colour or convert first.";
+      // The unified Studio (../studio/) decodes 10-bit HEVC and converts D-Log M / HLG / PQ to Rec.709 first.
+      status.innerHTML = `This is a 10-bit clip (D-Log M or HDR). This classic tool only handles 8-bit: open it in <a href="../studio/">Studio</a>, which converts it to Rec.709 and dewarps it.`;
       return;
     }
     // Export opens once the first preview frame has settled the GPU path.

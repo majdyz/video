@@ -580,6 +580,19 @@ a {
   line-height: 1.5;
   color: var(--warning);
 }
+/* Footage profile line above the tool panel ("DJI D-Log M → Rec.709 · Change"): informational, not a warning. */
+.footage-note {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-2);
+  color: var(--text-3);
+}
+.footage-note .link-btn {
+  margin-left: auto;
+  padding: 0;
+  min-height: 0;
+}
 .status-live {
   color: var(--text-2);
 }
@@ -1235,8 +1248,18 @@ a {
   flex: none;
 }
 
+/* The decoding <video>: rendered but invisible. WebKit does not advance or
+   decode a display:none video (Playwright WebKit: currentTime stuck at 0, black
+   texture uploads), so it is a 1 px transparent box instead. */
 .source-video {
-  display: none;
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
 }
 
 /* ------------------------------------------------------------ zoomable stage */

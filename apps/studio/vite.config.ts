@@ -54,7 +54,9 @@ function studioServiceWorker(): Plugin {
       for (const a of assets) hash.update(a);
       hash.update(readFileSync(join(dir, "index.html")));
       const version = hash.digest("hex").slice(0, 12);
-      const precache = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg", "./icon-192.png", "./apple-touch-icon.png", ...assets.filter((a) => /\.(js|css)$/.test(a)).map((a) => `./assets/${a}`)];
+      // The HDR calibration clips (a few KB) too: an HDR clip opened offline still gets measured.
+      const calib = existsSync(join(dir, "calib")) ? readdirSync(join(dir, "calib")).sort().map((f) => `./calib/${f}`) : [];
+      const precache = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg", "./icon-192.png", "./apple-touch-icon.png", ...calib, ...assets.filter((a) => /\.(js|css)$/.test(a)).map((a) => `./assets/${a}`)];
       const src = readFileSync(sw, "utf8").replace("__BUILD_VERSION__", version).replace("__PRECACHE__", JSON.stringify(precache));
       writeFileSync(sw, src);
       this.info?.(`sw.js: cache studio-${version}, ${precache.length} files precached`);

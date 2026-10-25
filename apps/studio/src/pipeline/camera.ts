@@ -74,6 +74,120 @@ function firstSample(moov: Uint8Array, trak: Box): { format: string; offset: num
   return { format, offset, size };
 }
 
+/** Words in vendor metadata that name a colour mode (footage.ts `detectFootage` reads the result). */
+const COLOUR_MODE = /\b(d-?log ?m|d-?log2?|apple ?log|gp-?log)\b/i;
+
+/** DJI dvtm ColorMode values (telemetry-parser dvtm_library.proto, MIT/Apache-2.0). */
+const DJI_COLOUR_MODE: Record<number, string> = { 0: "Normal", 1: "D-Cinelike", 2: "D-Log", 9: "HLG", 19: "D-Log M", 22: "D-Log2" };
+
+/** Protobuf walk: the varint at a field path (e.g. [2, 4, 1]), undefined if absent, null if unparsable. */
+export function protoVarintAt(b: Uint8Array, path: number[]): number | undefined | null {
+  let from = 0, to = b.length;
+  for (let depth = 0; depth < path.length; depth++) {
+    let i = from, found = false;
+    const varint = (): number => {
+      let x = 0, s = 1;
+      for (let k = 0; k < 10; k++) {
+        if (i >= to) throw new Error("eof");
+        const c = b[i++];
+        x += (c & 127) * s;
+        if (!(c & 128)) return x;
+        s *= 128;
+      }
+      throw new Error("varint");
+    };
+    try {
+      while (i < to) {
+        const key = varint(), field = Math.floor(key / 8), wire = key & 7;
+        if (field === 0) return null;
+        const last = depth === path.length - 1;
+        if (wire === 0) {
+          const v = varint();
+          if (field === path[depth] && last) return v;
+        } else if (wire === 2) {
+          const n = varint();
+          if (i + n > to) return null;
+          if (field === path[depth] && !last) { from = i; to = i + n; found = true; break; }
+          i += n;
+        } else if (wire === 1) i += 8;
+        else if (wire === 5) i += 4;
+        else return null;
+      }
+    } catch {
+      return null;
+    }
+    if (!found) return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * DJI clips record the colour mode in the first djmd sample (StreamMeta 2 →
+ * ColorMode 4 → color_mode 1; proto3 omits the default, Normal). Measured
+ * on Osmo Action 5 Pro files: D-Log M = 19 (8-bit Normal files carry none).
+ */
+export function djiColourMode(djmd: Uint8Array): string | null {
+  const v = protoVarintAt(djmd, [2, 4, 1]);
+  if (v === null) return null;
+  return DJI_COLOUR_MODE[v ?? 0] ?? `mode ${v}`;
+}
+
+/**
+ * GoPro writes its settings as GPMF in moov/udta; `PTCL` is the colour
+ * profile ("NATURAL", "FLAT", "GP-LOG", …), a KLV string: key, type 'c',
+ * element size, repeat count (big-endian), then the bytes.
+ */
+export function goproColourProfile(moov: Uint8Array): string | null {
+  for (let i = 0; i + 8 < moov.length; i++) {
+    if (moov[i] !== 0x50 || moov[i + 1] !== 0x54 || moov[i + 2] !== 0x43 || moov[i + 3] !== 0x4c || moov[i + 4] !== 0x63) continue; // "PTCL" 'c'
+    const n = moov[i + 5] * ((moov[i + 6] << 8) | moov[i + 7]);
+    if (n <= 0 || n > 32 || i + 8 + n > moov.length) continue;
+    const s = String.fromCharCode(...moov.subarray(i + 8, i + 8 + n)).replace(/\0+$/, "").trim();
+    if (/^[\x20-\x7e]+$/.test(s)) return s;
+  }
+  return null;
+}
+
+/**
+ * What the clip's own metadata says about its colour mode: the DJI colour
+ * mode from the djmd track ("DJI colour mode: D-Log M"), plus printable runs
+ * in the moov box (udta / meta / vendor atoms) that name one; null when
+ * nothing does. Never throws.
+ */
+export async function readColourModeHints(file: File): Promise<string | null> {
+  try {
+    const moovBox = (await topLevel(file)).find((b) => b.type === "moov");
+    if (!moovBox) return null;
+    const moov = await readBytes(file, moovBox.start, Math.min(moovBox.size, 64 << 20));
+    const hits = new Set<string>();
+    const root: Box = { type: "moov", start: 0, size: moov.byteLength, body: moovBox.body - moovBox.start };
+    for (const trak of children(moov, root.body, root.size).filter((b) => b.type === "trak")) {
+      const s = firstSample(moov, trak);
+      if (s?.format !== "djmd" || !s.size || s.size > 1 << 20) continue;
+      const mode = djiColourMode(await readBytes(file, s.offset, s.size));
+      if (mode) hits.add(`DJI colour mode: ${mode}`);
+    }
+    const gopro = goproColourProfile(moov);
+    if (gopro) hits.add(`GoPro colour profile: ${gopro}`);
+    let run = "";
+    for (let i = 0; i <= moov.length; i++) {
+      const c = i < moov.length ? moov[i] : 0;
+      if (c >= 0x20 && c < 0x7f) {
+        run += String.fromCharCode(c);
+        continue;
+      }
+      if (run.length >= 3 && run.length < 200) {
+        const m = run.match(COLOUR_MODE);
+        if (m) hits.add(run.trim());
+      }
+      run = "";
+    }
+    return hits.size ? [...hits].join(" | ") : null;
+  } catch {
+    return null;
+  }
+}
+
 /** What camera/lens shot this clip, as far as its metadata says. Never throws. */
 export async function detectClipCamera(file: File, codedW: number, codedH: number): Promise<CameraInfo> {
   try {

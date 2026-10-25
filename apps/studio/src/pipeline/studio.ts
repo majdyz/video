@@ -27,6 +27,10 @@ import { colourSettings, DEFAULT_TOOLS, exportSuffix, solveParams, type ToolsSta
 import { stabInfo, stabSummary, type StabInfo } from "./stab-info.ts";
 import { seekVideo, waitForEvent, waitForFirstFrame, type VideoWithRVFC } from "./video.ts";
 import { decodePhoto, encodeJpeg, isPhotoFile, photoLimits } from "./photo.ts";
+import { readExif, withExif } from "./photo-exif.ts";
+import { canvasFrameFix } from "@dive-tools/shared/frame-orientation.ts";
+import { detectFootage, FOOTAGE_LABEL, FOOTAGE_MODE, isHdrProfile, parseCodec, resolveFootage, type FootageChoice, type FootageInfo, type FootageProfile } from "./footage.ts";
+import type { CalibKind, SignalCalibration } from "./signal-probe.ts";
 
 type ColourMod = typeof import("./colour.ts");
 type MediaMod = typeof import("./media.ts");
@@ -95,7 +99,37 @@ export type Snapshot = {
   photoLimited: { w: number; h: number } | null;
   /** Camera / lens the clip's metadata names (Dewarp's detector); null until read, or for photos. */
   camera: CameraInfo | null;
+  /** Footage profile: what the clip is (detected), what the user chose, what runs. */
+  footage: FootageStatus;
 };
+
+export type FootageStatus = {
+  choice: FootageChoice;
+  info: FootageInfo | null;
+  /** The conversion in effect (after the choice; "standard" = none). */
+  active: FootageProfile;
+  /** One line for the UI, e.g. "DJI D-Log M → Rec.709"; null for plain SDR. */
+  note: string | null;
+};
+const FOOTAGE_NONE: FootageStatus = { choice: "auto", info: null, active: "standard", note: null };
+
+/** `?footage=dlogm|hlg|…` forces a profile (headless checks). */
+function initialFootage(): FootageChoice {
+  const q = new URLSearchParams(location.search).get("footage");
+  return q && (q === "auto" || q in FOOTAGE_MODE) ? (q as FootageChoice) : "auto";
+}
+
+/** Plain-language reason a clip can't be decoded here, from its codec string (null: nothing specific to say). */
+export function codecHelp(codecString: string | null | undefined): string | null {
+  const c = parseCodec(codecString);
+  if (c.family === "hevc") {
+    return `This clip is ${c.label} (H.265${c.bitDepth > 8 ? `, ${c.bitDepth}-bit` : ""}) and this browser can't decode it. HEVC plays in Safari on Mac, iPhone and iPad, and in Chrome or Edge on Mac, Windows and Android with hardware decoding (not on Linux). Open it there, or set the camera to H.264.`;
+  }
+  if (c.family === "prores") return "ProRes (e.g. iPhone Apple Log) only decodes in Safari on a Mac. Export it as HEVC or H.264 from Photos or an editor first.";
+  if (c.family === "avc" && c.bitDepth > 8) return "10-bit H.264 (High 10) isn't decoded by browsers. Re-encode it as HEVC or 8-bit H.264.";
+  if (c.family === "av1" || c.family === "vp9") return `This ${c.label} clip needs a newer browser to decode.`;
+  return null;
+}
 
 const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null };
 const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null };
@@ -128,6 +162,7 @@ export class Studio {
     exportMode: "offline",
     photoLimited: null,
     camera: null,
+    footage: FOOTAGE_NONE,
   };
   private listeners = new Set<() => void>();
   private frameListeners = new Set<(b: ImageBitmap) => void>();
@@ -165,6 +200,11 @@ export class Studio {
   private profiling: Promise<void> | null = null;
   private lastTimeEmit = 0;
   private photoAnalyseTimer = 0;
+  private footageChoice: FootageChoice = initialFootage();
+  /** How this browser hands this clip kind's signal to WebGL (signal-probe.ts); null = not measured (assume raw). */
+  private signal: SignalCalibration | null = null;
+  /** createImageBitmap(<video>) converts this clip's colour differently from a texture upload: don't paint paused stills. */
+  private stillsUnsafe = false;
 
   // ------------------------------------------------------------ store
 
@@ -387,19 +427,29 @@ export class Studio {
     this.teardown();
     const gen = ++this.gen;
     this.file = file;
-    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null });
+    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice } });
     try {
       await touchFile(file);
       const media = await loadMedia();
       const info = await media.probeClip(file);
       if (gen !== this.gen) return;
       // Which camera / lens (for Dewarp's preselection); only reads the moov box and two samples.
-      void media.detectClipCamera(file, info?.codedW ?? 0, info?.codedH ?? 0).then((camera) => {
-        if (gen !== this.gen) return;
+      const cameraP = media.detectClipCamera(file, info?.codedW ?? 0, info?.codedH ?? 0).then((camera) => {
+        if (gen !== this.gen) return camera;
         console.info(`[camera] ${camera.brand ? [camera.brand, camera.model, camera.lensMode].filter(Boolean).join(" ") : "unknown"} -> ${camera.profileId ?? "default"} (${camera.evidence.join("; ")})`);
         this.set({ camera });
         void this.updateDewarp();
+        return camera;
       });
+      // Footage profile (log / HDR / wide gamut): needs the camera brand for log curves cameras tag as Rec.709.
+      const camera = await Promise.race([cameraP, new Promise<null>((r) => setTimeout(() => r(null), 2500))]);
+      if (gen !== this.gen) return;
+      const vendorText = await media.readColourModeHints(file).catch(() => null);
+      const fInfo = info ? detectFootage({ codec: info.codecString ?? null, tags: info.colorTags ?? null, brand: camera?.brand, model: camera?.model, vendorText }) : null;
+      this.signal = null;
+      this.stillsUnsafe = false;
+      this.setFootageStatus(fInfo);
+      if (fInfo) console.info(`[footage] ${fInfo.detected} (${fInfo.evidence.join("; ")})${this.footageChoice !== "auto" ? `, forced ${this.footageChoice}` : ""}`);
       const url = URL.createObjectURL(file);
       this.sourceUrl = url;
       v.src = url;
@@ -407,18 +457,36 @@ export class Studio {
       v.playsInline = true;
       v.loop = true;
       v.preload = "auto";
-      await waitForEvent(v, ["loadedmetadata"], ["error"], 20_000, "Could not read this video");
+      try {
+        await waitForEvent(v, ["loadedmetadata"], ["error"], 20_000, "Could not read this video");
+      } catch (err) {
+        throw new Error(codecHelp(info?.codecString) ?? (err as Error).message);
+      }
       if (gen !== this.gen) return;
       // iOS only decodes once playback starts: play muted and wait for a frame.
       await v.play().catch(() => undefined);
       await waitForFirstFrame(v, 15_000);
       if (gen !== this.gen) return;
-      if (!v.videoWidth) throw new Error("This video has no decodable picture (unsupported codec?)");
+      if (!v.videoWidth) throw new Error(codecHelp(info?.codecString) ?? "This video has no decodable picture (unsupported codec?)");
+      // HDR / wide-gamut tags: learn how this browser hands the signal over before the first frame is drawn.
+      const kind = calibKindOf(info?.colorTags);
+      if (kind && this.geo) {
+        v.pause();
+        this.signal = await media.calibrateSignal(kind, parseCodec(info?.codecString).family, this.geo).catch(() => null);
+        if (gen !== this.gen) return;
+        console.info(`[footage] signal: <video> ${this.signal?.video ?? "?"}, VideoFrame ${this.signal?.frame ?? "?"}${this.signal ? `\n  ${this.signal.log.join("\n  ")}` : ""}`);
+        this.stillsUnsafe = await this.stillDiffers(v);
+        this.setFootageStatus(this.snap.footage.info);
+        await v.play().catch(() => undefined);
+      }
       const fallback: ClipInfo = { rot: 0, displayW: v.videoWidth, displayH: v.videoHeight, codedW: v.videoWidth, codedH: v.videoHeight, fps: 30, duration: v.duration, codec: null, hasAudio: false };
       const clip = info ?? fallback;
       e.lockGlobals(null);
       const mode = this.pickExportMode(e);
-      this.set({ info: clip, duration: v.duration || clip.duration, phase: "ready", currentTime: 0, exportMode: mode, canExport: mode === "realtime" || isWebCodecsSupported() });
+      // The offline exporter decodes with WebCodecs; a clip the <video> element plays may still be beyond it.
+      const canExport = mode === "realtime" || (isWebCodecsSupported() && clip.canDecode !== false);
+      if (mode === "offline" && clip.canDecode === false) console.info("[export] WebCodecs can't decode this clip here; export disabled");
+      this.set({ info: clip, duration: v.duration || clip.duration, phase: "ready", currentTime: 0, exportMode: mode, canExport });
       await this.updateDewarp();
       // First frame graded before anything shows, so the clip never flashes uncorrected.
       this.uploadToEngine(v, v.currentTime, false);
@@ -430,8 +498,81 @@ export class Studio {
       if (this.tools.stabilise.enabled) void this.analyseMotion();
     } catch (err) {
       if (gen !== this.gen) return;
-      this.set({ busy: null, phase: "empty", kind: null, fileName: null, info: null });
+      this.set({ busy: null, phase: "empty", kind: null, fileName: null, info: null, footage: FOOTAGE_NONE });
       this.fail(err);
+    }
+  }
+
+  // ------------------------------------------------------------ footage profile
+
+  /** Manual "Footage profile" override ("auto" = detected). Re-profiles the colour (its input changed). */
+  setFootage(choice: FootageChoice): void {
+    if (choice === this.footageChoice) return;
+    this.footageChoice = choice;
+    this.setFootageStatus(this.snap.footage.info);
+    if (this.snap.kind !== "video" || this.snap.phase !== "ready") return;
+    this.dropStill();
+    if (this.tools.colour.enabled && this.engine && !this.exporting) {
+      this.engine.lockGlobals(null);
+      this.set({ colourProfiled: false });
+      if (!this.profiling) void this.profileColour();
+    }
+    this.repaint();
+  }
+
+  private setFootageStatus(info: FootageInfo | null): void {
+    const choice = this.footageChoice;
+    const active = this.snap.kind === "photo" ? "standard" : resolveFootage(choice, info);
+    let note: string | null = null;
+    if (active !== "standard") {
+      note = `${FOOTAGE_LABEL[active]} → Rec.709`;
+      const s = this.signal;
+      if (isHdrProfile(active) || active === "wide") {
+        if (s?.video === "browser") note += " · preview tone-mapped by the browser";
+        if (s?.frame === "browser") note += " · export tone-mapped by the browser";
+      }
+    } else if (info && info.bitDepth > 8) note = `${info.codecLabel ?? "10-bit"} · Rec.709`;
+    this.set({ footage: { choice, info, active, note } });
+  }
+
+  /**
+   * Shader mode of the footage transform for a source path. A path the
+   * browser already converts to SDR (signal-probe.ts) gets none for the
+   * transfers it handled (HDR, BT.2020); log curves always need it.
+   */
+  private footageMode(path: "video" | "frame"): number {
+    const active = this.snap.footage.active;
+    if (active === "standard") return 0;
+    const sig = path === "video" ? this.signal?.video : this.signal?.frame;
+    if (sig === "browser" && (isHdrProfile(active) || active === "wide") && calibKindOf(this.snap.info?.colorTags)) return 0;
+    return FOOTAGE_MODE[active];
+  }
+
+  private footageActive(): boolean {
+    return this.snap.kind === "video" && (this.footageMode("video") !== 0 || this.footageMode("frame") !== 0);
+  }
+
+  /** Half-float upload for 10-bit sources whose signal the transform stretches. */
+  private highPrecision(mode: number): boolean {
+    return mode !== 0 && (this.snap.footage.info?.bitDepth ?? 8) > 8;
+  }
+
+  /** True when a still grabbed from the <video> reads differently from the element itself (colour conversion). */
+  private async stillDiffers(v: HTMLVideoElement): Promise<boolean> {
+    const geo = this.geo;
+    if (!geo || !v.videoWidth) return false;
+    try {
+      const pts: [number, number][] = [[0.25, 0.25], [0.5, 0.5], [0.75, 0.75], [0.5, 0.25], [0.25, 0.75]];
+      const w = 64, h = 36;
+      const a = geo.sample(v, w, h, false, pts);
+      const bmp = await createImageBitmap(v);
+      const b = geo.sample(bmp, w, h, false, pts);
+      bmp.close();
+      const d = Math.max(...a.flatMap((p, i) => p.map((x, c) => Math.abs(x - b[i][c]))));
+      if (d > 0.04) console.info(`[footage] paused stills read ${d.toFixed(2)} off the video element: drawing from the element`);
+      return d > 0.04;
+    } catch {
+      return false;
     }
   }
 
@@ -447,7 +588,8 @@ export class Studio {
     this.teardown();
     const gen = ++this.gen;
     this.file = file;
-    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null });
+    this.signal = null;
+    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice } });
     try {
       await touchFile(file);
       const { bitmap, original } = await decodePhoto(file, photoLimits(isWebKit(), e.backend.kind));
@@ -537,7 +679,13 @@ export class Studio {
   }
 
   private geometryActive(): boolean {
-    return this.stabActive() || (this.tools.dewarp.enabled && !!this.dewarpU);
+    return this.stabActive() || (this.tools.dewarp.enabled && !!this.dewarpU) || this.footageActive();
+  }
+
+  /** Geometry-pass options for an upright source (the <video>, a still from it, a photo). */
+  private uprightOpts(split: number | null) {
+    const footage = this.snap.kind === "video" ? this.footageMode("video") : 0;
+    return { texCoded: false, split, footage, highPrecision: this.highPrecision(footage) };
   }
 
   /** Gyro path active and rendering straight lines itself (Dewarp on). */
@@ -576,7 +724,7 @@ export class Studio {
     if (this.geometryActive() && this.geo) {
       const [w, h] = size ?? this.previewSize();
       this.geo.resize(w, h);
-      this.geo.render(src, this.geoParams(t, info.rot), { texCoded: false, split });
+      this.geo.render(src, this.geoParams(t, info.rot), this.uprightOpts(split));
       e.upload(this.geo.canvas, w, h, 0);
       e.setPreviewScale(1);
     } else {
@@ -599,7 +747,7 @@ export class Studio {
     } else if (this.geo) {
       const [w, h] = this.previewSize();
       this.geo.resize(w, h);
-      this.geo.render(src, this.geoParams(t, info.rot), { texCoded: false, split: this.split });
+      this.geo.render(src, this.geoParams(t, info.rot), this.uprightOpts(this.split));
     }
   }
 
@@ -626,7 +774,7 @@ export class Studio {
 
   private async captureStill(): Promise<void> {
     const v = this.video;
-    if (!v || !v.paused || v.readyState < 2 || this.snap.phase !== "ready" || this.snap.kind !== "video" || this.exporting) return;
+    if (!v || !v.paused || v.readyState < 2 || this.snap.phase !== "ready" || this.snap.kind !== "video" || this.exporting || this.stillsUnsafe) return;
     const gen = this.gen;
     try {
       const bmp = await createImageBitmap(v);
@@ -891,7 +1039,8 @@ export class Studio {
         result: { ...res, name: this.outName(res.blob.type === "video/webm" ? "webm" : "mp4"), url: URL.createObjectURL(res.blob), width: info.displayW, height: info.displayH },
       });
     } catch (err) {
-      failure = err;
+      const help = err instanceof Error && /not decodable/i.test(err.message) ? codecHelp(info.codecString) : null;
+      failure = help ? new Error(help) : err;
     } finally {
       this.finishExport(failure);
       if (e && this.colour) {
@@ -933,6 +1082,13 @@ export class Studio {
   private async runOffline(media: MediaMod, file: File, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController) {
     const e = this.engine, geo = this.geo;
     const geoOn = this.geometryActive();
+    const footage = this.footageMode("frame");
+    const hp = this.highPrecision(footage);
+    // The browser converts (and clips) HDR frames on upload but passes a re-tagged copy through raw (signal-probe.ts).
+    const retag = footage !== 0 && this.signal?.frame === "retag";
+    if (footage) console.info(`[export] footage ${this.snap.footage.active} (mode ${footage}${retag ? ", frames re-tagged" : ""}${hp ? ", half-float" : ""})`);
+    // Playwright's WebKit encodes canvas-wrapped frames upside down (frame-orientation.ts measures it end to end).
+    const fixFrame = await canvasFrameFix((line) => console.info("[export]", line));
     await this.engineForExport();
     this.setExp({ state: "running", detail: "Rendering" });
     const started = performance.now();
@@ -949,7 +1105,15 @@ export class Studio {
         const serial = geoOn || !colourOn || capture !== "readback";
         if (serial) await gate;
         const job = (async (): Promise<VideoFrame> => {
-          const frame = media.squarePixels(sample.toVideoFrame());
+          let decoded = sample.toVideoFrame();
+          if (retag) {
+            const raw = await media.retagFrame(decoded).catch(() => null);
+            if (raw) {
+              decoded.close();
+              decoded = raw;
+            }
+          }
+          const frame = media.squarePixels(decoded);
           try {
             const rot = ((fi.rotation / 90) % 4) as Rotation;
             const ts = Math.round(fi.timeSec * 1e6);
@@ -957,7 +1121,7 @@ export class Studio {
             let out: VideoFrame;
             if (geoOn || !colourOn) {
               geo!.resize(fi.displayWidth, fi.displayHeight);
-              geo!.render(frame, this.geoParams(fi.timeSec, rot as QuarterTurns), { texCoded: true, split: null });
+              geo!.render(frame, this.geoParams(fi.timeSec, rot as QuarterTurns), { texCoded: true, split: null, footage, highPrecision: hp });
             }
             if (!colourOn) {
               out = new VideoFrame(geo!.canvas, { timestamp: ts, duration: dur });
@@ -978,6 +1142,8 @@ export class Studio {
               eng.tick(fi.timeSec);
               out = await eng.renderToFrame(rotE, ts, dur);
             }
+            // Frames wrapped from a canvas (not the WebGPU backend's buffer readback).
+            if (fixFrame && (!colourOn || e?.backend.kind === "webgl2" || (e?.backend as unknown as { capture?: string | null }).capture !== "readback")) out = await fixFrame(out);
             frames++;
             const now = performance.now();
             if (now - lastLive > LIVE_EVERY_MS) {
@@ -1082,7 +1248,7 @@ export class Studio {
                   e.render();
                 } else {
                   geo.resize(W, H);
-                  geo.render(v, this.geoParams(t, info.rot), { texCoded: false, split: null });
+                  geo.render(v, this.geoParams(t, info.rot), this.uprightOpts(null));
                 }
                 onFrame(t);
                 rendered++;
@@ -1127,6 +1293,12 @@ export class Studio {
         this.uploadToEngine(bmp, 0, false, [W, H]);
         e!.setPreviewScale(1);
         src = await e!.renderToFrame(0, 0, undefined);
+        // WebGL2 backend: draw the canvas itself (it holds the full-size render); WebKit draws
+        // a VideoFrame wrapped from a WebGL canvas upside down.
+        if (e!.backend.kind === "webgl2") {
+          src.close();
+          src = e!.backend.canvas;
+        }
       } else {
         const geo = this.geo!;
         geo.resize(W, H);
@@ -1135,7 +1307,11 @@ export class Studio {
       }
       this.setExp({ progress: 0.6 });
       await this.emitFrame(src);
-      const blob = await encodeJpeg(src, W, H);
+      const encoded = await encodeJpeg(src, W, H);
+      // The browser's encoder writes no EXIF: carry the original's over (date, GPS, camera), orientation baked in.
+      const exif = this.file ? readExif(new Uint8Array(await this.file.arrayBuffer())) : null;
+      const blob = exif ? new Blob([withExif(new Uint8Array(await encoded.arrayBuffer()), exif, { width: W, height: H }) as BlobPart], { type: "image/jpeg" }) : encoded;
+      console.info(`[export] photo ${W}x${H}, EXIF ${exif ? "kept" : "none in source"}`);
       if (typeof VideoFrame !== "undefined" && src instanceof VideoFrame) src.close();
       this.setExp({
         state: "done",
@@ -1163,4 +1339,13 @@ export class Studio {
     if (r) URL.revokeObjectURL(r.url);
     this.set({ exp: IDLE_EXPORT });
   }
+}
+
+/** Calibration clip for a clip's colour tags (null: plain Rec.709, nothing to measure). */
+function calibKindOf(tags: ClipInfo["colorTags"]): CalibKind | null {
+  if (!tags) return null;
+  if (tags.transfer === "hlg") return "hlg";
+  if (tags.transfer === "pq") return "pq";
+  if (tags.primaries === "bt2020") return "wide";
+  return null;
 }
