@@ -679,7 +679,9 @@ export class Studio {
                 eng.tick(fi.timeSec);
                 out = await eng.renderToFrame(rotE, ts, dur);
                 const now = performance.now();
-                if (now - lastShown > 80) {
+                // Stage live view only on the plain colour path (Aqua Fix's verified one); with geometry
+                // the sheet's thumbnails are the live view (see open issues in ARCHITECTURE.md).
+                if (!geoOn && now - lastShown > 80) {
                   lastShown = now;
                   eng.render(rotE);
                 }

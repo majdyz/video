@@ -128,3 +128,17 @@ default in Oct 2026.
 `?webgl2` (force the WebGL2 colour backend: headless screenshots),
 `?tools=colour,stabilise,dewarp` (initial tool set), `?tab=dewarp`,
 `?person=0`, `?lock=0` (as in Aqua Fix).
+
+## Open issues
+
+* With a geometry tool on, `GradeEngine.render()` on the stage during an
+  offline export showed a magnified crop in headless WebGL2 (the exported
+  frames are correct). The stage live view is therefore disabled on that
+  path; the export sheet's thumbnails (bitmaps of the encoded frames) are
+  the live view. Likely the backend's on-screen size after a full-size
+  `renderToFrame` of a canvas source; investigate with the single-pass work.
+* One headless run logged "WebGL: too many errors" after ~20 minutes idle
+  post-export; not reproduced in a 60 s idle run.
+* Photos (Aqua Fix supports stills) are not wired into the Studio yet.
+* The bundled sample clip's attribution (Wikimedia Commons, CC BY-SA)
+  needs the exact author/title before a store release.
