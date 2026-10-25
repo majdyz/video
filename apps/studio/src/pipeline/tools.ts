@@ -3,8 +3,8 @@
 // state to what each engine reads. No React, no GPU: unit-tested.
 
 import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, type ScenePreset, type UserSettings } from "../../../aqua-fix/src/engine/params.ts";
-import { DEFAULT_PARAMS as STAB_DEFAULTS, type StabilizeParams } from "../../../motion-fix/src/lib/stabilize.ts";
-import { fitZoom, lensDiagonalFov, warpUniforms, type Projection, type WarpParams, type WarpUniforms } from "../../../dewarp/src/fisheye.ts";
+import type { StabilizeParams } from "../../../motion-fix/src/lib/stabilize.ts";
+import type { Projection } from "../../../dewarp/src/fisheye.ts";
 import { DEFAULT_PROFILE, PROFILES } from "../../../dewarp/src/profiles.ts";
 
 export type ToolId = "colour" | "stabilise" | "dewarp";
@@ -51,6 +51,12 @@ export function colourSettings(c: ColourState): UserSettings {
 }
 
 // ---------------------------------------------------------------- stabilise
+
+/**
+ * Motion Fix's DEFAULT_PARAMS, copied so the tool UI doesn't pull the motion
+ * solver into the first-load bundle (test/tools.test.ts keeps them equal).
+ */
+const STAB_DEFAULTS: StabilizeParams = { smoothing: 0.8, maxCrop: 0.15 };
 
 export type StabPreset = "gentle" | "steady" | "locked";
 export type StabiliseState = {
@@ -114,19 +120,6 @@ export const DEFAULT_DEWARP: DewarpState = {
   autoZoom: true,
   zoom: 1,
 };
-
-/** Dewarp parameters for a clip whose CODED size is w×h (the lens model's frame). */
-export function dewarpParams(d: DewarpState, codedW: number, codedH: number): WarpParams {
-  const p = PROFILES[d.profile] ?? PROFILES[DEFAULT_PROFILE];
-  const fovDeg = p.lens ? lensDiagonalFov(p.lens, codedW, codedH) : d.fovDeg;
-  const base = { srcWidth: codedW, srcHeight: codedH, fovDeg, k1: p.k1, strength: Math.min(1, Math.max(0, d.strength / 100)), projection: d.projection, lens: p.lens };
-  const zoom = d.autoZoom ? fitZoom(base, 0.5, 32, 2) : d.zoom;
-  return { ...base, zoom };
-}
-
-export function dewarpUniforms(d: DewarpState, codedW: number, codedH: number): WarpUniforms {
-  return warpUniforms(dewarpParams(d, codedW, codedH));
-}
 
 /** True when the lens profile's aspect differs from the clip's (the calibration may not fit). */
 export function profileAspectMismatch(id: string, codedW: number, codedH: number): boolean {

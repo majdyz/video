@@ -45,10 +45,13 @@ export function Timeline({
         aria-valuemin={0}
         aria-valuemax={Math.round(duration * 10) / 10}
         aria-valuenow={Math.round(shown * 10) / 10}
+        aria-valuetext={`${formatTime(shown)} of ${formatTime(duration)}`}
         tabIndex={disabled ? -1 : 0}
         onKeyDown={(e) => {
-          if (e.key === "ArrowRight") onSeek(Math.min(duration, time + 1));
-          if (e.key === "ArrowLeft") onSeek(Math.max(0, time - 1));
+          if (e.key === "ArrowRight" || e.key === "ArrowUp") { e.preventDefault(); onSeek(Math.min(duration, time + 1)); }
+          if (e.key === "ArrowLeft" || e.key === "ArrowDown") { e.preventDefault(); onSeek(Math.max(0, time - 1)); }
+          if (e.key === "Home") { e.preventDefault(); onSeek(0); }
+          if (e.key === "End") { e.preventDefault(); onSeek(duration); }
           if (e.key === " ") { e.preventDefault(); onToggle(); }
         }}
         onPointerDown={(e) => {
@@ -72,7 +75,7 @@ export function Timeline({
         </div>
         <div className="timeline__head" style={{ left: `${pct}%` }} />
       </div>
-      <div className="timeline__clock">
+      <div className="timeline__clock" aria-hidden="true">
         <span>{formatTime(shown)}</span>
         <span className="timeline__dur">{formatTime(duration)}</span>
       </div>

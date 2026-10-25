@@ -5,8 +5,6 @@ import {
   DEFAULT_TOOLS,
   applyStabPreset,
   colourSettings,
-  dewarpParams,
-  dewarpUniforms,
   enabledTools,
   exportSuffix,
   processingChain,
@@ -14,6 +12,7 @@ import {
   profileDefaults,
   stabiliseParams,
 } from "../src/pipeline/tools.ts";
+import { dewarpParams, dewarpUniforms } from "../src/pipeline/dewarp.ts";
 import { DEFAULT_SETTINGS } from "../../aqua-fix/src/engine/params.ts";
 import { DEFAULT_PARAMS } from "../../motion-fix/src/lib/stabilize.ts";
 import { samplePoint } from "../../dewarp/src/fisheye.ts";

@@ -36,12 +36,13 @@ type Props = {
   stab: StabStatus;
   info: ClipInfo | null;
   colourProfiled: boolean;
+  photo?: boolean;
   disabled: boolean;
   onAdvanced: () => void;
 };
 
 /** The active tool's controls: header with on/off, preset chips, one Strength, Advanced. */
-export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, disabled, onAdvanced }: Props) {
+export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, photo, disabled, onAdvanced }: Props) {
   const enabled = tools[tool].enabled;
   const Icon = TOOL_ICON[tool];
   const setEnabled = (v: boolean) => setTools((t) => ({ ...t, [tool]: { ...t[tool], enabled: v } }));
@@ -52,16 +53,16 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, d
     else if (stab.state === "ready" && stab.summary) status = <span className="status-good">{stab.summary}</span>;
     else if (stab.state === "error") status = <span className="status-bad">Analysis failed: {stab.message}</span>;
   }
-  if (tool === "colour" && enabled) status = colourProfiled ? <span className="status-good">Scene-locked to this clip</span> : <span className="status-live">Reading the water…</span>;
+  if (tool === "colour" && enabled) status = colourProfiled ? <span className="status-good">{photo ? "Balanced for this photo" : "Scene-locked to this clip"}</span> : <span className="status-live">Reading the water…</span>;
   if (tool === "dewarp" && enabled && info && profileAspectMismatch(tools.dewarp.profile, info.codedW, info.codedH)) status = <span className="status-warn">Calibrated for a different aspect ratio</span>;
 
   return (
     <div className={`panel${enabled ? "" : " is-off"}`}>
       <div className="panel__head">
-        <span className="panel__icon"><Icon size={18} /></span>
+        <span className="panel__icon" aria-hidden="true"><Icon size={18} /></span>
         <div className="panel__title">
           <h3>{TOOL_LABEL[tool]}</h3>
-          <p>{status}</p>
+          <p aria-live="polite">{status}</p>
         </div>
         <Switch checked={enabled} onChange={setEnabled} label={`${TOOL_LABEL[tool]} on`} disabled={disabled} />
       </div>

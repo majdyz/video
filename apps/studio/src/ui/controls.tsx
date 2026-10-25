@@ -109,9 +109,9 @@ export function Segmented<T extends string>({ items, value, onChange, label }: {
   );
 }
 
-export function IconButton({ label, onClick, children, disabled, className = "" }: { label: string; onClick: () => void; children: ReactNode; disabled?: boolean; className?: string }) {
+export function IconButton({ label, onClick, children, disabled, className = "", pressed }: { label: string; onClick: () => void; children: ReactNode; disabled?: boolean; className?: string; pressed?: boolean }) {
   return (
-    <button type="button" className={`icon-btn ${className}`} aria-label={label} title={label} onClick={onClick} disabled={disabled}>
+    <button type="button" className={`icon-btn ${className}`} aria-label={label} title={label} aria-pressed={pressed} onClick={onClick} disabled={disabled}>
       {children}
     </button>
   );
