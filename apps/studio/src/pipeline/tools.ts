@@ -3,9 +3,11 @@
 // state to what each engine reads. No React, no GPU: unit-tested.
 
 import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, type ScenePreset, type UserSettings } from "../../../aqua-fix/src/engine/params.ts";
-import { DEFAULT_PARAMS as STAB_DEFAULTS, type StabilizeParams } from "../../../motion-fix/src/lib/stabilize.ts";
-import { fitZoom, lensDiagonalFov, warpUniforms, type Projection, type WarpParams, type WarpUniforms } from "../../../dewarp/src/fisheye.ts";
-import { DEFAULT_PROFILE, PROFILES } from "../../../dewarp/src/profiles.ts";
+import type { StabilizeParams } from "../../../motion-fix/src/lib/stabilize.ts";
+import type { SolveParams } from "../../../motion-fix/src/lib/plan.ts";
+import type { Projection } from "../../../dewarp/src/fisheye.ts";
+import { DEFAULT_PROFILE, FROM_FILE, PROFILES } from "../../../dewarp/src/profiles.ts";
+import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 
 export type ToolId = "colour" | "stabilise" | "dewarp";
 export const TOOL_ORDER: ToolId[] = ["colour", "stabilise", "dewarp"];
@@ -52,6 +54,12 @@ export function colourSettings(c: ColourState): UserSettings {
 
 // ---------------------------------------------------------------- stabilise
 
+/**
+ * Motion Fix's DEFAULT_PARAMS, copied so the tool UI doesn't pull the motion
+ * solver into the first-load bundle (test/tools.test.ts keeps them equal).
+ */
+const STAB_DEFAULTS: StabilizeParams = { smoothing: 0.8, maxCrop: 0.15 };
+
 export type StabPreset = "gentle" | "steady" | "locked";
 export type StabiliseState = {
   enabled: boolean;
@@ -60,6 +68,12 @@ export type StabiliseState = {
   strength: number;
   /** Advanced: largest crop the path may use, 0.05..0.3. */
   maxCrop: number;
+  /** Advanced (gyro path): roll the virtual camera so the horizon stays level. */
+  keepLevel: boolean;
+  /** Advanced (gyro path): medium in front of the lens port; auto = the clip's picture check. */
+  lens: "auto" | "air" | "water";
+  /** Advanced: use visual tracking even when the file carries gyro data. */
+  visual: boolean;
 };
 
 export const STAB_PRESETS: (Chip<StabPreset> & { strength: number; maxCrop: number })[] = [
@@ -68,10 +82,36 @@ export const STAB_PRESETS: (Chip<StabPreset> & { strength: number; maxCrop: numb
   { id: "locked", label: "Locked", hint: "Tripod-like, crops more", strength: 100, maxCrop: 0.25 },
 ];
 
-export const DEFAULT_STABILISE: StabiliseState = { enabled: false, preset: "steady", strength: Math.round(STAB_DEFAULTS.smoothing * 100), maxCrop: STAB_DEFAULTS.maxCrop };
+export const DEFAULT_STABILISE: StabiliseState = { enabled: false, preset: "steady", strength: Math.round(STAB_DEFAULTS.smoothing * 100), maxCrop: STAB_DEFAULTS.maxCrop, keepLevel: false, lens: "auto", visual: false };
 
-export function stabiliseParams(s: StabiliseState): StabilizeParams {
+/** Motion Fix v3's gyro default smoothing (DEFAULT_GYRO_PARAMS.smoothing; test/tools.test.ts keeps it equal). */
+export const GYRO_DEFAULT_SMOOTHING = 0.6;
+
+/**
+ * Visual-path parameters (Motion Fix v2): Strength 0..100 → smoothing 0..1.
+ */
+export function stabiliseParams(s: Pick<StabiliseState, "strength" | "maxCrop">): StabilizeParams {
   return { smoothing: Math.min(1, Math.max(0, s.strength / 100)), maxCrop: Math.min(0.3, Math.max(0.02, s.maxCrop)) };
+}
+
+/**
+ * Solve parameters for either path. One Strength slider serves both: the
+ * gyro path's own default (0.6) sits where the visual default (0.8) does,
+ * so "Steady" means each path's tuned default and 100 is full smoothing on
+ * both. `output` is rectilinear when Dewarp is on (the gyro warp then
+ * undoes the lens itself), else the camera's lens look.
+ */
+export function solveParams(s: StabiliseState, mode: "gyro" | "visual", output: "lens" | "rectilinear"): SolveParams {
+  const v = stabiliseParams(s);
+  const k = STAB_DEFAULTS.smoothing;
+  const gyroSmoothing = v.smoothing <= k ? (v.smoothing / k) * GYRO_DEFAULT_SMOOTHING : GYRO_DEFAULT_SMOOTHING + ((v.smoothing - k) / (1 - k)) * (1 - GYRO_DEFAULT_SMOOTHING);
+  return {
+    smoothing: mode === "gyro" ? gyroSmoothing : v.smoothing,
+    maxCrop: v.maxCrop,
+    horizonLock: s.keepLevel ? 1 : 0,
+    output,
+    medium: s.lens,
+  };
 }
 
 export function applyStabPreset(s: StabiliseState, id: StabPreset): StabiliseState {
@@ -104,7 +144,32 @@ export const DEWARP_PROFILES: Chip<string>[] = [
   { id: "generic-fisheye", label: "Other", hint: PROFILES["generic-fisheye"]?.label ?? "" },
 ];
 
+/** Chip for the lens calibration the camera wrote into this clip (DJI, GoPro HERO11+). */
+export const FROM_FILE_CHIP: Chip<string> = { id: FROM_FILE, label: "From clip", hint: "The lens data your camera wrote into this clip" };
+export { FROM_FILE };
+
+/** Camera chips for a clip: the clip's own lens first when it carries one. */
+export function dewarpChips(camera: CameraInfo | null | undefined): Chip<string>[] {
+  return camera?.lens ? [FROM_FILE_CHIP, ...DEWARP_PROFILES] : DEWARP_PROFILES;
+}
+
+/** The profile the detector suggests for this clip (null: nothing detected, keep the user's pick). */
+export function detectedProfile(camera: CameraInfo | null | undefined): string | null {
+  const id = camera?.profileId;
+  if (!id) return null;
+  if (id === FROM_FILE) return camera?.lens ? FROM_FILE : null;
+  return id in PROFILES && DEWARP_PROFILES.some((c) => c.id === id) ? id : null;
+}
+
+/** "GoPro HERO12 Black · Wide" style label, or null when nothing was detected. */
+export function cameraLabel(c: CameraInfo | null | undefined): string | null {
+  if (!c?.brand) return null;
+  const who = [c.brand, c.model].filter(Boolean).join(" ");
+  return c.lensMode ? `${who} · ${c.lensMode}` : who;
+}
+
 export function profileDefaults(id: string): Pick<DewarpState, "profile" | "strength" | "fovDeg"> {
+  if (id === FROM_FILE) return { profile: FROM_FILE, strength: 100, fovDeg: 150 };
   const p = PROFILES[id] ?? PROFILES[DEFAULT_PROFILE];
   return { profile: id in PROFILES ? id : DEFAULT_PROFILE, strength: Math.round((p.strength ?? 1) * 100), fovDeg: p.fovDeg };
 }
@@ -117,21 +182,9 @@ export const DEFAULT_DEWARP: DewarpState = {
   zoom: 1,
 };
 
-/** Dewarp parameters for a clip whose CODED size is w×h (the lens model's frame). */
-export function dewarpParams(d: DewarpState, codedW: number, codedH: number): WarpParams {
-  const p = PROFILES[d.profile] ?? PROFILES[DEFAULT_PROFILE];
-  const fovDeg = p.lens ? lensDiagonalFov(p.lens, codedW, codedH) : d.fovDeg;
-  const base = { srcWidth: codedW, srcHeight: codedH, fovDeg, k1: p.k1, strength: Math.min(1, Math.max(0, d.strength / 100)), projection: d.projection, lens: p.lens };
-  const zoom = d.autoZoom ? fitZoom(base, 0.5, 32, 2) : d.zoom;
-  return { ...base, zoom };
-}
-
-export function dewarpUniforms(d: DewarpState, codedW: number, codedH: number): WarpUniforms {
-  return warpUniforms(dewarpParams(d, codedW, codedH));
-}
-
 /** True when the lens profile's aspect differs from the clip's (the calibration may not fit). */
 export function profileAspectMismatch(id: string, codedW: number, codedH: number): boolean {
+  if (id === FROM_FILE) return false;
   const lens = PROFILES[id]?.lens;
   if (!lens || !codedW || !codedH) return false;
   return Math.abs(codedW / codedH - lens.width / lens.height) > 0.02;

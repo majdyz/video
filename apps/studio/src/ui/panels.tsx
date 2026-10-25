@@ -3,7 +3,8 @@ import {
   COLOUR_PRESETS,
   DEFAULT_COLOUR,
   DEFAULT_STABILISE,
-  DEWARP_PROFILES,
+  cameraLabel,
+  dewarpChips,
   STAB_PRESETS,
   TOOL_LABEL,
   applyStabPreset,
@@ -14,6 +15,7 @@ import {
 } from "../pipeline/tools.ts";
 import type { StabStatus } from "../pipeline/studio.ts";
 import type { ClipInfo } from "../pipeline/probe.ts";
+import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { Chips, Segmented, Slider, Switch } from "./controls";
 import { IconColour, IconDewarp, IconSliders, IconStabilise } from "./icons";
 
@@ -36,12 +38,14 @@ type Props = {
   stab: StabStatus;
   info: ClipInfo | null;
   colourProfiled: boolean;
+  photo?: boolean;
+  camera?: CameraInfo | null;
   disabled: boolean;
   onAdvanced: () => void;
 };
 
 /** The active tool's controls: header with on/off, preset chips, one Strength, Advanced. */
-export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, disabled, onAdvanced }: Props) {
+export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, photo, camera, disabled, onAdvanced }: Props) {
   const enabled = tools[tool].enabled;
   const Icon = TOOL_ICON[tool];
   const setEnabled = (v: boolean) => setTools((t) => ({ ...t, [tool]: { ...t[tool], enabled: v } }));
@@ -49,22 +53,30 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, d
   if (tool === "stabilise" && enabled) {
     if (stab.state === "analysing") status = <span className="status-live">Analysing motion · {Math.round(stab.progress * 100)}%</span>;
     else if (stab.state === "solving") status = <span className="status-live">Planning a smooth path…</span>;
+    else if (stab.state === "ready" && stab.info) status = <span className="status-good">{stab.info.badge}</span>;
     else if (stab.state === "ready" && stab.summary) status = <span className="status-good">{stab.summary}</span>;
     else if (stab.state === "error") status = <span className="status-bad">Analysis failed: {stab.message}</span>;
   }
-  if (tool === "colour" && enabled) status = colourProfiled ? <span className="status-good">Scene-locked to this clip</span> : <span className="status-live">Reading the water…</span>;
+  if (tool === "colour" && enabled) status = colourProfiled ? <span className="status-good">{photo ? "Balanced for this photo" : "Scene-locked to this clip"}</span> : <span className="status-live">Reading the water…</span>;
+  const detected = cameraLabel(camera);
+  if (tool === "dewarp" && detected) status = <span className="status-good">Detected: {detected}</span>;
   if (tool === "dewarp" && enabled && info && profileAspectMismatch(tools.dewarp.profile, info.codedW, info.codedH)) status = <span className="status-warn">Calibrated for a different aspect ratio</span>;
+  // Gyro stabilisation + Dewarp: the gyro warp straightens through the clip's own lens model.
+  const gyroLens = tool === "dewarp" && enabled && tools.stabilise.enabled && stab.state === "ready" && stab.info?.mode === "gyro";
+  if (gyroLens) status = <span className="status-good">{detected ? `Detected: ${detected}` : stab.info?.camera} · gyro lens model</span>;
+  const note = tool === "stabilise" && enabled && stab.info?.warning ? stab.info.warning : null;
 
   return (
     <div className={`panel${enabled ? "" : " is-off"}`}>
       <div className="panel__head">
-        <span className="panel__icon"><Icon size={18} /></span>
+        <span className="panel__icon" aria-hidden="true"><Icon size={18} /></span>
         <div className="panel__title">
           <h3>{TOOL_LABEL[tool]}</h3>
-          <p>{status}</p>
+          <p aria-live="polite">{status}</p>
         </div>
         <Switch checked={enabled} onChange={setEnabled} label={`${TOOL_LABEL[tool]} on`} disabled={disabled} />
       </div>
+      {note && <p className="panel__note" role="note">{note}</p>}
       {tool === "stabilise" && stab.state === "analysing" && enabled && (
         <div className="progress-line"><div style={{ width: `${Math.round(stab.progress * 100)}%` }} /></div>
       )}
@@ -87,7 +99,7 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, d
         )}
         {tool === "dewarp" && (
           <>
-            <Chips label="Camera" items={DEWARP_PROFILES} value={tools.dewarp.profile} disabled={disabled}
+            <Chips label="Camera" items={dewarpChips(camera)} value={tools.dewarp.profile} disabled={disabled}
               onChange={(id) => setTools((t) => ({ ...t, dewarp: { ...t.dewarp, ...profileDefaults(id), enabled: true } }))} />
             <Slider emphasis label="Strength" value={tools.dewarp.strength} min={0} max={100} defaultValue={profileDefaults(tools.dewarp.profile).strength} disabled={disabled}
               onChange={(v) => setTools((t) => ({ ...t, dewarp: { ...t.dewarp, strength: v, enabled: true } }))} />
@@ -103,7 +115,7 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, d
 }
 
 /** Everything that isn't the main Strength. */
-export function AdvancedControls({ tool, tools, setTools }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void }) {
+export function AdvancedControls({ tool, tools, setTools, stab }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus }) {
   if (tool === "colour") {
     const c = tools.colour;
     const up = (patch: Partial<typeof c>) => setTools((t) => ({ ...t, colour: { ...t.colour, ...patch } }));
@@ -126,7 +138,32 @@ export function AdvancedControls({ tool, tools, setTools }: { tool: ToolId; tool
         <Slider label="Maximum crop" value={s.maxCrop * 100} min={4} max={30} defaultValue={DEFAULT_STABILISE.maxCrop * 100} format={(v) => `${Math.round(v)}%`}
           onChange={(v) => setTools((t) => ({ ...t, stabilise: { ...t.stabilise, maxCrop: v / 100, preset: "custom" } }))} />
         <p className="adv__hint">The camera path may zoom in this far to hide the moving edges. More crop allows a calmer path.</p>
-        <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, stabilise: { ...DEFAULT_STABILISE, enabled: t.stabilise.enabled } }))}>Reset stabilise</button>
+        {stab?.info?.canSwitch && (
+          <div className="adv__field">
+            <span className="adv__label">Motion source <small>{stab.info.mode === "gyro" ? `gyro data from ${stab.info.camera}` : "tracking the picture"}</small></span>
+            <Segmented label="Motion source" value={s.visual ? "visual" : "gyro"} onChange={(v) => setTools((t) => ({ ...t, stabilise: { ...t.stabilise, visual: v === "visual" } }))}
+              items={[{ id: "gyro", label: "Gyro data" }, { id: "visual", label: "Visual tracking" }]} />
+          </div>
+        )}
+        {stab?.info?.mode === "gyro" && (
+          <div className="adv__field">
+            <span className="adv__label">Lens port <small>refraction of a flat port underwater changes the lens</small></span>
+            <Segmented label="Lens port" value={s.lens} onChange={(v) => setTools((t) => ({ ...t, stabilise: { ...t.stabilise, lens: v } }))}
+              items={[
+                { id: "auto", label: `Auto${stab.info.mediumDetected ? ` (${stab.info.mediumDetected === "water" ? "underwater" : "air"})` : ""}` },
+                { id: "air", label: "Air" },
+                { id: "water", label: "Underwater" },
+              ]} />
+          </div>
+        )}
+        {stab?.info?.mode === "gyro" && stab.info.canLevel && (
+          <div className="adv__field adv__field--row">
+            <span className="adv__label">Keep level <small>rolls the view so the horizon stays straight</small></span>
+            <Switch checked={s.keepLevel} onChange={(v) => setTools((t) => ({ ...t, stabilise: { ...t.stabilise, keepLevel: v } }))} label="Keep level" />
+          </div>
+        )}
+        {stab?.summary && <p className="adv__hint">{stab.summary}</p>}
+        <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, stabilise: { ...DEFAULT_STABILISE, enabled: t.stabilise.enabled, visual: t.stabilise.visual } }))}>Reset stabilise</button>
       </div>
     );
   }

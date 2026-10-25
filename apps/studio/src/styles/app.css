@@ -31,6 +31,7 @@ body {
   -moz-osx-font-smoothing: grayscale;
   overscroll-behavior: none;
   -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 
 button {
@@ -81,6 +82,7 @@ a {
 }
 
 .wordmark {
+  margin: 0;
   font-family: var(--wordmark-font);
   font-size: var(--wordmark-size);
   font-weight: var(--wordmark-weight);
@@ -221,7 +223,7 @@ a {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: var(--split);
+  left: var(--split-x);
   width: 2px;
   margin-left: -1px;
   background: var(--split-line);
@@ -230,7 +232,7 @@ a {
 .split__knob {
   position: absolute;
   top: 50%;
-  left: var(--split);
+  left: var(--split-x);
   width: 36px;
   height: 36px;
   margin: -18px 0 0 -18px;
@@ -287,11 +289,16 @@ a {
 }
 
 .viewer__bar {
+  grid-area: bar;
   flex: none;
   display: flex;
   align-items: center;
   gap: var(--s-3);
+  min-width: 0;
   padding: var(--s-3) 0 var(--s-1);
+}
+.is-narrow .viewer__bar {
+  padding: 0;
 }
 
 /* ------------------------------------------------------------ timeline */
@@ -368,7 +375,7 @@ a {
   letter-spacing: 0.01em;
 }
 .timeline__dur {
-  color: var(--text-4);
+  color: var(--text-3);
 }
 .timeline__dur::before {
   content: " / ";
@@ -381,10 +388,12 @@ a {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
+    "grab grab"
+    "bar bar"
     "panel panel"
     "tabs export";
-  gap: var(--s-3) 10px;
-  padding: var(--s-2) var(--gutter) calc(var(--s-3) + env(safe-area-inset-bottom));
+  gap: var(--s-2) 10px;
+  padding: 0 var(--gutter) calc(var(--s-2) + env(safe-area-inset-bottom));
   animation: rise-in var(--dur-4) var(--ease-out);
 }
 .controls__panel {
@@ -516,7 +525,7 @@ a {
 .chain__note {
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
-  color: var(--text-4);
+  color: var(--text-3);
 }
 .chain li.is-on .chain__note {
   color: var(--text-2);
@@ -525,7 +534,7 @@ a {
 /* ------------------------------------------------------------ tool panel */
 
 .panel {
-  min-height: 172px;
+  min-height: 0;
 }
 .panel__head {
   display: flex;
@@ -564,6 +573,12 @@ a {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.panel__note {
+  margin: var(--s-2) 0 0;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--warning);
 }
 .status-live {
   color: var(--text-2);
@@ -1224,7 +1239,204 @@ a {
   display: none;
 }
 
+/* ------------------------------------------------------------ zoomable stage */
+
+.stage__content {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.stage__content.is-animating {
+  transition: transform var(--dur-3) var(--ease-out);
+}
+.stage__frame:focus-visible {
+  outline-offset: -2px;
+}
+.stage__frame.is-zoomed {
+  cursor: grab;
+}
+.stage__live {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  visibility: hidden;
+  background: var(--stage-bg);
+}
+.stage__live.is-on {
+  visibility: visible;
+}
+.stage__zoom {
+  position: absolute;
+  left: var(--s-3);
+  bottom: var(--s-3);
+  min-width: 44px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  background: var(--overlay);
+  box-shadow: 0 0 0 1px var(--line-1);
+  color: var(--text-1);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.stage__zoom::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+}
+
+/* ------------------------------------------------------------ phone dock */
+
+.dock__grab {
+  grid-area: grab;
+  position: relative;
+  height: 20px;
+  margin: 0 calc(-1 * var(--gutter));
+  display: grid;
+  place-items: center;
+  touch-action: none;
+  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
+}
+/* 44 px of touch target without making the strip taller. */
+.dock__grab::after {
+  content: "";
+  position: absolute;
+  inset: -12px 0 -12px;
+}
+.dock__grab:focus-visible {
+  outline-offset: -2px;
+}
+.dock__handle {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-3);
+  transition: background var(--dur-2) var(--ease-out);
+}
+.dock__grab:hover .dock__handle {
+  background: var(--text-3);
+}
+
+.photo-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-3);
+  min-height: 40px;
+  padding-left: var(--s-1);
+  font-size: var(--fs-sm);
+}
+.photo-meta__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+  font-weight: 500;
+}
+.photo-meta__size {
+  flex: none;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.photo-meta {
+  align-items: center;
+}
+
+.is-narrow .topbar {
+  --topbar-h: 44px;
+}
+.is-narrow .viewer {
+  padding: 0;
+}
+.is-narrow .stage__frame {
+  border-radius: 0;
+  box-shadow: none;
+}
+.is-narrow.phase-empty .viewer {
+  padding: 0 var(--gutter);
+}
+.is-narrow .controls {
+  background: var(--surface-1);
+  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
+  box-shadow: 0 0 0 1px var(--line-1);
+  position: relative;
+  z-index: 1;
+}
+.is-narrow .controls__panel:not([hidden]) {
+  animation: panel-in var(--dur-3) var(--ease-out);
+  padding-top: var(--s-1);
+}
+.is-narrow .panel__body {
+  margin-top: var(--s-3);
+  gap: var(--s-2);
+}
+.is-narrow .tab {
+  height: 40px;
+}
+.is-narrow .tabs {
+  padding: 3px;
+}
+.is-narrow .export-btn {
+  height: 46px;
+}
+.is-narrow .timeline__track {
+  height: 40px;
+}
+
+/* ------------------------------------------------------------ about */
+
+.about__credit h3 {
+  margin: 0 0 var(--s-1);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.about__credit p {
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+/* ------------------------------------------------------------ a11y helpers */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ------------------------------------------------------------ motion */
+
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(6px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* The busy spinner keeps turning slowly: it is the only sign of progress. */
+  .pill__dot {
+    animation-duration: 1.6s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
 
 @keyframes fade-in {
   from { opacity: 0; }
@@ -1329,6 +1541,22 @@ a {
   }
   .panel {
     min-height: 0;
+  }
+  /* 390 px of height: the processing order would squeeze the tool panel to nothing. */
+  .chain {
+    display: none !important;
+  }
+  .controls {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas: "tabs" "panel" "export";
+    gap: var(--s-3);
+    padding: var(--s-3);
+  }
+  .tab {
+    height: 40px;
+  }
+  .export-btn {
+    height: 44px;
   }
 }
 

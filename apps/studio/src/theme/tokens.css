@@ -63,7 +63,7 @@
   /* Text */
   --text-1: #ededf0;
   --text-2: #a9a9b1;
-  --text-3: #76767e;
+  --text-3: #8b8b94;
   --text-4: #4c4c53;
 
   /* Accent: Export, active slider fill, focus. Nothing else. */
@@ -190,10 +190,12 @@
 
   --text-1: #1d1b19;
   --text-2: #504943;
-  --text-3: #857b72;
+  --text-3: #6f655d;
   --text-4: #b3a9a0;
 
   --accent: #f0623f;
+  --warning: #8a5a00;
+  --danger: #c22a3a;
   --accent-ink: #ffffff;
   --primary-bg-hover: #f4764f;
   --strong-bg: #1d1b19;
@@ -242,7 +244,7 @@
 
   --text-1: #e7edf3;
   --text-2: #a7b6c4;
-  --text-3: #7b8fa2;
+  --text-3: #8799ab;
   --text-4: #4c6074;
 
   --accent: #d9b56e;
