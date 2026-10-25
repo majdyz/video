@@ -55,16 +55,35 @@ function child(buf: Uint8Array, parent: Box, type: string): Box | undefined {
   return children(buf, parent.body, parent.start + parent.size).find((b) => b.type === type);
 }
 
+/** The trak's handler name (mdia/hdlr), "" when absent: "DJI meta", "GoPro MET", … */
+export function handlerName(moov: Uint8Array, trak: Box): string {
+  const mdia = child(moov, trak, "mdia");
+  const hdlr = mdia && child(moov, mdia, "hdlr");
+  if (!hdlr) return "";
+  // version/flags, pre_defined, handler_type, 3 reserved words, then the name (C or Pascal string).
+  const from = hdlr.body + 24;
+  const to = hdlr.start + hdlr.size;
+  if (from >= to) return "";
+  return String.fromCharCode(...moov.subarray(from, to)).replace(/[^ -~]/g, "").trim();
+}
+
 /** Format, offset and size of the first sample of a trak (for timed-metadata tracks). */
 function firstSample(moov: Uint8Array, trak: Box): { format: string; offset: number; size: number } | null {
   const stbl = [ "mdia", "minf", "stbl" ].reduce<Box | undefined>((b, t) => (b ? child(moov, b, t) : undefined), trak);
   if (!stbl) return null;
   const v = new DataView(moov.buffer, moov.byteOffset, moov.byteLength);
   const stsd = child(moov, stbl, "stsd");
-  if (!stsd || stsd.body + 16 > stsd.start + stsd.size) return null;
+  if (!stsd) return null;
   const e = stsd.body + 8; // version/flags, entry_count, then the first entry
-  const format = String.fromCharCode(moov[e + 4], moov[e + 5], moov[e + 6], moov[e + 7]);
-  if (format !== "djmd" && format !== "gpmd") return { format, offset: 0, size: 0 };
+  // (A re-mux can leave the entry list empty.)
+  let format = e + 8 <= stsd.start + stsd.size ? String.fromCharCode(moov[e + 4], moov[e + 5], moov[e + 6], moov[e + 7]) : "";
+  // Re-muxers (ffmpeg -map 0 -c copy) keep the track but may rewrite its sample entry; the handler name survives.
+  if (format !== "djmd" && format !== "gpmd") {
+    const handler = handlerName(moov, trak);
+    if (/DJI meta/i.test(handler)) format = "djmd";
+    else if (/GoPro MET/i.test(handler)) format = "gpmd";
+    else return { format, offset: 0, size: 0 };
+  }
   const stsz = child(moov, stbl, "stsz");
   const co = child(moov, stbl, "stco") ?? child(moov, stbl, "co64");
   if (!stsz || !co) return null;

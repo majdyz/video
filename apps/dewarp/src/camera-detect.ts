@@ -390,8 +390,14 @@ export function parseDjiMeta(sample: Uint8Array): DjiClipMeta | undefined {
 const DJI_EIS: Record<number, string> = { 0: "off", 1: "RockSteady", 2: "HorizonSteady", 3: "HyperSmooth", 4: "Tradeoff", 5: "Horizon Balancing", 7: "off (cropped)", 8: "Horizon correction", 9: "RockSteady (auto)" };
 
 /** "DJI OsmoAction5 Pro" → "Osmo Action 5 Pro". */
+/** DJI camera-module codes seen in djmd product names (gyroflow test files, 25 Oct 2026). */
+const DJI_CAMERA_CODES: Record<string, string> = { FC8183: "Avata" };
+
 export function djiModelName(raw: string): string {
   let s = raw.replace(/^DJI\s*/i, "").trim();
+  // Drone / air-unit files name the camera module by its code.
+  const code = DJI_CAMERA_CODES[s.toUpperCase()];
+  if (code) return `${code} (${s})`;
   s = s.replace(/^Osmo\s*Action\s*/i, "Osmo Action ").replace(/^Osmo\s*360/i, "Osmo 360").replace(/^Osmo\s*Nano/i, "Osmo Nano");
   return s.replace(/\s+/g, " ").trim();
 }

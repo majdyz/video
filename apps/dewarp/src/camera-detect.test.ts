@@ -134,6 +134,7 @@ describe("DJI metadata", () => {
     expect(djiModelName("DJI OsmoAction5 Pro")).toBe("Osmo Action 5 Pro");
     expect(djiModelName("DJI Osmo Action 4")).toBe("Osmo Action 4");
     expect(djiModelName("DJI Osmo360")).toBe("Osmo 360");
+    expect(djiModelName("DJI FC8183")).toBe("Avata (FC8183)");
   });
 });
 
