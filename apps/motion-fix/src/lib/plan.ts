@@ -4,6 +4,7 @@
 //   visual — feature tracking (v2) for phones, re-encoded clips, EIS-on DJI.
 
 import { gyroWarpFnAtTime, type GyroParams, type GyroPlan } from "./gyro/gyro-stabilize.ts";
+import type { ResidualMotion } from "./gyro/hybrid.ts";
 import type { CameraMotion, TelemetryProbe } from "./gyro/telemetry.ts";
 import type { WarpFn } from "./mesh-renderer.ts";
 import { warpFnAtTime, type MotionAnalysis, type StabilizedPath } from "./stabilize.ts";
@@ -15,7 +16,8 @@ export type TelemetryNote =
   | { status: "declined"; camera: string };
 
 export type AnalysisResult =
-  | { mode: "gyro"; motion: CameraMotion; probeMs: number }
+  /** residual: the hybrid pass's picture measurements (translation the gyro cannot see), when it ran. */
+  | { mode: "gyro"; motion: CameraMotion; probeMs: number; residual?: ResidualMotion }
   | { mode: "visual"; analysis: MotionAnalysis; telemetry: TelemetryNote };
 
 export type SolveParams = GyroParams;
