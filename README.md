@@ -88,6 +88,32 @@ are cross-checked against [telemetry-parser](https://github.com/AdrianEddy/telem
 output (MIT/Apache) in `apps/motion-fix/test/gyro-parsers.test.ts`.
 Phone and re-encoded clips use the visual path below.
 
+Phone motion data (checked on real files, Oct 2026): stock phone camera
+apps store no gyro in the video. Pixel clips carry a per-frame `mett`
+track (`application/meta`, ~140 bytes of exposure / white-balance / focus
+protobuf, no IMU); iPhone clips (7 Plus to 16 Pro Max, iOS 15–26) carry
+`mebx` tracks for orientation, faces, `live-photo-info` (an undocumented
+144-byte blob per frame), scene illuminance, cinematic audio, no motion or
+attitude keys; other Android `VID_` clips have no metadata track. What
+does exist: CAMM tracks (Street View camera motion metadata, written by
+360 cameras and mapping apps; parsed in `gyro/camm.ts`) and motion logs
+recorded next to the clip by a logging app: Gyroflow `.gcsv` and Sensor
+Logger's `Gyroscope.csv` (`gyro/imu-log.ts`, added in Studio under
+Stabilise › Advanced › Add motion log). A log runs on its own clock: the
+picture check tracks 8+ short windows and correlates picture motion with
+the gyro's turn rate over the whole log (4 ms steps), then refines offset,
+focal (phones: pinhole, 26 mm-equivalent guess or the file's 35 mm focal)
+and rolling-shutter readout by reprojection error. Gyroflow's IMU frame
+relates to the camera frame as camera = (−Y, −X, −Z), measured against
+telemetry-parser's normalized IMU on four GoPro bodies (correlation 1.000
+per axis). A real HERO6 clip with its telemetry stripped and the gyro
+re-written as a `.gcsv` on a clock 7.3 s off syncs to 7.25 s (the known
+~−40 ms GoPro timing bias) and tracks at 1.1 px (16.3 px unsynced).
+Phone stabilisation (EIS) warps the recorded frames; logs only match
+clips recorded with it off, and the picture check flags the mismatch.
+`MOTION_LOG=<log> node --experimental-strip-types apps/motion-fix/scripts/gyro-cpu.ts <clip> <out>`
+runs the sidecar path on the CPU.
+
 Hybrid gyro + visual ("Bobbing: Remove", on by default): the gyro removes
 rotation only, but a diver's camera also heaves and sways with every fin
 kick. After the gyro result is on screen the clip is decoded and tracked in

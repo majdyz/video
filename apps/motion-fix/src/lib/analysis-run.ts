@@ -17,15 +17,17 @@ export type AnalyzeOptions = {
   /**
    * Trim: only this stretch of the clip (clip seconds) is decoded and
    * tracked (visual analysis, the gyro picture check, the hybrid pass). The
-   * gyro telemetry is read whole (cheap); its solve takes the span from
-   * SolveParams.span.
+   * gyro telemetry (or motion log) is read whole (cheap, and a log's clock
+   * sync searches all of it); the solve takes the span from SolveParams.span.
    */
   span?: TimeSpan | null;
+  /** A motion log recorded next to the clip (.gcsv, Sensor Logger CSV): used instead of the file's own telemetry. */
+  motionLog?: File | null;
 };
 
 export async function analyzeAny(file: File, forceVisual: boolean, onProgress: (fraction: number, frames: number) => void, signal: AbortSignal, options: AnalyzeOptions = {}): Promise<AnalysisResult> {
   const t0 = performance.now();
-  const probe = await probeFile(file, signal);
+  const probe = await probeFile(file, signal, options.motionLog);
   if (probe.status === "ok" && !forceVisual) {
     // Picture check: air vs underwater lens, and whether the gyro matches the picture at all.
     try {

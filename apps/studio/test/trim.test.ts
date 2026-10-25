@@ -30,6 +30,7 @@ import {
 } from "../src/pipeline/trim.ts";
 import { profileTimes } from "../../aqua-fix/src/engine/profile.ts";
 import { spanTimes } from "../../motion-fix/src/lib/gyro/gyro-stabilize.ts";
+import { checkWindowsFor } from "../../motion-fix/src/lib/gyro/medium.ts";
 
 const near = (a: number, b: number, eps = 1e-9, msg?: string) => assert.ok(Math.abs(a - b) <= eps, msg ?? `${a} ≉ ${b}`);
 
@@ -159,6 +160,19 @@ near(st[0], 45 / fps, 1e-9);
 assert.ok(st[st.length - 1] <= 4.5 && st.length === 90, `${st.length} frames in 1.5–4.5 s`);
 assert.equal(spanTimes(gt, null), gt);
 assert.equal(spanTimes(gt, { start: 10, end: 11 }), gt, "a span outside the clip falls back to all frames");
+
+// ---- gyro picture check windows inside the analysis span (motion logs sync against these pairs)
+{
+  const cam = (source: string, duration: number) => ({ source, video: { duration } }) as unknown as Parameters<typeof checkWindowsFor>[0];
+  const span = { start: 18.5, end: 21.5 };
+  const w = checkWindowsFor(cam("gopro", 120), span);
+  assert.ok(w.length >= 4 && w.every(([a, b]) => a >= 18.5 && b <= 21.5 && b > a), `camera windows inside the span: ${JSON.stringify(w)}`);
+  const lw = checkWindowsFor(cam("imu-log", 120), span);
+  assert.deepEqual(lw, [[18.5, 21.5]], "a log's 8 × 0.7 s windows don't fit in 3 s: the whole span is read once");
+  const big = checkWindowsFor(cam("imu-log", 120), { start: 10, end: 40 });
+  assert.ok(big.length >= 8 && big.every(([a, b]) => a >= 10 && b <= 40), "a long span keeps the log's windows, inside it");
+  assert.deepEqual(checkWindowsFor(cam("gopro", 120), null), checkWindowsFor(cam("gopro", 120)), "untrimmed: unchanged");
+}
 
 // ---- labels
 assert.equal(formatClock(107), "1:47");

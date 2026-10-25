@@ -31,7 +31,7 @@ export type Mp4Track = {
   timescale: number;
   /** Media duration in seconds. */
   duration: number;
-  /** tkhd display size (video tracks) and rotation from the matrix (0/90/180/270, clockwise). */
+  /** tkhd size (video tracks; before the matrix, so coded orientation) and rotation from the matrix (0/90/180/270, clockwise). */
   width: number;
   height: number;
   rotation: 0 | 90 | 180 | 270;
@@ -45,6 +45,10 @@ export type Mp4Index = {
   tracks: Mp4Track[];
   /** Raw payload of moov/udta/GPMF (GoPro global metadata), if present. */
   udtaGpmf: Uint8Array | null;
+  /** mvhd creation time as Unix seconds (null when unset). */
+  creationTime: number | null;
+  /** QuickTime moov/meta string items by key ("com.apple.quicktime.model", ...). */
+  metaKeys: Record<string, string>;
 };
 
 type Box = { type: string; start: number; data: number; end: number };
@@ -231,7 +235,20 @@ export async function readMp4Index(read: RangeReader, fileSize: number): Promise
   const top = children(moov, dv, 8, moov.byteLength);
   const tracks: Mp4Track[] = [];
   let udtaGpmf: Uint8Array | null = null;
+  let creationTime: number | null = null;
+  let metaKeys: Record<string, string> = {};
   for (const b of top) {
+    if (b.type === "mvhd") {
+      const v = dv.getUint8(b.data);
+      const raw = v === 1 ? Number(dv.getBigUint64(b.data + 4)) : dv.getUint32(b.data + 4);
+      // Seconds since 1904-01-01; zero means unset.
+      if (raw > 0) creationTime = raw - 2082844800;
+      continue;
+    }
+    if (b.type === "meta") {
+      metaKeys = parseMetaKeys(moov, dv, b);
+      continue;
+    }
     if (b.type === "trak") {
       const t = parseTrak(moov, dv, b);
       if (t) tracks.push(t);
@@ -240,7 +257,53 @@ export async function readMp4Index(read: RangeReader, fileSize: number): Promise
       if (g) udtaGpmf = moov.slice(g.data, g.end);
     }
   }
-  return { fileSize, tracks, udtaGpmf };
+  return { fileSize, tracks, udtaGpmf, creationTime, metaKeys };
+}
+
+/**
+ * QuickTime metadata (moov/meta: hdlr 'mdta', keys, ilst): string and
+ * numeric items by key name. iPhones write make/model/software and, on
+ * some versions, the lens and 35 mm-equivalent focal length here.
+ */
+function parseMetaKeys(u8: Uint8Array, dv: DataView, meta: Box): Record<string, string> {
+  const out: Record<string, string> = {};
+  // QuickTime's meta is a plain box; ISO's is a full box (4 bytes of version/flags first).
+  let start = meta.data;
+  if (fourcc(u8, start + 4) !== "hdlr" && fourcc(u8, start + 4) !== "keys") start += 4;
+  const kids = children(u8, dv, start, meta.end);
+  const keysBox = kids.find((k) => k.type === "keys");
+  const ilst = kids.find((k) => k.type === "ilst");
+  if (!keysBox || !ilst) return out;
+  const names: string[] = [];
+  const n = dv.getUint32(keysBox.data + 4);
+  let p = keysBox.data + 8;
+  for (let i = 0; i < n && p + 8 <= keysBox.end; i++) {
+    const size = dv.getUint32(p);
+    if (size < 8) break;
+    names.push(new TextDecoder().decode(u8.subarray(p + 8, p + size)));
+    p += size;
+  }
+  for (const item of children(u8, dv, ilst.data, ilst.end)) {
+    const idx = dv.getUint32(item.start + 4);
+    const name = names[idx - 1];
+    if (!name) continue;
+    const data = children(u8, dv, item.data, item.end).find((x) => x.type === "data");
+    if (!data || data.end - data.data < 8) continue;
+    const type = dv.getUint32(data.data) & 0xffffff;
+    const body = u8.subarray(data.data + 8, data.end);
+    const bdv = new DataView(body.buffer, body.byteOffset, body.byteLength);
+    // Well-known types: 1 UTF-8, 23 float32 BE, 24 float64 BE, 21/22 signed/unsigned int BE.
+    if (type === 1) out[name] = new TextDecoder().decode(body);
+    else if (type === 23 && body.length === 4) out[name] = String(bdv.getFloat32(0));
+    else if (type === 24 && body.length === 8) out[name] = String(bdv.getFloat64(0));
+    else if ((type === 21 || type === 22) && body.length > 0 && body.length <= 4) {
+      let v = 0;
+      for (const b of body) v = v * 256 + b;
+      if (type === 21 && body[0] & 0x80) v -= 2 ** (8 * body.length);
+      out[name] = String(v);
+    }
+  }
+  return out;
 }
 
 /**

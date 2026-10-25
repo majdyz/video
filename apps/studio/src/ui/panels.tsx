@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import {
   COLOUR_PRESETS,
   DEFAULT_COLOUR,
@@ -125,8 +125,27 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
   );
 }
 
+/**
+ * Sidecar motion log for phone clips and loggers: a Gyroflow .gcsv or
+ * Sensor Logger's Gyroscope.csv recorded with the clip. Stock phone camera
+ * apps store no gyro in the video, so this is the only gyro route for them.
+ */
+function MotionLogField({ name, onChange }: { name: string | null; onChange: (file: File | null) => void }) {
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <div className="adv__field">
+      <span className="adv__label">Motion log <small>{name ?? "gyro recorded next to the clip by a logging app (.gcsv, Sensor Logger Gyroscope.csv)"}</small></span>
+      <input ref={input} type="file" accept=".gcsv,.csv,text/csv,text/plain" hidden
+        onChange={(e) => { const f = e.currentTarget.files?.[0]; e.currentTarget.value = ""; if (f) onChange(f); }} />
+      {name
+        ? <button type="button" className="btn btn--ghost" onClick={() => onChange(null)}>Remove motion log</button>
+        : <button type="button" className="btn btn--ghost" onClick={() => input.current?.click()}>Add motion log (.gcsv)</button>}
+    </div>
+  );
+}
+
 /** Everything that isn't the main Strength. */
-export function AdvancedControls({ tool, tools, setTools, stab }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus }) {
+export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus; onMotionLog?: (file: File | null) => void }) {
   if (tool === "colour") {
     const c = tools.colour;
     const up = (patch: Partial<typeof c>) => setTools((t) => ({ ...t, colour: { ...t.colour, ...patch } }));
@@ -173,6 +192,7 @@ export function AdvancedControls({ tool, tools, setTools, stab }: { tool: ToolId
             <Switch checked={s.keepLevel} onChange={(v) => setTools((t) => ({ ...t, stabilise: { ...t.stabilise, keepLevel: v } }))} label="Keep level" />
           </div>
         )}
+        {onMotionLog && <MotionLogField name={stab?.motionLog ?? null} onChange={onMotionLog} />}
         {stab?.summary && <p className="adv__hint">{stab.summary}</p>}
         <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, stabilise: { ...DEFAULT_STABILISE, enabled: t.stabilise.enabled, visual: t.stabilise.visual, bobbing: t.stabilise.bobbing } }))}>Reset stabilise</button>
       </div>

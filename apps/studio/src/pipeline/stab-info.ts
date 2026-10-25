@@ -26,7 +26,14 @@ export function stabInfo(r: AnalysisResult): StabInfo {
     const m = r.motion;
     const extra = m.eis.active ? ` · ${m.eis.label} compensated` : "";
     const water = m.medium?.detected === "water" ? " · underwater lens" : "";
-    const mismatch = m.medium && !m.medium.consistent ? "The motion data barely matches the picture (an edited or re-timed copy?). If the result shakes, switch to Visual tracking under Advanced." : null;
+    const phone = m.source === "camm" || m.source === "imu-log";
+    const mismatch = m.medium && !m.medium.consistent
+      ? phone
+        ? "The motion data barely matches the picture: a different log, or the phone's own stabilisation was on while recording. If the result shakes, switch to Visual tracking under Advanced."
+        : "The motion data barely matches the picture (an edited or re-timed copy?). If the result shakes, switch to Visual tracking under Advanced."
+      : m.source === "imu-log" && m.notes.some((n) => /could not sync/.test(n))
+        ? "The motion log could not be synced to the picture (too little camera motion?). If the result shakes, switch to Visual tracking under Advanced."
+        : null;
     return {
       mode: "gyro",
       badge: `Gyro stabilisation · ${m.camera}${extra}${water}`,
@@ -42,6 +49,7 @@ export function stabInfo(r: AnalysisResult): StabInfo {
   const base = { mode: "visual" as const, badge: "Visual stabilisation", camera: null, mediumDetected: null, canLevel: false, canBobbing: false };
   if (t.status === "declined") return { ...base, warning: null, canSwitch: true };
   if (t.status === "unusable") {
+    if (t.source === "imu-log") return { ...base, canSwitch: false, warning: `Motion log not used: ${t.reason}. Using visual tracking.` };
     if (t.eisActive && t.source === "dji") {
       return { ...base, canSwitch: false, warning: `EIS was on in camera (${t.camera}): its warp can't be undone with the gyro data, so the picture is tracked instead. Record with RockSteady / HorizonSteady off for gyro-grade results.` };
     }

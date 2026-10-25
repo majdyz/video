@@ -2,6 +2,7 @@
 // tracks into time series in the device's own frames. The conversion to
 // the camera frame, lens and readout happens in telemetry.ts.
 
+import { decodeCamm, type CammRaw } from "./camm.ts";
 import { decodeDjiSample, type DjiClipMeta } from "./dji-meta.ts";
 import { parseKlv, payloadStreams, readGoProGlobals, type GoProGlobals, type KlvNode } from "./gpmf.ts";
 import { readSamples, type Mp4Index, type Mp4Track, type RangeReader } from "./mp4-index.ts";
@@ -37,7 +38,7 @@ export function videoTrackOf(index: Mp4Index): Mp4Track | null {
   return index.tracks.find((t) => t.handler === "vide" && t.width > 64) ?? index.tracks.find((t) => t.handler === "vide") ?? null;
 }
 
-export type TelemetryKind = "gopro" | "dji";
+export type TelemetryKind = "gopro" | "dji" | "camm";
 
 /** The metadata track, by sample-entry four-cc or (for remuxed files with a blank stsd) by handler name. */
 export function telemetryTrackOf(index: Mp4Index): { kind: TelemetryKind; track: Mp4Track } | null {
@@ -46,6 +47,8 @@ export function telemetryTrackOf(index: Mp4Index): { kind: TelemetryKind; track:
   if (gp) return { kind: "gopro", track: gp };
   const dj = usable.find((t) => t.codec === "djmd") ?? usable.find((t) => /DJI meta/i.test(t.handlerName));
   if (dj) return { kind: "dji", track: dj };
+  const camm = usable.find((t) => t.codec === "camm");
+  if (camm) return { kind: "camm", track: camm };
   return null;
 }
 
@@ -163,4 +166,9 @@ export async function extractDji(track: Mp4Track, read: RangeReader, opts: ReadO
     keepV.push(q.map((x) => x / nrm));
   }
   return { kind: "dji", clip, attitude: series(keepT, keepV, 4), frameTimes: Float64Array.from(frameTimes), meanExposure: expN ? expSum / expN : 0 };
+}
+
+export async function extractCamm(track: Mp4Track, read: RangeReader, opts: ReadOpts = {}): Promise<CammRaw> {
+  const payloads = await readSamples(read, track.samples, opts);
+  return decodeCamm(payloads, track.samples.map((s) => s.time - track.editMediaTime));
 }

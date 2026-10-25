@@ -1,11 +1,14 @@
 // Browser glue for the telemetry probe: File -> ranged Blob reads, then the
 // video's first presentation timestamp (so telemetry frame i lines up with
 // the i-th presented frame whatever the container's start offset), and a
-// rate cap on very dense orientation streams (DJI writes 2 kHz).
+// rate cap on very dense orientation streams (DJI writes 2 kHz). A motion
+// log picked next to the video (.gcsv, Sensor Logger CSV) replaces the
+// file's own telemetry.
 
 import { ALL_FORMATS, BlobSource, Input } from "mediabunny";
+import { parseImuLog } from "./imu-log.ts";
 import { blobReader } from "./mp4-index.ts";
-import { probeTelemetry, type CameraMotion, type TelemetryProbe } from "./telemetry.ts";
+import { probeTelemetry, probeWithLog, type CameraMotion, type TelemetryProbe } from "./telemetry.ts";
 
 const MAX_RATE_HZ = 1000;
 
@@ -25,10 +28,18 @@ export function decimate(motion: CameraMotion, maxRate = MAX_RATE_HZ): CameraMot
   return { ...motion, times, quats };
 }
 
-export async function probeFile(file: File, signal?: AbortSignal): Promise<TelemetryProbe> {
+/** Largest motion log read (a 1 kHz .gcsv is ~40 KB a second). */
+const MAX_LOG_BYTES = 200 * 1024 * 1024;
+
+export async function probeFile(file: File, signal?: AbortSignal, motionLog?: File | null): Promise<TelemetryProbe> {
   let probe: TelemetryProbe;
   try {
-    probe = await probeTelemetry(blobReader(file), file.size, { signal });
+    if (motionLog) {
+      if (motionLog.size > MAX_LOG_BYTES) return { status: "unusable", source: "imu-log", camera: `Motion log (${motionLog.name})`, reason: "the motion log is too large", eisActive: false };
+      const parsed = parseImuLog(await motionLog.text(), motionLog.name);
+      if (!parsed.ok) return { status: "unusable", source: "imu-log", camera: `Motion log (${motionLog.name})`, reason: parsed.reason, eisActive: false };
+      probe = await probeWithLog(blobReader(file), file.size, parsed.log);
+    } else probe = await probeTelemetry(blobReader(file), file.size, { signal });
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") throw e;
     return { status: "none", reason: `telemetry could not be read (${e instanceof Error ? e.message : String(e)})` };
@@ -40,7 +51,10 @@ export async function probeFile(file: File, signal?: AbortSignal): Promise<Telem
     try {
       const track = await input.getPrimaryVideoTrack();
       const first = track ? await track.getFirstTimestamp() : 0;
-      if (Number.isFinite(first) && Math.abs(first) < 1) motion = { ...motion, timeOffset: motion.timeOffset - first };
+      if (Number.isFinite(first) && Math.abs(first) < 1) {
+        motion = { ...motion, timeOffset: motion.timeOffset - first };
+        if (motion.syncRange) motion.syncRange = [motion.syncRange[0] - first, motion.syncRange[1] - first];
+      }
     } finally {
       input.dispose();
     }

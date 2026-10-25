@@ -84,6 +84,8 @@ export type StabStatus = {
   refineProgress: number;
   /** Short line for the panel: progress, result, or why the clip stayed gyro-only. */
   bobbing: string | null;
+  /** File name of the motion log (.gcsv / Sensor Logger CSV) added for this clip, if any. */
+  motionLog: string | null;
 };
 export type ExportStatus = {
   state: "idle" | "preparing" | "running" | "done" | "error";
@@ -173,7 +175,7 @@ export function codecHelp(codecString: string | null | undefined): string | null
 }
 
 const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null };
-const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null, refine: "idle", refineProgress: 0, bobbing: null };
+const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null, refine: "idle", refineProgress: 0, bobbing: null, motionLog: null };
 
 /** Real-time recorder default: WebKit (offline capture is ~10 fps there); `?rt=1` / `?rt=0` force it. */
 function wantRealtime(): boolean | null {
@@ -229,6 +231,8 @@ export class Studio {
   private dewarpU: WarpUniforms | null = null;
   private split: number | null = null;
   private file: File | null = null;
+  /** Sidecar motion log for the open clip (Stabilise › Advanced), used instead of the clip's own telemetry. */
+  private motionLog: File | null = null;
   private photo: ImageBitmap | null = null;
   /** The photo at ≤ PHOTO_PREVIEW_PX: what the preview and the analysis use (full size only when zoomed in or exporting). */
   private photoPreview: ImageBitmap | null = null;
@@ -712,6 +716,7 @@ export class Studio {
     this.cancelRefine();
     this.analysis = null;
     this.path = null;
+    this.motionLog = null;
     this.profiling = null;
     clearTimeout(this.photoAnalyseTimer);
     clearTimeout(this.trimTimer);
@@ -1084,12 +1089,12 @@ export class Studio {
           last = now;
           this.setStab({ progress: fraction });
         }
-      }, ctrl.signal, this.tools.stabilise.visual, false, span);
+      }, ctrl.signal, this.tools.stabilise.visual, false, this.motionLog, span);
       if (gen !== this.gen || ctrl.signal.aborted) return;
       this.analysis = analysis;
       this.analysedSpan = span;
       const info = stabInfo(analysis);
-      console.info(`[stabilise] ${info.badge}${info.warning ? ` (${info.warning})` : ""}, analysed ${span ? `${span.start.toFixed(2)}–${span.end.toFixed(2)} s` : "the whole clip"} in ${((performance.now() - started) / 1000).toFixed(1)} s`);
+      console.info(`[stabilise] ${info.badge}${info.warning ? ` (${info.warning})` : ""}, analysed ${span ? `${span.start.toFixed(2)}–${span.end.toFixed(2)} s` : "the whole clip"} in ${((performance.now() - started) / 1000).toFixed(1)} s${analysis.mode === "gyro" && analysis.motion.notes.length ? ` · ${analysis.motion.notes.join("; ")}` : ""}`);
       this.setStab({ state: "solving", progress: 1, info });
       const path = await client.solve(this.solveFor(analysis.mode));
       if (gen !== this.gen || ctrl.signal.aborted) return;
@@ -1109,6 +1114,25 @@ export class Studio {
   /** Solve parameters for the current tools and trim (the gyro solve covers only the analysis span). */
   private solveFor(mode: AnalysisResult["mode"]) {
     return { ...solveParams(this.tools.stabilise, mode, this.stabOutput()), span: this.motionSpan() };
+  }
+
+  /**
+   * Adds (or with null, removes) a motion log recorded next to the clip — a
+   * Gyroflow .gcsv or Sensor Logger's Gyroscope.csv — and re-runs the motion
+   * analysis with it in place of the clip's own telemetry.
+   */
+  setMotionLog(file: File | null): void {
+    if (this.snap.kind !== "video") return;
+    this.motionLog = file;
+    this.setStab({ motionLog: file?.name ?? null, summary: null, info: null });
+    this.stabAbort?.abort();
+    this.stabAbort = null;
+    this.cancelRefine();
+    this.analysis = null;
+    this.analysedSpan = null;
+    this.path = null;
+    if (this.tools.stabilise.enabled && this.snap.phase === "ready") void this.analyseMotion();
+    this.repaint();
   }
 
   private bobbingText(): string | null {
