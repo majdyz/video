@@ -32,12 +32,9 @@ import type { VideoSample } from "mediabunny";
 import { MotionFixLogo, MOTION_FIX_BRAND } from "./branding";
 import { AnalysisClient } from "./lib/analysis-client.ts";
 import { MeshRenderer, type Rotation } from "./lib/mesh-renderer.ts";
-import {
-  DEFAULT_PARAMS,
-  warpFnAtTime,
-  type MotionAnalysis,
-  type StabilizedPath,
-} from "./lib/stabilize.ts";
+import { DEFAULT_GYRO_PARAMS } from "./lib/gyro/gyro-stabilize.ts";
+import { planWarpFn, type AnalysisResult, type Plan, type SolveParams } from "./lib/plan.ts";
+import { DEFAULT_PARAMS } from "./lib/stabilize.ts";
 
 type Mode = "idle" | "video";
 
@@ -55,11 +52,15 @@ export default function App() {
   const rendererRef = useRef<MeshRenderer | null>(null);
   const clientRef = useRef<AnalysisClient | null>(null);
   const fileRef = useRef<File | null>(null);
+  /** User chose visual tracking over the file's gyro data (kept across re-analysis of the same clip). */
+  // ?visual=1 starts every clip on visual tracking (A/B checks against the gyro path).
+  const visualByDefault = typeof location !== "undefined" && new URLSearchParams(location.search).get("visual") === "1";
+  const forceVisualRef = useRef(visualByDefault);
   const fileNameRef = useRef<string>(MOTION_FIX_BRAND.filenamePrefix);
   const sourceUrlRef = useRef<string | null>(null);
   const sourceBitrateRef = useRef<number | null>(null);
-  const analysisRef = useRef<MotionAnalysis | null>(null);
-  const pathRef = useRef<StabilizedPath | null>(null);
+  const analysisRef = useRef<AnalysisResult | null>(null);
+  const pathRef = useRef<Plan | null>(null);
   const previewActiveRef = useRef(false);
   const exportingRef = useRef(false);
   const analysisAbortRef = useRef<AbortController | null>(null);
@@ -80,6 +81,12 @@ export default function App() {
   const [duration, setDuration] = useState(0);
   const [smoothing, setSmoothing] = useState(DEFAULT_PARAMS.smoothing);
   const [crop, setCrop] = useState(DEFAULT_PARAMS.maxCrop);
+  const [horizonLock, setHorizonLock] = useState(0);
+  const [lensOut, setLensOut] = useState<"lens" | "rectilinear">("lens");
+  const [medium, setMedium] = useState<"auto" | "air" | "water">("auto");
+  /** Which stabiliser runs, and what the user should know about the file's motion data. */
+  const [badge, setBadge] = useState<{ kind: "gyro" | "visual"; text: string } | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [analysisReady, setAnalysisReady] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
@@ -125,10 +132,12 @@ export default function App() {
     renderer.resize(v.videoWidth, v.videoHeight);
     if (!renderer.upload(v, v.videoWidth, v.videoHeight)) return;
     const path = pathRef.current;
-    // Per-vertex warp (similarity + wobble residual): the same callback the
-    // export uses, so the preview is what gets saved.
+    const result = analysisRef.current;
+    // Per-vertex warp (gyro: rotation through the lens with rolling shutter;
+    // visual: similarity + wobble residual): the same callback the export
+    // uses, so the preview is what gets saved.
     renderer.render({
-      warp: path ? warpFnAtTime(path, time) : null,
+      warp: path && result ? planWarpFn(result, path, time, v.videoWidth, v.videoHeight) : null,
       rotation: 0,
       split: compareActiveRef.current ? compareSplitRef.current : null,
     });
@@ -187,9 +196,12 @@ export default function App() {
     }
   }
 
-  async function handleFile(file: File) {
+  async function handleFile(file: File, keepMode = false) {
+    if (!keepMode) forceVisualRef.current = visualByDefault;
     setError(null);
     setStatus(null);
+    setBadge(null);
+    setWarning(null);
     setAnalysisReady(false);
     setCompareActive(false);
     const validation = validateUploadedFile(file, "video");
@@ -242,16 +254,24 @@ export default function App() {
       setMode("video");
       drawCurrentFrame();
 
-      setBusy("Analyzing motion 0%");
+      setBusy("Reading motion data…");
       const analysis = await client.analyze(
         file,
         (fraction, frames) => setBusy(`Analyzing motion ${Math.floor(fraction * 100)}% · ${frames} frames`),
         ctrl.signal,
+        forceVisualRef.current,
       );
       if (ctrl.signal.aborted) return;
       analysisRef.current = analysis;
+      const info = explain(analysis);
+      setBadge(info.badge);
+      setWarning(info.warning);
+      // Each path has its own sweet spot; the sliders start there for every new clip.
+      const startSmoothing = analysis.mode === "gyro" ? DEFAULT_GYRO_PARAMS.smoothing : DEFAULT_PARAMS.smoothing;
+      setSmoothing(startSmoothing);
       setBusy("Solving camera path…");
-      const path = await client.solve({ smoothing, maxCrop: crop });
+      setMedium("auto");
+      const path = await client.solve(solveParams(startSmoothing, crop, horizonLock, lensOut, "auto"));
       if (ctrl.signal.aborted) return;
       pathRef.current = path;
       setStatus(describe(analysis, path));
@@ -285,7 +305,7 @@ export default function App() {
       const client = clientRef.current;
       if (!client) return;
       try {
-        const path = await client.solve({ smoothing, maxCrop: crop });
+        const path = await client.solve(solveParams(smoothing, crop, horizonLock, lensOut, medium));
         if (seq !== solveSeqRef.current) return;
         pathRef.current = path;
         if (analysisRef.current) setStatus(describe(analysisRef.current, path));
@@ -295,7 +315,7 @@ export default function App() {
       }
     }, 120);
     return () => clearTimeout(id);
-  }, [smoothing, crop, analysisReady, drawCurrentFrame]);
+  }, [smoothing, crop, horizonLock, lensOut, medium, analysisReady, drawCurrentFrame]);
 
   // ---------------------------------------------------------------------
   // Playback controls
@@ -347,7 +367,9 @@ export default function App() {
       if (!renderer.upload(fb, fb.width, fb.height)) throw new Error("Could not upload frame to WebGL");
       rotation = 0;
     }
-    renderer.render({ warp: warpFnAtTime(path, info.timeSec), rotation, split: null });
+    const result = analysisRef.current;
+    if (!result) throw new Error("No analysis");
+    renderer.render({ warp: planWarpFn(result, path, info.timeSec, info.displayWidth, info.displayHeight), rotation, split: null });
     return canvas;
   }
 
@@ -376,7 +398,7 @@ export default function App() {
     let lastUiPush = 0;
     const started = performance.now();
     try {
-      const bitrate = sourceBitrateRef.current ?? pickBitrate(video.videoWidth, video.videoHeight, analysisRef.current?.frameRate ?? 30);
+      const bitrate = sourceBitrateRef.current ?? pickBitrate(video.videoWidth, video.videoHeight, frameRateOf(analysisRef.current) ?? 30);
       // Real-time path on WebKit (see aqua-fix): Safari's canvas → VideoFrame
       // copy pins the offline exporter to ~10 fps, so play the clip and
       // record the stabilised canvas instead, then remux the original audio.
@@ -386,7 +408,7 @@ export default function App() {
       // Offline export by default (every frame rendered once; survives tab switches); the recorder is ?rt=1 only.
       const useRealtime = !!canvasEl && rtParam === "1" && isRealtimeExportSupported(canvasEl);
       if (useRealtime && canvasEl) {
-        const srcFps = Math.min(60, Math.max(24, Math.round(analysisRef.current?.frameRate ?? (await probeFrameRate(file)))));
+        const srcFps = Math.min(60, Math.max(24, Math.round(frameRateOf(analysisRef.current) ?? (await probeFrameRate(file)))));
         let rendered = 0;
         const result = await exportRealtime(file, video, canvasEl, {
           bitrate,
@@ -469,6 +491,9 @@ export default function App() {
   // ---------------------------------------------------------------------
 
   const controlsDisabled = exporting || !analysisReady;
+  const result = analysisReady ? analysisRef.current : null;
+  const gyroResult = result?.mode === "gyro" ? result : null;
+  const canSwitch = !!gyroResult || (result?.mode === "visual" && result.telemetry.status === "declined");
 
   return (
     <div className="app motion-app">
@@ -483,7 +508,43 @@ export default function App() {
       <CapabilityBanner storageKey="motion-capnote-dismissed" />
 
       <Modal open={showInfo} onClose={() => setShowInfo(false)} title="How Motion Fix works">
-        <h4>Pipeline</h4>
+        <h4>Gyro path (GoPro, DJI originals)</h4>
+        <ul>
+          <li>
+            <b>Read</b> — GoPro (HERO8 and newer) and DJI action cameras /
+            drones record the camera's orientation in a metadata track next to
+            the video. Motion Fix reads only that track and the file index
+            (ranged reads, a few hundred KB even for a multi-GB file), so the
+            analysis takes a second and nothing is decoded. GoPro's
+            HyperSmooth correction (IORI) is read too and refined rather than
+            fought; DJI clips need RockSteady / HorizonSteady off, because
+            their warp cannot be undone from the file.
+          </li>
+          <li>
+            <b>Smooth</b> — the orientation is smoothed with a zero-phase
+            exponential filter on the rotation sphere whose time constant
+            shrinks when the camera turns fast, so fin-kick shake and drift
+            are flattened while a deliberate pan is followed without lag.
+            <i>Keep level</i> rolls the virtual camera so the horizon stays
+            level, using the camera's gravity sensor.
+          </li>
+          <li>
+            <b>Crop</b> — for every frame the border of the output is traced
+            through the lens model (GoPro's in-file calibration on HERO11+, a
+            measured HERO10 Wide profile otherwise; DJI's own calibration) to
+            find the zoom that keeps it inside the recorded picture. Frames
+            that would need more than <i>Max crop</i> follow the real camera a
+            little more instead, eased in and out over half a second.
+          </li>
+          <li>
+            <b>Render</b> — each output point is turned into a ray, rotated
+            from the virtual camera into the real one at the moment its sensor
+            row was read (rolling shutter, from the readout time in the file)
+            and projected through the lens. <i>Straight lines</i> outputs a
+            rectilinear view instead of the fisheye look.
+          </li>
+        </ul>
+        <h4>Visual path (phones, re-saved clips)</h4>
         <ul>
           <li>
             <b>Decode</b> — every frame is decoded with WebCodecs in a worker
@@ -514,7 +575,8 @@ export default function App() {
             <code>10·|D¹| + 1·|D²| + 100·|D³|</code> of the path (affine
             entries weighted 100:1 against translation) subject to the crop
             window staying inside every frame and the warp staying near
-            identity. The result is made of still, constant-velocity and
+            identity, plus a fidelity term (weight 1, ten times the paper's) so
+            the path only spends crop where the shake is worth it. The result is made of still, constant-velocity and
             constant-acceleration segments — tripod, dolly and crane moves —
             instead of a blurred average of the shake. The linear program is
             solved exactly with a banded primal-dual interior-point method
@@ -538,13 +600,14 @@ export default function App() {
           <li>
             <b>Zoom</b> — instead of a constant crop, each frame gets the
             smallest zoom that fills the output (measured on the warped
-            border, wobble included), smoothed with a 2.5 s rolling maximum
-            and a Gaussian, within the <i>Max crop</i> budget. The crop
-            breathes slowly and invisibly rather than cropping the whole clip
-            for its worst second.
+            border, wobble included); the zoom track is the lowest curve
+            above every frame's need that never changes by more than 2.5 % per
+            second, within the <i>Max crop</i> budget. The crop drifts slowly
+            instead of pumping, and a short clip with one shaky moment simply
+            holds its zoom.
           </li>
           <li>
-            <b>Render</b> — a 32×18 WebGL mesh samples the source where the
+            <b>Render</b> — a 64×36 WebGL mesh samples the source where the
             warp says each output point came from, for the preview and the
             export alike. Export runs through WebCodecs faster than realtime,
             copies the original audio untouched and streams to on-device
@@ -563,10 +626,13 @@ export default function App() {
           The path is planned on similarities (rotation, zoom, translation);
           the wobble pass only corrects what a single plane-projective motion
           per frame can explain, so strong parallax from nearby coral stays.
-          Phones and action cameras already correct rolling shutter in-camera,
-          so no per-row readout model is applied: with a guessed readout time
-          it adds jello rather than removing it. Clips with a large moving
-          subject that fills the frame will follow the subject.
+          Phones correct rolling shutter in-camera, so the visual path applies
+          no per-row readout model: with a guessed readout time it adds jello
+          rather than removing it. Clips with a large moving subject that
+          fills the frame will follow the subject. The gyro path removes
+          rotation only: it cannot (and should not) undo the camera moving
+          through the water, and shared or re-encoded copies lose the motion
+          data — import the original file from the SD card.
         </p>
         <h4>References</h4>
         <ul>
@@ -649,10 +715,56 @@ export default function App() {
 
         {mode === "video" && (
           <>
+            {badge && (
+              <div className={`stab-badge is-${badge.kind}`} role="status">
+                <span className="dot" aria-hidden="true" />
+                {badge.text}
+              </div>
+            )}
+            {warning && <p className="stab-warning">{warning}</p>}
             <div className="sliders">
               <Slider label="Smoothing" value={smoothing} min={0} max={1} step={0.01} onChange={setSmoothing} disabled={controlsDisabled} />
               <Slider label="Max crop" value={crop} min={0} max={0.4} step={0.005} onChange={setCrop} disabled={controlsDisabled} />
             </div>
+            {gyroResult && (
+              <>
+                <Segment
+                  label="Water"
+                  value={medium}
+                  options={[["auto", `Auto (${gyroResult.motion.medium?.detected === "water" ? "underwater" : gyroResult.motion.medium?.detected === "air" ? "air" : "?"})`], ["air", "Air"], ["water", "Underwater"]]}
+                  onChange={setMedium}
+                  disabled={controlsDisabled}
+                />
+                <Segment
+                  label="Lens"
+                  value={lensOut}
+                  options={[["lens", "Original"], ["rectilinear", "Straight lines"]]}
+                  onChange={setLensOut}
+                  disabled={controlsDisabled}
+                />
+                {gyroResult.motion.down && (
+                  <Segment
+                    label="Horizon"
+                    value={horizonLock > 0 ? "level" : "free"}
+                    options={[["free", "Follow camera"], ["level", "Keep level"]]}
+                    onChange={(v) => setHorizonLock(v === "level" ? 1 : 0)}
+                    disabled={controlsDisabled}
+                  />
+                )}
+              </>
+            )}
+            {canSwitch && (
+              <Segment
+                label="Using"
+                value={gyroResult ? "gyro" : "visual"}
+                options={[["gyro", "Gyro data"], ["visual", "Visual tracking"]]}
+                onChange={(v) => {
+                  forceVisualRef.current = v === "visual";
+                  if (fileRef.current) void handleFile(fileRef.current, true);
+                }}
+                disabled={controlsDisabled}
+              />
+            )}
             {status && <p className="note">{status}</p>}
             <div className="actions">
               {!exporting && (
@@ -686,10 +798,65 @@ export default function App() {
   );
 }
 
+function solveParams(smoothing: number, maxCrop: number, horizonLock: number, output: "lens" | "rectilinear", medium: "auto" | "air" | "water"): SolveParams {
+  return { smoothing, maxCrop, horizonLock, output, medium };
+}
+
+function frameRateOf(r: AnalysisResult | null): number | null {
+  if (!r) return null;
+  return r.mode === "gyro" ? r.motion.video.fps : r.analysis.frameRate;
+}
+
+/** Badge and warning for the path that ran. */
+function explain(r: AnalysisResult): { badge: { kind: "gyro" | "visual"; text: string }; warning: string | null } {
+  if (r.mode === "gyro") {
+    const m = r.motion;
+    const extra = m.eis.active ? ` · ${m.eis.label} compensated` : m.readout > 0 ? ` · rolling shutter ${(m.readout * 1000).toFixed(1)} ms` : "";
+    const water = m.medium?.detected === "water" ? " · underwater lens" : "";
+    const mismatch = m.medium && !m.medium.consistent ? "The motion data barely matches the picture (an edited or re-timed copy?). If the result shakes, switch to Visual tracking." : null;
+    return { badge: { kind: "gyro", text: `Gyro stabilisation (${m.camera})${extra}${water}` }, warning: mismatch };
+  }
+  const t = r.telemetry;
+  const badge = { kind: "visual" as const, text: "Visual stabilisation" };
+  if (t.status === "declined") return { badge, warning: null };
+  if (t.status === "unusable") {
+    if (t.eisActive && t.source === "dji") {
+      return { badge, warning: `EIS was on in camera (${t.camera}): its warp can't be undone with the gyro data, so the picture is tracked instead. For gyro-grade results record with RockSteady / HorizonSteady off.` };
+    }
+    return { badge, warning: `${t.camera}: ${t.reason}. Using visual tracking.` };
+  }
+  return { badge, warning: "No motion data in this file. For GoPro / DJI clips, import the original file from the SD card (shared or re-saved copies lose it). Using visual tracking." };
+}
+
 /** One-line summary under the sliders. */
-function describe(analysis: MotionAnalysis, path: StabilizedPath): string {
-  let good = 0;
-  for (let t = 0; t < analysis.frameCount; t++) if (analysis.model[t] >= 2) good++;
-  const quality = analysis.frameCount ? Math.round((100 * good) / analysis.frameCount) : 0;
-  return `${analysis.frameCount} frames · tracked ${quality}% · zoom ${path.stats.meanZoom.toFixed(2)}× (max ${path.stats.maxUsedZoom.toFixed(2)}×)`;
+function describe(result: AnalysisResult, plan: Plan): string {
+  if (result.mode === "gyro" && plan.kind === "gyro") {
+    const m = result.motion;
+    const s = plan.plan.stats;
+    return `${m.video.frameCount} frames · ${m.lens.source} · shake ${s.rawJitter.toFixed(3)} → ${s.virtJitter.toFixed(3)}°/frame² · zoom ${s.meanZoom.toFixed(2)}× (max ${s.maxUsedZoom.toFixed(2)}×)`;
+  }
+  if (result.mode === "visual" && plan.kind === "visual") {
+    const analysis = result.analysis;
+    let good = 0;
+    for (let t = 0; t < analysis.frameCount; t++) if (analysis.model[t] >= 2) good++;
+    const quality = analysis.frameCount ? Math.round((100 * good) / analysis.frameCount) : 0;
+    return `${analysis.frameCount} frames · tracked ${quality}% · zoom ${plan.path.stats.meanZoom.toFixed(2)}× (max ${plan.path.stats.maxUsedZoom.toFixed(2)}×)`;
+  }
+  return "";
+}
+
+/** Small segmented control (styled by .quality-row in motion-theme.css). */
+function Segment<T extends string>({ label, value, options, onChange, disabled }: { label: string; value: T; options: [T, string][]; onChange: (v: T) => void; disabled?: boolean }) {
+  return (
+    <div className="quality-row">
+      <span className="quality-label">{label}</span>
+      <div className="quality-segment" role="radiogroup" aria-label={label}>
+        {options.map(([v, text]) => (
+          <button key={v} type="button" role="radio" aria-checked={v === value} className={v === value ? "active" : ""} disabled={disabled} onClick={() => v !== value && onChange(v)}>
+            {text}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }

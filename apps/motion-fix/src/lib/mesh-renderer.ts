@@ -21,8 +21,8 @@
 
 import type { Similarity } from "./tracker.ts";
 
-export const GRID_W = 32;
-export const GRID_H = 18;
+export const GRID_W = 64;
+export const GRID_H = 36;
 const VERT_W = GRID_W + 1;
 const VERT_H = GRID_H + 1;
 const VERT_COUNT = VERT_W * VERT_H;

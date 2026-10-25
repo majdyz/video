@@ -50,9 +50,28 @@ export type StabilizeParams = {
   maxCrop: number;
   /** Wobble suppression between keyframes; always on in the app, switchable for tests and reports. */
   wobble?: boolean;
+  /** Adaptive-zoom window (s): rolling maximum span; longer = slower, rarer crop changes. */
+  zoomWindowSec?: number;
+  /** Largest zoom change per second (default PATH_ZOOM_RATE; 0 = the older rolling-window zoom). */
+  zoomRate?: number;
+  /** L1 fidelity weight override (default PATH_FIDELITY; Grundmann 0.1). */
+  fidelityWeight?: number;
 };
 
 export const DEFAULT_PARAMS: StabilizeParams = { smoothing: 0.8, maxCrop: 0.15 };
+
+/**
+ * L1 fidelity weight (pull toward the real camera). Grundmann's 0.1 lets the
+ * path spend the whole crop budget on every clip (zoom ~1.3 even on calm
+ * footage) and kink where it meets the crop wall; 1.0 keeps the path near
+ * the camera unless the shake is worth the crop. Output-tracked jitter on
+ * the scratch set (base -> 1.0 with rate-limited zoom): sea-lion swim
+ * 3.48 -> 2.31 px, guppies 0.42 -> 0.17, mullet 0.23 -> 0.16, reef wobble
+ * 0.21 -> 0.19, GBR 0.04 -> 0.08; mean zoom 1.20-1.32 -> 1.03-1.16.
+ */
+export const PATH_FIDELITY = 1;
+/** Zoom drift limit for the visual path (zoom units per second); 0 = rolling-window zoom. */
+export const PATH_ZOOM_RATE = 0.025;
 
 /** Keyframe spacing of the wobble suppression (Grundmann 2011 uses 30). */
 export const WOBBLE_KEYFRAME_INTERVAL = 30;
@@ -148,6 +167,46 @@ export function requiredZoom(w: Similarity, hw: number, hh: number): number {
     }
   }
   return z;
+}
+
+/**
+ * Rate-limited zoom: the lowest curve that stays at or above every frame's
+ * required zoom while never changing faster than `maxRate` per second
+ * (zoom units), with its corners rounded. A forward pass lets the zoom
+ * fall back no faster than the limit after a peak, a backward pass starts
+ * zooming in early enough to reach the next peak at the limit — so the
+ * crop can only ever drift slowly, which is what reads as "no pumping",
+ * and a short clip with one shaky moment simply holds its zoom.
+ */
+export function rateLimitedZoom(required: Float32Array, fps: number, maxRate: number, maxZoom: number): Float32Array {
+  const n = required.length;
+  const step = maxRate / Math.max(1, fps);
+  const env = new Float64Array(n);
+  for (let t = 0; t < n; t++) env[t] = Math.min(maxZoom, Math.max(1, required[t]));
+  const limit = (a: Float64Array): void => {
+    for (let t = 1; t < n; t++) a[t] = Math.max(a[t], a[t - 1] - step);
+    for (let t = n - 2; t >= 0; t--) a[t] = Math.max(a[t], a[t + 1] - step);
+  };
+  limit(env);
+  // Round the corners (σ = 0.4 s), then restore the guarantees.
+  const sigma = Math.max(0.5, 0.4 * fps);
+  const r = Math.ceil(3 * sigma);
+  const sm = new Float64Array(n);
+  for (let t = 0; t < n; t++) {
+    let acc = 0;
+    let w = 0;
+    for (let i = -r; i <= r; i++) {
+      const u = Math.min(n - 1, Math.max(0, t + i));
+      const k = Math.exp(-(i * i) / (2 * sigma * sigma));
+      acc += k * env[u];
+      w += k;
+    }
+    sm[t] = Math.max(acc / w, Math.min(maxZoom, Math.max(1, required[t])));
+  }
+  limit(sm);
+  const out = new Float32Array(n);
+  for (let t = 0; t < n; t++) out[t] = Math.min(maxZoom, sm[t]);
+  return out;
 }
 
 /**
@@ -391,7 +450,7 @@ export function computeStabilizedPath(analysis: MotionAnalysis, params: Stabiliz
     halfHeight: hh,
     cropHalfWidth: hw * solverCropRatio,
     cropHalfHeight: hh * solverCropRatio,
-    weights: GRUNDMANN_WEIGHTS,
+    weights: { ...GRUNDMANN_WEIGHTS, fidelity: params.fidelityWeight ?? PATH_FIDELITY },
   });
 
   // Back to source pixels.
@@ -455,8 +514,9 @@ export function computeStabilizedPath(analysis: MotionAnalysis, params: Stabiliz
       required[t] = z;
     }
   }
-  const windowFrames = Math.max(8, Math.round(analysis.frameRate * 2.5));
-  const zoom = smoothZoom(required, windowFrames, maxZoom);
+  const windowFrames = Math.max(8, Math.round(analysis.frameRate * (params.zoomWindowSec ?? 2.5)));
+  const zoomRate = params.zoomRate ?? PATH_ZOOM_RATE;
+  const zoom = zoomRate > 0 ? rateLimitedZoom(required, analysis.frameRate, zoomRate, maxZoom) : smoothZoom(required, windowFrames, maxZoom);
 
   let meanZoom = 0;
   let maxUsedZoom = 1;
