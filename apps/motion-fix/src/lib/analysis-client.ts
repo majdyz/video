@@ -72,21 +72,23 @@ export class AnalysisClient {
    * data (and `forceVisual` is off), else decode + feature tracking.
    * Rejects with AbortError when cancelled. `hybrid` runs the hybrid pass
    * before resolving (gyro clips); see refine() for showing the gyro result first.
+   * `motionLog`: a sidecar motion log (.gcsv, Sensor Logger CSV) to use
+   * instead of the file's own telemetry.
    */
-  async analyze(file: File, onProgress: (fraction: number, frames: number) => void, signal?: AbortSignal, forceVisual = false, hybrid = false): Promise<AnalysisResult> {
+  async analyze(file: File, onProgress: (fraction: number, frames: number) => void, signal?: AbortSignal, forceVisual = false, hybrid = false, motionLog: File | null = null): Promise<AnalysisResult> {
     this.fallbackResult = null;
     this.fallbackFile = null;
     const id = this.nextId++;
     const onAbort = (): void => this.worker?.postMessage({ type: "cancel" } satisfies WorkerRequest);
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      return await this.request<AnalysisResult>({ type: "analyze", id, file, forceVisual, hybrid }, onProgress);
+      return await this.request<AnalysisResult>({ type: "analyze", id, file, forceVisual, hybrid, motionLog }, onProgress);
     } catch (e) {
       if (signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw new DOMException("Aborted", "AbortError");
       if (!this.workerBroken && !(e instanceof Error && /VideoDecoder|worker/i.test(e.message))) throw e;
       // Worker could not decode here (older Safari): same code on the main thread.
       this.workerBroken = true;
-      const result = await analyzeAny(file, forceVisual, onProgress, signal ?? new AbortController().signal, { hybrid });
+      const result = await analyzeAny(file, forceVisual, onProgress, signal ?? new AbortController().signal, { hybrid, motionLog });
       this.fallbackResult = result;
       this.fallbackFile = file;
       return result;

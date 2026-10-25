@@ -7,9 +7,11 @@
 import { spawnSync } from "node:child_process";
 import { open } from "node:fs/promises";
 import { computeGyroPlan, correctionAngleDeg, frameTimesOf, gyroWarpFnAtTime, DEFAULT_GYRO_PARAMS } from "../src/lib/gyro/gyro-stabilize.ts";
-import { checkAndCalibrate, checkWindows, PairCollector } from "../src/lib/gyro/medium.ts";
+import { readFileSync } from "node:fs";
+import { parseImuLog } from "../src/lib/gyro/imu-log.ts";
+import { checkAndCalibrate, checkWindowsFor, PairCollector } from "../src/lib/gyro/medium.ts";
 import type { RangeReader } from "../src/lib/gyro/mp4-index.ts";
-import { probeTelemetry } from "../src/lib/gyro/telemetry.ts";
+import { probeTelemetry, probeWithLog, type TelemetryProbe } from "../src/lib/gyro/telemetry.ts";
 import { renderThroughMesh } from "../test/synth.ts";
 import { measure } from "./shake-metric.ts";
 
@@ -27,7 +29,14 @@ const read: RangeReader = async (off, len) => {
   return new Uint8Array(b.buffer, b.byteOffset, n);
 };
 const t0 = performance.now();
-const probe = await probeTelemetry(read, size);
+// MOTION_LOG=<file.gcsv|Gyroscope.csv>: use a sidecar motion log instead of the clip's telemetry.
+const logPath = process.env.MOTION_LOG;
+let probe: TelemetryProbe;
+if (logPath) {
+  const parsed = parseImuLog(readFileSync(logPath, "utf8"), logPath);
+  if (!parsed.ok) throw new Error(parsed.reason);
+  probe = await probeWithLog(read, size, parsed.log);
+} else probe = await probeTelemetry(read, size);
 await fh.close();
 const probeMs = performance.now() - t0;
 if (probe.status !== "ok") {
@@ -48,9 +57,10 @@ const n = Math.floor(raw.stdout.length / frameSize);
 // Picture check (air / water, telemetry consistency) on 4 short windows, like the app.
 {
   const times = frameTimesOf(motion);
-  const collector = new PairCollector(aw, ah, motion.lens.width / aw);
+  // ffmpeg hands over upright (display) frames: rotated clips map back to the coded frame.
+  const collector = new PairCollector(aw, ah, dispW / aw, motion.video.rotation, motion.lens.width, motion.lens.height);
   const gray = new Float32Array(frameSize);
-  for (const [w0, w1] of checkWindows(motion.video.duration)) {
+  for (const [w0, w1] of checkWindowsFor(motion)) {
     collector.reset();
     for (let t = 0; t < n && t < times.length; t++) {
       if (times[t] < w0 || times[t] > w1) continue;
@@ -60,7 +70,7 @@ const n = Math.floor(raw.stdout.length / frameSize);
   }
   const t1 = performance.now();
   motion.medium = checkAndCalibrate(motion, collector.pairs);
-  if (motion.notes.some((n) => /self-calibrated/.test(n))) console.log(`  ${motion.notes[motion.notes.length - 1]}`);
+  for (const note of motion.notes) console.log(`  note: ${note}`);
   const m = motion.medium;
   console.log(`  picture check: ${m.pairs} pairs, ${m.points} points; median error air ${m.errAir.toFixed(2)} px, water ${m.errWater.toFixed(2)} px, still ${m.errStill.toFixed(2)} px -> ${m.detected ?? "undecided"}${m.consistent ? "" : " (gyro does NOT match the picture)"} (${(performance.now() - t1).toFixed(0)} ms)`);
 }

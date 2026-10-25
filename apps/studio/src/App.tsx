@@ -328,7 +328,7 @@ export default function App() {
       <input ref={fileInputRef} type="file" accept={ACCEPT} hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) openFile(f); }} />
 
       <Sheet open={advOpen} onClose={() => setAdvOpen(false)} title={`${TOOL_LABEL[tab]} · Advanced`}>
-        <AdvancedControls tool={tab} tools={tools} setTools={setTools} stab={s.stab} />
+        <AdvancedControls tool={tab} tools={tools} setTools={setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined} />
         {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
       </Sheet>
 

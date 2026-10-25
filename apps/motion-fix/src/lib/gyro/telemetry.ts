@@ -17,14 +17,22 @@
 //    (120° about (1,1,1)). Readout from the file fits (9.7 ms stated, 11 ms
 //    fitted on an Avata clip) with row time = frame time + (y/H − ½)·readout.
 
-import { extractDji, extractGoPro, telemetryTrackOf, videoTrackOf, type GoProRaw } from "./extract.ts";
+import { extractCamm, extractDji, extractGoPro, telemetryTrackOf, videoTrackOf, type GoProRaw } from "./extract.ts";
 import { DJI_EIS_NAMES } from "./dji-meta.ts";
+import type { ImuLog } from "./imu-log.ts";
 import { fitFisheye, scaleLens, thetaD, type LensModel } from "./lens.ts";
-import { readMp4Index, type RangeReader } from "./mp4-index.ts";
+import { readMp4Index, type Mp4Index, type Mp4Track, type RangeReader } from "./mp4-index.ts";
 import { qangle, qconj, qcontinuous, qexp, qmul, qnorm, qrot, type Quat, type Vec3 } from "./quat.ts";
 
+/**
+ * Where the motion came from: in-file camera telemetry (GoPro, DJI), a CAMM
+ * track (Street View camera motion metadata), or a motion log the user
+ * added next to the video (imu-log.ts).
+ */
+export type MotionSource = "gopro" | "dji" | "camm" | "imu-log";
+
 export type CameraMotion = {
-  source: "gopro" | "dji";
+  source: MotionSource;
   /** Human-readable camera name ("GoPro HERO10 Black", "DJI FC8183"). */
   camera: string;
   /** Image-frame orientation samples, camera -> world, ascending times on the video timeline. */
@@ -44,6 +52,8 @@ export type CameraMotion = {
   notes: string[];
   /** Picture check (medium.ts): which medium explains the tracked motion, and how well the gyro matches the picture. */
   medium?: MediumCheck;
+  /** Motion logs: timeOffset range (s) the picture check searches to sync the log's clock. */
+  syncRange?: [number, number];
 };
 
 export type MediumCheck = {
@@ -64,7 +74,7 @@ export type MediumCheck = {
 export type TelemetryProbe =
   | { status: "ok"; motion: CameraMotion }
   /** Telemetry exists but cannot drive the stabiliser (EIS on, unsupported lens mode, ...). */
-  | { status: "unusable"; source: "gopro" | "dji"; camera: string; reason: string; eisActive: boolean }
+  | { status: "unusable"; source: MotionSource; camera: string; reason: string; eisActive: boolean }
   | { status: "none"; reason: string };
 
 /** DJI body (FRD) -> camera (x right, y down, z forward): 120° about (1,1,1). */
@@ -200,13 +210,13 @@ export async function probeTelemetry(read: RangeReader, fileSize: number, opts: 
   if (!video || !video.samples.length) return { status: "none", reason: "no video track" };
   const found = telemetryTrackOf(index);
   if (!found) return { status: "none", reason: "no motion data track" };
-  const W = Math.round(video.width);
-  const H = Math.round(video.height);
-  // Lens and orientation live in coded (sensor) orientation; tkhd sizes are display-oriented.
-  const coded = video.rotation === 90 || video.rotation === 270 ? { w: H, h: W } : { w: W, h: H };
-  const frameCount = video.samples.length;
-  const duration = video.duration || frameCount / 30;
-  const videoInfo = { width: coded.w, height: coded.h, rotation: video.rotation, frameCount, duration, fps: frameCount / duration };
+  const videoInfo = videoInfoOf(video);
+  const coded = { w: videoInfo.width, h: videoInfo.height };
+
+  if (found.kind === "camm") {
+    const c = await extractCamm(found.track, read, opts);
+    return cammProbe(c, index, videoInfo);
+  }
 
   if (found.kind === "gopro") {
     const g = await extractGoPro(index, found.track, read, opts);
@@ -330,6 +340,194 @@ export async function probeTelemetry(read: RangeReader, fileSize: number, opts: 
       eis: { active: false, label: "off" },
       video: videoInfo,
       notes: readout ? [`rolling shutter ${(readout * 1000).toFixed(1)} ms corrected`] : [],
+    },
+  };
+}
+
+type VideoInfo = CameraMotion["video"];
+
+export function videoInfoOf(video: Mp4Track): VideoInfo {
+  // Lens and orientation live in coded (sensor) orientation. The tkhd size is
+  // the track's size before its matrix (ISO 14496-12), i.e. coded: a portrait
+  // Pixel clip reads 3840×2160 with a 90° matrix (checked 25 Oct 2026), as do
+  // iPhone clips (AVFoundation's naturalSize + preferredTransform).
+  const coded = { w: Math.round(video.width), h: Math.round(video.height) };
+  const frameCount = video.samples.length;
+  const duration = video.duration || frameCount / 30;
+  return { width: coded.w, height: coded.h, rotation: video.rotation, frameCount, duration, fps: frameCount / duration };
+}
+
+/**
+ * Body rates already in the camera frame (rad/s, x right, y down, z
+ * forward) -> camera -> world orientation, integrated like the GoPro gyro
+ * (end-point rule; `lead` moves the result earlier, s).
+ */
+export function integrateRates(times: Float64Array, values: Float64Array, lead = 0): { times: Float64Array; quats: Float64Array } | null {
+  const n = times.length;
+  if (n < 2) return null;
+  const outT = new Float64Array(n);
+  const outQ = new Float64Array(4 * n);
+  let q: Quat = [1, 0, 0, 0];
+  for (let k = 0; k < n; k++) {
+    if (k > 0) {
+      const h = Math.min(0.05, Math.max(0, times[k] - times[k - 1]));
+      q = qnorm(qmul(q, qexp([values[3 * k] * h, values[3 * k + 1] * h, values[3 * k + 2] * h])));
+    }
+    outT[k] = times[k] - lead;
+    outQ.set(q, 4 * k);
+  }
+  return { times: outT, quats: outQ };
+}
+
+/** Typical phone main camera: 26 mm equivalent on a 4:3 sensor. */
+export const PHONE_DEFAULT_F35 = 26;
+
+/**
+ * Rectilinear lens for phone footage. Phones correct their distortion in
+ * camera, so a pinhole fits; the focal comes from the 35 mm-equivalent
+ * focal length when the file states it (iPhone moov/meta), else 26 mm.
+ * 35 mm equivalence is defined on the diagonal of a 4:3 still; a 16:9
+ * video keeps the sensor width, so f = f35 / 43.27 · (1.25 · long side).
+ * The picture check refines the focal (EIS crops the frame further).
+ */
+export function phoneLens(width: number, height: number, f35: number | null, source: string): LensModel {
+  const long = Math.max(width, height);
+  const f = ((f35 ?? PHONE_DEFAULT_F35) / 43.27) * 1.25 * long;
+  return { kind: "pinhole", width, height, fx: f, fy: f, cx: width / 2, cy: height / 2, k: [0, 0, 0, 0], source };
+}
+
+/** 35 mm-equivalent focal length from QuickTime metadata keys, when present. */
+export function focal35FromMeta(keys: Record<string, string>): number | null {
+  for (const k of ["com.apple.quicktime.camera.focal_length.35mm_equivalent", "com.android.capture.focal_length_35mm"]) {
+    const v = Number(keys[k]);
+    if (Number.isFinite(v) && v > 8 && v < 400) return v;
+  }
+  // "iPhone 15 Pro back camera 6.765mm f/1.78" names the real focal only.
+  return null;
+}
+
+function deviceName(index: Mp4Index): string | null {
+  const k = index.metaKeys;
+  const make = k["com.apple.quicktime.make"]?.trim();
+  const model = k["com.apple.quicktime.model"]?.trim();
+  if (model) return make && !model.startsWith(make) ? `${make} ${model}` : model;
+  return null;
+}
+
+function cammProbe(c: import("./camm.ts").CammRaw, index: Mp4Index, videoInfo: VideoInfo): TelemetryProbe {
+  const camera = "Phone motion data (CAMM)";
+  const { width: w, height: h } = videoInfo;
+  if (Math.abs(w / h - 2) < 0.02) {
+    return { status: "unusable", source: "camm", camera, reason: "360° (equirectangular) footage: gyro stabilisation needs a normal lens", eisActive: false };
+  }
+  let times: Float64Array;
+  let quats: Float64Array;
+  const notes: string[] = [];
+  if (c.gyro && c.gyro.times.length >= 10) {
+    const r = integrateRates(c.gyro.times, c.gyro.values)!;
+    times = r.times;
+    quats = r.quats;
+    notes.push("orientation integrated from the CAMM gyro");
+  } else if (c.orientation && c.orientation.times.length >= 10) {
+    times = Float64Array.from(c.orientation.times);
+    quats = Float64Array.from(c.orientation.values);
+    qcontinuous(quats);
+    notes.push("CAMM orientation");
+  } else {
+    return { status: "unusable", source: "camm", camera, reason: "the CAMM track has no gyro or orientation samples", eisActive: false };
+  }
+  const f35 = focal35FromMeta(index.metaKeys);
+  const lens = phoneLens(w, h, f35, f35 ? `rectilinear, ${f35} mm equivalent from file` : "rectilinear, focal estimated");
+  const readout = c.readoutNs ? c.readoutNs / 1e9 : 0;
+  if (readout) notes.push(`rolling shutter ${(readout * 1000).toFixed(1)} ms from CAMM`);
+  const dev = deviceName(index);
+  return {
+    status: "ok",
+    motion: {
+      source: "camm",
+      camera: dev ? `${camera} · ${dev}` : camera,
+      times,
+      quats,
+      readout,
+      timeOffset: 0,
+      lens,
+      down: null,
+      eis: { active: false, label: "off" },
+      video: videoInfo,
+      notes,
+    },
+  };
+}
+
+/**
+ * Camera motion from a sidecar motion log for the video in `read`. The
+ * log runs on its own clock: the first guess for the offset (telemetry
+ * time = media time + timeOffset) comes from the two wall clocks when both
+ * are known (log start, video creation time), else the log is taken to
+ * start with the video. medium.ts then syncs it to the picture.
+ */
+export async function probeWithLog(read: RangeReader, fileSize: number, log: ImuLog): Promise<TelemetryProbe> {
+  const camera = log.format === "gcsv" ? "Motion log (.gcsv)" : `Motion log (${log.label})`;
+  let index;
+  try {
+    index = await readMp4Index(read, fileSize);
+  } catch (e) {
+    return { status: "none", reason: `container not readable (${e instanceof Error ? e.message : String(e)})` };
+  }
+  if (!index) return { status: "none", reason: "not an MP4/MOV file" };
+  const video = videoTrackOf(index);
+  if (!video || !video.samples.length) return { status: "none", reason: "no video track" };
+  const videoInfo = videoInfoOf(video);
+  const integrated = integrateRates(log.gyro.times, log.gyro.values);
+  if (!integrated) return { status: "unusable", source: "imu-log", camera, reason: "the motion log has too few gyro samples", eisActive: false };
+  const { width: w, height: h } = videoInfo;
+  let lens: LensModel;
+  const info = (log.lensInfo ?? "").toLowerCase();
+  if (/wide|fisheye|super|ultra/.test(info) && log.format === "gcsv" && !/linear/.test(info)) {
+    // Action-cam loggers (RunCam, Caddx, ...): fisheye, about 150° across the diagonal, refined by the picture check.
+    const th = (150 * Math.PI) / 360;
+    const f = Math.hypot(w, h) / 2 / th;
+    lens = { kind: "fisheye", width: w, height: h, fx: f, fy: f, cx: w / 2, cy: h / 2, k: [0, 0, 0, 0], source: `generic fisheye (${log.lensInfo})` };
+  } else {
+    const f35 = focal35FromMeta(index.metaKeys);
+    lens = phoneLens(w, h, f35, f35 ? `rectilinear, ${f35} mm equivalent from file` : "rectilinear, focal estimated");
+  }
+  const notes = [...log.notes];
+  if (log.device) notes.unshift(`logged by ${log.device}`);
+  let timeOffset = 0;
+  if (log.wallStart !== null && index.creationTime !== null) {
+    const off = index.creationTime - log.wallStart;
+    const logEnd = log.gyro.times[log.gyro.times.length - 1];
+    // Only when it puts the clip inside the log (creation times are whole seconds, and some phones stamp the end).
+    if (off > -2 && off < logEnd + 2) {
+      timeOffset = off;
+      notes.push(`log clock placed by the wall clocks (${off.toFixed(1)} s into the log)`);
+    }
+  }
+  const coverStart = log.gyro.times[0] - timeOffset;
+  const coverEnd = log.gyro.times[log.gyro.times.length - 1] - timeOffset;
+  if (coverEnd < 0.5 || coverStart > videoInfo.duration - 0.5) notes.push("the log may not cover this clip");
+  // Picture sync range: ±3 s around a wall-clock placement, else anywhere the clip fits inside the log.
+  const logStart = log.gyro.times[0], logEnd = log.gyro.times[log.gyro.times.length - 1];
+  const fitLo = logStart - 1, fitHi = Math.max(fitLo, logEnd - videoInfo.duration + 1);
+  const syncRange: [number, number] = timeOffset !== 0 ? [Math.max(fitLo, timeOffset - 3), Math.min(fitHi, timeOffset + 3)] : [fitLo, Math.min(fitHi, fitLo + 600)];
+  if (syncRange[1] < syncRange[0]) syncRange[1] = syncRange[0];
+  const dev = deviceName(index);
+  return {
+    status: "ok",
+    motion: {
+      syncRange,
+      source: "imu-log",
+      camera: dev ? `${camera} · ${dev}` : camera,
+      times: integrated.times,
+      quats: integrated.quats,
+      readout: log.readout ?? 0,
+      timeOffset,
+      lens,
+      down: null,
+      eis: { active: false, label: "off" },
+      video: videoInfo,
+      notes,
     },
   };
 }

@@ -14,11 +14,13 @@ import { computeStabilizedPath } from "./stabilize.ts";
 export type AnalyzeOptions = {
   /** Gyro clips: also run the hybrid pass before returning (see refineHybrid for the two-step flow). */
   hybrid?: boolean;
+  /** A motion log recorded next to the clip (.gcsv, Sensor Logger CSV): used instead of the file's own telemetry. */
+  motionLog?: File | null;
 };
 
 export async function analyzeAny(file: File, forceVisual: boolean, onProgress: (fraction: number, frames: number) => void, signal: AbortSignal, options: AnalyzeOptions = {}): Promise<AnalysisResult> {
   const t0 = performance.now();
-  const probe = await probeFile(file, signal);
+  const probe = await probeFile(file, signal, options.motionLog);
   if (probe.status === "ok" && !forceVisual) {
     // Picture check: air vs underwater lens, and whether the gyro matches the picture at all.
     try {

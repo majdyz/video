@@ -6,7 +6,7 @@ import { analyzeAny, refineHybrid, solveAny } from "./analysis-run.ts";
 import type { AnalysisResult, Plan, SolveParams } from "./plan.ts";
 
 export type WorkerRequest =
-  | { type: "analyze"; id: number; file: File; forceVisual: boolean; hybrid?: boolean }
+  | { type: "analyze"; id: number; file: File; forceVisual: boolean; hybrid?: boolean; motionLog?: File | null }
   /** Hybrid pass on the loaded gyro analysis (same file); later solves use it. */
   | { type: "refine"; id: number }
   | { type: "solve"; id: number; params: SolveParams }
@@ -43,7 +43,7 @@ scope.onmessage = async (e: MessageEvent<WorkerRequest>) => {
     result = null;
     file = msg.file;
     try {
-      const r = await analyzeAny(msg.file, msg.forceVisual, (fraction, frames) => scope.postMessage({ type: "progress", id: msg.id, fraction, frames }), abort.signal, { hybrid: msg.hybrid });
+      const r = await analyzeAny(msg.file, msg.forceVisual, (fraction, frames) => scope.postMessage({ type: "progress", id: msg.id, fraction, frames }), abort.signal, { hybrid: msg.hybrid, motionLog: msg.motionLog });
       result = r;
       // Structured clone (no transfer): the worker keeps the arrays for solves.
       scope.postMessage({ type: "analysis", id: msg.id, result: r });

@@ -1,17 +1,18 @@
 // What the analysis produced and how a frame is warped, for both paths:
-//   gyro   — the file carries camera orientation (GoPro gpmd, DJI djmd):
+//   gyro   — the file carries camera orientation (GoPro gpmd, DJI djmd,
+//            CAMM) or the user added a motion log (.gcsv, Sensor Logger):
 //            rotation-exact stabilisation through the lens, no decode pass.
 //   visual — feature tracking (v2) for phones, re-encoded clips, EIS-on DJI.
 
 import { gyroWarpFnAtTime, type GyroParams, type GyroPlan } from "./gyro/gyro-stabilize.ts";
 import type { ResidualMotion } from "./gyro/hybrid.ts";
-import type { CameraMotion, TelemetryProbe } from "./gyro/telemetry.ts";
+import type { CameraMotion, MotionSource, TelemetryProbe } from "./gyro/telemetry.ts";
 import type { WarpFn } from "./mesh-renderer.ts";
 import { warpFnAtTime, type MotionAnalysis, type StabilizedPath } from "./stabilize.ts";
 
 /** Why the visual path was used (shown to the user). */
 export type TelemetryNote =
-  | { status: "unusable"; source: "gopro" | "dji"; camera: string; reason: string; eisActive: boolean }
+  | { status: "unusable"; source: MotionSource; camera: string; reason: string; eisActive: boolean }
   | { status: "none"; reason: string }
   | { status: "declined"; camera: string };
 
