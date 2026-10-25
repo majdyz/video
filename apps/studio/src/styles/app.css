@@ -1542,6 +1542,22 @@ a {
   .panel {
     min-height: 0;
   }
+  /* 390 px of height: the processing order would squeeze the tool panel to nothing. */
+  .chain {
+    display: none !important;
+  }
+  .controls {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas: "tabs" "panel" "export";
+    gap: var(--s-3);
+    padding: var(--s-3);
+  }
+  .tab {
+    height: 40px;
+  }
+  .export-btn {
+    height: 44px;
+  }
 }
 
 @media (min-width: 1280px) {
