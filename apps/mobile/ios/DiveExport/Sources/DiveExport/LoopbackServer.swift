@@ -43,7 +43,8 @@ public final class LoopbackServer {
                 let params = NWParameters.tcp
                 params.allowLocalEndpointReuse = true
                 params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
-                params.acceptLocalOnly = true
+                // Not acceptLocalOnly: it refuses loopback peers (connections were
+                // reset before reaching the handler). Binding to 127.0.0.1 is the guard.
                 let listener = try NWListener(using: params)
                 var done = false
                 listener.stateUpdateHandler = { [weak self] state in

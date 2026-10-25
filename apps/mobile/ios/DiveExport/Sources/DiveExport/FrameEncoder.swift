@@ -220,7 +220,14 @@ public final class FrameEncoder {
                 pendingAudio = next
             }
             guard let sample = pendingAudio else { return }
-            if CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(sample), limit) > 0 { return }
+            // Readers emit attachment-only marker buffers (no samples, invalid
+            // timestamp, e.g. trim info): drop them.
+            if CMSampleBufferGetNumSamples(sample) == 0 {
+                pendingAudio = nil
+                continue
+            }
+            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+            if pts.isValid && CMTimeCompare(pts, limit) > 0 { return }
             pendingAudio = nil
             if !input.append(sample) {
                 finishAudio(failed: true)
@@ -283,7 +290,7 @@ public final class FrameEncoder {
             let deadline = Date().addingTimeInterval(30)
             while !audioFinished {
                 pumpAudio(upTo: end)
-                if let p = pendingAudio, CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(p), end) > 0 { break }
+                if let p = pendingAudio, CMSampleBufferGetPresentationTimeStamp(p).isValid, CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(p), end) > 0 { break }
                 if writer.status == .failed || Date() > deadline { audioFailed = true; break }
                 if !audioFinished { usleep(1000) }
             }
