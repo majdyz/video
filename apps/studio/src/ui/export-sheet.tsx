@@ -82,7 +82,7 @@ export function ExportSheet({
   return (
     <Sheet open={open} onClose={onClose} title={exp.state === "done" ? "Ready" : "Export"} locked={running} className="sheet--export">
       <div className="export">
-        <div className={`export__preview${hasThumb ? " has-frame" : ""}`} style={{ aspectRatio: String(aspect), height: `min(34dvh, calc((min(100vw, 460px) - 48px) / ${aspect.toFixed(4)}))` }}>
+        <div hidden={exp.state === "idle" || exp.state === "error"} className={`export__preview${hasThumb ? " has-frame" : ""}`} style={{ aspectRatio: String(aspect), height: `min(34dvh, calc((min(100vw, 460px) - 48px) / ${aspect.toFixed(4)}))` }}>
           <canvas ref={thumbRef} />
           {!hasThumb && (
             <div className="export__placeholder">

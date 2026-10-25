@@ -584,6 +584,9 @@ a {
   gap: var(--s-3);
   transition: opacity var(--dur-2) var(--ease-out);
 }
+.panel.is-off .slider__fill {
+  background: var(--track-fill-quiet);
+}
 .panel.is-off .panel__body {
   opacity: 0.42;
 }
