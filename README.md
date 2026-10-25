@@ -132,6 +132,8 @@ explanation and links.
 ```
 .
 ├── apps/
+│   ├── studio/                   unified app — base /video/studio/
+│   ├── mobile/                   Capacitor iOS + Android shell around studio
 │   ├── aqua-fix/                 colour corrector — base /video/aqua-fix/
 │   └── motion-fix/               stabiliser     — base /video/motion-fix/
 ├── packages/
@@ -163,6 +165,30 @@ pnpm deploy   # runs pnpm build then gh-pages -d dist
 ```
 
 The `gh-pages` branch is served at `https://majdyz.github.io/video/`.
+
+## Mobile builds
+
+`apps/mobile` wraps the Studio in Capacitor 8 for iOS and Android: the same
+web code, bundled offline in the app (no remote URL), plus a native plugin for
+original-quality picking from Photos/Files, a hardware encoder fed by the
+renderer (AVAssetWriter / MediaCodec + MediaMuxer, audio copied from the
+source), saving to Photos/gallery, the share sheet, and background export
+(iOS 26 continued-processing task, Android foreground service). Design,
+platform notes and the store checklist: [apps/mobile/MOBILE.md](apps/mobile/MOBILE.md).
+
+```bash
+pnpm --filter mobile sync       # Studio → apps/mobile/www, then cap sync ios + android
+pnpm --filter mobile assets     # icons / splash from apps/studio/public/icon.svg
+pnpm --filter mobile brand      # after editing apps/mobile/app.config.json (app id, name, version)
+```
+
+Native builds run on GitHub Actions (`.github/workflows/mobile.yml`): push to
+the `mobile` branch (`git push origin HEAD:mobile`) or open a PR. Artifacts:
+`deepfix-android-debug` (debug APK) and `deepfix-ios-simulator` (unsigned
+simulator app), after JVM tests of the Android loopback endpoint and
+`xcodebuild test` of the iOS export package on a simulator. No signing or
+store upload yet; MOBILE.md lists the Apple/Google accounts, certificates and
+secrets those need. The web build and its URLs are unchanged.
 
 ## Install on iPhone
 

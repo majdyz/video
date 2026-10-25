@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { IconFilm } from "./icons";
 
 /** No clip yet: the stage area itself is the drop target, with one button to open a file. */
-export function EmptyState({ onFile, onSample, busy, accept }: { onFile: (f: File) => void; onSample: () => void; busy: string | null; accept: string }) {
+export function EmptyState({ onFile, onPick, onSample, busy, accept }: { onFile: (f: File) => void; onPick?: (source: "photos" | "files") => void; onSample: () => void; busy: string | null; accept: string }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
   return (
@@ -22,9 +22,14 @@ export function EmptyState({ onFile, onSample, busy, accept }: { onFile: (f: Fil
         <h2 className="empty__title" aria-live="polite">{busy ?? "Open a dive video or photo"}</h2>
         <p className="empty__sub">MP4 or MOV clips, JPEG, PNG or HEIC photos. Pick one from your camera roll or drop it here; it never leaves this device.</p>
         <div className="empty__actions">
-          <button type="button" className="btn btn--strong" onClick={() => inputRef.current?.click()} disabled={!!busy}>
+          <button type="button" className="btn btn--strong" onClick={() => (onPick ? onPick("photos") : inputRef.current?.click())} disabled={!!busy}>
             Open video or photo
           </button>
+          {onPick && (
+            <button type="button" className="btn btn--quiet" onClick={() => onPick("files")} disabled={!!busy}>
+              Browse files
+            </button>
+          )}
           <button type="button" className="btn btn--quiet empty__sample" onClick={onSample} disabled={!!busy}>
             Use sample clip
           </button>

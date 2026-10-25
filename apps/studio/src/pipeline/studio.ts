@@ -31,6 +31,7 @@ import { readExif, withExif } from "./photo-exif.ts";
 import { canvasFrameFix } from "@dive-tools/shared/frame-orientation.ts";
 import { detectFootage, FOOTAGE_LABEL, FOOTAGE_MODE, isHdrProfile, parseCodec, resolveFootage, type FootageChoice, type FootageInfo, type FootageProfile } from "./footage.ts";
 import type { CalibKind, SignalCalibration } from "./signal-probe.ts";
+import { isNativeShell, nativeFileOf, type NativeFileRef } from "../native/registry.ts";
 
 type ColourMod = typeof import("./colour.ts");
 type MediaMod = typeof import("./media.ts");
@@ -45,6 +46,9 @@ const loadColour = (): Promise<ColourMod> => import("./colour.ts");
 const loadMedia = (): Promise<MediaMod> => import("./media.ts");
 const loadMotion = (): Promise<MotionMod> => import("./motion.ts");
 const loadDewarp = (): Promise<DewarpMod> => import("./dewarp.ts");
+type NativeMod = typeof import("../native/bridge.ts");
+/** The Capacitor bridge helpers: only ever loaded inside the native app (apps/mobile). */
+const loadNative = (): Promise<NativeMod> => import("../native/bridge.ts");
 
 /** Preview renders at the stage's device-pixel size, capped; never at 4K unless zoomed in. */
 const PREVIEW_MAX_PX = 1600;
@@ -55,7 +59,12 @@ const OPFS_PREFIX = "studio-export-";
 const LIVE_EVERY_MS = 250;
 
 export type MediaKind = "video" | "photo";
-export type ExportMode = "offline" | "realtime" | "photo";
+/**
+ * offline: WebCodecs decode → render → encode in the page; realtime: WebKit
+ * canvas recorder; native: decode + render in the page, encode in the app
+ * (AVAssetWriter / MediaCodec, apps/mobile); photo: one JPEG.
+ */
+export type ExportMode = "offline" | "realtime" | "native" | "photo";
 
 export type StabStatus = {
   state: "off" | "analysing" | "solving" | "ready" | "error";
@@ -73,7 +82,24 @@ export type ExportStatus = {
   etaSec: number | null;
   detail: string;
   message: string | null;
-  result: { blob: Blob; name: string; url: string; frames: number; elapsedMs: number; audioIncluded: boolean; width: number; height: number } | null;
+  result: ExportResult | null;
+};
+
+export type ExportResult = {
+  /** The file in page memory (web exports); null when the native encoder wrote it. */
+  blob: Blob | null;
+  /** The file in the app sandbox (native exports, or a web export once saved/shared in the app). */
+  native: NativeFileRef | null;
+  bytes: number;
+  mime: string;
+  name: string;
+  /** Object URL (web) or WebView URL of the sandbox file (native). */
+  url: string;
+  frames: number;
+  elapsedMs: number;
+  audioIncluded: boolean;
+  width: number;
+  height: number;
 };
 
 export type Snapshot = {
@@ -482,10 +508,11 @@ export class Studio {
       const fallback: ClipInfo = { rot: 0, displayW: v.videoWidth, displayH: v.videoHeight, codedW: v.videoWidth, codedH: v.videoHeight, fps: 30, duration: v.duration, codec: null, hasAudio: false };
       const clip = info ?? fallback;
       e.lockGlobals(null);
-      const mode = this.pickExportMode(e);
+      const mode = this.pickExportMode(e, file);
       // The offline exporter decodes with WebCodecs; a clip the <video> element plays may still be beyond it.
-      const canExport = mode === "realtime" || (isWebCodecsSupported() && clip.canDecode !== false);
-      if (mode === "offline" && clip.canDecode === false) console.info("[export] WebCodecs can't decode this clip here; export disabled");
+      const decodable = isWebCodecsSupported() && clip.canDecode !== false;
+      const canExport = mode === "realtime" || ((mode === "native" || mode === "offline") && decodable);
+      if (mode !== "realtime" && clip.canDecode === false) console.info("[export] WebCodecs can't decode this clip here; export disabled");
       this.set({ info: clip, duration: v.duration || clip.duration, phase: "ready", currentTime: 0, exportMode: mode, canExport });
       await this.updateDewarp();
       // First frame graded before anything shows, so the clip never flashes uncorrected.
@@ -576,7 +603,10 @@ export class Studio {
     }
   }
 
-  private pickExportMode(e: Engine): ExportMode {
+  private pickExportMode(e: Engine, file: File): ExportMode {
+    // In the app, a clip picked natively is encoded natively (decode still
+    // runs in the page). `?native=0` keeps the web paths for comparison.
+    if (isNativeShell() && nativeFileOf(file) && typeof VideoDecoder !== "undefined" && new URLSearchParams(location.search).get("native") !== "0") return "native";
     const forced = wantRealtime();
     const canRt = isRealtimeExportSupported(e.backend.canvas);
     if (forced !== null) return forced && canRt ? "realtime" : "offline";
@@ -978,7 +1008,7 @@ export class Studio {
 
   private beginExport(): AbortController {
     const old = this.snap.exp.result;
-    if (old) URL.revokeObjectURL(old.url);
+    if (old?.blob) URL.revokeObjectURL(old.url);
     this.exporting = true;
     this.previewOn = false;
     this.video?.pause();
@@ -1026,18 +1056,25 @@ export class Studio {
       const total = this.snap.duration || info.duration;
       const bitrate = bitrateFromSource(file.size, total) ?? pickBitrate(info.displayW, info.displayH, info.fps);
       this.dropStill();
-      const res = this.snap.exportMode === "realtime"
-        ? await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl)
-        : await this.runOffline(media, file, bitrate, total, colourOn, ctrl);
-      console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (${this.snap.exportMode}), ${res.blob.type}, audio ${res.audioIncluded ? "kept" : "dropped"}`);
-      this.setExp({
-        state: "done",
-        progress: 1,
-        etaSec: 0,
-        frames: res.frames,
-        detail: "",
-        result: { ...res, name: this.outName(res.blob.type === "video/webm" ? "webm" : "mp4"), url: URL.createObjectURL(res.blob), width: info.displayW, height: info.displayH },
-      });
+      const mode = this.snap.exportMode;
+      if (mode === "native") {
+        const res = await this.runNative(media, file, info, bitrate, total, colourOn, ctrl);
+        console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (native), audio ${res.audioIncluded ? "kept" : "dropped"}`);
+        this.setExp({ state: "done", progress: 1, etaSec: 0, frames: res.frames, detail: "", result: res });
+      } else {
+        const res = mode === "realtime"
+          ? await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl)
+          : await this.runOffline(media, file, bitrate, total, colourOn, ctrl);
+        console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (${mode}), ${res.blob.type}, audio ${res.audioIncluded ? "kept" : "dropped"}`);
+        this.setExp({
+          state: "done",
+          progress: 1,
+          etaSec: 0,
+          frames: res.frames,
+          detail: "",
+          result: { ...res, native: null, bytes: res.blob.size, mime: res.blob.type, name: this.outName(res.blob.type === "video/webm" ? "webm" : "mp4"), url: URL.createObjectURL(res.blob), width: info.displayW, height: info.displayH },
+        });
+      }
     } catch (err) {
       const help = err instanceof Error && /not decodable/i.test(err.message) ? codecHelp(info.codecString) : null;
       failure = help ? new Error(help) : err;
@@ -1176,6 +1213,151 @@ export class Studio {
       },
     );
     return { blob: result.blob, frames: result.frames, elapsedMs: performance.now() - started, audioIncluded: result.audioIncluded };
+  }
+
+  /**
+   * Native export (apps/mobile): the page decodes (WebCodecs via mediabunny)
+   * and renders exactly as the offline path does, then hands each rendered
+   * frame's pixels to the app's hardware encoder (AVAssetWriter on iOS,
+   * MediaCodec + MediaMuxer on Android) over a loopback connection; the app
+   * copies the audio track from the source file itself. No canvas →
+   * VideoFrame → VideoEncoder hop in WebKit, and the app can keep the export
+   * alive in the background (iOS 26 continued-processing task, Android
+   * foreground service). See apps/mobile/MOBILE.md.
+   */
+  private async runNative(media: MediaMod, file: File, info: ClipInfo, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController): Promise<ExportResult> {
+    const e = this.engine, geo = this.geo;
+    const src = nativeFileOf(file);
+    if (!src) throw new Error("This clip was not opened from the app's picker");
+    const nat = await loadNative();
+    const caps = await nat.nativeInfo();
+    const geoOn = this.geometryActive();
+    // Footage profile, as on the offline path (decoded frames re-tagged when the browser would convert them).
+    const footage = this.footageMode("frame");
+    const hp = this.highPrecision(footage);
+    const retag = footage !== 0 && this.signal?.frame === "retag";
+    await this.engineForExport();
+    const outName = this.outName("mp4");
+    let session: Awaited<ReturnType<typeof nat.DiveNative.startExport>> | null = null;
+    let sink: InstanceType<typeof nat.NativeFrameSink> | null = null;
+    let t0: number | null = null;
+    let width = info.displayW, height = info.displayH;
+    const started = performance.now();
+    let frames = 0, lastUi = 0, lastLive = 0;
+    const onAbort = () => { if (session) void nat.DiveNative.cancelExport({ id: session.id }).catch(() => undefined); };
+    ctrl.signal.addEventListener("abort", onAbort, { once: true });
+    // The user can stop the export from the iOS Live Activity; the system can expire it.
+    const stateSub = await nat.DiveNative.addListener("exportState", (ev) => {
+      if (!session || ev.id !== session.id) return;
+      console.info(`[export] native state: ${ev.state}${ev.message ? ` (${ev.message})` : ""}`);
+      if (ev.state === "cancelled-by-user" || ev.state === "background-expired") ctrl.abort();
+    });
+    try {
+      this.setExp({ state: "running", detail: "Rendering" });
+      for await (const { sample, info: fi } of media.decodeFrames(file, ctrl.signal)) {
+        let decoded = sample.toVideoFrame();
+        sample.close();
+        if (retag) {
+          const raw = await media.retagFrame(decoded).catch(() => null);
+          if (raw) {
+            decoded.close();
+            decoded = raw;
+          }
+        }
+        const frame = media.squarePixels(decoded);
+        try {
+          if (t0 === null) {
+            t0 = fi.timeSec;
+            width = fi.displayWidth;
+            height = fi.displayHeight;
+            session = await nat.DiveNative.startExport({
+              width,
+              height,
+              fps: info.fps || 30,
+              bitrate: Math.round(bitrate),
+              codec: caps.encoders.avc ? "avc" : "hevc",
+              keyFrameIntervalSec: 2,
+              durationSec: total,
+              audio: info.hasAudio ? { path: src.path, shiftSec: Math.max(0, t0) } : null,
+              title: `Exporting ${this.snap.fileName ?? "clip"}`,
+              subtitle: `${width}×${height}`,
+              outputName: outName,
+            });
+            sink = new nat.NativeFrameSink(session, (await nat.loopbackReachable()) ? "loopback" : "bridge");
+            console.info(`[export] native encoder ${caps.platform} ${width}×${height}, frames via ${sink.transport}, background: ${caps.background}`);
+          }
+          const timeSec = Math.max(0, fi.timeSec - t0);
+          const rot = ((fi.rotation / 90) % 4) as Rotation;
+          const ts = Math.round(timeSec * 1e6);
+          const dur = frame.duration ?? undefined;
+          let out: VideoFrame;
+          if (geoOn || !colourOn) {
+            geo!.resize(fi.displayWidth, fi.displayHeight);
+            geo!.render(frame, this.geoParams(fi.timeSec, rot as QuarterTurns), { texCoded: true, split: null, footage, highPrecision: hp });
+          }
+          if (!colourOn) {
+            out = new VideoFrame(geo!.canvas, { timestamp: ts, duration: dur });
+          } else {
+            const eng = e!;
+            let rotE: Rotation = rot;
+            if (geoOn) {
+              eng.upload(geo!.canvas, fi.displayWidth, fi.displayHeight, 0);
+              rotE = 0;
+            } else {
+              eng.upload(frame, frame.displayWidth, frame.displayHeight, rot);
+            }
+            if (frames === 0 || eng.inCutWindow(fi.timeSec)) await eng.analyzeNow(true).catch(() => undefined);
+            else eng.analyzeSoon();
+            eng.tick(fi.timeSec);
+            out = await eng.renderToFrame(rotE, ts, dur);
+          }
+          try {
+            await sink!.push(out, ts, dur);
+            frames++;
+            const now = performance.now();
+            if (now - lastLive > LIVE_EVERY_MS) {
+              lastLive = now;
+              await this.emitFrame(out);
+            }
+            if (now - lastUi > 250) {
+              lastUi = now;
+              const secs = (now - started) / 1000;
+              const fps = frames / secs;
+              const progress = total > 0 ? Math.min(1, timeSec / total) : 0;
+              const eta = progress > 0.02 ? (secs / progress) * (1 - progress) : null;
+              this.setExp({ frames, fps, progress, etaSec: eta, detail: `${width}×${height} · ${fps.toFixed(1)} fps · native encoder` });
+            }
+          } finally {
+            out.close();
+          }
+        } finally {
+          frame.close();
+        }
+      }
+      if (!session || !sink) throw new Error("Decoder produced no frames");
+      await sink.flush();
+      this.setExp({ detail: "Finishing file", progress: 1 });
+      const outFile = await nat.DiveNative.finishExport({ id: session.id });
+      return {
+        blob: null,
+        native: { path: outFile.path, name: outFile.name, mime: outFile.mime, size: outFile.size },
+        bytes: outFile.size,
+        mime: outFile.mime,
+        name: outFile.name,
+        url: nat.webPathOf(outFile.path),
+        frames,
+        elapsedMs: performance.now() - started,
+        audioIncluded: outFile.audioIncluded,
+        width,
+        height,
+      };
+    } catch (err) {
+      if (session) await nat.DiveNative.cancelExport({ id: session.id }).catch(() => undefined);
+      throw ctrl.signal.aborted ? new DOMException("Aborted", "AbortError") : err;
+    } finally {
+      ctrl.signal.removeEventListener("abort", onAbort);
+      void stateSub.remove();
+    }
   }
 
   /**
@@ -1319,7 +1501,7 @@ export class Studio {
         etaSec: 0,
         frames: 1,
         detail: "",
-        result: { blob, name: this.outName("jpg"), url: URL.createObjectURL(blob), frames: 1, elapsedMs: performance.now() - started, audioIncluded: true, width: W, height: H },
+        result: { blob, native: null, bytes: blob.size, mime: blob.type || "image/jpeg", name: this.outName("jpg"), url: URL.createObjectURL(blob), frames: 1, elapsedMs: performance.now() - started, audioIncluded: true, width: W, height: H },
       });
     } catch (err) {
       failure = err;
@@ -1336,7 +1518,7 @@ export class Studio {
   dismissExport(): void {
     if (this.exporting) return;
     const r = this.snap.exp.result;
-    if (r) URL.revokeObjectURL(r.url);
+    if (r?.blob) URL.revokeObjectURL(r.url);
     this.set({ exp: IDLE_EXPORT });
   }
 }

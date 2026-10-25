@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <!-- app_name / title_activity_main come from app.config.json (app/build.gradle resValue). -->
+    <string name="package_name">app.deepfix.dive</string>
+    <string name="custom_url_scheme">app.deepfix.dive</string>
+</resources>

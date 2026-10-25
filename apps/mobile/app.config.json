@@ -1,0 +1,8 @@
+{
+  "$comment": "Single place for the native app identity (placeholders until the store name is decided). After changing it run `pnpm --filter mobile brand` to push it into the iOS/Android projects. The web wordmark lives in apps/studio/src/brand.ts.",
+  "appId": "app.deepfix.dive",
+  "appName": "deepfix",
+  "version": "0.1.0",
+  "build": 1,
+  "backgroundColor": "#0a0a0b"
+}

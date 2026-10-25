@@ -1,0 +1,204 @@
+# Native app builds (apps/mobile, Capacitor around the Studio web build).
+#
+#   web      Studio unit tests, app-config check, offline web bundle (artifact `www`)
+#   android  JVM unit tests + debug APK (artifact `deepfix-android-debug`)
+#   ios      DiveExport package tests on an iOS simulator + unsigned simulator
+#            build of the app (artifact `deepfix-ios-simulator`)
+#
+# No signing, no store upload: see apps/mobile/MOBILE.md for what TestFlight /
+# Play internal testing need (accounts, certificates, secrets).
+name: Mobile
+
+on:
+  push:
+    branches: [mobile]
+    paths:
+      - "apps/mobile/**"
+      - "apps/studio/**"
+      - "apps/aqua-fix/src/**"
+      - "apps/aqua-fix/public/mediapipe/**"
+      - "apps/motion-fix/src/**"
+      - "apps/dewarp/src/**"
+      - "packages/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/mobile.yml"
+  pull_request:
+    paths:
+      - "apps/mobile/**"
+      - "apps/studio/**"
+      - "apps/aqua-fix/src/**"
+      - "apps/aqua-fix/public/mediapipe/**"
+      - "apps/motion-fix/src/**"
+      - "apps/dewarp/src/**"
+      - "packages/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/mobile.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+  PNPM_VERSION: "11.0.8"
+
+jobs:
+  web:
+    name: Web bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Studio unit tests
+        run: pnpm --filter studio test
+      - name: Native projects match app.config.json
+        run: node apps/mobile/scripts/apply-brand.mjs --check
+      - name: Build the offline bundle (relative base, no service worker)
+        run: pnpm --filter mobile build:web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: www
+          path: apps/mobile/www
+          retention-days: 3
+          if-no-files-found: error
+
+  android:
+    name: Android debug APK
+    needs: web
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: www
+          path: apps/mobile/www
+      - name: Capacitor sync (copies www, writes plugin config)
+        working-directory: apps/mobile
+        run: pnpm exec cap sync android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests + assemble
+        working-directory: apps/mobile/android
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deepfix-android-debug
+          path: apps/mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-test-reports
+          path: apps/mobile/android/app/build/reports/tests
+          if-no-files-found: ignore
+
+  ios:
+    name: iOS simulator build + tests
+    needs: web
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      SPM_DIR: ${{ github.workspace }}/.spm
+    defaults:
+      run:
+        # `pretty`: xcbeautify when the image has it, raw log otherwise.
+        shell: bash -eo pipefail {0}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (iOS 26 SDK for BGContinuedProcessingTask)
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then echo "::error::No Xcode 26 on this runner image"; ls -d /Applications/Xcode*.app; exit 1; fi
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: www
+          path: apps/mobile/www
+      - name: Capacitor sync (copies www, regenerates CapApp-SPM/Package.swift)
+        working-directory: apps/mobile
+        run: pnpm exec cap sync ios
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.SPM_DIR }}
+          key: spm-${{ runner.os }}-${{ hashFiles('apps/mobile/ios/App/CapApp-SPM/Package.swift', 'apps/mobile/ios/DiveExport/Package.swift', 'pnpm-lock.yaml') }}
+          restore-keys: spm-${{ runner.os }}-
+      - name: Pick a simulator
+        id: sim
+        run: |
+          ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; key=lambda k: [int(x) for x in k.split("iOS-")[-1].split("-")]; ids=[dev["udid"] for rt in sorted((k for k in d if "iOS" in k), key=key, reverse=True) for dev in d[rt] if dev["name"].startswith("iPhone")]; print(ids[0])')
+          echo "Simulator $ID"
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+      - name: DiveExport tests (encoder, loopback endpoint, pixel copy) on the simulator
+        working-directory: apps/mobile/ios/DiveExport
+        run: |
+          SCHEME=$(xcodebuild -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); s=(d.get("workspace") or d.get("project") or {}).get("schemes",[]); print("DiveExport-Package" if "DiveExport-Package" in s else "DiveExport")')
+          echo "Scheme $SCHEME"
+          pretty() { if command -v xcbeautify >/dev/null; then xcbeautify --renderer github-actions; else cat; fi; }
+          xcodebuild test \
+            -scheme "$SCHEME" \
+            -destination "id=${{ steps.sim.outputs.id }}" \
+            -clonedSourcePackagesDirPath "$SPM_DIR" \
+            -resultBundlePath "$RUNNER_TEMP/DiveExportTests.xcresult" \
+            | pretty
+      - name: Build the app for the simulator (unsigned)
+        working-directory: apps/mobile/ios/App
+        run: |
+          pretty() { if command -v xcbeautify >/dev/null; then xcbeautify --renderer github-actions; else cat; fi; }
+          xcodebuild build \
+            -project App.xcodeproj \
+            -scheme App \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            -clonedSourcePackagesDirPath "$SPM_DIR" \
+            CODE_SIGNING_ALLOWED=NO \
+            | pretty
+          cd "$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator"
+          ditto -c -k --keepParent App.app "$RUNNER_TEMP/deepfix-ios-simulator.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deepfix-ios-simulator
+          path: ${{ runner.temp }}/deepfix-ios-simulator.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ios-test-results
+          path: ${{ runner.temp }}/DiveExportTests.xcresult
+          if-no-files-found: ignore
