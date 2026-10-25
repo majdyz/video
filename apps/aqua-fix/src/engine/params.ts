@@ -116,9 +116,11 @@ export const DEHAZE_LUM = { lo: 0.05, hi: 0.2 };
  * to black blobs. `soft` is the width of the smooth max between the toe and
  * the line; `chroma` is the share of t that follows the measured haze colour
  * (per-channel floor) rather than neutral grey. Driven by HAZE_AUTO.lift ×
- * hazeWeight, so clear frames are untouched.
+ * hazeWeight, so clear frames are untouched. Pixels whose hue is far from the
+ * veil (yellow algae, an orange fish: they have escaped the cast) take a
+ * hue-preserving luminance ratio with `farKeep` less of the subtraction.
  */
-export const HAZE_LIFT = { floor: 0.25, soft: 0.12, chroma: 0.7 };
+export const HAZE_LIFT = { floor: 0.25, soft: 0.12, chroma: 0.7, farKeep: 0.6 };
 
 /**
  * Per-channel haze-lift subtraction: `lift` × a blend of the luminance black
@@ -488,7 +490,7 @@ export const CLAHE_BINS = 32;
  *  p12: confLo, confHi, cosLo, cosHi
  *  p15: knee, subLo, subHi, hueFarLo
  *  p16: hazeWeight, deepHaze, 0, 0
- *  p17: haze-lift subtraction per channel (hazeLiftT), 0
+ *  p17: haze-lift subtraction per channel (hazeLiftT), neutral subtraction (hazeLift·hazeBlack)
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -527,7 +529,7 @@ export function packUniforms(
   }
   u.set([params.knee, params.subLo, params.subHi, params.hueFarLo], 60);
   u.set([hazeWeight(params), deepHaze(params), 0, 0], 64);
-  u.set([...hazeLiftT(params, s.hazeLift), 0], 68);
+  u.set([...hazeLiftT(params, s.hazeLift), s.hazeLift * params.hazeBlack], 68);
   return u;
 }
 

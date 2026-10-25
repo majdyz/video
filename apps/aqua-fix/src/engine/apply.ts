@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 
 export type ApplyContext = {
@@ -165,7 +165,13 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   let hf = 1;
   if (tLift[0] + tLift[1] + tLift[2] > 0) {
     const y0 = luminance(out[0], out[1], out[2]);
-    for (let c = 0; c < 3; c++) out[c] *= hazeLiftRatio(out[c], tLift[c]);
+    // A pixel whose hue is far from the veil's (yellow algae, an orange
+    // fish) has escaped the cast: it takes the hue-preserving (luminance
+    // ratio) form, since per-channel subtraction shifts a hue toward its
+    // dominant channel (yellow → orange).
+    const far = hueFar(pa, pb, p);
+    const rY = hazeLiftRatio(y0, s.hazeLift * p.hazeBlack * (1 - HAZE_LIFT.farKeep));
+    for (let c = 0; c < 3; c++) out[c] *= hazeLiftRatio(out[c], tLift[c]) + (rY - hazeLiftRatio(out[c], tLift[c])) * far;
     hf = y0 > 1e-6 ? luminance(out[0], out[1], out[2]) / y0 : 1;
   }
   // Levels on luminance, ratio-preserving.

@@ -18,6 +18,7 @@ const float DEHAZE_LUM_LO = ${DEHAZE_LUM.lo.toFixed(4)};
 const float DEHAZE_LUM_HI = ${DEHAZE_LUM.hi.toFixed(4)};
 const float HAZE_LIFT_FLOOR = ${HAZE_LIFT.floor.toFixed(4)};
 const float HAZE_LIFT_SOFT = ${HAZE_LIFT.soft.toFixed(4)};
+const float HAZE_LIFT_FAR_KEEP = ${HAZE_LIFT.farKeep.toFixed(4)};
 const float VIVID_C_LO = ${VIVID.cLo.toFixed(4)};
 const float VIVID_C_HI = ${VIVID.cHi.toFixed(4)};
 const float VIVID_KEEP = ${VIVID.keep.toFixed(4)};
@@ -328,7 +329,9 @@ vec3 grade(vec3 src, vec2 uv) {
   float hf = 1.0;
   if (tc.r + tc.g + tc.b > 0.0) {
     float y0 = lum(o);
-    o *= vec3(hazeLiftRatio(o.r, tc.r), hazeLiftRatio(o.g, tc.g), hazeLiftRatio(o.b, tc.b));
+    // Far-hue pixels take the hue-preserving luminance ratio (see apply.ts).
+    vec3 rc = vec3(hazeLiftRatio(o.r, tc.r), hazeLiftRatio(o.g, tc.g), hazeLiftRatio(o.b, tc.b));
+    o *= mix(rc, vec3(hazeLiftRatio(y0, p[17].w * (1.0 - HAZE_LIFT_FAR_KEEP))), hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma));
     hf = y0 > 1e-6 ? lum(o) / y0 : 1.0;
   }
   // Levels on luminance, ratio-preserving.
@@ -613,7 +616,8 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   var hf = 1.0;
   if (tc.r + tc.g + tc.b > 0.0) {
     let y0 = lum(o);
-    o *= vec3(hazeLiftRatio(o.r, tc.r), hazeLiftRatio(o.g, tc.g), hazeLiftRatio(o.b, tc.b));
+    let rc = vec3(hazeLiftRatio(o.r, tc.r), hazeLiftRatio(o.g, tc.g), hazeLiftRatio(o.b, tc.b));
+    o *= mix(rc, vec3(hazeLiftRatio(y0, p[17].w * (1.0 - HAZE_LIFT_FAR_KEEP))), hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma));
     hf = select(1.0, lum(o) / y0, y0 > 1e-6);
   }
   var Y = lum(o);
