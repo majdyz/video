@@ -2,6 +2,7 @@
 // GRADE_WGSL (see grade-shader.ts); this file holds the plumbing: full-screen
 // triangle, source rotation, and the analysis downscale pass.
 import { DETAIL_GLSL, DETAIL_WGSL, GRADE_GLSL, GRADE_WGSL } from "./grade-shader.ts";
+import { TP_FINAL_GLSL, TP_FINAL_WGSL } from "./temporal.ts";
 
 // Upright uv → source uv for a clockwise quarter-turn count r (0..3).
 // r=1: the source must be rotated 90° CW to appear upright, so upright
@@ -26,21 +27,33 @@ export const GLSL_FRAGMENT = `#version 300 es
 precision highp float;
 precision highp int;
 precision highp sampler2D;
-layout(std140) uniform Params { vec4 p[23]; };
+layout(std140) uniform Params { vec4 p[24]; };
 uniform sampler2D u_source;
 uniform sampler2D u_data0;
 uniform sampler2D u_data1;
 uniform sampler2D u_data2;
+uniform sampler2D u_tpF0;
+uniform sampler2D u_tpF1;
+uniform sampler2D u_tpFlow;
+uniform sampler2D u_tpPrev;
 in vec2 v_uv;
 out vec4 o_color;
 ${ROTATE_GLSL}
 ${GRADE_GLSL}
 ${DETAIL_GLSL}
+${TP_FINAL_GLSL}
 void main() {
   int rot = int(p[0].x + 0.5);
   vec2 suv = rotateUV(v_uv, rot);
   vec3 src = texture(u_source, suv).rgb;
-  o_color = vec4(gradeD(src, detailBase(suv, src), v_uv), 1.0);
+  // Temporal layer (temporal.ts): tracked subject mask as prior, then the
+  // anti-crawl correction and the dark-flat-water denoise.
+  bool tp = p[23].x > 0.5 && p[23].y > 0.5;
+  g_subjPrior = tp ? texture(u_tpF0, tpUV(v_uv)).a : 0.0;
+  vec3 base = detailBase(suv, src);
+  vec3 col = gradeD(src, base, v_uv);
+  if (tp) col = temporalStage(col, src, base, v_uv);
+  o_color = vec4(col, 1.0);
 }`;
 
 // Box-filtered downscale of the (rotated) source for CPU analysis. Taps a
@@ -78,13 +91,17 @@ void main() {
 }`;
 
 export const WGSL_GRADE = `
-struct Params { p: array<vec4<f32>, 23> };
+struct Params { p: array<vec4<f32>, 24> };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var u_source: texture_2d<f32>;
 @group(0) @binding(3) var u_data0: texture_2d<f32>;
 @group(0) @binding(4) var u_data1: texture_2d<f32>;
 @group(0) @binding(5) var u_data2: texture_2d<f32>;
+@group(0) @binding(6) var u_tpF0: texture_2d<f32>;
+@group(0) @binding(7) var u_tpF1: texture_2d<f32>;
+@group(0) @binding(8) var u_tpFlow: texture_2d<f32>;
+@group(0) @binding(9) var u_tpPrev: texture_2d<f32>;
 struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
   var p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
@@ -96,11 +113,19 @@ struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 ${ROTATE_WGSL}
 ${GRADE_WGSL}
 ${DETAIL_WGSL}
+${TP_FINAL_WGSL}
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let rot = u32(params.p[0].x + 0.5);
   let suv = rotateUV(in.uv, rot);
   let src = textureSampleLevel(u_source, samp, suv, 0.0).rgb;
-  return vec4(gradeD(src, detailBase(suv, src), in.uv), 1.0);
+  let tp = params.p[23].x > 0.5 && params.p[23].y > 0.5;
+  let prior = textureSampleLevel(u_tpF0, samp, tpUV(in.uv), 0.0).a;
+  g_subjPrior = select(0.0, prior, tp);
+  let base = detailBase(suv, src);
+  var col = gradeD(src, base, in.uv);
+  let tcol = temporalStage(col, src, base, in.uv);
+  if (tp) { col = tcol; }
+  return vec4(col, 1.0);
 }`;
 
 export const WGSL_DOWNSCALE = `

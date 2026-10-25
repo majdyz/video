@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, VIVID } from "./params.ts";
+import { TEMPORAL, CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, VIVID } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 import { BACKDROP } from "./backdrop.ts";
 
@@ -68,6 +68,11 @@ const float SKIN_MIX = ${SKIN.mix.toFixed(4)};
 const float SKIN_W_LO = ${SKIN.wLo.toFixed(4)};
 const float SKIN_W_HI = ${SKIN.wHi.toFixed(4)};
 const float SKIN_C_MIN = ${SKIN.cMin.toFixed(4)};
+const float TP_PRIOR_LO = ${TEMPORAL.priorLo.toFixed(4)};
+const float TP_PRIOR_HI = ${TEMPORAL.priorHi.toFixed(4)};
+const float TP_PRIOR_IN = ${TEMPORAL.priorIn.toFixed(4)};
+const float TP_IN_LO = ${TEMPORAL.inLo.toFixed(4)};
+const float TP_IN_HI = ${TEMPORAL.inHi.toFixed(4)};
 const float DG_K = ${DETAIL_GUARD.k.toFixed(4)};
 const float DG_EPS = ${DETAIL_GUARD.eps.toFixed(5)};
 const float DG_R_MIN = ${DETAIL_GUARD.rMin.toFixed(4)};
@@ -362,7 +367,11 @@ float detailRatio(vec3 src, vec3 baseLin) {
   float ys = lum(srgbToLinear(src));
   return clamp((ys + DG_EPS) / (lum(baseLin) + DG_EPS), DG_R_MIN, DG_R_MAX);
 }
+// Temporal layer hooks (temporal.ts): subject prior in, raw subject mask out.
+float g_subjPrior = 0.0;
+float g_subjOut = 0.0;
 vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
+  g_subjOut = 0.0;
   float split = p[0].y;
   float strength = p[0].z;
   if (uv.x < split || strength <= 0.0) return src;
@@ -424,8 +433,13 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // Whatever the map says, a pixel the veil model would nearly erase
   // (tiny D) must take the water path — the physics path would crush it
   // to black, which is the dark ghost on moving content.
-  float conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal;
-  float subj = p[16].w * p[22].z > 0.0 ? subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev) * p[16].w * p[22].z : 0.0;
+  // Open blue water: no source red → the water path's colour (see apply.ts).
+  float conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  // Raw subject mask (before the tone gate) is also the temporal tracker's output; the warped
+  // previous mask (g_subjPrior) holds wherever the pixel departs from the water at all.
+  float subjRaw = p[16].w > 0.0 ? max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * mix(smoothstepf(TP_PRIOR_LO, TP_PRIOR_HI, bdev), smoothstepf(TP_IN_LO, TP_IN_HI, bdev), smoothstepf(TP_PRIOR_IN, 1.0, g_subjPrior))) : 0.0;
+  g_subjOut = subjRaw;
+  float subj = subjRaw * p[16].w * p[22].z;
   if (p[0].w > 0.5) return vec3(k, confPix, clamp(fld.y, 0.0, 1.0));
   vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   vec3 full = D * rangeGain * wb;
@@ -481,10 +495,11 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   scale *= saturation;
   float onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
   float tN = objectNeutral(lab.x, lab.yz, lin, onFar, objectWeight(subj), p[16].w);
-  scale *= warmClamp(lab.yz, lin, onFar, person, p[16].w);
+  float personS = person * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  scale *= warmClamp(lab.yz, lin, onFar, personS, p[16].w);
   vec2 nab = mix(lab.yz * scale, veilHue * ON_SILVER, tN);
   float Ls = lab.x + objectLift(lab.x, objectWeight(subj), p[16].w);
-  vec3 o1 = oklabToLinear(capChroma(deepBlueLook(vec3(Ls, skinTone(Ls, nab, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y), cSrc));
+  vec3 o1 = oklabToLinear(capChroma(deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y), cSrc));
   vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
@@ -737,7 +752,10 @@ fn detailRatio(src: vec3<f32>, baseLin: vec3<f32>) -> f32 {
   return clamp((ys + DG_EPS) / (lum(baseLin) + DG_EPS), DG_R_MIN, DG_R_MAX);
 }
 fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> { return gradeD(src, src, uv); }
+var<private> g_subjPrior: f32 = 0.0;
+var<private> g_subjOut: f32 = 0.0;
 fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+  g_subjOut = 0.0;
   let p = params.p;
   let split = p[0].y;
   let strength = p[0].z;
@@ -788,8 +806,10 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let bsub = smoothstepf(BD_VETO_LO, BD_VETO_HI, bdev);
   let veto = mix(1.0, bsub, p[16].w);
   let confPix = min(confSignal, max(hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma) * veto, confBright));
-  let conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal;
-  let subj = select(0.0, subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev) * p[16].w * p[22].z, p[16].w * p[22].z > 0.0);
+  let conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  let subjRaw = select(0.0, max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * mix(smoothstepf(TP_PRIOR_LO, TP_PRIOR_HI, bdev), smoothstepf(TP_IN_LO, TP_IN_HI, bdev), smoothstepf(TP_PRIOR_IN, 1.0, g_subjPrior))), p[16].w > 0.0);
+  g_subjOut = subjRaw;
+  let subj = subjRaw * p[16].w * p[22].z;
   if (p[0].w > 0.5) { return vec3(k, confPix, clamp(fld.y, 0.0, 1.0)); }
   let rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   let full = D * rangeGain * wb;
@@ -837,10 +857,11 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   scale *= saturation;
   let onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
   let tN = objectNeutral(lab.x, lab.yz, lin, onFar, objectWeight(subj), p[16].w);
-  scale *= warmClamp(lab.yz, lin, onFar, person, p[16].w);
+  let personS = person * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  scale *= warmClamp(lab.yz, lin, onFar, personS, p[16].w);
   let nab = mix(lab.yz * scale, veilHue * ON_SILVER, tN);
   let Ls = lab.x + objectLift(lab.x, objectWeight(subj), p[16].w);
-  let o1 = oklabToLinear(capChroma(deepBlueLook(vec3(Ls, skinTone(Ls, nab, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y), cSrc));
+  let o1 = oklabToLinear(capChroma(deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y), cSrc));
   let o2 = fitToGamut(o1 * detailRatio(src, lin));
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);

@@ -47,6 +47,8 @@ export const BACKDROP = {
   ringR: 6,
   /** Closing radius (thumbnail pixels) of the whole-animal map. */
   closeR: 4,
+  /** Margin (thumbnail pixels) around far-hue pixels that the whole-animal flood never enters. */
+  farMargin: 2,
   /** Whole-animal growth (growSubjects): seed threshold (share of validity), the veto-ramped departure a
    * pixel needs to join a subject, and the subject size (share of the frame) below which it is a small fish. */
   seedFrac: 0.5,
@@ -274,10 +276,20 @@ export function backdropDev(L: number, a: number, b: number, u: number, v: numbe
  * frame): small fish keep the normal grade and their own colour. `dev` is the
  * veto-ramped departure (backdropObjectness devOut). Output 0..1 in `out`.
  */
-export function growSubjects(objectness: Float32Array, dev: Float32Array, validity: number, w: number, h: number, out: Float32Array, L?: Float32Array, fit?: ArrayLike<number>): number {
+export function growSubjects(objectness: Float32Array, dev: Float32Array, validity: number, w: number, h: number, out: Float32Array, L?: Float32Array, fit?: ArrayLike<number>, waterW?: Float32Array): number {
   const n = w * h;
   out.fill(0, 0, n);
   if (validity <= 0) return 0;
+  // Pixels whose hue cannot be water (a yellow fish), and a small margin
+  // around them (their blur halo), belong to another object: the flood never
+  // enters them, so a fish touching the shark is neither toned nor merged.
+  let block: Float32Array | null = null;
+  if (waterW) {
+    const far = new Float32Array(n);
+    for (let i = 0; i < n; i++) far[i] = waterW[i] < 0.5 ? 1 : 0;
+    block = new Float32Array(n);
+    maxFilter(far, block, w, h, BACKDROP.farMargin);
+  }
   let litAny = 0;
   const label = new Int32Array(n).fill(-1);
   const stack = new Int32Array(n);
@@ -290,7 +302,7 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     return 0.5 * Math.sqrt(gx * gx + gy * gy);
   };
   for (let s = 0; s < n; s++) {
-    if (label[s] >= 0 || (objectness[s] < seed && dev[s] < BACKDROP.growDev)) continue;
+    if (label[s] >= 0 || (block && block[s] > 0) || (objectness[s] < seed && dev[s] < BACKDROP.growDev)) continue;
     let top = 0, cnt = 0, seeded = false, edge = 0, light = 0;
     stack[top++] = s; label[s] = s;
     while (top > 0) {
@@ -302,7 +314,7 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
       if (g > edge) edge = g;
       const x = i % w;
       const nb = [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i >= w ? i - w : -1, i < n - w ? i + w : -1];
-      for (const j of nb) if (j >= 0 && label[j] < 0 && (dev[j] >= BACKDROP.growDev || objectness[j] >= seed)) { label[j] = s; stack[top++] = j; }
+      for (const j of nb) if (j >= 0 && label[j] < 0 && !(block && block[j] > 0) && (dev[j] >= BACKDROP.growDev || objectness[j] >= seed)) { label[j] = s; stack[top++] = j; }
     }
     // A region with no confident seed still counts when it has an outline
     // (a dim, far animal); a sun glow departs just as far but has none.
@@ -328,5 +340,4 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
   maxFilter(tmp, out, w, h, BACKDROP.closeR);
   for (let i = 0; i < n; i++) out[i] = 1 - out[i];
   return litAny;
-  for (let i = 0; i < n; i++) out[i] = Math.min(1, out[i]);
 }

@@ -17,6 +17,7 @@ import { inCutWindow as lockInCutWindow, noteCut as lockNoteCut, segmentAt, type
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
 import { linearToOklab } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
+import { POP_GATE, gateTarget, subjectMask } from "./pop-gate.ts";
 import {
   CLAHE_BINS,
   CLAHE_TILES_X,
@@ -112,6 +113,13 @@ export class GradeEngine {
   personEvery = PERSON_EVERY;
   /** Person segmentation on/off (debug `?person=0`). */
   personEnabled = true;
+  /** Temporal layer on/off (debug `?temporal=0`). */
+  temporalEnabled = true;
+  private lastRenderSec = -1;
+  /** Subject-pop stability gate (pop-gate.ts): eased value, target, last mask. */
+  private popGate = 0;
+  private popTarget = 0;
+  private popMask: ReturnType<typeof subjectMask> | null = null;
   private personWorker: Worker | null = null;
   private personInflight = false;
   private personReqId = 0;
@@ -504,10 +512,23 @@ export class GradeEngine {
     this.stats.analysisMs = packet.ms;
     const cut = this.lastMean !== null && meanDiff(this.lastMean, packet.mean) > SCENE_CUT_MEAN_DIFF;
     this.lastMean = packet.mean;
+    // Subject-pop gate: temporal stability of the subject map (only when the
+    // tone could apply at all; a cut restarts it from zero).
+    if (this.settings.subjectPop && (packet.params.backdrop ?? 0) > 0) {
+      const f = packet.fields;
+      const m = subjectMask(f.data, f.width, f.height);
+      this.popTarget = cut ? 0 : gateTarget(this.popMask, m);
+      this.popMask = m;
+    } else {
+      this.popTarget = 0;
+      this.popMask = null;
+    }
+    if (cut) this.popGate = 0;
     if (!this.hasAnalysis || cut) {
       if (cut) {
         this.stats.sceneCuts++;
         this.noteSceneCut(this.lastTickSec);
+        this.backend.resetTemporal?.();
         // New scene: the detector must speak again before any mask counts.
         this.personBoxes = null;
         this.personPasses = 0;
@@ -540,6 +561,10 @@ export class GradeEngine {
 
   private smooth(dt: number): void {
     if (dt <= 0) return;
+    {
+      const tau = this.popTarget < this.popGate ? POP_GATE.tauDown : POP_GATE.tauUp;
+      this.popGate += (this.popTarget - this.popGate) * (1 - Math.exp(-dt / tau));
+    }
     if (this.target) {
       const a = 1 - Math.exp(-dt / TAU_PARAMS_S);
       this.current = lerpParams(this.current, this.target, a);
@@ -630,13 +655,28 @@ export class GradeEngine {
     this.stats.personCoverage = 0;
     this.stats.personBoxes = verdict ? verdict.length : -1;
     this.settlePerson();
+    this.lastRenderSec = -1;
+    this.backend.resetTemporal?.();
+    // An export of the clip just previewed keeps the gate (like the person verdict).
+    if (!opts.keepPerson) {
+      this.popGate = 0;
+      this.popTarget = 0;
+      this.popMask = null;
+    }
   }
 
   private pack(): Float32Array {
     const depth: DepthMap = { width: this.fields!.width, height: this.fields!.height, fields: new Float32Array(0), guide: new Float32Array(0) };
     const clahe: ClaheLuts = { tilesX: CLAHE_TILES_X, tilesY: CLAHE_TILES_Y, bins: CLAHE_BINS, data: new Float32Array(0) };
     const settings = this.hasAnalysis ? this.settings : { ...this.settings, intensity: 0 };
-    return packUniforms(this.current, settings, depth, clahe, 0, this.split);
+    const u = packUniforms(this.current, settings, depth, clahe, 0, this.split);
+    u[93] = this.temporalEnabled ? 1 : 0;
+    u[90] *= this.popGate;
+    // A seek (or a jump back) breaks the motion history.
+    const t = this.lastTickSec;
+    if (this.lastRenderSec >= 0 && (t < this.lastRenderSec - 1e-3 || t - this.lastRenderSec > 0.3)) this.backend.resetTemporal?.();
+    this.lastRenderSec = t;
+    return u;
   }
 
   /** Renders the current source with the current grade into the canvas. */

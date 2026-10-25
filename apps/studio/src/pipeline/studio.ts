@@ -259,8 +259,9 @@ export class Studio {
       const mod = await loadColour();
       this.colour = mod;
       const engine = await mod.GradeEngine.create(canvas, (e) => this.set({ error: e.message }), !q.has("webgl2"));
-      engine.settings = colourSettings(this.tools.colour);
+      engine.settings = this.colourFor(this.tools.colour);
       engine.personEnabled = q.get("person") !== "0";
+      engine.temporalEnabled = q.get("temporal") !== "0";
       this.engine = engine;
       this.set({ engine: engine.backend.kind });
       return engine;
@@ -325,11 +326,18 @@ export class Studio {
 
   // ------------------------------------------------------------ tools
 
+  /** Engine settings for the colour tool (debug `?pop=1` forces Subject pop on for headless checks). */
+  private colourFor(c: ToolsState["colour"]) {
+    const s = colourSettings(c);
+    if (new URLSearchParams(location.search).get("pop") === "1") s.subjectPop = true;
+    return s;
+  }
+
   setTools(next: ToolsState): void {
     const prev = this.tools;
     this.tools = next;
     const e = this.engine;
-    if (e) e.settings = colourSettings(next.colour);
+    if (e) e.settings = this.colourFor(next.colour);
     const info = this.snap.info;
     if (info && (next.dewarp !== prev.dewarp || !this.dewarpU)) void this.updateDewarp();
     const video = this.snap.kind === "video";

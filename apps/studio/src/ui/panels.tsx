@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import {
   COLOUR_PRESETS,
   DEFAULT_COLOUR,
+  SUBJECT_POP_UI,
   DEFAULT_STABILISE,
   cameraLabel,
   dewarpChips,
@@ -126,6 +127,12 @@ export function AdvancedControls({ tool, tools, setTools, stab }: { tool: ToolId
         <Slider label="Saturation" value={c.saturation * 100} min={0} max={200} defaultValue={100} format={(v) => `${Math.round(v)}%`} onChange={(v) => up({ saturation: v / 100 })} />
         <Slider label="Clarity" value={c.clarity * 100} min={0} max={100} defaultValue={DEFAULT_COLOUR.clarity * 100} onChange={(v) => up({ clarity: v / 100 })} />
         <Slider label="Haze removal" value={c.veil * 100} min={0} max={120} defaultValue={DEFAULT_COLOUR.veil * 100} onChange={(v) => up({ veil: v / 100 })} />
+        {SUBJECT_POP_UI && (
+          <div className="adv__field adv__field--row">
+            <span className="adv__label">Subject pop <small>Separates fish, divers and animals from open blue water</small></span>
+            <Switch checked={!!c.subjectPop} onChange={(v) => up({ subjectPop: v })} label="Subject pop" />
+          </div>
+        )}
         <p className="adv__hint">Strength 50 is the engine's own estimate for this clip; above it the correction is pushed harder (redder reds, whiter sand) at some cost to fidelity.</p>
         <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, colour: { ...DEFAULT_COLOUR, enabled: t.colour.enabled } }))}>Reset colour</button>
       </div>

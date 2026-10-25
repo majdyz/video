@@ -34,6 +34,12 @@ export type UserSettings = {
   preset: ScenePreset;
   /** Debug (?hazeauto=0): disables the haze-adaptive default for A/B runs. */
   hazeAuto?: boolean;
+  /**
+   * "Subject pop" (opt-in, default off): in open blue water, subjects (a
+   * shark, a diver, a big fish) are toned silver and lifted against the
+   * water (OBJECT_NEUTRAL, backdrop.ts, tracked by the temporal layer).
+   */
+  subjectPop?: boolean;
 };
 
 /**
@@ -57,7 +63,7 @@ export const PRESET_ADJUST: Record<ScenePreset, { red: number; blue: number; red
   reef: { red: 1, blue: 1, redMax: 1.6, dehaze: 0, clarity: -0.1, exposure: 0.97, hazeLift: 0 },
 };
 
-export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto" };
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto", subjectPop: false };
 export const INTENSITY_MAX = 2;
 
 /** Internal controls the shader reads, derived from the intensity. */
@@ -84,6 +90,8 @@ export type GradeSettings = {
    * soft toe (see hazeLiftRatio). 0 in clear frames.
    */
   hazeLift: number;
+  /** Open-water subject tone on (UserSettings.subjectPop). */
+  subjectPop?: boolean;
 };
 
 /**
@@ -190,7 +198,7 @@ export const DETAIL_TAPS: readonly (readonly [number, number, number])[] = [
  * frames object mid-tones gain up to `lift` Oklab lightness (fading out
  * toward black and white), so the subject steps forward from the water.
  */
-export const OBJECT_NEUTRAL = { hue: (195 * Math.PI) / 180, bandIn: (45 * Math.PI) / 180, bandOut: (85 * Math.PI) / 180, rLo: 0.08, rHi: 0.3, mix: 0.92, silver: 0.022, lLo: 0.12, lHi: 0.32, farLo: (30 * Math.PI) / 180, farHi: (60 * Math.PI) / 180, lift: 0.05, confLo: 0.05, confHi: 0.5, warmHue: (80 * Math.PI) / 180, warmLo: -0.2, warmHi: 0.4 };
+export const OBJECT_NEUTRAL = { hue: (195 * Math.PI) / 180, bandIn: (45 * Math.PI) / 180, bandOut: (85 * Math.PI) / 180, rLo: 0.08, rHi: 0.3, mix: 0.92, silver: 0.022, lLo: 0.12, lHi: 0.32, farLo: (30 * Math.PI) / 180, farHi: (60 * Math.PI) / 180, lift: 0.05, confLo: 0.05, confHi: 0.5, warmHue: (50 * Math.PI) / 180, warmLo: 0.1, warmHi: 0.5 };
 /**
  * Object-neutral strength for a frame (uniform p16.w): only frames that are
  * mostly open water with subjects in them (backdrop validity) — on a reef
@@ -205,6 +213,52 @@ export function objectNeutralOf(p: GradeParams): number {
 export function detailGuardOf(_p: GradeParams): number {
   return 1;
 }
+
+/**
+ * Temporal layer (temporal.ts; GPU only — the CPU reference grades single
+ * frames, where every term below is the identity). A motion-compensated
+ * history at 1/8 resolution serves two jobs:
+ *  - anti-crawl: the low-resolution correction (graded / source per channel)
+ *    is blended in the log domain with the previous frame's, aligned by block
+ *    flow; the full-resolution grade is multiplied by stabilised / current
+ *    (clamped kMin..kMax), so the correction can no longer change faster
+ *    than the scene. betaMax: history weight at a perfect match; betaDiff:
+ *    log-ratio change at which the history is dropped (a real change).
+ *  - subject tracking: the previous frame's subject mask, warped by the same
+ *    flow (decay per frame), is a prior for the open-water subject weight,
+ *    kept wherever the pixel departs from the water at all (priorLo..priorHi
+ *    of the backdrop departure) — the same object as one frame ago.
+ *  - dark flat water gets a light motion-adaptive temporal denoise (denoise
+ *    × flow confidence × flatness × darkness × not-subject × similarity to
+ *    the warped previous output, tau in sRGB units).
+ * Block flow: 3×3 luma patches, ±flowR low-res texels (±24 px at 1/8),
+ * lambda: per-texel bias toward zero motion; conf ramps out by sadLo..sadHi.
+ */
+export const TEMPORAL = {
+  scale: 8,
+  flowR: 3,
+  lambda: 0.004,
+  sadLo: 0.012,
+  sadHi: 0.04,
+  betaMax: 0.8,
+  betaDiff: 0.15,
+  kMin: 0.8,
+  kMax: 1.25,
+  decay: 0.9,
+  priorLo: 0.006,
+  priorHi: 0.02,
+  /** Deep inside a tracked object (prior above this) the per-pixel test no longer cuts: the object is toned whole. */
+  priorIn: 0.8,
+  /** … where only plain water (departure below inLo..inHi) is still cut, so a fast tail leaves no toned trail. */
+  inLo: 0.004,
+  inHi: 0.012,
+  denoise: 0.5,
+  tau: 5 / 255,
+  flatLo: 3 / 255,
+  flatHi: 8 / 255,
+  darkLo: 0.3,
+  darkHi: 0.5,
+};
 
 /**
  * Vivid objects keep their colour: a pixel that is strongly chromatic in the
@@ -277,6 +331,7 @@ export function resolveSettings(s: UserSettings): GradeSettings {
     look: Math.min(1, Math.max(0, s.look)),
     dehaze: 0.6 * t,
     hazeLift: 0,
+    subjectPop: !!s.subjectPop,
   };
 }
 
@@ -574,6 +629,7 @@ export const CLAHE_BINS = 32;
  *  p16: hazeWeight, deepHaze, detail guard, object-neutral strength
  *  p17: haze-lift subtraction per channel (hazeLiftT), neutral subtraction (hazeLift·hazeBlack)
  *  p18–p22: backdrop surface (18 coefficients, L / a / b; backdrop.ts), p22.z subject tone, 1 spare
+ *  p23: temporal history valid (backend), temporal layer on (engine), 0, 0
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -615,7 +671,9 @@ export function packUniforms(
   u.set([hazeWeight(params), deepHaze(params), detailGuardOf(params), objectNeutralOf(params)], 64);
   u.set([...hazeLiftT(params, s.hazeLift), s.hazeLift * params.hazeBlack], 68);
   if (params.backdropFit && params.backdropFit.length === 18) u.set(params.backdropFit, 72);
-  u[90] = Math.min(1, Math.max(0, params.subjectTone ?? 0));
+  u[90] = settings.subjectPop ? Math.min(1, Math.max(0, params.subjectTone ?? 0)) : 0;
+  // p23: history valid (set by the backend per frame), temporal layer on, 0, 0
+  u[93] = 1;
   return u;
 }
 

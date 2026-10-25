@@ -1,5 +1,7 @@
 import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput, FULL_RECT, type Rect } from "./backend.ts";
 import { WGSL_GRADE, WGSL_DOWNSCALE, WGSL_GRADE_EXT, WGSL_DOWNSCALE_EXT } from "./shaders.ts";
+import { WGSL_TP_FIELD, WGSL_TP_FLOW, WGSL_TP_LUM, tpExternal } from "./temporal.ts";
+import { TEMPORAL } from "./params.ts";
 
 /** Draws the frame small into a 2D canvas and looks for anything above black. */
 function frameIsLit(frame: VideoFrame): boolean {
@@ -58,6 +60,21 @@ export class WebGPUBackend implements GpuBackend {
   private exportTex: GPUTexture | null = null;
   private exportCanvas: OffscreenCanvas | null = null;
   private exportCtx: GPUCanvasContext | null = null;
+  // Temporal layer (temporal.ts): 1/8-resolution lum / flow / field passes
+  // and a full-resolution previous output, ping-ponged per frame.
+  private readonly tpLumPipe: GPURenderPipeline;
+  private readonly tpLumPipeExt: GPURenderPipeline;
+  private readonly tpFlowPipe: GPURenderPipeline;
+  private readonly tpFieldPipe: GPURenderPipeline;
+  private tpValid = false;
+  private tpIdx = 0;
+  private tpLowW = 0;
+  private tpLowH = 0;
+  private tpOutW = 0;
+  private tpOutH = 0;
+  private tpTex: { lum: GPUTexture[]; f0: GPUTexture[]; f1: GPUTexture; flow: GPUTexture; out: GPUTexture[] } | null = null;
+  private readonly tpDummyHalf: GPUTexture;
+  private readonly tpDummyOut: GPUTexture;
 
   private constructor(canvas: HTMLCanvasElement, device: GPUDevice) {
     this.canvas = canvas;
@@ -66,7 +83,7 @@ export class WebGPUBackend implements GpuBackend {
     if (!ctx) throw new Error("WebGPU canvas context unavailable");
     this.ctx = ctx;
     this.format = navigator.gpu.getPreferredCanvasFormat();
-    ctx.configure({ device, format: this.format, alphaMode: "opaque" });
+    ctx.configure({ device, format: this.format, alphaMode: "opaque", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST });
     // Explicit layouts: an "auto" layout drops bindings a shader variant
     // doesn't read, and the bind group below always supplies all of them.
     const tex = (binding: number, sampleType: GPUTextureSampleType = "float"): GPUBindGroupLayoutEntry => ({
@@ -77,6 +94,7 @@ export class WebGPUBackend implements GpuBackend {
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
         tex(2), tex(3, "unfilterable-float"), tex(4, "unfilterable-float"), tex(5, "unfilterable-float"),
+        tex(6), tex(7), tex(8), tex(9),
       ],
     });
     const downLayout = device.createBindGroupLayout({
@@ -92,6 +110,7 @@ export class WebGPUBackend implements GpuBackend {
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
         ext, tex(3, "unfilterable-float"), tex(4, "unfilterable-float"), tex(5, "unfilterable-float"),
+        tex(6), tex(7), tex(8), tex(9),
       ],
     });
     const downLayoutExt = device.createBindGroupLayout({
@@ -112,6 +131,27 @@ export class WebGPUBackend implements GpuBackend {
     this.downPipeline = pipeline(WGSL_DOWNSCALE, "rgba8unorm", downLayout);
     this.gradePipelineExt = pipeline(WGSL_GRADE_EXT, this.format, gradeLayoutExt);
     this.downPipelineExt = pipeline(WGSL_DOWNSCALE_EXT, "rgba8unorm", downLayoutExt);
+    // Temporal passes (the lum pass reads the source like the downscale pass does).
+    this.tpLumPipe = pipeline(WGSL_TP_LUM, "rgba16float", downLayout);
+    this.tpLumPipeExt = pipeline(tpExternal(WGSL_TP_LUM), "rgba16float", downLayoutExt);
+    const flowLayout = device.createBindGroupLayout({ entries: [tex(0, "unfilterable-float"), tex(1, "unfilterable-float")] });
+    this.tpFlowPipe = pipeline(WGSL_TP_FLOW, "rgba16float", flowLayout);
+    const fieldLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        tex(3, "unfilterable-float"), tex(4, "unfilterable-float"), tex(5, "unfilterable-float"),
+        tex(6, "unfilterable-float"), tex(7, "unfilterable-float"), tex(8, "unfilterable-float"),
+      ],
+    });
+    const fieldModule = device.createShaderModule({ code: WGSL_TP_FIELD });
+    this.tpFieldPipe = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [fieldLayout] }),
+      vertex: { module: fieldModule, entryPoint: "vs" },
+      fragment: { module: fieldModule, entryPoint: "fs", targets: [{ format: "rgba16float" }, { format: "rgba16float" }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.tpDummyHalf = device.createTexture({ size: [1, 1], format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING });
+    this.tpDummyOut = device.createTexture({ size: [1, 1], format: this.format, usage: GPUTextureUsage.TEXTURE_BINDING });
     this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.uniformBuf = device.createBuffer({ size: UNIFORM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.downParamsBuf = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -232,7 +272,7 @@ export class WebGPUBackend implements GpuBackend {
     }
   }
 
-  private gradeGroup(): GPUBindGroup {
+  private gradeGroup(ext: GPUExternalTexture | null): GPUBindGroup {
     if (this.extSource) {
       // External textures are per task: a fresh import and bind group per draw.
       return this.device.createBindGroup({
@@ -240,13 +280,15 @@ export class WebGPUBackend implements GpuBackend {
         entries: [
           { binding: 0, resource: { buffer: this.uniformBuf } },
           { binding: 1, resource: this.sampler },
-          { binding: 2, resource: this.device.importExternalTexture({ source: this.extSource }) },
+          { binding: 2, resource: ext! },
           { binding: 3, resource: this.data[0].createView() },
           { binding: 4, resource: this.data[1].createView() },
           { binding: 5, resource: this.data[2].createView() },
+          ...this.tpGradeEntries(),
         ],
       });
     }
+    if (this.tpTex) this.bindGroupDirty = true; // the history textures swap every frame
     if (this.gradeBindGroup && !this.bindGroupDirty) return this.gradeBindGroup;
     if (!this.source) throw new Error("no source uploaded");
     this.gradeBindGroup = this.device.createBindGroup({
@@ -258,19 +300,105 @@ export class WebGPUBackend implements GpuBackend {
         { binding: 3, resource: this.data[0].createView() },
         { binding: 4, resource: this.data[1].createView() },
         { binding: 5, resource: this.data[2].createView() },
+        ...this.tpGradeEntries(),
       ],
     });
     this.bindGroupDirty = false;
     return this.gradeBindGroup;
   }
 
-  private draw(target: GPUTextureView): void {
+  /** Forgets the temporal history (scene cut, seek, new clip). */
+  resetTemporal(): void {
+    this.tpValid = false;
+  }
+
+  private tpGradeEntries(): GPUBindGroupEntry[] {
+    const t = this.tpTex;
+    if (!t) return [6, 7, 8].map((b) => ({ binding: b, resource: this.tpDummyHalf.createView() })).concat([{ binding: 9, resource: this.tpDummyOut.createView() }]);
+    const cur = this.tpIdx;
+    return [
+      { binding: 6, resource: t.f0[cur].createView() },
+      { binding: 7, resource: t.f1.createView() },
+      { binding: 8, resource: t.flow.createView() },
+      { binding: 9, resource: t.out[1 - cur].createView() },
+    ];
+  }
+
+  private tpEnsure(outW: number, outH: number): void {
+    const lw = Math.max(1, Math.ceil(this.outputWidth / TEMPORAL.scale)), lh = Math.max(1, Math.ceil(this.outputHeight / TEMPORAL.scale));
+    if (this.tpTex && lw === this.tpLowW && lh === this.tpLowH && outW === this.tpOutW && outH === this.tpOutH) return;
+    this.tpRelease();
+    const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
+    const half = () => this.device.createTexture({ size: [lw, lh], format: "rgba16float", usage });
+    const out = () => this.device.createTexture({ size: [outW, outH], format: this.format, usage: usage | GPUTextureUsage.COPY_SRC });
+    this.tpTex = { lum: [half(), half()], f0: [half(), half()], f1: half(), flow: half(), out: [out(), out()] };
+    this.tpLowW = lw; this.tpLowH = lh; this.tpOutW = outW; this.tpOutH = outH;
+    this.tpValid = false;
+    this.bindGroupDirty = true;
+  }
+
+  private tpRelease(): void {
+    const t = this.tpTex;
+    if (t) for (const x of [...t.lum, ...t.f0, t.f1, t.flow, ...t.out]) x.destroy();
+    this.tpTex = null;
+  }
+
+  /** Grades the current source into `target` (through the temporal layer when it has a source size). */
+  private draw(target: GPUTexture): void {
     const encoder = this.device.createCommandEncoder();
-    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target, loadOp: "clear", storeOp: "store" }] });
+    // The layer runs only while the engine asks for it (p23.y); off, the history lapses.
+    const tp = this.outputWidth > 0 && this.uniforms[93] > 0.5;
+    if (!tp) {
+      this.tpValid = false;
+      if (this.uniforms[92] !== 0) { this.uniforms[92] = 0; this.device.queue.writeBuffer(this.uniformBuf, 92 * 4, this.uniforms, 92, 1); }
+    }
+    // One external import per draw, shared by the lum pass and the grade.
+    const ext = this.extSource ? this.device.importExternalTexture({ source: this.extSource }) : null;
+    if (tp) {
+      this.tpEnsure(target.width, target.height);
+      const t = this.tpTex!, cur = this.tpIdx, prev = 1 - cur;
+      this.uniforms[92] = this.tpValid ? 1 : 0;
+      this.device.queue.writeBuffer(this.uniformBuf, 92 * 4, this.uniforms, 92, 1);
+      const lowPass = (views: GPUTextureView[], pipe: GPURenderPipeline, group: GPUBindGroup) => {
+        const pass = encoder.beginRenderPass({ colorAttachments: views.map((view) => ({ view, loadOp: "clear" as const, storeOp: "store" as const })) });
+        pass.setPipeline(pipe);
+        pass.setBindGroup(0, group);
+        pass.draw(3);
+        pass.end();
+      };
+      const lumPipe = ext ? this.tpLumPipeExt : this.tpLumPipe;
+      lowPass([t.lum[cur].createView()], lumPipe, this.device.createBindGroup({
+        layout: lumPipe.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: this.uniformBuf } }, { binding: 1, resource: this.sampler }, { binding: 2, resource: ext ?? this.source!.createView() }],
+      }));
+      lowPass([t.flow.createView()], this.tpFlowPipe, this.device.createBindGroup({
+        layout: this.tpFlowPipe.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: t.lum[cur].createView() }, { binding: 1, resource: t.lum[prev].createView() }],
+      }));
+      lowPass([t.f0[cur].createView(), t.f1.createView()], this.tpFieldPipe, this.device.createBindGroup({
+        layout: this.tpFieldPipe.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.uniformBuf } },
+          { binding: 3, resource: this.data[0].createView() },
+          { binding: 4, resource: this.data[1].createView() },
+          { binding: 5, resource: this.data[2].createView() },
+          { binding: 6, resource: t.lum[cur].createView() },
+          { binding: 7, resource: t.flow.createView() },
+          { binding: 8, resource: t.f0[prev].createView() },
+        ],
+      }));
+    }
+    const out = tp ? this.tpTex!.out[this.tpIdx] : target;
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: out.createView(), loadOp: "clear", storeOp: "store" }] });
     pass.setPipeline(this.extSource ? this.gradePipelineExt : this.gradePipeline);
-    pass.setBindGroup(0, this.gradeGroup());
+    pass.setBindGroup(0, this.gradeGroup(ext));
     pass.draw(3);
     pass.end();
+    if (tp) {
+      encoder.copyTextureToTexture({ texture: out }, { texture: target }, [target.width, target.height]);
+      this.tpIdx = 1 - this.tpIdx;
+      this.tpValid = true;
+    }
     this.device.queue.submit([encoder.finish()]);
   }
 
@@ -328,7 +456,7 @@ export class WebGPUBackend implements GpuBackend {
   }
 
   render(): void {
-    this.draw(this.ctx.getCurrentTexture().createView());
+    this.draw(this.ctx.getCurrentTexture());
   }
 
   // How a rendered frame reaches the encoder. Browsers differ: a VideoFrame
@@ -354,12 +482,12 @@ export class WebGPUBackend implements GpuBackend {
     if (!this.exportCanvas || this.exportCanvas.width !== w || this.exportCanvas.height !== h) {
       this.exportCanvas = new OffscreenCanvas(w, h);
       this.exportCtx = this.exportCanvas.getContext("webgpu") as GPUCanvasContext;
-      this.exportCtx.configure({ device: this.device, format: this.format, alphaMode: "opaque", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+      this.exportCtx.configure({ device: this.device, format: this.format, alphaMode: "opaque", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
       this.exportTex?.destroy();
       // Same format as the grade pipeline's target (the canvas format): on
       // Safari that is bgra8unorm, and rendering into an rgba8unorm texture
       // was a validation error — the readback capture came out black there.
-      this.exportTex = this.device.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+      this.exportTex = this.device.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
       for (const r of this.readbackRing) r.buffer.destroy();
       this.readbackRing = [];
     }
@@ -441,7 +569,7 @@ export class WebGPUBackend implements GpuBackend {
     const h = this.outputHeight;
     const t0 = performance.now();
     if (mode === "canvas" || mode === "bitmap") {
-      this.draw(this.exportCtx!.getCurrentTexture().createView());
+      this.draw(this.exportCtx!.getCurrentTexture());
       const t1 = performance.now();
       try {
         if (mode === "canvas") return new VideoFrame(this.exportCanvas!, { timestamp: timestampUs, duration: durationUs });
@@ -472,7 +600,7 @@ export class WebGPUBackend implements GpuBackend {
     }
     slot.busy = true;
     try {
-      this.draw(this.exportTex!.createView());
+      this.draw(this.exportTex!);
       const enc = this.device.createCommandEncoder();
       enc.copyTextureToBuffer({ texture: this.exportTex! }, { buffer: slot.buffer, bytesPerRow }, [w, h]);
       this.device.queue.submit([enc.finish()]);
@@ -545,6 +673,7 @@ export class WebGPUBackend implements GpuBackend {
     this.analysisBuf?.destroy();
     this.exportTex?.destroy();
     for (const r of this.readbackRing) r.buffer.destroy();
+    this.tpRelease();
     this.device.destroy();
   }
 }

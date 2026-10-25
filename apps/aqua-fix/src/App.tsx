@@ -38,6 +38,8 @@ type Mode = "idle" | "photo" | "video";
 
 // Preview renders at the stage's device-pixel size (capped), never at 4K.
 const PREVIEW_MAX_WIDTH = 1600;
+/** The "Subject pop" control stays hidden until its mask tracking is clean (the engine path ships off). */
+const SUBJECT_POP_UI = false;
 type CaptureChoice = "auto" | "readback" | "bitmap" | "canvas";
 type ExportOpts = { capture: CaptureChoice; depth: number };
 const DEFAULT_EXPORT_OPTS: ExportOpts = { capture: "auto", depth: 3 };
@@ -440,6 +442,7 @@ export default function App() {
     // ?lock=0 keeps per-frame estimation (A/B testing).
     e.lockRange = new URLSearchParams(location.search).get("lockz") === "1";
     e.personEnabled = new URLSearchParams(location.search).get("person") !== "0";
+    e.temporalEnabled = new URLSearchParams(location.search).get("temporal") !== "0";
     if (new URLSearchParams(location.search).get("lock") !== "0") void profileClip(video, myGen);
   }
 
@@ -933,6 +936,16 @@ export default function App() {
                 onChange={(v) => setSettings((s) => ({ ...s, clarity: v }))} disabled={exporting} />
               <Slider label="Veil removal" value={settings.veil} min={0} max={1.2} step={0.01}
                 onChange={(v) => setSettings((s) => ({ ...s, veil: v }))} disabled={exporting} />
+              {SUBJECT_POP_UI && <>
+                <p className="hint">Subject pop: separates fish, divers and animals from open blue water.</p>
+                <div className="optswitch" role="radiogroup" aria-label="Subject pop">
+                  {([[false, "Off"], [true, "On"]] as const).map(([v, label]) => (
+                    <button key={label} type="button" role="radio" aria-checked={!!settings.subjectPop === v}
+                      className={!!settings.subjectPop === v ? "on" : ""} disabled={exporting}
+                      onClick={() => setSettings((s) => ({ ...s, subjectPop: v }))}>{label}</button>
+                  ))}
+                </div>
+              </>}
               <p className="hint">Export pipeline (for speed experiments; the status line under the progress bar shows the result).</p>
               <div className="optswitch" role="radiogroup" aria-label="Export capture">
                 {CAPTURE_CHOICES.map((c) => (

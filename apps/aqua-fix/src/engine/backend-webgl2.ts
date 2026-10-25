@@ -1,5 +1,7 @@
 import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput, FULL_RECT, type Rect } from "./backend.ts";
 import { GLSL_FRAGMENT, GLSL_DOWNSCALE_FRAGMENT } from "./shaders.ts";
+import { GLSL_TP_FIELD, GLSL_TP_FLOW, GLSL_TP_LUM } from "./temporal.ts";
+import { TEMPORAL } from "./params.ts";
 
 const VS = `#version 300 es
 out vec2 v_uv;
@@ -39,6 +41,20 @@ export class WebGL2Backend implements GpuBackend {
   private pbo: WebGLBuffer | null = null;
   private readbackInFlight = false;
   private previewScale = 1;
+  // Temporal layer (temporal.ts): 1/8-resolution lum / flow / field passes
+  // and a full-resolution previous-output texture, ping-ponged per frame.
+  private tpOn = false;
+  private tpValid = false;
+  private tpLum!: Program;
+  private tpFlow!: Program;
+  private tpField!: Program;
+  private tpLowW = 0;
+  private tpLowH = 0;
+  private tpOutW = 0;
+  private tpOutH = 0;
+  private tpIdx = 0;
+  private tpTex: { lum: WebGLTexture[]; f0: WebGLTexture[]; f1: WebGLTexture; flow: WebGLTexture; out: WebGLTexture[] } | null = null;
+  private tpFbo: { lum: WebGLFramebuffer[]; field: WebGLFramebuffer[]; flow: WebGLFramebuffer; out: WebGLFramebuffer[] } | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -53,8 +69,8 @@ export class WebGL2Backend implements GpuBackend {
     });
     if (!gl) throw new Error("WebGL2 not supported");
     this.gl = gl;
-    gl.getExtension("EXT_color_buffer_float");
-    this.grade = this.link(VS, GLSL_FRAGMENT, ["u_source", "u_data0", "u_data1", "u_data2"]);
+    const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
+    this.grade = this.link(VS, GLSL_FRAGMENT, ["u_source", "u_data0", "u_data1", "u_data2", "u_tpF0", "u_tpF1", "u_tpFlow", "u_tpPrev"]);
     this.down = this.link(VS, GLSL_DOWNSCALE_FRAGMENT, ["u_source", "u_rotation", "u_srcSize", "u_outSize", "u_rect"]);
     this.vao = gl.createVertexArray()!;
     this.source = this.makeTexture(gl.LINEAR);
@@ -70,6 +86,118 @@ export class WebGL2Backend implements GpuBackend {
     const blockIndex = gl.getUniformBlockIndex(this.grade.prog, "Params");
     gl.uniformBlockBinding(this.grade.prog, blockIndex, 0);
     gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, this.uniformBuf);
+    // The temporal layer needs half-float render targets; without them the
+    // grade runs as before (history never valid).
+    if (floatTargets) {
+      try {
+        this.tpLum = this.link(VS, GLSL_TP_LUM, ["u_source"]);
+        this.tpFlow = this.link(VS, GLSL_TP_FLOW, ["u_lum", "u_lumPrev"]);
+        this.tpField = this.link(VS, GLSL_TP_FIELD, ["u_data0", "u_data1", "u_data2", "u_lum", "u_flow", "u_histf"]);
+        for (const p of [this.tpLum, this.tpField]) gl.uniformBlockBinding(p.prog, gl.getUniformBlockIndex(p.prog, "Params"), 0);
+        this.tpOn = true;
+      } catch (e) {
+        console.warn("temporal layer unavailable:", (e as Error).message);
+      }
+    }
+  }
+
+  /** Forgets the temporal history (scene cut, seek, new clip). */
+  resetTemporal(): void {
+    this.tpValid = false;
+  }
+
+  private tpTarget(w: number, h: number, fmt: "half" | "rgba8"): WebGLTexture {
+    const gl = this.gl;
+    const t = this.makeTexture(gl.LINEAR);
+    if (fmt === "half") gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    return t;
+  }
+
+  private tpFramebuffer(...tex: WebGLTexture[]): WebGLFramebuffer {
+    const gl = this.gl;
+    const fb = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    tex.forEach((t, i) => gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, t, 0));
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return fb;
+  }
+
+  private tpRelease(): void {
+    const gl = this.gl;
+    if (this.tpTex) {
+      const t = this.tpTex;
+      for (const x of [...t.lum, ...t.f0, t.f1, t.flow, ...t.out]) gl.deleteTexture(x);
+    }
+    if (this.tpFbo) {
+      const f = this.tpFbo;
+      for (const x of [...f.lum, ...f.field, f.flow, ...f.out]) gl.deleteFramebuffer(x);
+    }
+    this.tpTex = null;
+    this.tpFbo = null;
+  }
+
+  /** (Re)creates the temporal targets for the current sizes; false when the layer is off. */
+  private tpEnsure(): boolean {
+    if (!this.tpOn || !this.outputWidth) return false;
+    const lw = Math.max(1, Math.ceil(this.outputWidth / TEMPORAL.scale)), lh = Math.max(1, Math.ceil(this.outputHeight / TEMPORAL.scale));
+    const ow = this.canvas.width, oh = this.canvas.height;
+    if (this.tpTex && lw === this.tpLowW && lh === this.tpLowH && ow === this.tpOutW && oh === this.tpOutH) return true;
+    this.tpRelease();
+    const half = (w: number, h: number) => this.tpTarget(w, h, "half");
+    const tex = { lum: [half(lw, lh), half(lw, lh)], f0: [half(lw, lh), half(lw, lh)], f1: half(lw, lh), flow: half(lw, lh), out: [this.tpTarget(ow, oh, "rgba8"), this.tpTarget(ow, oh, "rgba8")] };
+    this.tpTex = tex;
+    this.tpFbo = {
+      lum: tex.lum.map((t) => this.tpFramebuffer(t)),
+      field: tex.f0.map((t) => this.tpFramebuffer(t, tex.f1)),
+      flow: this.tpFramebuffer(tex.flow),
+      out: tex.out.map((t) => this.tpFramebuffer(t)),
+    };
+    this.tpLowW = lw; this.tpLowH = lh; this.tpOutW = ow; this.tpOutH = oh;
+    this.tpValid = false;
+    return true;
+  }
+
+  private bindTex(unit: number, tex: WebGLTexture, prog: Program, name: string): void {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(prog.loc.get(name)!, unit);
+  }
+
+  /** Runs the three 1/8-resolution temporal passes; the grade then reads their output. */
+  private tpPasses(): void {
+    const gl = this.gl;
+    const t = this.tpTex!, f = this.tpFbo!;
+    const cur = this.tpIdx, prev = 1 - cur;
+    // History flag for this frame (p23.x).
+    this.uniforms[92] = this.tpValid ? 1 : 0;
+    gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, 92 * 4, this.uniforms.subarray(92, 93));
+    gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, this.uniformBuf);
+    gl.bindVertexArray(this.vao);
+    gl.viewport(0, 0, this.tpLowW, this.tpLowH);
+    // 1. lum
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f.lum[cur]);
+    gl.useProgram(this.tpLum.prog);
+    this.bindTex(0, this.source, this.tpLum, "u_source");
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    // 2. flow
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f.flow);
+    gl.useProgram(this.tpFlow.prog);
+    this.bindTex(4, t.lum[cur], this.tpFlow, "u_lum");
+    this.bindTex(5, t.lum[prev], this.tpFlow, "u_lumPrev");
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    // 3. field (two targets)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f.field[cur]);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+    gl.useProgram(this.tpField.prog);
+    for (let i = 0; i < DATA_SLOTS; i++) this.bindTex(1 + i, this.data[i], this.tpField, `u_data${i}`);
+    this.bindTex(4, t.lum[cur], this.tpField, "u_lum");
+    this.bindTex(5, t.flow, this.tpField, "u_flow");
+    this.bindTex(6, t.f0[prev], this.tpField, "u_histf");
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
   }
 
   private makeTexture(filter: number): WebGLTexture {
@@ -200,7 +328,17 @@ export class WebGL2Backend implements GpuBackend {
 
   render(): void {
     const gl = this.gl;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // The layer runs only while the engine asks for it (p23.y); off, the history lapses.
+    const tp = this.uniforms[93] > 0.5 && this.tpEnsure();
+    if (!tp) this.tpValid = false;
+    if (tp) this.tpPasses();
+    else if (this.uniforms[92] !== 0) {
+      this.uniforms[92] = 0;
+      gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
+      gl.bufferSubData(gl.UNIFORM_BUFFER, 92 * 4, this.uniforms.subarray(92, 93));
+    }
+    const cur = this.tpIdx;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, tp ? this.tpFbo!.out[cur] : null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     this.bindCommon(this.grade);
     for (let i = 0; i < DATA_SLOTS; i++) {
@@ -208,8 +346,27 @@ export class WebGL2Backend implements GpuBackend {
       gl.bindTexture(gl.TEXTURE_2D, this.data[i]);
       gl.uniform1i(this.grade.loc.get(`u_data${i}`)!, 1 + i);
     }
+    if (tp) {
+      const t = this.tpTex!;
+      this.bindTex(4, t.f0[cur], this.grade, "u_tpF0");
+      this.bindTex(5, t.f1, this.grade, "u_tpF1");
+      this.bindTex(6, t.flow, this.grade, "u_tpFlow");
+      this.bindTex(7, t.out[1 - cur], this.grade, "u_tpPrev");
+    } else {
+      // Unused when the layer is off, but every sampler needs a texture.
+      for (const [u, n] of [[4, "u_tpF0"], [5, "u_tpF1"], [6, "u_tpFlow"], [7, "u_tpPrev"]] as const) this.bindTex(u, this.data[0], this.grade, n);
+    }
     gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, this.uniformBuf);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (tp) {
+      const w = this.canvas.width, h = this.canvas.height;
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.tpFbo!.out[cur]);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this.tpIdx = 1 - cur;
+      this.tpValid = true;
+    }
   }
 
   async renderToFrame(timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
@@ -294,6 +451,7 @@ export class WebGL2Backend implements GpuBackend {
     const gl = this.gl;
     gl.deleteProgram(this.grade.prog);
     gl.deleteProgram(this.down.prog);
+    this.tpRelease();
     gl.deleteTexture(this.source);
     for (const t of this.data) gl.deleteTexture(t);
     gl.deleteBuffer(this.uniformBuf);

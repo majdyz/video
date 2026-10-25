@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { TEMPORAL, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -97,7 +97,7 @@ function sampleClahe(c: ClaheLuts, u: number, v: number, value: number): number 
  * pixel's own sub-noise detail is put back at unit gain, so compression
  * blocks and noise are never amplified. Without it the pixel is its own base.
  */
-export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number, u: number, v: number, base?: readonly [number, number, number]): [number, number, number] {
+export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number, u: number, v: number, base?: readonly [number, number, number], subjPrior = 0): [number, number, number] {
   const { params: p, settings: s } = ctx;
   const er = base ? base[0] : sr, eg = base ? base[1] : sg, eb = base ? base[2] : sb;
   const r0 = srgbToLinear(er), g0 = srgbToLinear(eg), b0 = srgbToLinear(eb);
@@ -165,10 +165,17 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // Open water: the map lags a moving subject (ghosts where it was); a pixel
   // the backdrop surface predicts as plain water vetoes the map's verdict.
   const veto = 1 + (bsub - 1) * ow;
-  const conf = Math.max(Math.min(clamp(confMap, 0, 1), veto) * k + confPix * (1 - k), personW) * confSignal;
+  // Open blue water: a source with no red left cannot get its colour back
+  // from the object path (a red gain over nothing turns a grey shark neon
+  // yellow-green): such pixels keep the water path's hue-preserving colour.
+  // Subject pop (below) separates them by tone instead.
+  const conf = Math.max(Math.min(clamp(confMap, 0, 1), veto) * k + confPix * (1 - k), personW) * confSignal * (1 - ow * redDeficit(r0, g0, b0));
   // Subject tone weight (open water): the whole-animal map trimmed per pixel, without the signal test (a dark back is part of the shark).
-  const tone = clamp(p.subjectTone ?? 0, 0, 1);
-  const subj = ow > 0 && tone > 0 && fit && fit.length === 18 ? subjectWeight(ctx.depth, u, v, clamp(confMap, 0, 1) * k, backdropDev(lab0[0], pa, pb, u, v, fit)) * ow * tone : 0;
+  const tone = ctx.settings.subjectPop ? clamp(p.subjectTone ?? 0, 0, 1) : 0;
+  // Raw mask (before the tone gate) also takes the temporal layer's warped previous mask (GPU only; 0 here by default).
+  const bdevP = ow > 0 && fit && fit.length === 18 ? backdropDev(lab0[0], pa, pb, u, v, fit) : 1;
+  const subjRaw = ow > 0 && fit && fit.length === 18 ? Math.max(subjectWeight(ctx.depth, u, v, clamp(confMap, 0, 1) * k, bdevP), subjPrior * (smoothstep(TEMPORAL.priorLo, TEMPORAL.priorHi, bdevP) + (smoothstep(TEMPORAL.inLo, TEMPORAL.inHi, bdevP) - smoothstep(TEMPORAL.priorLo, TEMPORAL.priorHi, bdevP)) * smoothstep(TEMPORAL.priorIn, 1, subjPrior))) : 0;
+  const subj = subjRaw * ow * tone;
   if (ctx.debug) return [k, confPix, clamp(confMap, 0, 1)];
   const out = [0, 0, 0];
   const ew = Math.pow(p.exposure, p.waterExposure);
@@ -251,14 +258,17 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // water's own hue): a dead-neutral or greenish grey next to saturated blue
   // water reads peach by simultaneous contrast.
   const tN = objectNeutral(L, a, b, r0, g0, b0, onFar, objectWeight(subj), objectNeutralOf(p));
-  scale *= warmClamp(a, b, r0, g0, b0, onFar, person, objectNeutralOf(p));
+  // In open blue water the person detector also fires on sharks and big
+  // fish: skin colour only where the source has red left to be skin.
+  const personS = person * (1 - objectNeutralOf(p) * redDeficit(r0, g0, b0));
+  scale *= warmClamp(a, b, r0, g0, b0, onFar, personS, objectNeutralOf(p));
   const [, vla, vlb] = linearToOklab(p.veilColor[0], p.veilColor[1], p.veilColor[2]);
   const vln = Math.hypot(vla, vlb) || 1;
   const na = a * scale + ((vla / vln) * OBJECT_NEUTRAL.silver - a * scale) * tN;
   const nb = b * scale + ((vlb / vln) * OBJECT_NEUTRAL.silver - b * scale) * tN;
   // Subjects in open water also step forward a little in lightness.
   const Ls = L + objectLift(L, objectWeight(subj), objectNeutralOf(p));
-  const skinned = skinTone(Ls, na, nb, person);
+  const skinned = skinTone(Ls, na, nb, personS);
   // Water-likeness for the look comes from the pixel's own hue (the mask or
   // the water/object split would cut one garment into differently treated parts).
   const looked = deepBlueLook(Ls, skinned[0], skinned[1], s.look, 1 - hueConf(pa, pb, p), hazeWeight(p), deepHaze(p));
@@ -340,6 +350,11 @@ export function warmClamp(a: number, b: number, r: number, g: number, bl: number
 export function objectLift(L: number, conf: number, strength: number): number {
   if (strength <= 0 || conf <= 0) return 0;
   return OBJECT_NEUTRAL.lift * strength * conf * smoothstep(OBJECT_NEUTRAL.lLo - 0.1, OBJECT_NEUTRAL.lHi - 0.1, L) * (1 - smoothstep(0.82, 0.95, L));
+}
+
+/** 1 when the (linear) source has no red left next to green/blue (OBJECT_NEUTRAL.rLo..rHi). */
+export function redDeficit(r: number, g: number, b: number): number {
+  return 1 - smoothstep(OBJECT_NEUTRAL.rLo, OBJECT_NEUTRAL.rHi, r / Math.max(1e-4, g, b));
 }
 
 /** Skin memory colour on person pixels (mirrors the shaders; see SKIN in params.ts). Returns (a, b). */

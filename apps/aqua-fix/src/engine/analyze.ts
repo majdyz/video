@@ -547,7 +547,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   let subjectTone = 0;
   if (backdropValidity > 0) {
     const subj = temp("subjMap", n);
-    subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit);
+    subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit, bdWater);
     confMap = temp("confMap", n);
     for (let i = 0; i < n; i++) confMap[i] = conf[i] + (subj[i] - conf[i]) * backdropValidity;
   }
