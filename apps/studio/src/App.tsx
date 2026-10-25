@@ -13,6 +13,7 @@ import { IconClose, IconCompare, IconExport, IconMore, IconPlus, IconWarning } f
 import { useMedia } from "./ui/use-media";
 import { FootageField } from "./ui/footage";
 import { isNativeShell } from "./native/registry.ts";
+import { trimAt } from "./pipeline/trim.ts";
 
 type Theme = "abyss" | "coral" | "depth";
 const THEMES: { id: Theme; label: string }[] = [
@@ -125,10 +126,17 @@ export default function App() {
         e.preventDefault();
         studio.togglePlay();
       }
+      // I / O: trim in / out point at the playhead (desktop editors' convention).
+      const k = e.key.toLowerCase();
+      if ((k === "i" || k === "o") && ready && !photo && !exporting && !e.metaKey && !e.ctrlKey && !e.altKey && !(e.target as HTMLElement).closest("input,textarea,select,[contenteditable],[role=dialog]")) {
+        e.preventDefault();
+        const snap = studio.getSnapshot();
+        studio.setTrim(trimAt(k === "i" ? "in" : "out", snap.currentTime, snap.trim, snap.duration), true);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [ready, photo, studio]);
+  }, [ready, photo, exporting, studio]);
 
   const openFile = (f: File) => {
     setSplit(0.5);
@@ -162,19 +170,27 @@ export default function App() {
     }
   };
 
+  const compare = (
+    <IconButton label={split === null ? "Show before and after" : "Hide before and after"} pressed={split !== null} className={split !== null ? "is-active" : ""} onClick={() => setSplit((v) => (v === null ? 0.5 : null))} disabled={!ready || exporting}>
+      <IconCompare size={18} />
+    </IconButton>
+  );
+  // Photos have no timeline: name and size instead.
   const bar = s.phase !== "empty" && (
-    <div className="viewer__bar">
+    <div className={`viewer__bar${photo ? "" : " viewer__bar--video"}`}>
       {photo ? (
-        <div className="photo-meta">
-          <span className="photo-meta__name">{s.fileName}</span>
-          <span className="photo-meta__size">{s.info ? `${s.info.displayW} × ${s.info.displayH}` : ""}</span>
-        </div>
+        <>
+          <div className="photo-meta">
+            <span className="photo-meta__name">{s.fileName}</span>
+            <span className="photo-meta__size">{s.info ? `${s.info.displayW} × ${s.info.displayH}` : ""}</span>
+          </div>
+          {compare}
+        </>
       ) : (
-        <Timeline time={s.currentTime} duration={s.duration} playing={s.playing} disabled={!ready || exporting} onToggle={() => studio.togglePlay()} onSeek={(t) => studio.seek(t)} />
+        <Timeline time={s.currentTime} duration={s.duration} playing={s.playing} disabled={!ready || exporting} trim={s.trim} thumbs={s.thumbs} onToggle={() => studio.togglePlay()} onSeek={(t) => studio.seek(t)} onTrim={(r, commit) => studio.setTrim(r, commit)}>
+          {compare}
+        </Timeline>
       )}
-      <IconButton label={split === null ? "Show before and after" : "Hide before and after"} pressed={split !== null} className={split !== null ? "is-active" : ""} onClick={() => setSplit((v) => (v === null ? 0.5 : null))} disabled={!ready || exporting}>
-        <IconCompare size={18} />
-      </IconButton>
     </div>
   );
 

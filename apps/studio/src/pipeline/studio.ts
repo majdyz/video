@@ -32,6 +32,7 @@ import { canvasFrameFix } from "@dive-tools/shared/frame-orientation.ts";
 import { detectFootage, FOOTAGE_LABEL, FOOTAGE_MODE, isHdrProfile, parseCodec, resolveFootage, type FootageChoice, type FootageInfo, type FootageProfile } from "./footage.ts";
 import type { CalibKind, SignalCalibration } from "./signal-probe.ts";
 import { isNativeShell, nativeFileOf, type NativeFileRef } from "../native/registry.ts";
+import { analysisSpan, clampToRange, effectiveTrim, filmstripTimes, loopTarget, outputLength, rangeTimes, spanServes, type TrimRange } from "./trim.ts";
 
 type ColourMod = typeof import("./colour.ts");
 type MediaMod = typeof import("./media.ts");
@@ -57,6 +58,11 @@ const PHOTO_PREVIEW_PX = 2048;
 const OPFS_PREFIX = "studio-export-";
 /** Live export frames for the stage / sheet: a few a second. */
 const LIVE_EVERY_MS = 250;
+/** Filmstrip under the trim handles: this many thumbnails, this tall (px), decoded once per clip. */
+const FILMSTRIP_COUNT = 10;
+const FILMSTRIP_PX = 80;
+/** A committed trim change waits this long before analysis re-runs (another drag may follow). */
+const TRIM_SETTLE_MS = 500;
 
 export type MediaKind = "video" | "photo";
 /**
@@ -132,6 +138,10 @@ export type Snapshot = {
   camera: CameraInfo | null;
   /** Footage profile: what the clip is (detected), what the user chose, what runs. */
   footage: FootageStatus;
+  /** The in/out selection (clip seconds); null = the whole clip. Export, analysis and the preview loop use it. */
+  trim: TrimRange | null;
+  /** Filmstrip thumbnails (object URLs, "" for a frame that didn't decode); null until decoded or unavailable. */
+  thumbs: string[] | null;
 };
 
 export type FootageStatus = {
@@ -194,6 +204,8 @@ export class Studio {
     photoLimited: null,
     camera: null,
     footage: FOOTAGE_NONE,
+    trim: null,
+    thumbs: null,
   };
   private listeners = new Set<() => void>();
   private frameListeners = new Set<(b: ImageBitmap) => void>();
@@ -237,6 +249,15 @@ export class Studio {
   private signal: SignalCalibration | null = null;
   /** createImageBitmap(<video>) converts this clip's colour differently from a texture upload: don't paint paused stills. */
   private stillsUnsafe = false;
+  /** Effective trim (null = whole clip); mirrored in the snapshot. */
+  private trim: TrimRange | null = null;
+  private trimTimer = 0;
+  /** What the loaded motion analysis / colour profile were computed over (null = the whole clip). */
+  private analysedSpan: TrimRange | null = null;
+  private profiledSpan: TrimRange | null = null;
+  /** Span of the motion analysis in flight. */
+  private pendingSpan: TrimRange | null = null;
+  private thumbAbort: AbortController | null = null;
 
   // ------------------------------------------------------------ store
 
@@ -461,7 +482,7 @@ export class Studio {
     this.teardown();
     const gen = ++this.gen;
     this.file = file;
-    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice } });
+    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null });
     try {
       await touchFile(file);
       const media = await loadMedia();
@@ -531,6 +552,7 @@ export class Studio {
       this.startPreview();
       if (this.tools.colour.enabled) void this.profileColour();
       if (this.tools.stabilise.enabled && !this.stabAbort && !this.analysis) void this.analyseMotion();
+      this.buildFilmstrip(media, file, gen);
     } catch (err) {
       if (gen !== this.gen) return;
       this.set({ busy: null, phase: "empty", kind: null, fileName: null, info: null, footage: FOOTAGE_NONE });
@@ -627,7 +649,7 @@ export class Studio {
     const gen = ++this.gen;
     this.file = file;
     this.signal = null;
-    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice } });
+    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null });
     try {
       await touchFile(file);
       const { bitmap, original } = await decodePhoto(file, photoLimits(isWebKit(), e.backend.kind));
@@ -678,7 +700,7 @@ export class Studio {
   /** Back to the empty state. */
   close(): void {
     this.teardown();
-    this.set({ phase: "empty", kind: null, fileName: null, info: null, duration: 0, currentTime: 0, playing: false, busy: null, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF });
+    this.set({ phase: "empty", kind: null, fileName: null, info: null, duration: 0, currentTime: 0, playing: false, busy: null, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, trim: null, thumbs: null });
   }
 
   private teardown(): void {
@@ -692,6 +714,15 @@ export class Studio {
     this.path = null;
     this.profiling = null;
     clearTimeout(this.photoAnalyseTimer);
+    clearTimeout(this.trimTimer);
+    this.trimTimer = 0;
+    this.trim = null;
+    this.analysedSpan = null;
+    this.profiledSpan = null;
+    this.pendingSpan = null;
+    this.thumbAbort?.abort();
+    this.thumbAbort = null;
+    for (const u of this.snap.thumbs ?? []) if (u) URL.revokeObjectURL(u);
     const v = this.video;
     if (v) {
       v.pause();
@@ -839,6 +870,11 @@ export class Studio {
       if (!this.previewOn || this.exporting || gen !== this.gen) return;
       const vv = this.video!;
       const t = meta?.mediaTime ?? vv.currentTime;
+      // Playback loops inside the trim.
+      const loop = vv.paused ? null : loopTarget(t, this.trim, this.snap.info?.fps || 30);
+      if (loop !== null) {
+        try { vv.currentTime = loop; } catch { /* ignore */ }
+      }
       this.dropStill();
       this.drawLive(t, true);
       const now = performance.now();
@@ -858,8 +894,13 @@ export class Studio {
   togglePlay(): void {
     const v = this.video;
     if (!v || this.exporting || this.snap.phase !== "ready" || this.snap.kind !== "video") return;
-    if (v.paused) void v.play().catch(() => undefined);
-    else v.pause();
+    if (v.paused) {
+      const r = this.trim;
+      if (r && (v.currentTime < r.start || v.currentTime >= r.end - 0.02)) {
+        try { v.currentTime = r.start; } catch { /* ignore */ }
+      }
+      void v.play().catch(() => undefined);
+    } else v.pause();
   }
 
   pause(): void {
@@ -870,11 +911,92 @@ export class Studio {
     const v = this.video;
     if (!v || this.exporting || this.snap.phase !== "ready" || this.snap.kind !== "video") return;
     try {
-      v.currentTime = Math.min(Math.max(0, t), v.duration || 0);
+      v.currentTime = clampToRange(t, this.trim, v.duration || 0);
     } catch {
       // ignore
     }
     this.set({ currentTime: v.currentTime });
+  }
+
+  // ------------------------------------------------------------ trim
+
+  /**
+   * The in/out selection. Cheap on every call (the preview loop and seeks
+   * follow it at once); with `commit` (handle released, a key press, Reset)
+   * the analyses that depend on the range re-run after a short settle.
+   */
+  setTrim(range: TrimRange | null, commit: boolean): void {
+    if (this.snap.kind !== "video" || this.exporting) return;
+    const next = effectiveTrim(range, this.snap.duration);
+    const a = next, b = this.trim;
+    const same = a === b || (!!a && !!b && Math.abs(a.start - b.start) < 1e-4 && Math.abs(a.end - b.end) < 1e-4);
+    if (!same) {
+      this.trim = next;
+      this.set({ trim: next });
+    }
+    if (commit) {
+      clearTimeout(this.trimTimer);
+      this.trimTimer = window.setTimeout(() => this.applyTrim(), TRIM_SETTLE_MS);
+    }
+  }
+
+  /** Motion analysis span for the current trim: the range plus a margin (null = the whole clip). */
+  private motionSpan(): TrimRange | null {
+    return analysisSpan(this.trim, this.snap.duration);
+  }
+
+  /** Re-runs what the trim invalidated: the colour profile, and the motion analysis (or only its solve). */
+  private applyTrim(): void {
+    clearTimeout(this.trimTimer);
+    this.trimTimer = 0;
+    if (this.snap.kind !== "video" || this.snap.phase !== "ready" || this.exporting) return;
+    const duration = this.snap.duration;
+    if (this.tools.colour.enabled && this.engine && (this.snap.colourProfiled || this.profiling)) {
+      const again = () => {
+        if (this.exporting || this.snap.phase !== "ready" || spanServes(this.profiledSpan, this.trim, duration)) return;
+        this.engine?.lockGlobals(null);
+        this.set({ colourProfiled: false });
+        void this.profileColour();
+      };
+      if (this.profiling) void this.profiling.then(again);
+      else again();
+    }
+    if (this.tools.stabilise.enabled && (this.analysis || this.stabAbort)) {
+      const want = this.motionSpan();
+      if (this.stabAbort) {
+        // In flight for another span: restart unless it covers this one too.
+        if (!spanServes(this.pendingSpan, want, duration)) void this.analyseMotion();
+      } else if (this.analysis && spanServes(this.analysedSpan, want, duration)) {
+        // Gyro: the solve takes the span (the telemetry covers the clip); visual: the tracked span still covers it.
+        if (this.analysis.mode === "gyro") this.scheduleSolve(0);
+      } else {
+        // The old result stays on screen until the new one lands.
+        void this.analyseMotion();
+      }
+    }
+  }
+
+  /** Decodes the filmstrip thumbnails once the clip is on screen (idle time; skipped where WebCodecs is missing). */
+  private buildFilmstrip(media: MediaMod, file: File, gen: number): void {
+    this.thumbAbort?.abort();
+    const ctrl = new AbortController();
+    this.thumbAbort = ctrl;
+    const run = () => {
+      if (gen !== this.gen || ctrl.signal.aborted) return;
+      const t0 = performance.now();
+      media.filmstrip(file, filmstripTimes(this.snap.duration, FILMSTRIP_COUNT), FILMSTRIP_PX, ctrl.signal)
+        .then((urls) => {
+          if (gen !== this.gen || ctrl.signal.aborted) {
+            for (const u of urls) if (u) URL.revokeObjectURL(u);
+            return;
+          }
+          console.info(`[timeline] filmstrip: ${urls.filter(Boolean).length}/${urls.length} thumbnails in ${Math.round(performance.now() - t0)} ms`);
+          if (urls.some(Boolean)) this.set({ thumbs: urls });
+        })
+        .catch((e: unknown) => console.info("[timeline] no filmstrip:", e instanceof Error ? e.message : e));
+    };
+    const ric = (window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
+    window.setTimeout(() => (ric ? ric(run, { timeout: 2000 }) : run()), 600);
   }
 
   // ------------------------------------------------------------ colour profile
@@ -890,7 +1012,9 @@ export class Studio {
       const v = this.video, e = this.engine, mod = this.colour;
       if (!v || !e || !mod || new URLSearchParams(location.search).get("lock") === "0") return;
       const gen = this.gen;
-      const times = mod.profileTimes(v.duration);
+      // Trimmed: the samples (and so the scene lock) come from the selection only.
+      const span = this.trim;
+      const times = rangeTimes(mod.profileTimes, span, v.duration);
       if (!times.length) return;
       const wasPaused = v.paused;
       const resumeAt = v.currentTime;
@@ -913,13 +1037,14 @@ export class Studio {
         if (gen !== this.gen) return;
         const lock = mod.segmentProfile(samples, mod.SCENE_CUT_MEAN_DIFF);
         if (lock) e.lockGlobals(lock);
-        console.info(`[profile] ${lock ? `locked ${lock.length} segment(s)` : "skipped"}: ${samples.length}/${times.length} samples`);
+        console.info(`[profile] ${lock ? `locked ${lock.length} segment(s)` : "skipped"}: ${samples.length}/${times.length} samples${span ? ` in ${span.start.toFixed(2)}–${span.end.toFixed(2)} s` : ""}`);
+        this.profiledSpan = span;
         this.set({ colourProfiled: true });
       } finally {
         if (gen === this.gen) {
           this.set({ busy: null });
           if (!this.exporting) {
-            await seekVideo(v, resumeAt).catch(() => undefined);
+            await seekVideo(v, clampToRange(resumeAt, this.trim, v.duration)).catch(() => undefined);
             this.drawLive(v.currentTime, false);
             if (!wasPaused) await v.play().catch(() => undefined);
             this.startPreview();
@@ -941,26 +1066,32 @@ export class Studio {
     const gen = this.gen;
     // A second start (tool switched on while the clip was still opening) replaces the first quietly.
     this.stabAbort?.abort();
+    this.cancelRefine();
     const ctrl = new AbortController();
     this.stabAbort = ctrl;
+    // Trimmed: only the selection plus a margin is decoded and tracked.
+    const span = this.motionSpan();
+    this.pendingSpan = span;
     this.setStab({ state: "analysing", progress: 0, message: null });
     try {
       const mod = this.motion ?? (this.motion = await loadMotion());
       const client = this.stabClient ?? (this.stabClient = new mod.AnalysisClient());
       let last = 0;
+      const started = performance.now();
       const analysis = await client.analyze(file, (fraction) => {
         const now = performance.now();
         if (now - last > 150) {
           last = now;
           this.setStab({ progress: fraction });
         }
-      }, ctrl.signal, this.tools.stabilise.visual);
+      }, ctrl.signal, this.tools.stabilise.visual, false, span);
       if (gen !== this.gen || ctrl.signal.aborted) return;
       this.analysis = analysis;
+      this.analysedSpan = span;
       const info = stabInfo(analysis);
-      console.info(`[stabilise] ${info.badge}${info.warning ? ` (${info.warning})` : ""}`);
+      console.info(`[stabilise] ${info.badge}${info.warning ? ` (${info.warning})` : ""}, analysed ${span ? `${span.start.toFixed(2)}–${span.end.toFixed(2)} s` : "the whole clip"} in ${((performance.now() - started) / 1000).toFixed(1)} s`);
       this.setStab({ state: "solving", progress: 1, info });
-      const path = await client.solve(solveParams(this.tools.stabilise, analysis.mode, this.stabOutput()));
+      const path = await client.solve(this.solveFor(analysis.mode));
       if (gen !== this.gen || ctrl.signal.aborted) return;
       this.path = path;
       this.setStab({ state: "ready", summary: this.stabSummary(), bobbing: this.bobbingText() });
@@ -973,6 +1104,11 @@ export class Studio {
     } finally {
       if (this.stabAbort === ctrl) this.stabAbort = null;
     }
+  }
+
+  /** Solve parameters for the current tools and trim (the gyro solve covers only the analysis span). */
+  private solveFor(mode: AnalysisResult["mode"]) {
+    return { ...solveParams(this.tools.stabilise, mode, this.stabOutput()), span: this.motionSpan() };
   }
 
   private bobbingText(): string | null {
@@ -1006,7 +1142,7 @@ export class Studio {
           this.setStab({ refineProgress: fraction });
           this.setStab({ bobbing: this.bobbingText() });
         }
-      }, ctrl.signal)
+      }, ctrl.signal, this.analysedSpan)
       .then((ok) => {
         if (gen !== this.gen || ctrl.signal.aborted || analysis !== this.analysis) return;
         console.info(`[stabilise] bobbing pass ${ok ? "done" : "unavailable (gyro only)"}`);
@@ -1041,9 +1177,10 @@ export class Studio {
     this.solveTimer = window.setTimeout(async () => {
       const client = this.stabClient;
       const analysis = this.analysis;
-      if (!client || !analysis) return;
+      // A new analysis in flight (the trim moved past the analysed span) solves with the current settings itself.
+      if (!client || !analysis || this.stabAbort) return;
       try {
-        const path = await client.solve(solveParams(this.tools.stabilise, analysis.mode, this.stabOutput()));
+        const path = await client.solve(this.solveFor(analysis.mode));
         if (analysis !== this.analysis) return;
         if (seq !== this.solveSeq) return;
         this.path = path;
@@ -1060,7 +1197,8 @@ export class Studio {
   private async waitForPath(): Promise<void> {
     if (!this.tools.stabilise.enabled) return;
     if (!this.path && !this.stabAbort && !this.analysis) void this.analyseMotion();
-    while (!this.path) {
+    // A re-analysis for a new trim must land before the export uses the path.
+    while (!this.path || this.stabAbort) {
       if (this.snap.stab.state === "error") throw new Error("Motion analysis failed: " + (this.snap.stab.message ?? ""));
       if (this.exportAbort?.signal.aborted) throw new DOMException("Aborted", "AbortError");
       const pct = Math.round(this.snap.stab.progress * 100);
@@ -1085,7 +1223,8 @@ export class Studio {
 
   private outName(ext: string): string {
     const base = (this.snap.fileName ?? "clip").replace(/\.[^.]+$/, "");
-    return `${base}-${exportSuffix({ ...this.tools, stabilise: { ...this.tools.stabilise, enabled: this.tools.stabilise.enabled && this.snap.kind === "video" } })}.${ext}`;
+    const trimmed = this.snap.kind === "video" && this.trim ? "-trimmed" : "";
+    return `${base}-${exportSuffix({ ...this.tools, stabilise: { ...this.tools.stabilise, enabled: this.tools.stabilise.enabled && this.snap.kind === "video" } })}${trimmed}.${ext}`;
   }
 
   private beginExport(): AbortController {
@@ -1121,8 +1260,11 @@ export class Studio {
       this.setExp({ state: "error", message: "Saving video isn't supported in this browser: update to the latest Safari or Chrome." });
       return;
     }
+    // A trim change still settling: its re-analysis starts now, and the export waits for it below.
+    if (this.trimTimer) this.applyTrim();
     const ctrl = this.beginExport();
     const colourOn = this.tools.colour.enabled && !!e;
+    const trim = this.trim;
     let failure: unknown = null;
     try {
       const media = await loadMedia();
@@ -1139,18 +1281,21 @@ export class Studio {
       this.previewOn = false;
       v.pause();
       if ((this.geometryActive() || !colourOn) && !this.geo) throw new Error("WebGL2 is unavailable");
-      const total = this.snap.duration || info.duration;
-      const bitrate = bitrateFromSource(file.size, total) ?? pickBitrate(info.displayW, info.displayH, info.fps);
+      const clipLen = this.snap.duration || info.duration;
+      // The source's bitrate comes from the whole file; the output (and the progress) is the trimmed length.
+      const bitrate = bitrateFromSource(file.size, clipLen) ?? pickBitrate(info.displayW, info.displayH, info.fps);
+      const total = outputLength(trim, clipLen);
+      if (trim) console.info(`[export] trim ${trim.start.toFixed(2)}–${trim.end.toFixed(2)} s (${total.toFixed(2)} of ${clipLen.toFixed(2)} s)`);
       this.dropStill();
       const mode = this.snap.exportMode;
       if (mode === "native") {
-        const res = await this.runNative(media, file, info, bitrate, total, colourOn, ctrl);
+        const res = await this.runNative(media, file, info, bitrate, total, colourOn, ctrl, trim);
         console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (native), audio ${res.audioIncluded ? "kept" : "dropped"}`);
         this.setExp({ state: "done", progress: 1, etaSec: 0, frames: res.frames, detail: "", result: res });
       } else {
         const res = mode === "realtime"
-          ? await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl)
-          : await this.runOffline(media, file, bitrate, total, colourOn, ctrl);
+          ? await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl, trim)
+          : await this.runOffline(media, file, bitrate, total, colourOn, ctrl, trim);
         console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (${mode}), ${res.blob.type}, audio ${res.audioIncluded ? "kept" : "dropped"}`);
         this.setExp({
           state: "done",
@@ -1175,10 +1320,12 @@ export class Studio {
       }
       v.loop = true;
       if (this.file === file && this.snap.phase === "ready") {
-        try { v.currentTime = 0; } catch { /* ignore */ }
-        this.uploadToEngine(v, 0, false);
+        const t0 = this.trim?.start ?? 0;
+        if (t0 > 0) await seekVideo(v, t0).catch(() => undefined);
+        else try { v.currentTime = 0; } catch { /* ignore */ }
+        this.uploadToEngine(v, t0, false);
         await e?.analyzeNow(true).catch(() => undefined);
-        this.drawLive(0, false);
+        this.drawLive(t0, false);
         await v.play().catch(() => undefined);
         this.startPreview();
       }
@@ -1202,7 +1349,7 @@ export class Studio {
    * The stage shows bitmaps of the encoded frames (never the full-size
    * render canvas, see ARCHITECTURE.md).
    */
-  private async runOffline(media: MediaMod, file: File, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController) {
+  private async runOffline(media: MediaMod, file: File, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null) {
     const e = this.engine, geo = this.geo;
     const geoOn = this.geometryActive();
     const footage = this.footageMode("frame");
@@ -1239,7 +1386,8 @@ export class Studio {
           const frame = media.squarePixels(decoded);
           try {
             const rot = ((fi.rotation / 90) % 4) as Rotation;
-            const ts = Math.round(fi.timeSec * 1e6);
+            // Output clock (0 at the trim's first frame); the warp and the grade read source time.
+            const ts = Math.round(fi.outTimeSec * 1e6);
             const dur = frame.duration ?? undefined;
             let out: VideoFrame;
             if (geoOn || !colourOn) {
@@ -1277,7 +1425,7 @@ export class Studio {
               lastUi = now;
               const secs = (now - started) / 1000;
               const fps = frames / secs;
-              const progress = total > 0 ? Math.min(1, fi.timeSec / total) : 0;
+              const progress = total > 0 ? Math.min(1, fi.outTimeSec / total) : 0;
               const eta = progress > 0.02 ? (secs / progress) * (1 - progress) : null;
               this.setExp({ frames, fps, progress, etaSec: eta, detail: `${fi.displayWidth}×${fi.displayHeight} · ${fps.toFixed(1)} fps` });
             }
@@ -1296,6 +1444,7 @@ export class Studio {
         signal: ctrl.signal,
         log: (line) => console.info("[export]", line),
         onProgress: (p) => this.setExp({ progress: p }),
+        range: trim,
       },
     );
     return { blob: result.blob, frames: result.frames, elapsedMs: performance.now() - started, audioIncluded: result.audioIncluded };
@@ -1311,7 +1460,7 @@ export class Studio {
    * alive in the background (iOS 26 continued-processing task, Android
    * foreground service). See apps/mobile/MOBILE.md.
    */
-  private async runNative(media: MediaMod, file: File, info: ClipInfo, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController): Promise<ExportResult> {
+  private async runNative(media: MediaMod, file: File, info: ClipInfo, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null): Promise<ExportResult> {
     const e = this.engine, geo = this.geo;
     const src = nativeFileOf(file);
     if (!src) throw new Error("This clip was not opened from the app's picker");
@@ -1340,7 +1489,8 @@ export class Studio {
     });
     try {
       this.setExp({ state: "running", detail: "Rendering" });
-      for await (const { sample, info: fi } of media.decodeFrames(file, ctrl.signal)) {
+      // Trimmed: only the selection is decoded; the first kept frame's source time aligns the audio (shiftSec).
+      for await (const { sample, info: fi } of media.decodeFrames(file, ctrl.signal, trim)) {
         let decoded = sample.toVideoFrame();
         sample.close();
         if (retag) {
@@ -1453,7 +1603,7 @@ export class Studio {
    * frame rate, restart with the clip slowed down (every frame still lands
    * in the file, re-timed), then at half size.
    */
-  private async runRealtime(media: MediaMod, file: File, v: HTMLVideoElement, info: ClipInfo, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController) {
+  private async runRealtime(media: MediaMod, file: File, v: HTMLVideoElement, info: ClipInfo, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null) {
     const e = this.engine, geo = this.geo!;
     const canvas = colourOn ? e!.backend.canvas : geo.canvas;
     const STEPS: { scale: number; rate: number }[] = [
@@ -1470,9 +1620,10 @@ export class Studio {
       // Grade the first frame before recording starts so the file never opens uncorrected.
       await this.engineForExport();
       this.setExp({ state: "preparing", detail: `Preparing${tag}` });
-      await seekVideo(v, 0).catch(() => undefined);
+      const from = trim?.start ?? 0;
+      await seekVideo(v, from).catch(() => undefined);
       if (colourOn && e) {
-        this.uploadToEngine(v, 0, false, [W, H]);
+        this.uploadToEngine(v, from, false, [W, H]);
         await e.analyzeNow(true).catch(() => undefined);
       }
       let rendered = 0;
@@ -1489,6 +1640,7 @@ export class Studio {
           opfsPrefix: OPFS_PREFIX,
           fps: srcFps,
           rate,
+          range: trim,
           signal: rtCtrl.signal,
           log: (line) => console.info("[export]", line),
           onProgress: (p) => {

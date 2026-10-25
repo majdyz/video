@@ -7,8 +7,9 @@ import { FrameReader } from "../frame-gray.ts";
 import { analysisSize } from "../tracker.ts";
 import { checkAndCalibrate, checkWindows, PairCollector } from "./medium.ts";
 import type { CameraMotion, MediumCheck } from "./telemetry.ts";
+import type { TimeSpan } from "../analyze.ts";
 
-export async function checkPicture(file: File, motion: CameraMotion, signal?: AbortSignal): Promise<MediumCheck | null> {
+export async function checkPicture(file: File, motion: CameraMotion, signal?: AbortSignal, span?: TimeSpan | null): Promise<MediumCheck | null> {
   if (typeof VideoDecoder === "undefined") return null;
   // The lens lives in coded orientation; the decoded frames are drawn upright.
   if (motion.video.rotation !== 0) return null;
@@ -23,7 +24,10 @@ export async function checkPicture(file: File, motion: CameraMotion, signal?: Ab
     const collector = new PairCollector(aw, ah, motion.lens.width / aw);
     const sink = new VideoSampleSink(track);
     const first = await track.getFirstTimestamp();
-    for (const [w0, w1] of checkWindows(motion.video.duration)) {
+    // Trimmed: the windows are spread over the span the user kept.
+    const base = span ? span.start : 0;
+    for (const [c0, c1] of checkWindows(span ? span.end - span.start : motion.video.duration)) {
+      const w0 = base + c0, w1 = base + c1;
       collector.reset();
       for await (const sample of sink.samples(first + w0, first + w1)) {
         try {

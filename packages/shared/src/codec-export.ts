@@ -63,8 +63,10 @@ export function squarePixels(frame: VideoFrame): VideoFrame {
 }
 
 export type ExportFrameInfo = {
-  /** Presentation time in seconds. */
+  /** Presentation time in seconds (clip time: 0 = the first video frame; a trimmed export keeps the source's clock here). */
   timeSec: number;
+  /** Time of this frame in the output file (timeSec minus the first exported frame's time). */
+  outTimeSec: number;
   /** Rotation metadata of the source track (0/90/180/270). `sample.draw` applies it; a GPU path must. */
   rotation: Rotation;
   /** Upright (display) size, i.e. after rotation. */
@@ -99,7 +101,34 @@ export type CodecExportOptions = {
    * completes. Renderers that keep per-frame GPU state must tolerate this.
    */
   pipelineDepth?: number;
+  /**
+   * Trim: only frames starting in [start, end) (clip seconds, half a frame
+   * of tolerance) are exported, and the audio packets overlapping it; the
+   * output starts at 0 with both tracks shifted by the same amount.
+   */
+  range?: TimeRange | null;
 };
+
+/** A time range in clip seconds (0 = the first video frame). */
+export type TimeRange = { start: number; end: number };
+
+/** Half-frame-tolerant membership of a frame starting at `t` (same rule as the Studio's trim maths). */
+function inRange(t: number, r: TimeRange | null | undefined, fps: number): boolean {
+  if (!r) return true;
+  const half = 0.5 / (fps > 0 ? fps : 30);
+  return t >= r.start - half && t < r.end - half;
+}
+
+/**
+ * Clip time of the first frame a trimmed export keeps: the last packet
+ * starting at or before start + half a frame (a packet lookup, no decode).
+ */
+async function firstKeptTime(track: import("mediabunny").InputVideoTrack, r: TimeRange, t0: number, fps: number): Promise<number> {
+  const half = 0.5 / (fps > 0 ? fps : 30);
+  const pkt = await new EncodedPacketSink(track).getPacket(t0 + r.start + half).catch(() => null);
+  const t = pkt ? pkt.timestamp - t0 : r.start;
+  return t >= r.start - half ? t : r.start;
+}
 
 export type CodecExportResult = {
   blob: Blob;
@@ -154,6 +183,11 @@ export async function exportWithCodec(
     // reordering); the output starts at the first video frame and both
     // tracks shift by the same amount so sync is untouched.
     const t0 = await videoTrack.getFirstTimestamp();
+    const range = opts.range ?? null;
+    // Output clock: 0 at the first exported frame; audio shifts by the same amount.
+    const offset = range ? await firstKeptTime(videoTrack, range, t0, fps) : 0;
+    const span = range ? Math.max(1e-3, range.end - range.start) : duration;
+    if (range) log(`trim ${range.start.toFixed(3)}–${range.end.toFixed(3)} s (first frame ${offset.toFixed(3)} s)`);
 
     const videoSource = new VideoSampleSource({
       codec,
@@ -193,9 +227,14 @@ export async function exportWithCodec(
       const decoderConfig = await audioTrack.getDecoderConfig();
       const packetSink = new EncodedPacketSink(audioTrack);
       let first = true;
-      for await (const packet of packetSink.packets()) {
+      // Trimmed: start reading at the packet covering the cut, stop past the end.
+      const startPacket = range ? await packetSink.getPacket(t0 + range.start).catch(() => null) : null;
+      for await (const packet of packetSink.packets(startPacket ?? undefined)) {
         throwIfAborted(signal);
-        const ts = packet.timestamp - t0;
+        const clip = packet.timestamp - t0;
+        if (range && clip >= range.end) break;
+        if (range && clip + packet.duration <= range.start) continue;
+        const ts = clip - offset;
         if (ts + packet.duration <= 0) continue;
         // iPhone .mov files carry audio priming: the first packet sits a few
         // ms before zero even when the video starts at 0 — always clamp.
@@ -205,7 +244,7 @@ export async function exportWithCodec(
       }
       packetSource.close();
     } else if (audioMode === "reencode" && audioSampleSource && audioTrack) {
-      await writeReencodedAudio(audioTrack, audioSampleSource, signal);
+      await writeReencodedAudio(audioTrack, audioSampleSource, signal, range, t0, offset);
     }
 
     const sampleSink = new VideoSampleSink(videoTrack);
@@ -227,22 +266,27 @@ export async function exportWithCodec(
       }
       frames += 1;
       const now = performance.now();
-      if (duration > 0 && now - lastProgressAt > 100) {
+      if (span > 0 && now - lastProgressAt > 100) {
         lastProgressAt = now;
-        onProgress(Math.min(1, job.timeSec / duration));
+        onProgress(Math.min(1, Math.max(0, (job.timeSec - (range ? range.start : 0)) / span)));
       }
     };
     try {
-      for await (const sample of sampleSink.samples()) {
+      for await (const sample of range ? sampleSink.samples(t0 + range.start, t0 + range.end) : sampleSink.samples()) {
         throwIfAborted(signal);
         const timeSec = Math.max(0, sample.timestamp - t0);
-        const info: ExportFrameInfo = { timeSec, rotation, displayWidth, displayHeight, index: frames + inflight.length };
+        if (!inRange(timeSec, range, fps)) {
+          sample.close();
+          continue;
+        }
+        const outTimeSec = Math.max(0, timeSec - offset);
+        const info: ExportFrameInfo = { timeSec, outTimeSec, rotation, displayWidth, displayHeight, index: frames + inflight.length };
         const promise = Promise.resolve(render(sample, info)).then((rendered) => {
           if (rendered instanceof VideoSample) {
-            rendered.setTimestamp(timeSec);
+            rendered.setTimestamp(outTimeSec);
             return rendered;
           }
-          return new VideoSample(rendered, { timestamp: timeSec, duration: sample.duration });
+          return new VideoSample(rendered, { timestamp: outTimeSec, duration: sample.duration });
         });
         inflight.push({ promise, sample, timeSec });
         if (inflight.length >= depth) await encodeOldest();
@@ -282,12 +326,20 @@ export async function exportWithCodec(
 async function writeReencodedAudio(
   audioTrack: InputAudioTrack,
   source: AudioSampleSource,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  range: TimeRange | null,
+  t0: number,
+  offset: number,
 ): Promise<void> {
   const sink = new AudioSampleSink(audioTrack);
-  for await (const sample of sink.samples()) {
+  for await (const sample of range ? sink.samples(t0 + range.start, t0 + range.end) : sink.samples()) {
     try {
       throwIfAborted(signal);
+      if (range) {
+        const ts = sample.timestamp - t0 - offset;
+        if (ts + sample.duration <= 0) continue;
+        sample.setTimestamp(Math.max(0, ts));
+      }
       await source.add(sample);
     } finally {
       sample.close();
@@ -296,10 +348,15 @@ async function writeReencodedAudio(
   source.close();
 }
 
-/** Decodes every frame of a file in presentation order (analysis passes). */
+/**
+ * Decodes every frame of a file in presentation order (analysis passes, the
+ * native export). `timeSec` is the container timestamp; with `range` (clip
+ * seconds, 0 = first frame) only the frames an export of it keeps are yielded.
+ */
 export async function* decodeFrames(
   file: File,
   signal?: AbortSignal,
+  range?: TimeRange | null,
 ): AsyncGenerator<{ sample: VideoSample; info: ExportFrameInfo; duration: number }, void, unknown> {
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
   try {
@@ -312,10 +369,18 @@ export async function* decodeFrames(
     const displayHeight = await track.getDisplayHeight();
     const duration = await input.computeDuration();
     const sink = new VideoSampleSink(track);
+    const t0 = range ? await track.getFirstTimestamp() : 0;
+    const fps = range ? ((await track.computePacketStats(100).catch(() => null))?.averagePacketRate ?? 30) : 30;
     let index = 0;
-    for await (const sample of sink.samples()) {
+    let first: number | null = null;
+    for await (const sample of range ? sink.samples(t0 + range.start, t0 + range.end) : sink.samples()) {
       throwIfAborted(signal);
-      yield { sample, info: { timeSec: sample.timestamp, rotation, displayWidth, displayHeight, index: index++ }, duration };
+      if (range && !inRange(sample.timestamp - t0, range, fps)) {
+        sample.close();
+        continue;
+      }
+      if (first === null) first = sample.timestamp;
+      yield { sample, info: { timeSec: sample.timestamp, outTimeSec: sample.timestamp - first, rotation, displayWidth, displayHeight, index: index++ }, duration };
     }
   } finally {
     input.dispose();

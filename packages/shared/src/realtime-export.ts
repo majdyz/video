@@ -101,6 +101,12 @@ export type RealtimeExportOptions = {
    * is aborted).
    */
   startRendering: (onFrame: (timeSec: number) => void) => () => void;
+  /**
+   * Trim (clip seconds): playback starts at `start` and the recording stops
+   * at the first frame at or past `end`; the remux keeps the audio of the
+   * same stretch and drops any frame recorded past it.
+   */
+  range?: { start: number; end: number } | null;
 };
 
 export type RealtimeExportResult = {
@@ -142,7 +148,9 @@ export async function exportRealtime(
   };
   log(`realtime capture → ${mime}, ${Math.round(bitrate / 1e6)} Mbps, ${captureFps} fps${rate < 1 ? ` (playback ×${rate}, re-timed to ${fps} fps)` : ""}`);
 
-  // Playback setup: silent (audio comes from the file), from the start.
+  const range = opts.range ?? null;
+  const from = range ? range.start : 0;
+  // Playback setup: silent (audio comes from the file), from the start (of the trim).
   const wasMuted = video.muted;
   const wasRate = video.playbackRate;
   video.muted = true;
@@ -153,7 +161,17 @@ export async function exportRealtime(
   // The recording's timeline starts at the first captured frame, which is
   // some way into the clip (decoder spin-up); the audio is shifted to match.
   let firstFrameSec: number | null = null;
-  const onFrame = (t: number) => { if (firstFrameSec === null) firstFrameSec = t; };
+  let reachedEnd: (() => void) | null = null;
+  const half = 0.5 / fps;
+  const onFrame = (t: number) => {
+    if (firstFrameSec === null) firstFrameSec = t;
+    // Trimmed: the first frame at the out point ends the recording (it is not part of the range).
+    if (range && t >= range.end - half && reachedEnd) {
+      video.pause();
+      reachedEnd();
+      reachedEnd = null;
+    }
+  };
   const stopped = new Promise<void>((resolve, reject) => {
     recorder.onstop = () => resolve();
     recorder.onerror = (ev) => reject((ev as unknown as { error?: Error }).error ?? new Error("MediaRecorder failed"));
@@ -168,8 +186,10 @@ export async function exportRealtime(
     finish();
   };
   signal?.addEventListener("abort", onAbort, { once: true });
+  const span = range ? Math.max(1e-3, range.end - range.start) : 0;
   const onTime = () => {
-    if (video.duration > 0) onProgress(Math.min(0.98, video.currentTime / video.duration));
+    if (range) onProgress(Math.min(0.98, Math.max(0, (video.currentTime - range.start) / span)));
+    else if (video.duration > 0) onProgress(Math.min(0.98, video.currentTime / video.duration));
   };
   video.addEventListener("timeupdate", onTime);
   // Backgrounded (tab switch, phone lock): pause playback and the recorder
@@ -185,7 +205,10 @@ export async function exportRealtime(
     }
   };
   document.addEventListener("visibilitychange", onVisibility);
-  const ended = new Promise<void>((resolve) => video.addEventListener("ended", () => resolve(), { once: true }));
+  const ended = new Promise<void>((resolve) => {
+    video.addEventListener("ended", () => resolve(), { once: true });
+    reachedEnd = resolve;
+  });
   // An abort (user cancel, or the app restarting at a smaller size) must
   // interrupt the wait for "ended" — the paused video never ends.
   const aborted = new Promise<never>((_, reject) => {
@@ -197,8 +220,8 @@ export async function exportRealtime(
       const onSeeked = () => { video.removeEventListener("seeked", onSeeked); resolve(); };
       video.addEventListener("seeked", onSeeked);
       video.addEventListener("error", () => reject(new Error("Video failed to seek")), { once: true });
-      try { video.currentTime = 0; } catch (e) { reject(e as Error); }
-      if (video.currentTime === 0 && video.readyState >= 1) { video.removeEventListener("seeked", onSeeked); resolve(); }
+      try { video.currentTime = from; } catch (e) { reject(e as Error); }
+      if (from === 0 && video.currentTime === 0 && video.readyState >= 1) { video.removeEventListener("seeked", onSeeked); resolve(); }
     });
     stopRender = opts.startRendering(onFrame);
     recorder.start(1000);
@@ -228,7 +251,9 @@ export async function exportRealtime(
   // when the recorded codec can't live in MP4).
   const r0 = performance.now();
   log(`first rendered frame at ${(firstFrameSec ?? 0).toFixed(3)} s`);
-  const { blob, audioIncluded, codec } = await remux(recorded, file, firstFrameSec ?? 0, rate, fps, opts.opfsPrefix, signal, log);
+  // The output ends where the range does: no audio, and no stray recorded frame, past it.
+  const limit = range ? Math.max(0, range.end - (firstFrameSec ?? range.start)) : Infinity;
+  const { blob, audioIncluded, codec } = await remux(recorded, file, firstFrameSec ?? from, rate, fps, opts.opfsPrefix, signal, log, limit);
   onProgress(1);
   return { blob, audioIncluded, codec, recordedMs, remuxMs: performance.now() - r0 };
 }
@@ -242,6 +267,7 @@ async function remux(
   opfsPrefix: string,
   signal: AbortSignal | undefined,
   log: (line: string) => void,
+  limitSec = Infinity,
 ): Promise<{ blob: Blob; audioIncluded: boolean; codec: string }> {
   const recIn = new Input({ formats: ALL_FORMATS, source: new BlobSource(recorded) });
   const origIn = new Input({ formats: ALL_FORMATS, source: new BlobSource(original) });
@@ -287,6 +313,8 @@ async function remux(
       // Recording time → clip time: the clip played at `rate`, so the
       // recording's clock runs 1/rate slower than the clip's.
       let vts = Math.max(0, (packet.timestamp - vt0) * rate);
+      // Past the out point (the recorder ran a frame or two long); a key frame is never dropped first.
+      if (vts >= limitSec - 0.25 / fps && !first) break;
       if (vts <= prevTs) vts = prevTs + 1e-4;
       prevTs = vts;
       const dur = packet.duration * rate;
@@ -305,6 +333,7 @@ async function remux(
       for await (const packet of aSink.packets()) {
         throwIfAborted(signal);
         const ts = packet.timestamp - at0;
+        if (ts >= limitSec) break;
         if (ts + packet.duration <= 0) continue;
         const shifted = ts === packet.timestamp && ts >= 0 ? packet : new EncodedPacket(packet.data, packet.type, Math.max(0, ts), packet.duration, packet.sequenceNumber);
         await aSource.add(shifted, firstA && decoderConfig ? { decoderConfig } : undefined);

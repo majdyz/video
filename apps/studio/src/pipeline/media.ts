@@ -6,3 +6,4 @@ export { decodeFrames, exportWithCodec, squarePixels } from "@dive-tools/shared/
 export { exportRealtime, probeFrameRate } from "@dive-tools/shared/realtime-export.ts";
 export { detectClipCamera, readColourModeHints } from "./camera.ts";
 export { calibrateSignal, retagFrame } from "./signal-probe.ts";
+export { filmstrip } from "./filmstrip.ts";

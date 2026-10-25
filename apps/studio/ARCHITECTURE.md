@@ -162,6 +162,41 @@ engine's in-flight analysis readback: `GradeEngine.reset()` clears its flag
 but the GPU readback keeps running, and the next analysis then failed with
 "analysis readback already in flight".
 
+## Trim
+
+The player bar is a trim timeline (`ui/timeline.tsx`, maths in
+`pipeline/trim.ts`, tested in `test/trim.test.ts`): a filmstrip of 10
+thumbnails (mediabunny `CanvasSink`, decoded once per clip after the first
+frame is up, `pipeline/filmstrip.ts` in the media chunk), in/out handles
+just outside the selection (44 px touch zones, picked by distance), the
+playhead clamped between them, "0:02.0 of 0:06" and Reset. I / O set the in
+/ out point at the playhead; the handles are sliders (arrows ±0.1 s, Shift
+±1 s). Photos keep the name/size bar.
+
+`Studio.setTrim(range, commit)` stores the range at once (seeks clamp to it,
+the preview loop jumps back to the in point on the frame at the out point);
+on commit, after 500 ms, `applyTrim()` re-runs what depends on it:
+
+* **Stabilise**: the analysis covers the trim ± 0.5 s (`analysisSpan`).
+  Visual: only that span is decoded and tracked. Gyro: the telemetry is
+  read whole (cheap), the picture check windows and the bobbing pass
+  decode the span only, and `computeGyroPlan` solves only the span's frames
+  (`GyroParams.span`). An analysis is reused while it covers the needed span
+  and is at most 3× its length (`spanServes`); otherwise it re-runs, with the
+  old path on screen until the new one lands (export waits for it).
+* **Colour**: the profile samples (and so the scene lock) come from the
+  trim; re-profiled under the same rule.
+* **Export**: offline WebCodecs decodes from the key frame before the in
+  point and keeps frames starting in [in, out) (half a frame of tolerance:
+  2.0–4.0 s at 29.97 fps = 60 frames), timestamps from 0, audio packets
+  overlapping the range copied with the same shift (`CodecExportOptions.range`).
+  Real-time: playback starts at the in point, the first frame at the out
+  point stops the recorder, the remux drops audio and frames past it. Native:
+  `decodeFrames(file, signal, range)`, `shiftSec` = the first kept frame's
+  source time and `durationSec` = the trim, which the iOS / Android encoders
+  already use to cut the audio (no native change). The file name gets
+  `-trimmed`; the export sheet shows the output length.
+
 ## Photos
 
 JPEG / PNG / WebP everywhere, HEIC where the browser decodes it (Safari;

@@ -3,7 +3,7 @@
 // the file has no usable motion data; optionally the hybrid pass (track the
 // picture too, for the translation the gyro cannot see).
 
-import { analyzeVideoFile } from "./analyze.ts";
+import { analyzeVideoFile, type TimeSpan } from "./analyze.ts";
 import { computeGyroPlan } from "./gyro/gyro-stabilize.ts";
 import { checkPicture } from "./gyro/check-file.ts";
 import { probeFile } from "./gyro/probe-file.ts";
@@ -14,6 +14,13 @@ import { computeStabilizedPath } from "./stabilize.ts";
 export type AnalyzeOptions = {
   /** Gyro clips: also run the hybrid pass before returning (see refineHybrid for the two-step flow). */
   hybrid?: boolean;
+  /**
+   * Trim: only this stretch of the clip (clip seconds) is decoded and
+   * tracked (visual analysis, the gyro picture check, the hybrid pass). The
+   * gyro telemetry is read whole (cheap); its solve takes the span from
+   * SolveParams.span.
+   */
+  span?: TimeSpan | null;
 };
 
 export async function analyzeAny(file: File, forceVisual: boolean, onProgress: (fraction: number, frames: number) => void, signal: AbortSignal, options: AnalyzeOptions = {}): Promise<AnalysisResult> {
@@ -22,7 +29,7 @@ export async function analyzeAny(file: File, forceVisual: boolean, onProgress: (
   if (probe.status === "ok" && !forceVisual) {
     // Picture check: air vs underwater lens, and whether the gyro matches the picture at all.
     try {
-      const check = await checkPicture(file, probe.motion, signal);
+      const check = await checkPicture(file, probe.motion, signal, options.span);
       if (check) probe.motion.medium = check;
     } catch (e) {
       // Only a cancel by the caller ends the analysis: a decoder that aborts on its own
@@ -31,9 +38,9 @@ export async function analyzeAny(file: File, forceVisual: boolean, onProgress: (
       console.warn("[motion] picture check failed, using the in-air lens", e);
     }
     const result: AnalysisResult = { mode: "gyro", motion: probe.motion, probeMs: performance.now() - t0 };
-    return options.hybrid ? refineHybrid(file, result, onProgress, signal) : result;
+    return options.hybrid ? refineHybrid(file, result, onProgress, signal, options.span) : result;
   }
-  const analysis = await analyzeVideoFile(file, onProgress, signal);
+  const analysis = await analyzeVideoFile(file, onProgress, signal, options.span);
   return { mode: "visual", analysis, telemetry: noteFromProbe(probe) };
 }
 
@@ -43,10 +50,10 @@ export async function analyzeAny(file: File, forceVisual: boolean, onProgress: (
  * Visual results, rotated clips and decode failures come back unchanged
  * (the gyro-only plan stays as it is). Rejects only with AbortError.
  */
-export async function refineHybrid(file: File, result: AnalysisResult, onProgress: (fraction: number, frames: number) => void, signal: AbortSignal): Promise<AnalysisResult> {
+export async function refineHybrid(file: File, result: AnalysisResult, onProgress: (fraction: number, frames: number) => void, signal: AbortSignal, span?: TimeSpan | null): Promise<AnalysisResult> {
   if (result.mode !== "gyro") return result;
   try {
-    const residual = await trackResidual(file, result.motion, onProgress, signal);
+    const residual = await trackResidual(file, result.motion, onProgress, signal, span);
     return residual ? { ...result, residual } : result;
   } catch (e) {
     if (signal.aborted) throw e;

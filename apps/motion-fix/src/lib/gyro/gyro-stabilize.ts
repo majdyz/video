@@ -59,6 +59,11 @@ export type GyroParams = {
    * the rotation left over. Default 1 when a residual is given.
    */
   hybrid?: number;
+  /**
+   * Trim: solve only the frames in this stretch (clip seconds, the trim plus
+   * a margin). The warp clamps to the span's first / last frame outside it.
+   */
+  span?: { start: number; end: number } | null;
 };
 
 /** What the hybrid translation pass did (absent when no residual was given). */
@@ -122,6 +127,16 @@ export function frameTimesOf(motion: CameraMotion): Float64Array {
   const t = new Float64Array(n);
   for (let i = 0; i < n; i++) t[i] = i * dt - motion.timeOffset;
   return t;
+}
+
+/** The frame times inside a span (all of them without one, or when fewer than 2 frames fall inside). */
+export function spanTimes(times: Float64Array, span?: { start: number; end: number } | null): Float64Array {
+  if (!span) return times;
+  let a = 0;
+  while (a < times.length && times[a] < span.start) a++;
+  let b = a;
+  while (b < times.length && times[b] <= span.end) b++;
+  return b - a >= 2 ? times.slice(a, b) : times;
 }
 
 // ---------------------------------------------------------------------------
@@ -449,7 +464,7 @@ export function mediumIndex(motion: CameraMotion, medium: GyroParams["medium"]):
 
 export function computeGyroPlan(motion: CameraMotion, params: GyroParams, residual?: ResidualMotion | null): GyroPlan {
   const started = performance.now();
-  const times = frameTimesOf(motion);
+  const times = spanTimes(frameTimesOf(motion), params.span);
   const n = times.length;
   const fps = motion.video.fps || 30;
   const index = mediumIndex(motion, params.medium);

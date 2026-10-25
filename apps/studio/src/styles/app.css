@@ -303,17 +303,40 @@ a {
 
 /* ------------------------------------------------------------ timeline */
 
+/*
+ * Trim timeline: play, the strip (filmstrip under in/out handles and the
+ * playhead), then the clock row. One row on wide screens; on phones the
+ * strip gets the full width and the clock row sits under it.
+ *
+ * The handles sit just outside the selection (14 px each, the strip is
+ * inset by that much), so they never overlap; the touch target is the
+ * whole strip height and 44 px around each handle (picked in JS).
+ * Neutral by design: the selection frame is the text colour when trimmed,
+ * a quiet grey when not; no accent.
+ */
 .timeline {
+  --trim-h: 40px;
+  --trim-handle: 14px;
+  --trim-frame: var(--text-4);
+  --trim-grip: var(--text-2);
   flex: 1;
   min-width: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "play strip meta";
   align-items: center;
-  gap: var(--s-3);
+  column-gap: var(--s-3);
+  row-gap: var(--s-1);
+}
+.timeline.is-trimmed {
+  --trim-frame: var(--text-1);
+  --trim-grip: var(--bg);
 }
 .timeline.is-disabled {
   opacity: 0.5;
 }
 .timeline__play {
+  grid-area: play;
   width: 40px;
   height: 40px;
   flex: none;
@@ -330,55 +353,184 @@ a {
 .timeline__play:active:not(:disabled) {
   transform: scale(0.94);
 }
-.timeline__track {
+
+.trim {
+  grid-area: strip;
   position: relative;
-  flex: 1;
   min-width: 0;
-  height: 36px;
-  display: flex;
-  align-items: center;
+  /* Room for the handles outside the selection, and a little touch slop above / below. */
+  padding: 2px var(--trim-handle);
   cursor: pointer;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
-.timeline__rail {
-  width: 100%;
-  height: 4px;
-  border-radius: var(--r-pill);
-  background: var(--track);
-  overflow: hidden;
+.timeline.is-disabled .trim {
+  cursor: default;
 }
-.timeline__fill {
-  height: 100%;
-  background: var(--text-2);
+.trim__strip {
+  position: relative;
+  height: var(--trim-h);
+  border-radius: 0;
+  outline: none;
 }
-.timeline__head {
+.trim__strip:focus-visible {
+  box-shadow: 0 0 0 2px var(--focus);
+  border-radius: var(--r-xs);
+}
+.trim__film {
   position: absolute;
+  inset: 0;
+  display: flex;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.trim__film img,
+.trim__film span {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.trim__film.has-thumbs img {
+  animation: fade-in var(--dur-3) var(--ease-out);
+}
+/* Outside the selection the strip is dimmed. */
+.trim__shade {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--scrim);
+  pointer-events: none;
+}
+/* The selection's top and bottom edges; the handles close it left and right. */
+.trim__sel {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-shadow: inset 0 2px 0 var(--trim-frame), inset 0 -2px 0 var(--trim-frame);
+  pointer-events: none;
+}
+.trim__handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: var(--trim-handle);
+  background: var(--trim-frame);
+  outline: none;
+  transition: background var(--dur-2) var(--ease-out);
+}
+.trim__handle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
   top: 50%;
-  width: 14px;
+  width: 2px;
   height: 14px;
-  margin: -7px 0 0 -7px;
-  border-radius: 50%;
+  margin: -7px 0 0 -1px;
+  border-radius: 1px;
+  background: var(--trim-grip);
+}
+.trim__handle--in {
+  transform: translateX(-100%);
+  border-radius: var(--r-xs) 0 0 var(--r-xs);
+}
+.trim__handle--out {
+  border-radius: 0 var(--r-xs) var(--r-xs) 0;
+}
+.trim__handle:focus-visible {
+  box-shadow: 0 0 0 2px var(--focus);
+  z-index: 2;
+}
+.trim__head {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
   background: var(--thumb);
   box-shadow: var(--thumb-shadow);
-  transform: scale(0.72);
-  transition: transform var(--dur-2) var(--ease-spring);
+  pointer-events: none;
+  z-index: 1;
 }
-.timeline__track:hover .timeline__head,
-.timeline__track.is-dragging .timeline__head {
-  transform: scale(1);
+.timeline.is-dragging .trim__head {
+  opacity: 0;
 }
-.timeline__clock {
-  flex: none;
+/* Timecode over the handle being dragged. */
+.trim__tip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  padding: 3px 7px;
+  border-radius: var(--r-xs);
+  background: var(--overlay);
+  box-shadow: 0 0 0 1px var(--line-2);
+  color: var(--text-1);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.timeline__meta {
+  grid-area: meta;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.timeline__clock,
+.timeline__sel {
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
-  color: var(--text-2);
   letter-spacing: 0.01em;
+  white-space: nowrap;
 }
-.timeline__dur {
+.timeline__clock {
+  color: var(--text-2);
+  min-width: 6ch;
+}
+.timeline__sel {
   color: var(--text-3);
 }
-.timeline__dur::before {
-  content: " / ";
+.timeline__reset {
+  height: 32px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  transition: color var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out);
+}
+.timeline__reset:hover:not(:disabled) {
+  color: var(--text-1);
+  background: var(--surface-2);
+}
+
+/* Phones: the strip across the full width, play + clock + compare under it. */
+.is-narrow .timeline {
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    "strip strip"
+    "play meta";
+  row-gap: var(--s-2);
+}
+.is-narrow .trim {
+  margin: 0 calc(-1 * var(--trim-handle) + 2px);
+}
+.is-narrow .timeline__clock {
+  margin-right: auto;
+}
+.is-narrow .timeline__meta {
+  gap: var(--s-1);
+}
+.is-narrow .timeline__meta .icon-btn {
+  margin-left: var(--s-1);
 }
 
 /* ------------------------------------------------------------ controls dock */
@@ -1410,9 +1562,6 @@ a {
 }
 .is-narrow .export-btn {
   height: 46px;
-}
-.is-narrow .timeline__track {
-  height: 40px;
 }
 
 /* ------------------------------------------------------------ about */

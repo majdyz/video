@@ -14,11 +14,14 @@ import { MotionTracker, analysisSize, prepOptions } from "./tracker.ts";
 
 export type AnalysisProgress = (fraction: number, frames: number) => void;
 
+/** A stretch of the clip to analyse, in clip seconds (0 = the first video frame); null = all of it. */
+export type TimeSpan = { start: number; end: number };
+
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 }
 
-export async function analyzeVideoFile(file: File, onProgress: AnalysisProgress, signal?: AbortSignal): Promise<MotionAnalysis> {
+export async function analyzeVideoFile(file: File, onProgress: AnalysisProgress, signal?: AbortSignal, span?: TimeSpan | null): Promise<MotionAnalysis> {
   throwIfAborted(signal);
   if (typeof VideoDecoder === "undefined") throw new Error("WebCodecs (VideoDecoder) is not available here");
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
@@ -32,7 +35,10 @@ export async function analyzeVideoFile(file: File, onProgress: AnalysisProgress,
     const width = await track.getDisplayWidth();
     const height = await track.getDisplayHeight();
     if (!width || !height) throw new Error("Video has no usable size");
-    const duration = await input.computeDuration();
+    // Trimmed: decode and track only the span (the path is solved on it alone).
+    const first = span ? await track.getFirstTimestamp() : 0;
+    const from = span ? first + span.start : 0;
+    const duration = span ? Math.max(1e-3, span.end - span.start) : await input.computeDuration();
     // Analysis size: 640 px on the long edge, 480 px for high frame rates.
     // 60 fps clips have twice the frames; at 480 px the tracker costs about
     // half per frame with the same stabilisation quality on real clips
@@ -67,7 +73,7 @@ export async function analyzeVideoFile(file: File, onProgress: AnalysisProgress,
     // rotation applied so portrait phone clips are tracked the way they are
     // displayed) on a second thread while this one tracks.
     let tr = performance.now();
-    for await (const { gray, timestamp, prepared } of grayFrames(sink.samples(), aw, ah, { stats: readStats, prep: prepOptions(tracker.opts) })) {
+    for await (const { gray, timestamp, prepared } of grayFrames(span ? sink.samples(from, first + span.end) : sink.samples(), aw, ah, { stats: readStats, prep: prepOptions(tracker.opts) })) {
       throwIfAborted(signal);
       const t0 = performance.now();
       readMs += t0 - tr;
@@ -100,7 +106,7 @@ export async function analyzeVideoFile(file: File, onProgress: AnalysisProgress,
       const now = performance.now();
       if (duration > 0 && now - lastProgress > 80) {
         lastProgress = now;
-        onProgress(Math.min(1, Math.max(0, timestamp / duration)), times.length);
+        onProgress(Math.min(1, Math.max(0, (timestamp - from) / duration)), times.length);
       }
       tr = performance.now();
     }

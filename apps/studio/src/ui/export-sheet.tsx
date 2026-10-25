@@ -4,6 +4,7 @@ import { processingChain, type ToolsState } from "../pipeline/tools.ts";
 import { Sheet } from "./sheet";
 import { IconDownload, IconExport, IconShare, IconWarning } from "./icons";
 import { formatTime } from "./timeline";
+import { formatTimecode, selectionLabel } from "../pipeline/trim.ts";
 import { BRAND } from "../brand.ts";
 import { isNativeShell } from "../native/registry.ts";
 
@@ -117,7 +118,7 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
             <dl className="export__facts">
               <div><dt>Processing</dt><dd>{processingChain(chainTools)}</dd></div>
               <div><dt>Output</dt><dd>{photo ? `${outSize} · JPEG` : `${outSize} · H.264 MP4${info?.hasAudio ? " · original audio" : ""}`}</dd></div>
-              {!photo && <div><dt>Length</dt><dd>{formatTime(duration)}</dd></div>}
+              {!photo && <div><dt>Length</dt><dd>{snap.trim ? `${selectionLabel(snap.trim, duration)} · ${formatTimecode(snap.trim.start)}–${formatTimecode(snap.trim.end)}` : formatTime(duration)}</dd></div>}
               {photo && snap.photoLimited && <div><dt>Note</dt><dd>Original is {snap.photoLimited.w}×{snap.photoLimited.h}; this browser renders at most {outSize}</dd></div>}
             </dl>
             <button type="button" className="btn btn--primary btn--block" onClick={() => void studio.exportVideo()}>

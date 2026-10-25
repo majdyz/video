@@ -5,6 +5,7 @@
 import { analyzeAny, refineHybrid, solveAny } from "./analysis-run.ts";
 import type { WorkerRequest, WorkerResponse } from "./analysis-worker.ts";
 import type { AnalysisResult, Plan, SolveParams } from "./plan.ts";
+import type { TimeSpan } from "./analyze.ts";
 
 type Pending = { resolve: (v: never) => void; reject: (e: Error) => void; onProgress?: (fraction: number, frames: number) => void };
 
@@ -72,21 +73,22 @@ export class AnalysisClient {
    * data (and `forceVisual` is off), else decode + feature tracking.
    * Rejects with AbortError when cancelled. `hybrid` runs the hybrid pass
    * before resolving (gyro clips); see refine() for showing the gyro result first.
+   * `span` (clip seconds) limits the decode passes to a trimmed stretch.
    */
-  async analyze(file: File, onProgress: (fraction: number, frames: number) => void, signal?: AbortSignal, forceVisual = false, hybrid = false): Promise<AnalysisResult> {
+  async analyze(file: File, onProgress: (fraction: number, frames: number) => void, signal?: AbortSignal, forceVisual = false, hybrid = false, span: TimeSpan | null = null): Promise<AnalysisResult> {
     this.fallbackResult = null;
     this.fallbackFile = null;
     const id = this.nextId++;
     const onAbort = (): void => this.worker?.postMessage({ type: "cancel" } satisfies WorkerRequest);
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      return await this.request<AnalysisResult>({ type: "analyze", id, file, forceVisual, hybrid }, onProgress);
+      return await this.request<AnalysisResult>({ type: "analyze", id, file, forceVisual, hybrid, span }, onProgress);
     } catch (e) {
       if (signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw new DOMException("Aborted", "AbortError");
       if (!this.workerBroken && !(e instanceof Error && /VideoDecoder|worker/i.test(e.message))) throw e;
       // Worker could not decode here (older Safari): same code on the main thread.
       this.workerBroken = true;
-      const result = await analyzeAny(file, forceVisual, onProgress, signal ?? new AbortController().signal, { hybrid });
+      const result = await analyzeAny(file, forceVisual, onProgress, signal ?? new AbortController().signal, { hybrid, span });
       this.fallbackResult = result;
       this.fallbackFile = file;
       return result;
@@ -101,9 +103,9 @@ export class AnalysisClient {
    * measurements are loaded (later solves use them), false when the clip
    * cannot use them (visual analysis, rotated clip, decode failure).
    */
-  async refine(onProgress: (fraction: number, frames: number) => void, signal?: AbortSignal): Promise<boolean> {
+  async refine(onProgress: (fraction: number, frames: number) => void, signal?: AbortSignal, span: TimeSpan | null = null): Promise<boolean> {
     if (this.fallbackResult && this.fallbackFile) {
-      const r = await refineHybrid(this.fallbackFile, this.fallbackResult, onProgress, signal ?? new AbortController().signal);
+      const r = await refineHybrid(this.fallbackFile, this.fallbackResult, onProgress, signal ?? new AbortController().signal, span);
       this.fallbackResult = r;
       return r.mode === "gyro" && !!r.residual;
     }
@@ -111,7 +113,7 @@ export class AnalysisClient {
     const onAbort = (): void => this.worker?.postMessage({ type: "cancel" } satisfies WorkerRequest);
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      return await this.request<boolean>({ type: "refine", id }, onProgress);
+      return await this.request<boolean>({ type: "refine", id, span }, onProgress);
     } catch (e) {
       if (signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw new DOMException("Aborted", "AbortError");
       throw e;
