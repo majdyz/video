@@ -434,7 +434,7 @@ export type DepthMap = {
  * are untouched.
  */
 export const SKIN = {
-  hue: (35 * Math.PI) / 180,
+  hue: (18 * Math.PI) / 180, // pink: the reference skin measures ~19° (35° read peach/cream)
   bandHue: (65 * Math.PI) / 180, // candidates: hue within ~15°–115° …
   bandIn: (50 * Math.PI) / 180,
   bandOut: (75 * Math.PI) / 180,
@@ -443,10 +443,10 @@ export const SKIN = {
   lHi: 0.55,
   cLo: 0.07, // not vivid
   cHi: 0.1,
-  mix: 0.9, // how far the hue moves toward SKIN.hue
+  mix: 1.0, // how far the hue moves toward SKIN.hue
   wLo: 0.1, // person weight saturates: smoothstep(wLo, wHi, person)
   wHi: 0.5,
-  cMin: 0.045, // chroma floor
+  cMin: 0.05, // chroma floor
 };
 
 /** CLAHE tile LUTs: `tilesX*tilesY` rows of `bins` entries (R channel). */
