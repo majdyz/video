@@ -190,6 +190,13 @@ jobs:
             -clonedSourcePackagesDirPath "$SPM_DIR" \
             -resultBundlePath "$RUNNER_TEMP/DiveExportTests.xcresult" \
             -quiet
+      - name: Test details (on failure)
+        if: failure()
+        run: |
+          R="$RUNNER_TEMP/DiveExportTests.xcresult"
+          [ -d "$R" ] || exit 0
+          xcrun xcresulttool get test-results tests --path "$R" --compact | python3 "$GITHUB_WORKSPACE/apps/mobile/scripts/xcresult-summary.py" || true
+          xcrun xcresulttool get log --path "$R" --type console 2>/dev/null | grep -E "loopback|Test Case|error|Error" | head -300 || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
