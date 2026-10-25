@@ -8,8 +8,8 @@
 // network-first so a deploy never serves an index pointing at deleted
 // bundles. Each deploy gets a new cache and the old one is deleted on
 // activate.
-const VERSION = "studio-f35c5f0bdd37";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-CRIzJ-u6.js","./assets/analysis-worker-D2TOee3w.js","./assets/bridge-BzaqbQjw.js","./assets/colour-Df9h0axE.js","./assets/dewarp-BVn11FaV.js","./assets/dist-C1-5Ybmv.js","./assets/fisheye-ZQaGtv4_.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-9iM1BTBR.css","./assets/index-Dj3ma4H8.js","./assets/media-CsE4n3D5.js","./assets/motion-CrUd5EJN.js","./assets/opfs-worker-BuQ2QldH.js","./assets/person-worker-PK8s94hj.js","./assets/videoframe-colorspace-DKLt8PMM.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-Ean3G7CM.js"];
+const VERSION = "studio-f519db150700";
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker--wK0gl3y.js","./assets/analysis-worker-D2TOee3w.js","./assets/bridge-CFrz4Ovc.js","./assets/colour-kA8Df1ET.js","./assets/dewarp-BTJWFLrg.js","./assets/dist-C1-5Ybmv.js","./assets/fisheye-ZQaGtv4_.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-BM0htAWD.css","./assets/index-Bc_lNaFs.js","./assets/media-CsFjhxpO.js","./assets/motion-ChtB6WDQ.js","./assets/opfs-worker-BuQ2QldH.js","./assets/person-worker-PK8s94hj.js","./assets/videoframe-colorspace-RrV_ceTo.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-Ean3G7CM.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
