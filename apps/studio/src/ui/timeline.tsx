@@ -7,9 +7,11 @@ export function formatTime(s: number): string {
 }
 
 /** Width of a trim handle (px); the handles sit just outside the selection, so they never overlap. */
-const HANDLE_W = 14;
+const HANDLE_W = 12;
 /** Half the touch target around a handle (44 px). */
 const HIT_HALF = 22;
+/** Room the drag timecode needs beside a handle (px). */
+const TIP_W = 56;
 
 type Drag = { kind: "in" | "out"; range: TrimRange } | { kind: "scrub"; t: number };
 
@@ -94,11 +96,23 @@ export function Timeline({
     else if (e.key === "End") { e.preventDefault(); nudge(which, duration); }
   };
 
-  const tip = drag && drag.kind !== "scrub" ? (
-    <div className="trim__tip" style={{ left: `${drag.kind === "in" ? inPct : outPct}%` }} aria-hidden="true">
-      {formatTimecode(drag.kind === "in" ? range.start : range.end)}
-    </div>
-  ) : null;
+  // Timecode of the handle being dragged, inside the strip (never over the dock's grab bar):
+  // beside the handle over the dimmed part, or inside the selection when there is no room outside.
+  let tip = null;
+  if (drag && drag.kind !== "scrub") {
+    const w = stripRef.current?.clientWidth ?? 0;
+    const atIn = drag.kind === "in";
+    const edge = atIn ? inPct : outPct;
+    const room = atIn ? (edge / 100) * w - HANDLE_W : w - (edge / 100) * w - HANDLE_W;
+    const outside = room >= TIP_W;
+    const side = atIn === outside ? "left" : "right";
+    const offset = (outside ? HANDLE_W : 0) + 4;
+    tip = (
+      <div className={`trim__tip trim__tip--${side}`} style={{ left: `calc(${edge}% ${side === "left" ? "-" : "+"} ${offset}px)` }} aria-hidden="true">
+        {formatTimecode(atIn ? range.start : range.end)}
+      </div>
+    );
+  }
 
   return (
     <div className={`timeline${disabled ? " is-disabled" : ""}${trimmed ? " is-trimmed" : ""}${drag ? " is-dragging" : ""}`}>
@@ -109,6 +123,10 @@ export function Timeline({
         className="trim"
         onPointerDown={(e) => {
           if (!live || e.button !== 0) return;
+          // A pointer drag doesn't take keyboard focus (no focus ring after dragging); drop any it had.
+          e.preventDefault();
+          const focused = document.activeElement as HTMLElement | null;
+          if (focused?.closest(".trim")) focused.blur();
           e.currentTarget.setPointerCapture(e.pointerId);
           const d = grab(e.clientX);
           const moved = d.kind === "scrub" ? follow(d, e.clientX) : d;

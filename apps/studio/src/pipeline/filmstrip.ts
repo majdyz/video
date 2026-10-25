@@ -4,7 +4,7 @@
 // after the first frame is on screen; any failure just leaves the strip plain.
 
 import "@dive-tools/shared/videoframe-colorspace.ts";
-import { ALL_FORMATS, BlobSource, CanvasSink, Input } from "mediabunny";
+import { ALL_FORMATS, BlobSource, CanvasSink, EncodedPacketSink, Input } from "mediabunny";
 
 export async function filmstrip(file: File, times: number[], height: number, signal: AbortSignal): Promise<string[]> {
   if (typeof VideoDecoder === "undefined" || !times.length) return [];
@@ -18,8 +18,18 @@ export async function filmstrip(file: File, times: number[], height: number, sig
     const th = Math.max(16, Math.round(height));
     const tw = Math.max(16, Math.round((th * w) / h));
     const first = await track.getFirstTimestamp();
+    // Snap each slot to the key frame at or before it: one decode per thumbnail instead of
+    // decoding up to a whole GOP to land on the exact time (a thumbnail doesn't need it).
+    // A key frame already used by the previous slot keeps the exact time instead.
+    const packets = new EncodedPacketSink(track);
+    const targets: number[] = [];
+    for (const t of times) {
+      const key = await packets.getKeyPacket(first + t).catch(() => null);
+      const k = key?.timestamp;
+      targets.push(k !== undefined && (targets.length === 0 || k > targets[targets.length - 1] + 1e-6) ? k : first + t);
+    }
     const sink = new CanvasSink(track, { width: tw, height: th, fit: "fill", poolSize: 1 });
-    for await (const wrapped of sink.canvasesAtTimestamps(times.map((t) => first + t))) {
+    for await (const wrapped of sink.canvasesAtTimestamps(targets)) {
       if (signal.aborted) break;
       if (!wrapped) {
         urls.push("");

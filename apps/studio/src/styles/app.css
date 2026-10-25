@@ -316,7 +316,7 @@ a {
  */
 .timeline {
   --trim-h: 40px;
-  --trim-handle: 14px;
+  --trim-handle: 12px;
   --trim-frame: var(--text-4);
   --trim-grip: var(--text-2);
   flex: 1;
@@ -375,8 +375,10 @@ a {
   border-radius: 0;
   outline: none;
 }
+/* Keyboard focus only (a pointer drag never focuses the strip): a ring outside the handles. */
 .trim__strip:focus-visible {
-  box-shadow: 0 0 0 2px var(--focus);
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
   border-radius: var(--r-xs);
 }
 .trim__film {
@@ -397,12 +399,12 @@ a {
 .trim__film.has-thumbs img {
   animation: fade-in var(--dur-3) var(--ease-out);
 }
-/* Outside the selection the strip is dimmed. */
+/* Outside the selection the strip is dimmed (~60 % of the page background), so what gets exported reads at a glance. */
 .trim__shade {
   position: absolute;
   top: 0;
   bottom: 0;
-  background: var(--scrim);
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
   pointer-events: none;
 }
 /* The selection's top and bottom edges; the handles close it left and right. */
@@ -459,12 +461,11 @@ a {
 .timeline.is-dragging .trim__head {
   opacity: 0;
 }
-/* Timecode over the handle being dragged. */
+/* Timecode of the handle being dragged: inside the strip, beside the handle (JS picks the side with room). */
 .trim__tip {
   position: absolute;
-  bottom: calc(100% + 8px);
-  transform: translateX(-50%);
-  padding: 3px 7px;
+  top: 50%;
+  padding: 3px 6px;
   border-radius: var(--r-xs);
   background: var(--overlay);
   box-shadow: 0 0 0 1px var(--line-2);
@@ -475,6 +476,12 @@ a {
   white-space: nowrap;
   pointer-events: none;
   z-index: 3;
+}
+.trim__tip--left {
+  transform: translate(-100%, -50%);
+}
+.trim__tip--right {
+  transform: translate(0, -50%);
 }
 
 .timeline__meta {
