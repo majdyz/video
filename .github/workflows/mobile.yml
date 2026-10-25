@@ -10,7 +10,6 @@
 name: Mobile
 
 on:
-  workflow_dispatch:
   push:
     branches: [mobile]
     paths:
