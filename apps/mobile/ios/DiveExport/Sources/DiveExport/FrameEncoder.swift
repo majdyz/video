@@ -80,8 +80,7 @@ public final class FrameEncoder {
     private var audioInput: AVAssetWriterInput?
     private var audioReader: AVAssetReader?
     private var audioOutput: AVAssetReaderTrackOutput?
-    private let audioQueue = DispatchQueue(label: "dive.encoder.audio")
-    private let audioDone = DispatchGroup()
+    private var pendingAudio: CMSampleBuffer?
     private var audioFinished = false
     private var audioFailed = false
     private var cancelled = false
@@ -196,40 +195,46 @@ public final class FrameEncoder {
     }
 
     private func startAudio() {
-        guard let input = audioInput, let reader = audioReader, let output = audioOutput else { return }
-        guard reader.startReading() else {
+        guard let input = audioInput, let reader = audioReader else { return }
+        if !reader.startReading() {
             audioFailed = true
+            audioFinished = true
             input.markAsFinished()
-            return
         }
-        audioDone.enter()
-        // The writer interleaves: the audio input reports not-ready while it
-        // is ahead of the video, and this block runs again as frames arrive.
-        input.requestMediaDataWhenReady(on: audioQueue) { [weak self] in
-            guard let self else { return }
-            while input.isReadyForMoreMediaData {
-                if self.cancelled {
-                    self.finishAudio(input, failed: true)
+    }
+
+    /// Copies source audio into the file up to `limit` (source time), on the
+    /// caller's thread. The writer interleaves its inputs: with
+    /// expectsMediaDataInRealTime = false it holds one input back while the
+    /// other lags, so audio is fed here, alongside the video, instead of from
+    /// a separate requestMediaDataWhenReady queue (which stalled the video
+    /// input on the simulator).
+    private func pumpAudio(upTo limit: CMTime) {
+        guard let input = audioInput, let output = audioOutput, !audioFinished else { return }
+        while input.isReadyForMoreMediaData {
+            if pendingAudio == nil {
+                guard let next = output.copyNextSampleBuffer() else {
+                    finishAudio(failed: audioReader?.status == .failed)
                     return
                 }
-                guard let sample = output.copyNextSampleBuffer() else {
-                    self.finishAudio(input, failed: reader.status == .failed)
-                    return
-                }
-                if !input.append(sample) {
-                    self.finishAudio(input, failed: true)
-                    return
-                }
+                pendingAudio = next
+            }
+            guard let sample = pendingAudio else { return }
+            if CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(sample), limit) > 0 { return }
+            pendingAudio = nil
+            if !input.append(sample) {
+                finishAudio(failed: true)
+                return
             }
         }
     }
 
-    private func finishAudio(_ input: AVAssetWriterInput, failed: Bool) {
+    private func finishAudio(failed: Bool) {
         guard !audioFinished else { return }
         audioFinished = true
-        audioFailed = failed
-        input.markAsFinished()
-        audioDone.leave()
+        if failed { audioFailed = true }
+        pendingAudio = nil
+        audioInput?.markAsFinished()
     }
 
     /// Encodes one frame. `ptsUs` is relative to the first frame. Blocks
@@ -237,11 +242,15 @@ public final class FrameEncoder {
     public func append(_ bytes: UnsafeRawBufferPointer, width w: Int, height h: Int, format: PixelFormat, ptsUs: Int64) throws {
         if cancelled { throw EncoderError.cancelled }
         guard ptsUs > lastPtsUs else { throw EncoderError.outOfOrder(last: lastPtsUs, got: ptsUs) }
+        let t = CMTimeAdd(CMTime(value: ptsUs, timescale: 1_000_000), shift)
+        let audioAhead = CMTimeAdd(t, CMTime(value: 500, timescale: 1000))
+        pumpAudio(upTo: audioAhead)
         let deadline = Date().addingTimeInterval(20)
         while !videoInput.isReadyForMoreMediaData {
             if writer.status == .failed { throw EncoderError.writer(writer.error?.localizedDescription ?? "failed") }
             if cancelled { throw EncoderError.cancelled }
             if Date() > deadline { throw EncoderError.timeout }
+            pumpAudio(upTo: audioAhead)
             usleep(1000)
         }
         guard let pool = adaptor.pixelBufferPool else { throw EncoderError.writer("no pixel buffer pool (\(writer.status.rawValue))") }
@@ -251,7 +260,6 @@ public final class FrameEncoder {
         CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
         CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
         try PixelCopy.copy(bytes, width: w, height: h, format: format, into: pb)
-        let t = CMTimeAdd(CMTime(value: ptsUs, timescale: 1_000_000), shift)
         guard adaptor.append(pb, withPresentationTime: t) else {
             throw EncoderError.writer(writer.error?.localizedDescription ?? "append failed")
         }
@@ -259,35 +267,34 @@ public final class FrameEncoder {
         frames += 1
     }
 
-    /// Closes the video track, waits for the audio copy, writes the moov box.
+    /// Closes the video track, copies the rest of the audio (to the end of
+    /// the video), writes the moov box.
     public func finish(completion: @escaping (Result<EncoderResult, Error>) -> Void) {
         guard !cancelled else { completion(.failure(EncoderError.cancelled)); return }
         guard frames > 0 else { cancel(); completion(.failure(EncoderError.writer("no frames"))); return }
         videoInput.markAsFinished()
         let frameDur = 1.0 / (config.fps > 0 ? config.fps : 30)
         let end = CMTimeAdd(CMTimeAdd(CMTime(value: lastPtsUs, timescale: 1_000_000), CMTime(seconds: frameDur, preferredTimescale: 1_000_000)), shift)
-        let finishWriting = { [self] in
-            writer.endSession(atSourceTime: end)
-            writer.finishWriting { [self] in
-                if writer.status == .completed {
-                    let bytes = (try? FileManager.default.attributesOfItem(atPath: config.output.path)[.size] as? NSNumber)?.intValue ?? 0
-                    completion(.success(EncoderResult(url: config.output, frames: frames, bytes: bytes, audioIncluded: config.audioSource == nil || (audioInput != nil && !audioFailed), durationSec: CMTimeGetSeconds(CMTimeSubtract(end, shift)))))
-                } else {
-                    completion(.failure(EncoderError.writer(writer.error?.localizedDescription ?? "finishWriting status \(writer.status.rawValue)")))
-                }
-            }
-        }
         if audioInput != nil {
             // With the video finished the writer no longer holds the audio back.
-            DispatchQueue.global(qos: .userInitiated).async { [self] in
-                if audioDone.wait(timeout: .now() + 30) == .timedOut {
-                    audioReader?.cancelReading()
-                    audioFailed = true
-                }
-                finishWriting()
+            let deadline = Date().addingTimeInterval(30)
+            while !audioFinished {
+                pumpAudio(upTo: end)
+                if let p = pendingAudio, CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(p), end) > 0 { break }
+                if writer.status == .failed || Date() > deadline { audioFailed = true; break }
+                if !audioFinished { usleep(1000) }
             }
-        } else {
-            finishWriting()
+            finishAudio(failed: false)
+            audioReader?.cancelReading()
+        }
+        writer.endSession(atSourceTime: end)
+        writer.finishWriting { [self] in
+            if writer.status == .completed {
+                let bytes = (try? FileManager.default.attributesOfItem(atPath: config.output.path)[.size] as? NSNumber)?.intValue ?? 0
+                completion(.success(EncoderResult(url: config.output, frames: frames, bytes: bytes, audioIncluded: config.audioSource == nil || (audioInput != nil && !audioFailed), durationSec: CMTimeGetSeconds(CMTimeSubtract(end, shift)))))
+            } else {
+                completion(.failure(EncoderError.writer(writer.error?.localizedDescription ?? "finishWriting status \(writer.status.rawValue)")))
+            }
         }
     }
 

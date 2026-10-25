@@ -167,6 +167,8 @@ final class FrameEncoderTests: XCTestCase {
 
 final class ExportHubTests: XCTestCase {
     func testFramesOverLoopback() async throws {
+        LoopbackServer.debugLog = { print("[loopback] \($0)") }
+        defer { LoopbackServer.debugLog = nil }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("dive-hub-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let hub = ExportHub(exportsDir: root.appendingPathComponent("exports"), filesDir: root.appendingPathComponent("files"))

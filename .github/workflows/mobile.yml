@@ -163,18 +163,6 @@ jobs:
           ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; key=lambda k: [int(x) for x in k.split("iOS-")[-1].split("-")]; ids=[dev["udid"] for rt in sorted((k for k in d if "iOS" in k), key=key, reverse=True) for dev in d[rt] if dev["name"].startswith("iPhone")]; print(ids[0])')
           echo "Simulator $ID"
           echo "id=$ID" >> "$GITHUB_OUTPUT"
-      - name: DiveExport tests (encoder, loopback endpoint, pixel copy) on the simulator
-        working-directory: apps/mobile/ios/DiveExport
-        run: |
-          SCHEME=$(xcodebuild -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); s=(d.get("workspace") or d.get("project") or {}).get("schemes",[]); print("DiveExport-Package" if "DiveExport-Package" in s else "DiveExport")')
-          echo "Scheme $SCHEME"
-          pretty() { if command -v xcbeautify >/dev/null; then xcbeautify --renderer github-actions; else cat; fi; }
-          xcodebuild test \
-            -scheme "$SCHEME" \
-            -destination "id=${{ steps.sim.outputs.id }}" \
-            -clonedSourcePackagesDirPath "$SPM_DIR" \
-            -resultBundlePath "$RUNNER_TEMP/DiveExportTests.xcresult" \
-            | pretty
       - name: Build the app for the simulator (unsigned)
         working-directory: apps/mobile/ios/App
         run: |
@@ -191,7 +179,19 @@ jobs:
             | pretty
           cd "$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator"
           ditto -c -k --keepParent App.app "$RUNNER_TEMP/deepfix-ios-simulator.zip"
+      - name: DiveExport tests (encoder, loopback endpoint, pixel copy) on the simulator
+        working-directory: apps/mobile/ios/DiveExport
+        run: |
+          SCHEME=$(xcodebuild -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); s=(d.get("workspace") or d.get("project") or {}).get("schemes",[]); print("DiveExport-Package" if "DiveExport-Package" in s else "DiveExport")')
+          echo "Scheme $SCHEME"
+          xcodebuild test \
+            -scheme "$SCHEME" \
+            -destination "id=${{ steps.sim.outputs.id }}" \
+            -clonedSourcePackagesDirPath "$SPM_DIR" \
+            -resultBundlePath "$RUNNER_TEMP/DiveExportTests.xcresult" \
+            -quiet
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: deepfix-ios-simulator
           path: ${{ runner.temp }}/deepfix-ios-simulator.zip

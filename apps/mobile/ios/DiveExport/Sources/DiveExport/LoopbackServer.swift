@@ -13,6 +13,9 @@ public final class LoopbackServer {
     public typealias Handler = (_ request: HTTPRequest, _ respond: @escaping (HTTPResponse) -> Void) -> Void
 
     public let token: String
+    /// Diagnostics hook (tests print it): connection states, reads, responses.
+    public static var debugLog: ((String) -> Void)?
+    private func log(_ s: @autoclosure () -> String) { LoopbackServer.debugLog?(s()) }
     private let handler: Handler
     private let queue = DispatchQueue(label: "dive.loopback", qos: .userInitiated)
     private var listener: NWListener?
@@ -79,7 +82,9 @@ public final class LoopbackServer {
         let conn = Connection(nw: nw)
         let key = ObjectIdentifier(conn)
         connections[key] = conn
+        log("accept \(nw.endpoint)")
         nw.stateUpdateHandler = { [weak self] state in
+            self?.log("conn state \(state)")
             switch state {
             case .failed, .cancelled:
                 self?.queue.async { self?.connections[key] = nil }
@@ -95,6 +100,7 @@ public final class LoopbackServer {
         // Large reads: frames are megabytes.
         conn.nw.receive(minimumIncompleteLength: 1, maximumLength: 4 * 1024 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
+            self.log("recv \(data?.count ?? -1) bytes complete=\(isComplete) error=\(String(describing: error))")
             if let data, !data.isEmpty { conn.parser.append(data) }
             do {
                 if let request = try conn.parser.next() {
@@ -121,6 +127,7 @@ public final class LoopbackServer {
 
     private func dispatch(_ request: HTTPRequest, on conn: Connection) {
         let keepAlive = request.keepAlive
+        log("request \(request.method) \(request.path) body=\(request.body.count) keepAlive=\(keepAlive)")
         if request.method == "OPTIONS" {
             send(HTTPResponse(status: 204), on: conn, keepAlive: keepAlive)
             return
@@ -142,6 +149,7 @@ public final class LoopbackServer {
     private func send(_ response: HTTPResponse, on conn: Connection, keepAlive: Bool) {
         conn.nw.send(content: response.serialized(keepAlive: keepAlive), completion: .contentProcessed { [weak self] error in
             guard let self else { return }
+            self.log("sent \(response.status) error=\(String(describing: error))")
             if error != nil || !keepAlive {
                 conn.nw.cancel()
                 return
