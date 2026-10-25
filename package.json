@@ -6,7 +6,9 @@
   "scripts": {
     "dev:aqua": "pnpm --filter aqua-fix dev",
     "dev:motion": "pnpm --filter motion-fix dev",
-    "build": "pnpm --filter aqua-fix build && pnpm --filter motion-fix build && pnpm --filter dewarp build && node scripts/assemble-dist.mjs",
+    "build": "pnpm --filter aqua-fix build && pnpm --filter motion-fix build && pnpm --filter dewarp build && pnpm --filter studio build && node scripts/assemble-dist.mjs",
+    "dev:studio": "pnpm --filter studio dev",
+    "build:studio": "pnpm --filter studio build",
     "build:aqua": "pnpm --filter aqua-fix build",
     "build:motion": "pnpm --filter motion-fix build",
     "preview": "vite preview --outDir dist",

@@ -28,7 +28,8 @@ import {
 import "@dive-tools/shared/theme.css";
 import { AquaFixLogo, AQUA_FIX_BRAND } from "./branding";
 import { GradeEngine } from "./engine/engine";
-import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, medianParams, type GradeParams, type UserSettings } from "./engine/params";
+import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, type UserSettings } from "./engine/params";
+import { segmentProfile, type ProfileSample } from "./engine/profile";
 import { ANALYSIS_INTERVAL_MS, SCENE_CUT_MEAN_DIFF } from "./engine/engine";
 import type { Rotation } from "./engine/backend";
 
@@ -447,7 +448,7 @@ export default function App() {
     const dur = video.duration;
     if (!e || !Number.isFinite(dur) || dur < 0.5) return;
     const n = Math.min(12, Math.max(4, Math.round(dur)));
-    const samples: { t: number; params: GradeParams; mean: [number, number, number] }[] = [];
+    const samples: ProfileSample[] = [];
     const wasPaused = video.paused;
     const resumeAt = video.currentTime;
     previewActiveRef.current = false;
@@ -467,27 +468,9 @@ export default function App() {
         }
       }
       if (myGen !== fileGenRef.current) return;
-      if (samples.length >= 3) {
-        // Split at real cuts only: samples are ~0.5–1 s apart, so a pan from
-        // sunlit surface to dark rock already moves the mean colour by more
-        // than the frame-to-frame cut threshold. A split needs a large jump,
-        // or a moderate one together with a genuinely different estimate —
-        // if the estimates agree there is nothing to gain from splitting
-        // (and a mid-clip snap is exactly the inconsistency the lock exists
-        // to remove). Each segment with ≥ 2 samples locks its own median; a
-        // lone sample joins the previous segment.
-        const segs: { from: number; window?: [number, number]; items: typeof samples }[] = [{ from: 0, items: [samples[0]] }];
-        for (let i = 1; i < samples.length; i++) {
-          const a = samples[i - 1].mean, b = samples[i].mean;
-          const diff = Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
-          const wa = samples[i - 1].params.wb, wb = samples[i].params.wb;
-          const wbDiff = Math.max(Math.abs(Math.log(wa[0] / wb[0])), Math.abs(Math.log(wa[2] / wb[2])));
-          const cut = diff > 2 * SCENE_CUT_MEAN_DIFF || (diff > SCENE_CUT_MEAN_DIFF && wbDiff > 0.2);
-          if (cut) segs.push({ from: (samples[i - 1].t + samples[i].t) / 2, window: [samples[i - 1].t, samples[i].t] as [number, number], items: [] });
-          segs[segs.length - 1].items.push(samples[i]);
-        }
-        for (let i = segs.length - 1; i > 0; i--) if (segs[i].items.length < 2) { segs[i - 1].items.push(...segs[i].items); segs.splice(i, 1); }
-        const lock = segs.map((s) => ({ from: s.from, window: s.window, params: medianParams(s.items.map((x) => x.params)) }));
+      // Split at real cuts only and lock each segment's median (engine/profile.ts).
+      const lock = segmentProfile(samples, SCENE_CUT_MEAN_DIFF);
+      if (lock) {
         e.lockGlobals(lock);
         console.info(`[profile] locked ${lock.length} segment(s): ${samples.length}/${n} samples, wb ${samples.map((p) => p.params.wb[0].toFixed(2)).join("/")}, cuts at ${lock.slice(1).map((s) => s.from.toFixed(1) + "s").join(", ") || "none"}`);
       } else {
