@@ -16,6 +16,7 @@ import { boxGate, PERSON_BOX_MIN_SCORE, type PersonBox } from "./person-gate.ts"
 import { inCutWindow as lockInCutWindow, noteCut as lockNoteCut, segmentAt, type LockSegment } from "./lock.ts";
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
 import { linearToOklab } from "./color.ts";
+import { calmToneOf } from "./calm.ts";
 import {
   CLAHE_BINS,
   CLAHE_TILES_X,
@@ -572,7 +573,9 @@ export class GradeEngine {
       // The guide's alpha carries the person mask (the analysis leaves it 0).
       const merged = this.guideMerged && this.guideMerged.length === g.data.length ? this.guideMerged : new Float32Array(g.data.length);
       merged.set(g.data);
-      for (let i = 0; i < this.person.length; i++) merged[i * 4 + 3] = this.person[i];
+      // Topside / no-cast frames (calm.ts) keep their skin as recorded.
+      const pk = 1 - calmToneOf(this.current);
+      for (let i = 0; i < this.person.length; i++) merged[i * 4 + 3] = this.person[i] * pk;
       this.guideMerged = merged;
       this.backend.setData(2, { width: g.width, height: g.height, data: merged });
     } else {

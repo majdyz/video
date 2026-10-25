@@ -4,6 +4,7 @@
 
 import { UNIFORM_FLOATS } from "./backend.ts";
 import { linearToOklab } from "./color.ts";
+import { calmParams, calmSettings, type CalmEvidence } from "./calm.ts";
 
 /** ULAP depth prior (Song et al. 2018): d = mu0 + mu1·max(G,B) + mu2·R on 0..1 sRGB. */
 export const ULAP = { mu0: 0.53214829, mu1: 0.51309827, mu2: -0.91066194 };
@@ -380,6 +381,14 @@ export type GradeParams = {
   /** Signal-fraction ramp between hue-preserving (proportional) and per-channel veil subtraction. */
   subLo: number;
   subHi: number;
+  /**
+   * Do-no-harm (see calm.ts), 0..1: evidence that the frame is already
+   * colour-balanced (calm: backs off balance, range compensation and veil)
+   * or not underwater at all (calmTone: also exposure, levels, local
+   * contrast, haze removal, skin colour). Absent = 0.
+   */
+  calm?: number;
+  calmTone?: number;
 };
 
 export const IDENTITY_PARAMS: GradeParams = {
@@ -466,6 +475,8 @@ export type FrameAnalysis = {
   clahe: ClaheLuts;
   /** Mean sRGB of the thumbnail, for scene-cut detection. */
   mean: Vec3;
+  /** Diagnostics (harness only; the worker does not post it). */
+  diag?: { sandWeight: number; sandFrac: number; sandMask: Uint8Array; calm: CalmEvidence };
 };
 
 export const CLAHE_TILES_X = 8;
@@ -504,8 +515,9 @@ export function packUniforms(
 ): Float32Array {
   const u = new Float32Array(UNIFORM_FLOATS);
   const hz = settings.hazeAuto !== false;
-  params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(params, pushOf(settings)), settings)), settings);
-  const s = lookSettings(hz ? hazeSettings(presetSettings(resolveSettings(settings), settings), params) : presetSettings(resolveSettings(settings), settings), params);
+  params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(params), pushOf(settings)), settings)), settings);
+  const base = presetSettings(calmSettings(resolveSettings(settings), params), settings);
+  const s = lookSettings(hz ? hazeSettings(base, params) : base, params);
   u.set([rotation, split, s.strength, 0], 0);
   u.set([...params.binf, s.veil], 4);
   u.set([...params.betaB, s.look], 8);
@@ -615,5 +627,7 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     knee: m(a.knee, b.knee),
     subLo: m(a.subLo, b.subLo),
     subHi: m(a.subHi, b.subHi),
+    calm: m(a.calm ?? 0, b.calm ?? 0),
+    calmTone: m(a.calmTone ?? 0, b.calmTone ?? 0),
   };
 }

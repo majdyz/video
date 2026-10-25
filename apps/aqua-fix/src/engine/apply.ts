@@ -5,6 +5,7 @@
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
 import { CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
+import { calmParams, calmSettings } from "./calm.ts";
 
 export type ApplyContext = {
   /** When set, gradePixel returns (k, confPix, confMap) instead of a colour. */
@@ -22,8 +23,9 @@ type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings }
 
 export function resolveContext(ctx: ApplyContext): PixelContext {
   const hz = ctx.settings.hazeAuto !== false;
-  const params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(ctx.params, pushOf(ctx.settings)), ctx.settings)), ctx.settings);
-  return { ...ctx, params, settings: lookSettings(hz ? hazeSettings(presetSettings(resolveSettings(ctx.settings), ctx.settings), params) : presetSettings(resolveSettings(ctx.settings), ctx.settings), params) };
+  const params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(ctx.params), pushOf(ctx.settings)), ctx.settings)), ctx.settings);
+  const base = presetSettings(calmSettings(resolveSettings(ctx.settings), params), ctx.settings);
+  return { ...ctx, params, settings: lookSettings(hz ? hazeSettings(base, params) : base, params) };
 }
 
 /**
