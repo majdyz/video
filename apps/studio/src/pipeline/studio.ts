@@ -415,7 +415,7 @@ export class Studio {
   // ------------------------------------------------------------ tools
 
   /** Engine settings for the colour tool (debug `?pop=1` forces Subject pop on for headless checks). */
-  private colourFor(c: ToolsState["colour"]) {
+  private colourFor(c: Parameters<typeof colourSettings>[0]) {
     const s = colourSettings(c);
     if (new URLSearchParams(location.search).get("pop") === "1") s.subjectPop = true;
     return s;
