@@ -9,31 +9,52 @@ const dist = resolve(root, "dist");
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
 
-// Each app gets its own subpath under /video/
-const aquaSrc = resolve(root, "apps/aqua-fix/dist");
-const aquaDst = resolve(dist, "aqua-fix");
-if (existsSync(aquaSrc)) {
-  mkdirSync(aquaDst, { recursive: true });
-  cpSync(aquaSrc, aquaDst, { recursive: true });
+// Each app gets its own subpath under /video/ (the classic single-tool apps
+// keep their URLs; the unified Studio lives at /video/studio/).
+const assembled = [];
+for (const app of ["aqua-fix", "motion-fix", "dewarp", "studio"]) {
+  const src = resolve(root, `apps/${app}/dist`);
+  if (!existsSync(src)) continue;
+  const dst = resolve(dist, app);
+  mkdirSync(dst, { recursive: true });
+  cpSync(src, dst, { recursive: true });
+  assembled.push(app);
 }
 
-const motionSrc = resolve(root, "apps/motion-fix/dist");
-const motionDst = resolve(dist, "motion-fix");
-if (existsSync(motionSrc)) {
-  mkdirSync(motionDst, { recursive: true });
-  cpSync(motionSrc, motionDst, { recursive: true });
-}
-
-const dewarpSrc = resolve(root, "apps/dewarp/dist");
-const dewarpDst = resolve(dist, "dewarp");
-if (existsSync(dewarpSrc)) {
-  mkdirSync(dewarpDst, { recursive: true });
-  cpSync(dewarpSrc, dewarpDst, { recursive: true });
-}
-
-// Landing page at /video/ that links both apps
+// /video/ → the Studio (instant redirect; links for no-JS and for the classic tools).
 writeFileSync(
   resolve(dist, "index.html"),
+  `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#08090b" />
+<title>deepfix</title>
+<meta http-equiv="refresh" content="0; url=./studio/" />
+<link rel="canonical" href="./studio/" />
+<script>location.replace("./studio/" + location.search + location.hash);</script>
+<style>
+  html, body { margin: 0; height: 100%; background: #08090b; color: #f2f4f7; font: 15px/1.5 -apple-system, system-ui, sans-serif; }
+  main { min-height: 100%; display: grid; place-content: center; gap: 12px; text-align: center; padding: 24px; }
+  a { color: #3ee6ff; text-decoration: none; }
+  small { color: #7d8590; }
+</style>
+</head>
+<body>
+<main>
+  <a href="./studio/">Open deepfix &rarr;</a>
+  <small>Classic tools: <a href="./classic/">all</a> · <a href="./aqua-fix/">Aqua Fix</a> · <a href="./motion-fix/">Motion Fix</a> · <a href="./dewarp/">Dewarp</a></small>
+</main>
+</body>
+</html>
+`,
+);
+
+// The previous landing page (links to the single-tool apps) moves to /video/classic/.
+mkdirSync(resolve(dist, "classic"), { recursive: true });
+writeFileSync(
+  resolve(dist, "classic/index.html"),
   `<!doctype html>
 <html lang="en">
 <head>
@@ -66,17 +87,17 @@ writeFileSync(
     <p class="intro">On-device PWAs for diver-shot video. Pick a tool below; both work offline once installed to your home screen.</p>
   </header>
   <nav class="grid">
-    <a class="card aqua" href="./aqua-fix/">
+    <a class="card aqua" href="../aqua-fix/">
       <span class="arrow">→</span>
       <h2>Aqua Fix</h2>
       <p>Underwater colour correction. Physically-based: removes the backscatter veil, restores colour by range, keeps water looking like water. One estimate per clip, on-device person detection for skin, scene presets, native 4K, WebGPU. Real-time export on iPhone with the original audio.</p>
     </a>
-    <a class="card motion" href="./motion-fix/">
+    <a class="card motion" href="../motion-fix/">
       <span class="arrow">→</span>
       <h2>Motion Fix</h2>
       <p>Stabilize shaky clips. KLT tracking with outlier rejection, L1-optimal camera path (interior-point solver), wobble suppression, adaptive zoom. WebCodecs export; real-time export on iPhone with the original audio.</p>
     </a>
-    <a class="card dewarp" href="./dewarp/">
+    <a class="card dewarp" href="../dewarp/">
       <span class="arrow">→</span>
       <h2>Dewarp</h2>
       <p>Straighten Osmo Action and GoPro wide-angle clips with calibrated lens profiles. Fisheye to rectilinear, audio kept, on-device.</p>
@@ -89,4 +110,4 @@ writeFileSync(
 `,
 );
 
-console.log("Assembled dist/ → /aqua-fix/, /motion-fix/, landing index.html");
+console.log(`Assembled dist/ → ${assembled.map((a) => "/" + a + "/").join(", ")}, /classic/, landing → /studio/`);

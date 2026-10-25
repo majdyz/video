@@ -1,0 +1,268 @@
+/*
+ * deepfix design tokens: the ONLY place colours, fonts, radii, spacing,
+ * elevation and motion are defined. Components (styles/app.css) read these
+ * variables and nothing else, so a new look is a new [data-theme] block.
+ *
+ *   abyss  (default, "A"): pro-camera near-black, one electric-cyan accent
+ *   coral  ("B"): warm light consumer theme, coral accent, pill shapes
+ *   depth  ("C"): deep-ocean navy gradient, gold accent, serif wordmark
+ *
+ * Switch at runtime with <html data-theme="…"> (About sheet → Appearance).
+ * Fonts are self-hosted (fontsource, bundled by Vite): no network font fetches,
+ * so the PWA and the native wrapper render identically offline.
+ */
+
+:root,
+[data-theme="abyss"] {
+  color-scheme: dark;
+
+  /* Type */
+  --font-display: "Space Grotesk Variable", "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-ui: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --wordmark-weight: 700;
+  --wordmark-tracking: -0.03em;
+  --wordmark-accent-style: normal;
+  --heading-weight: 600;
+  --heading-tracking: -0.02em;
+  --label-tracking: 0.08em;
+
+  /* Type scale (px): 11 / 12 / 13 / 15 / 17 / 20 / 28 / 40 */
+  --fs-2xs: 11px;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 15px;
+  --fs-lg: 17px;
+  --fs-xl: 20px;
+  --fs-2xl: 28px;
+  --fs-3xl: 40px;
+
+  /* Surfaces: page → raised → control → control-active */
+  --app-bg: #08090b;
+  --bg: #08090b;
+  --surface-1: #0f1114;
+  --surface-2: #16181c;
+  --surface-3: #1e2126;
+  --surface-4: #262a31;
+  --stage-bg: #000000;
+  --sheet-bg: #111316;
+  --scrim: rgba(3, 4, 6, 0.62);
+  --glass: rgba(16, 18, 21, 0.72);
+  --glass-blur: 18px;
+
+  /* Lines */
+  --line-1: rgba(255, 255, 255, 0.06);
+  --line-2: rgba(255, 255, 255, 0.1);
+  --line-3: rgba(255, 255, 255, 0.18);
+
+  /* Text */
+  --text-1: #f2f4f7;
+  --text-2: #b4bcc6;
+  --text-3: #7d8590;
+  --text-4: #4f565f;
+
+  /* Accent (one) */
+  --accent: #3ee6ff;
+  --accent-ink: #001318;
+  --accent-soft: rgba(62, 230, 255, 0.12);
+  --accent-line: rgba(62, 230, 255, 0.42);
+  --accent-glow: 0 0 0 1px rgba(62, 230, 255, 0.35), 0 8px 28px rgba(62, 230, 255, 0.22);
+  --primary-bg: var(--accent);
+  --primary-bg-hover: #6eedff;
+  --primary-ink: var(--accent-ink);
+
+  /* Status */
+  --danger: #ff5d6c;
+  --danger-soft: rgba(255, 93, 108, 0.14);
+  --success: #4be3a3;
+
+  /* Controls */
+  --track: #23272d;
+  --track-fill: var(--accent);
+  --thumb: #ffffff;
+  --thumb-shadow: 0 2px 10px rgba(0, 0, 0, 0.45), 0 0 0 0.5px rgba(0, 0, 0, 0.2);
+  --chip-bg: var(--surface-2);
+  --chip-ink: #aab2bc;
+  --chip-on-bg: var(--accent);
+  --chip-on-ink: var(--accent-ink);
+  --chip-border: transparent;
+  --chip-on-border: transparent;
+  --tab-bg: var(--surface-2);
+  --tab-ink: var(--text-3);
+  --tab-on-bg: var(--surface-4);
+  --tab-on-ink: var(--text-1);
+  --tab-on-shadow: none;
+  --switch-off: #2c3037;
+  --switch-on: var(--accent);
+  --split-line: #ffffff;
+  --split-knob: #ffffff;
+  --split-knob-ink: #0b0c0e;
+  --tag-bg: rgba(0, 0, 0, 0.5);
+  --tag-ink: #ffffff;
+
+  /* Spacing: 8-pt grid with a 4-px half step */
+  --s-0: 2px;
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 40px;
+  --s-8: 48px;
+  --s-9: 64px;
+  --gutter: 16px;
+
+  /* Touch targets */
+  --touch: 44px;
+  --touch-lg: 52px;
+
+  /* Shape */
+  --r-xs: 6px;
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 18px;
+  --r-xl: 24px;
+  --r-pill: 999px;
+  --r-stage: 14px;
+  --r-button: 14px;
+  --r-chip: 999px;
+  --r-sheet: 24px;
+
+  /* Elevation */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-sheet: 0 -12px 48px rgba(0, 0, 0, 0.55);
+  --stage-ring: 0 0 0 1px var(--line-1);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --dur-1: 120ms;
+  --dur-2: 200ms;
+  --dur-3: 320ms;
+  --dur-4: 480ms;
+  --press-scale: 0.97;
+
+  /* Layout */
+  --sidebar-w: 392px;
+  --topbar-h: 56px;
+}
+
+[data-theme="coral"] {
+  color-scheme: light;
+  --font-display: "Manrope Variable", "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --wordmark-weight: 800;
+  --wordmark-tracking: -0.04em;
+  --heading-weight: 700;
+
+  --app-bg: #fbf7f3;
+  --bg: #fbf7f3;
+  --surface-1: #f6f0ea;
+  --surface-2: #efe7df;
+  --surface-3: #e8ded4;
+  --surface-4: #ffffff;
+  --stage-bg: #1d1b19;
+  --sheet-bg: #fffdfb;
+  --scrim: rgba(29, 27, 25, 0.38);
+  --glass: rgba(251, 247, 243, 0.82);
+
+  --line-1: rgba(29, 27, 25, 0.06);
+  --line-2: rgba(29, 27, 25, 0.1);
+  --line-3: rgba(29, 27, 25, 0.18);
+
+  --text-1: #1d1b19;
+  --text-2: #4f4842;
+  --text-3: #857b72;
+  --text-4: #b4aaa1;
+
+  --accent: #ff6b4a;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(255, 107, 74, 0.12);
+  --accent-line: rgba(255, 107, 74, 0.45);
+  --accent-glow: 0 8px 24px rgba(255, 107, 74, 0.3);
+  --primary-bg: #ff6b4a;
+  --primary-bg-hover: #ff7f62;
+  --primary-ink: #ffffff;
+
+  --track: #e8dfd6;
+  --track-fill: linear-gradient(90deg, #ffb36b, #ff6b4a);
+  --thumb-shadow: 0 2px 8px rgba(0, 0, 0, 0.18), 0 0 0 0.5px rgba(0, 0, 0, 0.1);
+  --chip-bg: #efe7df;
+  --chip-ink: #5c544d;
+  --chip-on-bg: #1d1b19;
+  --chip-on-ink: #ffffff;
+  --tab-bg: #efe7df;
+  --tab-ink: #7c726a;
+  --tab-on-bg: #ffffff;
+  --tab-on-ink: #1d1b19;
+  --tab-on-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --switch-off: #ddd2c7;
+  --shadow-2: 0 8px 24px rgba(60, 40, 20, 0.12);
+  --shadow-sheet: 0 -12px 48px rgba(60, 40, 20, 0.16);
+
+  --r-stage: 28px;
+  --r-button: 999px;
+  --r-sheet: 28px;
+}
+
+[data-theme="depth"] {
+  --font-display: "Fraunces Variable", "Fraunces", ui-serif, Georgia, serif;
+  --wordmark-weight: 500;
+  --wordmark-tracking: -0.01em;
+  --wordmark-accent-style: italic;
+  --heading-weight: 500;
+  --heading-tracking: -0.01em;
+
+  --app-bg: radial-gradient(120% 70% at 50% 0%, #0f2a44 0%, #06121f 60%);
+  --bg: #06121f;
+  --surface-1: rgba(255, 255, 255, 0.03);
+  --surface-2: rgba(255, 255, 255, 0.06);
+  --surface-3: rgba(255, 255, 255, 0.09);
+  --surface-4: rgba(255, 255, 255, 0.12);
+  --sheet-bg: #0b1d30;
+  --glass: rgba(8, 22, 38, 0.78);
+
+  --line-1: rgba(255, 255, 255, 0.07);
+  --line-2: rgba(255, 255, 255, 0.11);
+
+  --text-1: #eef3f8;
+  --text-2: #b9c7d5;
+  --text-3: #8fa2b5;
+  --text-4: #546a80;
+
+  --accent: #e8c27a;
+  --accent-ink: #1a1205;
+  --accent-soft: rgba(232, 194, 122, 0.14);
+  --accent-line: rgba(232, 194, 122, 0.5);
+  --accent-glow: 0 8px 28px rgba(232, 194, 122, 0.22);
+  --primary-bg: linear-gradient(180deg, #f0d08f, #d4a752);
+  --primary-bg-hover: linear-gradient(180deg, #f5daa3, #dcb262);
+  --primary-ink: #1a1205;
+
+  --track: rgba(255, 255, 255, 0.1);
+  --track-fill: linear-gradient(90deg, #b8913f, #e8c27a);
+  --chip-bg: rgba(255, 255, 255, 0.06);
+  --chip-ink: #a9b8c7;
+  --chip-border: rgba(255, 255, 255, 0.08);
+  --chip-on-bg: rgba(232, 194, 122, 0.14);
+  --chip-on-ink: #e8c27a;
+  --chip-on-border: rgba(232, 194, 122, 0.5);
+  --tab-bg: rgba(255, 255, 255, 0.06);
+  --tab-on-bg: rgba(232, 194, 122, 0.14);
+  --tab-on-ink: #e8c27a;
+  --switch-off: rgba(255, 255, 255, 0.14);
+
+  --r-stage: 20px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 0ms;
+    --dur-2: 0ms;
+    --dur-3: 0ms;
+    --dur-4: 0ms;
+    --press-scale: 1;
+  }
+}
