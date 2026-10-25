@@ -14,12 +14,12 @@
 // (colour right after first paint, mediabunny when a clip opens, motion when
 // Stabilise is switched on, the lens maths when Dewarp is).
 
-import { isWebCodecsSupported } from "@dive-tools/shared/codec-export.ts";
-import { isRealtimeExportSupported, isWebKit } from "@dive-tools/shared/realtime-export.ts";
+import { isRealtimeExportSupported, isWebCodecsSupported, isWebKit } from "./env.ts";
 import { bitrateFromSource, pickBitrate } from "@dive-tools/shared/recorder.ts";
 import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validate.ts";
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
+import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometrySource } from "./geometry.ts";
 import type { GeometryParams, QuarterTurns } from "./geometry-math.ts";
 import type { ClipInfo } from "./probe.ts";
@@ -44,6 +44,7 @@ const loadDewarp = (): Promise<DewarpMod> => import("./dewarp.ts");
 /** Preview renders at the stage's device-pixel size, capped; never at 4K unless zoomed in. */
 const PREVIEW_MAX_PX = 1600;
 const PREVIEW_ZOOM_MAX_PX = 4096;
+const PHOTO_PREVIEW_PX = 2048;
 const OPFS_PREFIX = "studio-export-";
 /** Live export frames for the stage / sheet: a few a second. */
 const LIVE_EVERY_MS = 250;
@@ -84,6 +85,8 @@ export type Snapshot = {
   exportMode: ExportMode;
   /** Photo export was scaled to the browser's canvas limit (original px). */
   photoLimited: { w: number; h: number } | null;
+  /** Camera / lens the clip's metadata names (Dewarp's detector); null until read, or for photos. */
+  camera: CameraInfo | null;
 };
 
 const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null };
@@ -116,6 +119,7 @@ export class Studio {
     canExport: false,
     exportMode: "offline",
     photoLimited: null,
+    camera: null,
   };
   private listeners = new Set<() => void>();
   private frameListeners = new Set<(b: ImageBitmap) => void>();
@@ -139,6 +143,8 @@ export class Studio {
   private split: number | null = null;
   private file: File | null = null;
   private photo: ImageBitmap | null = null;
+  /** The photo at ≤ PHOTO_PREVIEW_PX: what the preview and the analysis use (full size only when zoomed in or exporting). */
+  private photoPreview: ImageBitmap | null = null;
   private sourceUrl: string | null = null;
   private gen = 0;
   private still: ImageBitmap | null = null;
@@ -247,6 +253,16 @@ export class Studio {
     this.set({ error: null });
   }
 
+  /**
+   * Waits for the engine's in-flight analysis (its GPU readback) to land.
+   * `GradeEngine.reset()` forgets the flag but not the readback, so a reset
+   * while one is pending makes the next analysis fail ("analysis readback
+   * already in flight"). Call with the frame loop stopped.
+   */
+  private async settleEngine(): Promise<void> {
+    await this.engine?.analyzeNow(false, 4000).catch(() => undefined);
+  }
+
   // ------------------------------------------------------------ stage size
 
   /** CSS size of the picture box and the device pixel ratio; sets the preview resolution. */
@@ -305,7 +321,7 @@ export class Studio {
     const mod = this.dewarpMod ?? (this.dewarpMod = await loadDewarp());
     if (gen !== this.gen || !this.snap.info) return;
     const t = this.tools.dewarp;
-    this.dewarpU = t.enabled ? mod.dewarpUniforms(t, this.snap.info.codedW, this.snap.info.codedH) : null;
+    this.dewarpU = t.enabled ? mod.dewarpUniforms(t, this.snap.info.codedW, this.snap.info.codedH, this.snap.camera) : null;
     if (this.snap.kind === "photo") this.schedulePhotoAnalysis();
     this.repaint();
   }
@@ -344,16 +360,27 @@ export class Studio {
       this.set({ busy: null, error: "The GPU engine couldn't start on this device." });
       return;
     }
+    // Stop the frame loop and let its last analysis land before the engine is reset.
+    this.previewOn = false;
+    v.pause();
+    if (this.snap.phase === "ready") await this.settleEngine();
     if (isPhotoFile(file)) return this.openPhoto(file, e);
     this.teardown();
     const gen = ++this.gen;
     this.file = file;
-    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null });
+    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null });
     try {
       await touchFile(file);
       const media = await loadMedia();
       const info = await media.probeClip(file);
       if (gen !== this.gen) return;
+      // Which camera / lens (for Dewarp's preselection); only reads the moov box and two samples.
+      void media.detectClipCamera(file, info?.codedW ?? 0, info?.codedH ?? 0).then((camera) => {
+        if (gen !== this.gen) return;
+        console.info(`[camera] ${camera.brand ? [camera.brand, camera.model, camera.lensMode].filter(Boolean).join(" ") : "unknown"} -> ${camera.profileId ?? "default"} (${camera.evidence.join("; ")})`);
+        this.set({ camera });
+        void this.updateDewarp();
+      });
       const url = URL.createObjectURL(file);
       this.sourceUrl = url;
       v.src = url;
@@ -401,12 +428,17 @@ export class Studio {
     this.teardown();
     const gen = ++this.gen;
     this.file = file;
-    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0 });
+    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null });
     try {
       await touchFile(file);
       const { bitmap, original } = await decodePhoto(file, photoLimits(isWebKit(), e.backend.kind));
       if (gen !== this.gen) return bitmap.close();
       this.photo = bitmap;
+      const ps = Math.min(1, PHOTO_PREVIEW_PX / Math.max(bitmap.width, bitmap.height));
+      this.photoPreview = ps < 1
+        ? await createImageBitmap(bitmap, { resizeWidth: Math.round(bitmap.width * ps), resizeHeight: Math.round(bitmap.height * ps), resizeQuality: "high" })
+        : bitmap;
+      if (gen !== this.gen) return;
       const info: ClipInfo = { rot: 0, displayW: bitmap.width, displayH: bitmap.height, codedW: bitmap.width, codedH: bitmap.height, fps: 0, duration: 0, codec: null, hasAudio: false };
       e.lockGlobals(null);
       e.reset();
@@ -427,8 +459,10 @@ export class Studio {
 
   /** One analysis of the (geometry-corrected) photo, snapped: there is no frame loop to ease into it. */
   private async analysePhoto(): Promise<void> {
-    const e = this.engine, bmp = this.photo;
+    const e = this.engine, bmp = this.photoPreview;
     if (!e || !bmp) return;
+    await this.settleEngine();
+    if (bmp !== this.photoPreview) return;
     e.reset({ keepPerson: true });
     this.uploadToEngine(bmp, 0, false);
     await e.analyzeNow(true).catch((err: unknown) => this.fail(err, "Analysis failed"));
@@ -466,8 +500,10 @@ export class Studio {
     }
     if (this.sourceUrl) URL.revokeObjectURL(this.sourceUrl);
     this.sourceUrl = null;
+    if (this.photoPreview && this.photoPreview !== this.photo) this.photoPreview.close();
     this.photo?.close();
     this.photo = null;
+    this.photoPreview = null;
     const r = this.snap.exp.result;
     if (r) URL.revokeObjectURL(r.url);
     this.dropStill();
@@ -546,7 +582,8 @@ export class Studio {
   repaint(): void {
     if (this.exporting || this.snap.phase !== "ready") return;
     if (this.snap.kind === "photo") {
-      if (this.photo) this.draw(this.photo, 0, false);
+      const src = this.zoom > 1.01 ? this.photo : this.photoPreview;
+      if (src) this.draw(src, 0, false);
       return;
     }
     const v = this.video;
@@ -605,6 +642,10 @@ export class Studio {
     if (!v || this.exporting || this.snap.phase !== "ready" || this.snap.kind !== "video") return;
     if (v.paused) void v.play().catch(() => undefined);
     else v.pause();
+  }
+
+  pause(): void {
+    this.video?.pause();
   }
 
   seek(t: number): void {
@@ -822,6 +863,8 @@ export class Studio {
     } finally {
       this.finishExport(failure);
       if (e && this.colour) {
+        // The export's last analysis may still be reading back.
+        await this.settleEngine();
         e.analysisIntervalMs = this.colour.ANALYSIS_INTERVAL_MS;
         e.personEvery = 2;
         e.reset();
@@ -839,9 +882,10 @@ export class Studio {
   }
 
   /** Lighter per-frame analysis load while exporting (globals are locked per clip anyway). */
-  private engineForExport(): void {
+  private async engineForExport(): Promise<void> {
     const e = this.engine;
     if (!e) return;
+    await this.settleEngine();
     e.reset({ keepPerson: true });
     e.split = 0;
     e.analysisIntervalMs = 150;
@@ -857,7 +901,7 @@ export class Studio {
   private async runOffline(media: MediaMod, file: File, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController) {
     const e = this.engine, geo = this.geo;
     const geoOn = this.geometryActive();
-    this.engineForExport();
+    await this.engineForExport();
     this.setExp({ state: "running", detail: "Rendering" });
     const started = performance.now();
     let frames = 0;
@@ -958,7 +1002,7 @@ export class Studio {
       const W = Math.max(2, Math.round(info.displayW * scale)), H = Math.max(2, Math.round(info.displayH * scale));
       const tag = `${rate < 1 ? ` · ${rate === 0.5 ? "½" : "¼"} speed` : ""}${scale < 1 ? ` · ${Math.round(scale * 100)}% size` : ""}`;
       // Grade the first frame before recording starts so the file never opens uncorrected.
-      this.engineForExport();
+      await this.engineForExport();
       this.setExp({ state: "preparing", detail: `Preparing${tag}` });
       await seekVideo(v, 0).catch(() => undefined);
       if (colourOn && e) {

@@ -96,20 +96,86 @@ freeze of `grade-shader.ts` and both backends to land.
 
 ## Export
 
-Offline WebCodecs export only (`exportWithCodec`): every frame decoded,
-rendered once, encoded with its own timestamp, audio packets copied
-through. The export sheet shows progress, frames/fps/ETA and small
-bitmaps of the rendered output (`Studio.onThumb`), and offers Share (Web
-Share with files) and Save (download) at the end. The real-time recorder
-path of Aqua Fix (`?rt=1`) is not wired; the user rejected it as the
-default in Oct 2026.
+Two paths, picked per browser when a clip opens (`Studio.pickExportMode`):
+
+* **Offline WebCodecs** (Chrome, Android, desktop Firefox): every frame
+  decoded, rendered once, encoded with its own timestamp, audio packets
+  copied through (`exportWithCodec`). The stage never shows the full-size
+  render canvas during this export: the engine's canvas is resized for
+  `renderToFrame` every frame, which showed up as a magnified crop on the
+  stage. Instead the stage gets an overlay `<canvas>` fed with bitmaps of
+  the *encoded* frames (`Studio.onExportFrame`, ~4 per second at the
+  stage's pixel size), the same bitmaps the export sheet shows, so the
+  live view is exactly the output, on every backend.
+* **Real-time recorder** (WebKit: Safari and every iOS browser, where each
+  canvas → VideoFrame copy costs 60–80 ms): the clip plays through once,
+  every presented frame is rendered at full size into the visible canvas
+  (the colour canvas, or the geometry canvas with colour off) and recorded
+  with MediaRecorder; the recording is remuxed with the original audio
+  packets (`exportRealtime` in packages/shared, as Aqua Fix uses it).
+  Backgrounding pauses playback and the recorder together. If the
+  renderer falls below 90 % of the clip's frame rate in the first 2.5 s,
+  the export restarts with the clip slowed to ½, then ¼ speed (the remux
+  re-times it, so every frame still lands in the file), then at half
+  size. The first frame is analysed before recording starts.
+  `?rt=1` / `?rt=0` force the path on or off anywhere.
+* **Photos**: one full-size render (`renderToFrame`, or the geometry
+  canvas with colour off) drawn into a 2D canvas and encoded as JPEG
+  (quality 0.92).
+
+Before any export or engine reset, `Studio.settleEngine()` waits for the
+engine's in-flight analysis readback: `GradeEngine.reset()` clears its flag
+but the GPU readback keeps running, and the next analysis then failed with
+"analysis readback already in flight".
+
+## Photos
+
+JPEG / PNG / WebP everywhere, HEIC where the browser decodes it (Safari;
+`createImageBitmap(blob)` first, an `<img>` decode as fallback). The
+bitmap is EXIF-oriented and bounded to the browser's limits (WebKit's
+16.7 Mpx canvas cap, WebGPU's 8192 px textures; the sheet says when a
+48 Mpx photo was scaled). Colour and Dewarp apply (Stabilise is hidden);
+there is no frame loop, so the photo is analysed once, snapped, and
+re-analysed (debounced) when the framing changes. Output keeps no EXIF.
+
+## Camera detection
+
+When a clip opens, `pipeline/camera.ts` reads the moov box and the first
+sample of each timed-metadata track (DJI `djmd`, GoPro `gpmd`) with a small
+box walker (no mp4box) and runs Dewarp's `detectCamera`. The Dewarp tab
+preselects the suggested profile, offers "From clip" when the camera wrote
+its own lens calibration (`resolveProfile(FROM_FILE, camera)`, HyperSmooth
+crop applied for GoPro), and shows "Detected: GoPro HERO10 Black · Wide".
+Any chip is still a manual override.
+
+## Loading
+
+The first-load bundle is the shell only (React, the UI, tool state). Each
+engine is its own chunk, loaded when first needed:
+
+| Chunk        | Loaded                                  | Contents                                   |
+|--------------|-----------------------------------------|--------------------------------------------|
+| `index`      | page load                               | React, UI, tool state, geometry renderer   |
+| `colour`     | right after first paint                 | Aqua Fix GradeEngine, clip profile         |
+| `media` (+ mediabunny) | when a clip opens             | probe, camera detection, both exporters    |
+| `motion`     | first time Stabilise is on              | Motion Fix analysis client, path helpers   |
+| `dewarp` / `fisheye` | first time Dewarp is on         | lens maths                                 |
+| workers      | on use                                  | analysis, person (MediaPipe from `mediapipe/`) |
+
+The capability checks the shell needs live in `pipeline/env.ts` (copies of
+the shared ones) so the shell shares no module, and so no mediabunny, with
+the media chunk. The service worker (`public/sw.js`, versioned at build by
+`studioServiceWorker` in vite.config.ts) precaches the shell and every
+JS/CSS chunk, so all tools work offline after one online visit; each
+deploy gets a new cache name and old caches are deleted on activate.
 
 ## UI
 
 * `src/theme/tokens.css` is the only place colours, fonts, radii, spacing
   and motion live. Three looks are defined (`abyss` default, `coral`,
   `depth`) and switchable in the About sheet; a new direction is one more
-  `[data-theme]` block.
+  `[data-theme]` block. Text colours meet WCAG AA (4.5:1) on every surface
+  in all three themes.
 * Restraint rules (user feedback): the wordmark is one plain colour
   (`BRAND.name` in `src/brand.ts` is a placeholder); the accent appears
   only on Export, the active slider fill and focus rings; selection,
@@ -118,16 +184,31 @@ default in Oct 2026.
 * Fonts are self-hosted via fontsource (bundled by Vite), no runtime
   network fetch: Space Grotesk (wordmark/headings) and Inter (UI) for
   Abyss, Manrope and Fraunces for the alternatives.
-* Layout: phone portrait = picture, timeline, tool panel, then the tab bar
-  with Export in the bottom-right; ≥ 960 px or phone landscape = picture
-  left, controls card right with Export at its bottom. Safe-area insets on
-  all edges; 44 px minimum touch targets.
+* Phone portrait: the picture runs edge to edge between a 44 px top bar and
+  a bottom dock (grab handle, timeline, the active tool's panel, tool tabs
+  and Export). The dock collapses to timeline + tabs (tap or drag the
+  handle, or tap the active tab); it starts collapsed for portrait clips
+  so a 9:16 clip gets the height, open for landscape ones.
+* ≥ 960 px or phone landscape: picture left, controls card right with
+  Export at its bottom.
+* Stage gestures (`ui/stage.tsx`), one thumb is enough: drag anywhere to
+  move the before/after line (near the line when zoomed in); with compare
+  off, press and hold to see the original; double-tap or pinch to zoom
+  (up to 6×, the preview re-renders sharper up to 4096 px while zoomed),
+  drag to pan, the "2.5×" button returns to fit; tap plays/pauses. Mouse
+  wheel zooms; with the picture focused, + / − / 0 and the arrow keys.
+* Accessibility: sheets are modal dialogs that take focus, trap Tab and
+  return focus on close; tabs are a tablist with a labelled tabpanel;
+  the timeline is a slider with a spoken time; status lines are polite
+  live regions; `prefers-reduced-motion` turns transitions off (the busy
+  spinner keeps turning slowly); page zoom is allowed.
 
 ## Debug URL flags
 
 `?webgl2` (force the WebGL2 colour backend: headless screenshots),
 `?tools=colour,stabilise,dewarp` (initial tool set), `?tab=dewarp`,
-`?person=0`, `?lock=0` (as in Aqua Fix).
+`?person=0`, `?lock=0` (as in Aqua Fix), `?rt=1|0` (real-time export on /
+off), `?dock=open|closed` (phone dock).
 
 ## Open issues
 

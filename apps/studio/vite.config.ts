@@ -1,6 +1,7 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import { cpSync, createReadStream, existsSync, statSync } from "node:fs";
+import { cpSync, createReadStream, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,9 +34,37 @@ function sharedMediapipe(): Plugin {
   };
 }
 
+/**
+ * Versions the service worker: after the bundle is written, sw.js gets a hash
+ * of every built asset as its cache name and the shell + all JS/CSS chunks
+ * (lazy tool chunks and workers included) as its precache list. Fonts, the
+ * MediaPipe models and icons are cached on first use.
+ */
+function studioServiceWorker(): Plugin {
+  return {
+    name: "studio-service-worker",
+    apply: "build",
+    writeBundle(opts) {
+      const dir = opts.dir;
+      if (!dir) return;
+      const sw = join(dir, "sw.js");
+      if (!existsSync(sw)) return;
+      const assets = readdirSync(join(dir, "assets")).sort();
+      const hash = createHash("sha256");
+      for (const a of assets) hash.update(a);
+      hash.update(readFileSync(join(dir, "index.html")));
+      const version = hash.digest("hex").slice(0, 12);
+      const precache = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg", "./icon-192.png", "./apple-touch-icon.png", ...assets.filter((a) => /\.(js|css)$/.test(a)).map((a) => `./assets/${a}`)];
+      const src = readFileSync(sw, "utf8").replace("__BUILD_VERSION__", version).replace("__PRECACHE__", JSON.stringify(precache));
+      writeFileSync(sw, src);
+      this.info?.(`sw.js: cache studio-${version}, ${precache.length} files precached`);
+    },
+  };
+}
+
 export default defineConfig({
   base,
-  plugins: [react(), sharedMediapipe()],
+  plugins: [react(), sharedMediapipe(), studioServiceWorker()],
   server: { fs: { allow: [resolve(here, "../.."), "/home/majdyz/video/node_modules"] } },
   worker: { format: "es" },
 });

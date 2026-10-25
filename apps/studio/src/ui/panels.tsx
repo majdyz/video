@@ -3,7 +3,8 @@ import {
   COLOUR_PRESETS,
   DEFAULT_COLOUR,
   DEFAULT_STABILISE,
-  DEWARP_PROFILES,
+  cameraLabel,
+  dewarpChips,
   STAB_PRESETS,
   TOOL_LABEL,
   applyStabPreset,
@@ -14,6 +15,7 @@ import {
 } from "../pipeline/tools.ts";
 import type { StabStatus } from "../pipeline/studio.ts";
 import type { ClipInfo } from "../pipeline/probe.ts";
+import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { Chips, Segmented, Slider, Switch } from "./controls";
 import { IconColour, IconDewarp, IconSliders, IconStabilise } from "./icons";
 
@@ -37,12 +39,13 @@ type Props = {
   info: ClipInfo | null;
   colourProfiled: boolean;
   photo?: boolean;
+  camera?: CameraInfo | null;
   disabled: boolean;
   onAdvanced: () => void;
 };
 
 /** The active tool's controls: header with on/off, preset chips, one Strength, Advanced. */
-export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, photo, disabled, onAdvanced }: Props) {
+export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, photo, camera, disabled, onAdvanced }: Props) {
   const enabled = tools[tool].enabled;
   const Icon = TOOL_ICON[tool];
   const setEnabled = (v: boolean) => setTools((t) => ({ ...t, [tool]: { ...t[tool], enabled: v } }));
@@ -54,6 +57,8 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
     else if (stab.state === "error") status = <span className="status-bad">Analysis failed: {stab.message}</span>;
   }
   if (tool === "colour" && enabled) status = colourProfiled ? <span className="status-good">{photo ? "Balanced for this photo" : "Scene-locked to this clip"}</span> : <span className="status-live">Reading the water…</span>;
+  const detected = cameraLabel(camera);
+  if (tool === "dewarp" && detected) status = <span className="status-good">Detected: {detected}</span>;
   if (tool === "dewarp" && enabled && info && profileAspectMismatch(tools.dewarp.profile, info.codedW, info.codedH)) status = <span className="status-warn">Calibrated for a different aspect ratio</span>;
 
   return (
@@ -88,7 +93,7 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
         )}
         {tool === "dewarp" && (
           <>
-            <Chips label="Camera" items={DEWARP_PROFILES} value={tools.dewarp.profile} disabled={disabled}
+            <Chips label="Camera" items={dewarpChips(camera)} value={tools.dewarp.profile} disabled={disabled}
               onChange={(id) => setTools((t) => ({ ...t, dewarp: { ...t.dewarp, ...profileDefaults(id), enabled: true } }))} />
             <Slider emphasis label="Strength" value={tools.dewarp.strength} min={0} max={100} defaultValue={profileDefaults(tools.dewarp.profile).strength} disabled={disabled}
               onChange={(v) => setTools((t) => ({ ...t, dewarp: { ...t.dewarp, strength: v, enabled: true } }))} />

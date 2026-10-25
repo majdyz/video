@@ -5,7 +5,8 @@
 import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, type ScenePreset, type UserSettings } from "../../../aqua-fix/src/engine/params.ts";
 import type { StabilizeParams } from "../../../motion-fix/src/lib/stabilize.ts";
 import type { Projection } from "../../../dewarp/src/fisheye.ts";
-import { DEFAULT_PROFILE, PROFILES } from "../../../dewarp/src/profiles.ts";
+import { DEFAULT_PROFILE, FROM_FILE, PROFILES } from "../../../dewarp/src/profiles.ts";
+import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 
 export type ToolId = "colour" | "stabilise" | "dewarp";
 export const TOOL_ORDER: ToolId[] = ["colour", "stabilise", "dewarp"];
@@ -110,7 +111,32 @@ export const DEWARP_PROFILES: Chip<string>[] = [
   { id: "generic-fisheye", label: "Other", hint: PROFILES["generic-fisheye"]?.label ?? "" },
 ];
 
+/** Chip for the lens calibration the camera wrote into this clip (DJI, GoPro HERO11+). */
+export const FROM_FILE_CHIP: Chip<string> = { id: FROM_FILE, label: "From clip", hint: "The lens data your camera wrote into this clip" };
+export { FROM_FILE };
+
+/** Camera chips for a clip: the clip's own lens first when it carries one. */
+export function dewarpChips(camera: CameraInfo | null | undefined): Chip<string>[] {
+  return camera?.lens ? [FROM_FILE_CHIP, ...DEWARP_PROFILES] : DEWARP_PROFILES;
+}
+
+/** The profile the detector suggests for this clip (null: nothing detected, keep the user's pick). */
+export function detectedProfile(camera: CameraInfo | null | undefined): string | null {
+  const id = camera?.profileId;
+  if (!id) return null;
+  if (id === FROM_FILE) return camera?.lens ? FROM_FILE : null;
+  return id in PROFILES && DEWARP_PROFILES.some((c) => c.id === id) ? id : null;
+}
+
+/** "GoPro HERO12 Black · Wide" style label, or null when nothing was detected. */
+export function cameraLabel(c: CameraInfo | null | undefined): string | null {
+  if (!c?.brand) return null;
+  const who = [c.brand, c.model].filter(Boolean).join(" ");
+  return c.lensMode ? `${who} · ${c.lensMode}` : who;
+}
+
 export function profileDefaults(id: string): Pick<DewarpState, "profile" | "strength" | "fovDeg"> {
+  if (id === FROM_FILE) return { profile: FROM_FILE, strength: 100, fovDeg: 150 };
   const p = PROFILES[id] ?? PROFILES[DEFAULT_PROFILE];
   return { profile: id in PROFILES ? id : DEFAULT_PROFILE, strength: Math.round((p.strength ?? 1) * 100), fovDeg: p.fovDeg };
 }
@@ -125,6 +151,7 @@ export const DEFAULT_DEWARP: DewarpState = {
 
 /** True when the lens profile's aspect differs from the clip's (the calibration may not fit). */
 export function profileAspectMismatch(id: string, codedW: number, codedH: number): boolean {
+  if (id === FROM_FILE) return false;
   const lens = PROFILES[id]?.lens;
   if (!lens || !codedW || !codedH) return false;
   return Math.abs(codedW / codedH - lens.width / lens.height) > 0.02;

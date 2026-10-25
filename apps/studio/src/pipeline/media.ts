@@ -4,3 +4,4 @@
 export { probeClip } from "./probe.ts";
 export { exportWithCodec, squarePixels } from "@dive-tools/shared/codec-export.ts";
 export { exportRealtime, probeFrameRate } from "@dive-tools/shared/realtime-export.ts";
+export { detectClipCamera } from "./camera.ts";

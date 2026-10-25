@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Studio } from "./pipeline/studio.ts";
-import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, type ToolId, type ToolsState } from "./pipeline/tools.ts";
+import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, profileDefaults, type ToolId, type ToolsState } from "./pipeline/tools.ts";
 import { BRAND, SAMPLE } from "./brand.ts";
 import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
@@ -105,6 +105,12 @@ export default function App() {
   useEffect(() => {
     if (!exporting) setHasLive(false);
   }, [exporting]);
+
+  // Dewarp preselects the camera / lens the clip's metadata names (the user can still pick another).
+  useEffect(() => {
+    const id = detectedProfile(s.camera);
+    if (id) setToolsState((t) => (t.dewarp.profile === id ? t : { ...t, dewarp: { ...t.dewarp, ...profileDefaults(id) } }));
+  }, [s.camera]);
 
   const tabs = photo ? TOOL_ORDER.filter((id) => id !== "stabilise") : TOOL_ORDER;
   useEffect(() => {
@@ -242,7 +248,7 @@ export default function App() {
             )}
             {!wide && bar}
             <div className="controls__panel" id="tool-panel" role="tabpanel" aria-labelledby={`tab-${tab}`} hidden={!wide && !dockOpen}>
-              <ToolPanel tool={tab} tools={tools} setTools={setTools} stab={s.stab} info={s.info} colourProfiled={s.colourProfiled} photo={photo} disabled={exporting || !ready} onAdvanced={() => setAdvOpen(true)} />
+              <ToolPanel tool={tab} tools={tools} setTools={setTools} stab={s.stab} info={s.info} colourProfiled={s.colourProfiled} photo={photo} camera={s.camera} disabled={exporting || !ready} onAdvanced={() => setAdvOpen(true)} />
             </div>
             <div className="tabs" role="tablist" aria-label="Tool">
               {tabs.map((id) => {
@@ -280,7 +286,7 @@ export default function App() {
                 </ol>
               </section>
             )}
-            <button type="button" className="btn btn--primary export-btn" onClick={() => setExportOpen(true)} disabled={!ready || !s.canExport}>
+            <button type="button" className="btn btn--primary export-btn" onClick={() => { studio.pause(); setExportOpen(true); }} disabled={!ready || !s.canExport}>
               <IconExport size={18} />
               <span>Export</span>
             </button>
