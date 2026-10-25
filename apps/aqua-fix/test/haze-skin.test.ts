@@ -1,7 +1,7 @@
 // Haze-lift removal and skin memory colour (pure functions).
 //   node --experimental-strip-types apps/aqua-fix/test/haze-skin.test.ts
 import assert from "node:assert/strict";
-import { DEFAULT_SETTINGS, HAZE_AUTO, HAZE_LIFT, IDENTITY_PARAMS, SKIN, hazeLiftRatio, hazeLiftT, hazeSettings, resolveSettings, presetSettings } from "../src/engine/params.ts";
+import { DEFAULT_SETTINGS, HAZE_AUTO, HAZE_LIFT, IDENTITY_PARAMS, SKIN, hazeLiftRatio, hazeLiftT, hazeSettings, lookParams, resolveSettings, presetSettings } from "../src/engine/params.ts";
 import { skinTone } from "../src/engine/apply.ts";
 
 // 1. The haze-lift curve: identity at t = 0 (and continuous into it), monotone,
@@ -42,6 +42,16 @@ import { skinTone } from "../src/engine/apply.ts";
   assert.ok(presetSettings(g, { ...DEFAULT_SETTINGS, preset: "murky" }).hazeLift > 0, "Green water preset lifts");
   assert.equal(presetSettings(g, { ...DEFAULT_SETTINGS, preset: "reef" }).hazeLift, 0);
   console.log("ok  hazeLiftT / hazeSettings");
+}
+
+// 2b. The look's haze dim backs off when the haze lift is already darkening
+//     the frame (they used to stack to near-black on murky scenes).
+{
+  const murky = { ...IDENTITY_PARAMS, haze: 1, hazeBlack: 0.14 };
+  const lifted = lookParams(murky, { ...DEFAULT_SETTINGS, look: 1 }).exposure;
+  const unlifted = lookParams(murky, { ...DEFAULT_SETTINGS, look: 1, hazeAuto: false }).exposure;
+  assert.ok(lifted < 1 && lifted > unlifted, `relief: ${lifted} vs ${unlifted}`);
+  console.log("ok  look dim relief under haze lift");
 }
 
 // 3. Skin memory colour: a cream person pixel turns pink (toward SKIN.hue),

@@ -158,6 +158,8 @@ export const LOOK = {
   // per-pixel shadow crush.
   gamma: 0.0,
   dim: 0.5, // refit 7 Oct: both hazy references sit ≈0.82× below the 0.3 result
+  liftRelief: 0.6, // the dim backs off by up to this share when the haze lift is subtracting …
+  liftRef: 0.1, // … this much (linear luminance) or more
   hazeDehaze: 0.4, // hazy frames: the look also dehazes the water path …
   hazeClarity: 0.4, // … local contrast (dark garments are safe now that dehaze skips them; more than this does nothing visible — CLAHE_CLIP caps it) …
   hazeLevels: 0.15, // … and a slightly fuller levels stretch
@@ -256,7 +258,11 @@ export function lookParams(p: GradeParams, s: UserSettings): GradeParams {
   const look = Math.min(1, Math.max(0, s.look));
   if (look <= 0) return p;
   const hw = hazeWeight(p) * look;
-  return { ...p, exposure: p.exposure * (1 - LOOK.dim * hw), levelsMix: Math.min(0.85, p.levelsMix + LOOK.hazeLevels * hw) };
+  // The automatic haze lift already darkens a murky frame: the look's dim
+  // backs off in proportion to the lift (else the two stack to near-black).
+  const tl = s.hazeAuto !== false ? HAZE_AUTO.lift * hazeWeight(p) * p.hazeBlack : 0;
+  const relief = LOOK.liftRelief * Math.min(1, tl / LOOK.liftRef);
+  return { ...p, exposure: p.exposure * (1 - LOOK.dim * hw * (1 - relief)), levelsMix: Math.min(0.85, p.levelsMix + LOOK.hazeLevels * hw) };
 }
 
 /**
