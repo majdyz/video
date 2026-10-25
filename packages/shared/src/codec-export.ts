@@ -62,6 +62,25 @@ export function squarePixels(frame: VideoFrame): VideoFrame {
   return out;
 }
 
+/**
+ * H.264/HEVC encoders reject odd frame sizes (4:2:0 chroma), and sources such
+ * as a 1438-wide clip with a non-square sample aspect come out at 1439 after
+ * `squarePixels`. Crops the last column/row off odd-sized frames (no copy:
+ * a narrower visibleRect); even frames pass through untouched.
+ */
+export function evenFrame(frame: VideoFrame): VideoFrame {
+  const r = frame.visibleRect;
+  const w = r ? r.width : frame.codedWidth, h = r ? r.height : frame.codedHeight;
+  if (w % 2 === 0 && h % 2 === 0) return frame;
+  const out = new VideoFrame(frame, {
+    visibleRect: { x: r ? r.x : 0, y: r ? r.y : 0, width: Math.max(2, w & ~1), height: Math.max(2, h & ~1) },
+    displayWidth: Math.max(2, w & ~1),
+    displayHeight: Math.max(2, h & ~1),
+  });
+  frame.close();
+  return out;
+}
+
 export type ExportFrameInfo = {
   /** Presentation time in seconds (clip time: 0 = the first video frame; a trimmed export keeps the source's clock here). */
   timeSec: number;

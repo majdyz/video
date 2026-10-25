@@ -1561,6 +1561,7 @@ export class Studio {
             }
             // Frames wrapped from a canvas (not the WebGPU backend's buffer readback).
             if (fixFrame && (!colourOn || e?.backend.kind === "webgl2" || (e?.backend as unknown as { capture?: string | null }).capture !== "readback")) out = await fixFrame(out);
+            out = media.evenFrame(out);
             frames++;
             const now = performance.now();
             if (now - lastLive > LIVE_EVERY_MS) {
