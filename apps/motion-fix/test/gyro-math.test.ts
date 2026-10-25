@@ -10,8 +10,11 @@ import {
   rotationJitter,
   smoothQuats,
   type GyroParams,
+  WATER_INDEX,
 } from "../src/lib/gyro/gyro-stabilize.ts";
-import { fitFisheye, maxTheta, project, thetaD, thetaFromD, unproject, type LensModel } from "../src/lib/gyro/lens.ts";
+import { fitFisheye, maxTheta, project, refractIn, refractOut, thetaD, thetaFromD, unproject, type LensModel } from "../src/lib/gyro/lens.ts";
+import { checkMedium, type MatchPair } from "../src/lib/gyro/medium.ts";
+import { makeRng } from "./synth.ts";
 import { qangle, qat, qconj, qexp, qlog, qmat, qmul, qrot, qslerp, sampleOrientation, type Quat, type Vec3 } from "../src/lib/gyro/quat.ts";
 import { fisheyeFromGoProPoly, GOPRO_WIDE_K, type CameraMotion } from "../src/lib/gyro/telemetry.ts";
 
@@ -232,6 +235,66 @@ const shake = (t: number): Vec3 => [
     for (const z of plan.zoom) assert.ok(z <= plan.maxZoom + 1e-6 && z >= 1 - 1e-6);
     console.log(`crop budget ${JSON.stringify(params)}: worst excursion ${worst.toFixed(2)} px, zoom ${plan.stats.meanZoom.toFixed(3)}/${plan.stats.maxUsedZoom.toFixed(3)}, limited ${plan.stats.limitedFrames}/240, jitter ${plan.stats.rawJitter.toFixed(3)} -> ${plan.stats.virtJitter.toFixed(3)}`);
   }
+}
+// ---------------------------------------------------------------- flat-port refraction and the air/water check
+{
+  close((refractIn(30 * deg, 1.333) * 180) / Math.PI, (Math.asin(0.6665) * 180) / Math.PI, 1e-9, "Snell 30° in water");
+  close(refractOut(refractIn(0.4, 1.335), 1.335), 0.4, 1e-12, "refraction round trip");
+  assert.ok(Number.isNaN(refractIn(60 * deg, 1.335)), "beyond total internal reflection");
+  const wHero: LensModel = { ...hero, n: 1.335 };
+  for (const [x, y] of [[960, 540], [100, 80], [1800, 1000], [1500, 300]]) {
+    const ray = unproject(wHero, x, y);
+    const p = project(wHero, ray);
+    close(p[0], x, 1e-6, "water round trip x");
+    close(p[1], y, 1e-6, "water round trip y");
+  }
+  // Underwater the same pixel sees a narrower angle: centre magnification × n.
+  const pa = project(hero, [Math.tan(0.001), 0, 1]);
+  const pw = project(wHero, [Math.tan(0.001), 0, 1]);
+  close((pw[0] - 960) / (pa[0] - 960), 1.335, 1e-3, "underwater centre magnification");
+
+  const fps = 60;
+  const sway = (t: number): Vec3 => [3 * deg * Math.sin(2 * Math.PI * 1.3 * t), 4 * deg * Math.sin(2 * Math.PI * 0.9 * t + 1), 2 * deg * Math.sin(2 * Math.PI * 1.7 * t)];
+  const pairsFor = (lens: LensModel, motion: CameraMotion, scramble = false): MatchPair[] => {
+    const rng = makeRng(3);
+    const out: MatchPair[] = [];
+    for (let k = 0; k < 40; k++) {
+      const t0 = 0.2 + k * 0.1;
+      const t1 = t0 + 1 / fps;
+      const m0 = qmat(sampleOrientation(motion.times, motion.quats, t0));
+      const m1 = qmat(sampleOrientation(motion.times, motion.quats, t1));
+      const px: number[] = [], py: number[] = [], qx: number[] = [], qy: number[] = [];
+      for (let i = 0; i < 30; i++) {
+        const x = 100 + rng() * 1720;
+        const y = 80 + rng() * 920;
+        const r = unproject(lens, x, y);
+        const w = [m0[0] * r[0] + m0[1] * r[1] + m0[2] * r[2], m0[3] * r[0] + m0[4] * r[1] + m0[5] * r[2], m0[6] * r[0] + m0[7] * r[1] + m0[8] * r[2]];
+        const c: Vec3 = [m1[0] * w[0] + m1[3] * w[1] + m1[6] * w[2], m1[1] * w[0] + m1[4] * w[1] + m1[7] * w[2], m1[2] * w[0] + m1[5] * w[1] + m1[8] * w[2]];
+        const p = project(lens, c);
+        if (!Number.isFinite(p[0])) continue;
+        px.push(x);
+        py.push(y);
+        qx.push(scramble ? x + (rng() - 0.5) * 60 : p[0] + (rng() - 0.5) * 0.6);
+        qy.push(scramble ? y + (rng() - 0.5) * 60 : p[1] + (rng() - 0.5) * 0.6);
+      }
+      out.push({ t0, t1, px: Float32Array.from(px), py: Float32Array.from(py), qx: Float32Array.from(qx), qy: Float32Array.from(qy) });
+    }
+    return out;
+  };
+  const motion = synthMotion(400, fps, sway, hero);
+  const inAir = checkMedium(motion, pairsFor(hero, motion));
+  const inWater = checkMedium(motion, pairsFor(wHero, motion));
+  const nonsense = checkMedium(motion, pairsFor(hero, motion, true));
+  assert.equal(inAir.detected, "air");
+  assert.equal(inWater.detected, "water");
+  assert.ok(inAir.consistent && inWater.consistent);
+  assert.equal(nonsense.consistent, false, "random motion is flagged as not matching the gyro");
+  // The plan follows the detection (n = 1.335 underwater).
+  const wPlan = computeGyroPlan({ ...motion, medium: inWater }, { smoothing: 0.6, maxCrop: 0.15, horizonLock: 0, output: "lens" });
+  close(wPlan.n, WATER_INDEX, 1e-12, "plan uses the water index");
+  const forced = computeGyroPlan({ ...motion, medium: inWater }, { smoothing: 0.6, maxCrop: 0.15, horizonLock: 0, output: "lens", medium: "air" });
+  assert.equal(forced.n, 1);
+  console.log(`air/water check: air clip ${inAir.errAir.toFixed(2)} vs ${inAir.errWater.toFixed(2)} px, water clip ${inWater.errAir.toFixed(2)} vs ${inWater.errWater.toFixed(2)} px, scrambled best ${Math.min(nonsense.errAir, nonsense.errWater).toFixed(1)} vs still ${nonsense.errStill.toFixed(1)} px`);
 }
 console.log("gyro maths tests passed");
 

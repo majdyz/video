@@ -1,0 +1,43 @@
+// Browser side of the picture check: decode four short windows of the clip
+// (WebCodecs via mediabunny), track them at 480 px and hand the point pairs
+// to checkMedium(). A few hundred milliseconds of video, not the whole clip.
+
+import { ALL_FORMATS, BlobSource, Input, VideoSampleSink } from "mediabunny";
+import { analysisSize, greenChannel } from "../tracker.ts";
+import { checkMedium, checkWindows, PairCollector } from "./medium.ts";
+import type { CameraMotion, MediumCheck } from "./telemetry.ts";
+
+export async function checkPicture(file: File, motion: CameraMotion, signal?: AbortSignal): Promise<MediumCheck | null> {
+  if (typeof VideoDecoder === "undefined" || typeof OffscreenCanvas === "undefined") return null;
+  // The lens lives in coded orientation; the decoded frames are drawn upright.
+  if (motion.video.rotation !== 0) return null;
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  try {
+    const track = await input.getPrimaryVideoTrack();
+    if (!track || !(await track.canDecode())) return null;
+    const { width: aw, height: ah } = analysisSize(motion.lens.width, motion.lens.height, 480);
+    const canvas = new OffscreenCanvas(aw, ah);
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    const gray = new Float32Array(aw * ah);
+    const collector = new PairCollector(aw, ah, motion.lens.width / aw);
+    const sink = new VideoSampleSink(track);
+    const first = await track.getFirstTimestamp();
+    for (const [w0, w1] of checkWindows(motion.video.duration)) {
+      collector.reset();
+      for await (const sample of sink.samples(first + w0, first + w1)) {
+        try {
+          if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+          sample.draw(ctx, 0, 0, aw, ah);
+          greenChannel(ctx.getImageData(0, 0, aw, ah).data, gray);
+          collector.push(sample.timestamp, gray);
+        } finally {
+          sample.close();
+        }
+      }
+    }
+    return checkMedium(motion, collector.pairs);
+  } finally {
+    input.dispose();
+  }
+}

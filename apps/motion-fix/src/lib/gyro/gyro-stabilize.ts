@@ -27,6 +27,7 @@
 import { maxTheta, project, thetaD, unproject, type LensModel } from "./lens.ts";
 import { qat, qconj, qcontinuous, qdot, qlog, qmat, qmul, qnorm, qrot, qslerp, sampleOrientation, type Quat, type Vec3 } from "./quat.ts";
 import type { CameraMotion } from "./telemetry.ts";
+import { rateLimitedZoom } from "../stabilize.ts";
 
 export type GyroParams = {
   /** 0 = follow the camera, 1 = heaviest smoothing. */
@@ -37,9 +38,16 @@ export type GyroParams = {
   horizonLock: number;
   /** Keep the camera's lens look, or output rectilinear (straight lines). */
   output: "lens" | "rectilinear";
+  /** Medium in front of the (flat) lens port: auto uses the clip's detection (motion.medium). */
+  medium?: "auto" | "air" | "water";
+  /** Largest zoom change per second (default ZOOM_RATE; 0 = the older rolling-window zoom). */
+  zoomRate?: number;
   /** Tuning override (tests/scripts): angular speed, deg/s, at which smoothing halves. */
   omegaRefDeg?: number;
 };
+
+/** Default zoom drift limit, zoom units per second (2.5 % per second reads as static). */
+export const ZOOM_RATE = 0.025;
 
 export const DEFAULT_GYRO_PARAMS: GyroParams = { smoothing: 0.6, maxCrop: 0.15, horizonLock: 0, output: "lens" };
 
@@ -53,6 +61,8 @@ export type GyroPlan = {
   output: "lens" | "rectilinear";
   /** Rectilinear output: focal (in source fx units) at zoom 1, chosen so the identity view fits. */
   rectBase: number;
+  /** Refractive index the lens model used (1 air, 1.333 underwater behind a flat port). */
+  n: number;
   maxZoom: number;
   stats: {
     meanZoom: number;
@@ -389,6 +399,15 @@ export function smoothZoomTrack(required: Float32Array, windowFrames: number, ma
   return out;
 }
 
+/** Refractive index of water (sea water ≈ 1.34, fresh ≈ 1.333). */
+export const WATER_INDEX = 1.335;
+
+/** Refractive index for a clip: the user's choice, else the clip's detection, else air. */
+export function mediumIndex(motion: CameraMotion, medium: GyroParams["medium"]): number {
+  const m = medium && medium !== "auto" ? medium : (motion.medium?.detected ?? "air");
+  return m === "water" ? WATER_INDEX : 1;
+}
+
 // ---------------------------------------------------------------------------
 // The solve
 
@@ -397,7 +416,8 @@ export function computeGyroPlan(motion: CameraMotion, params: GyroParams): GyroP
   const times = frameTimesOf(motion);
   const n = times.length;
   const fps = motion.video.fps || 30;
-  const src = motion.lens;
+  const index = mediumIndex(motion, params.medium);
+  const src: LensModel = { ...motion.lens, n: index };
   const srcThMax = src.kind === "fisheye" ? maxTheta(src.k) : Math.PI / 2;
   const maxZoom = 1 / (1 - 2 * Math.min(0.45, Math.max(0, params.maxCrop)));
   const border = borderPoints(src.width, src.height, 10);
@@ -485,7 +505,8 @@ export function computeGyroPlan(motion: CameraMotion, params: GyroParams): GyroP
   // 5. zoom
   const required = new Float32Array(n);
   for (let i = 0; i < n; i++) required[i] = Math.min(maxZoom, requiredZoom(geo, qat(virt, i), rowsAt(i), 1, maxZoom));
-  const zoom = smoothZoomTrack(required, Math.max(8, Math.round(fps * 3)), maxZoom);
+  // Rate-limited: the crop drifts at most ZOOM_RATE per second, so it never visibly pumps.
+  const zoom = params.zoomRate === 0 ? smoothZoomTrack(required, Math.max(8, Math.round(fps * 3)), maxZoom) : rateLimitedZoom(required, fps, params.zoomRate ?? ZOOM_RATE, maxZoom);
 
   let meanZoom = 0;
   let maxUsed = 1;
@@ -510,6 +531,7 @@ export function computeGyroPlan(motion: CameraMotion, params: GyroParams): GyroP
     zoom,
     output: params.output,
     rectBase,
+    n: index,
     maxZoom,
     stats: { meanZoom: meanZoom / Math.max(1, n), maxUsedZoom: maxUsed, limitedFrames: limited, solveMs: performance.now() - started, rawSpeed: (rs / Math.max(1, n)) * deg, virtSpeed: (vsum / Math.max(1, n)) * deg, rawJitter, virtJitter },
   };
@@ -586,7 +608,7 @@ export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number
   const { i0, i1, f } = bracket(plan.frameTimes, t);
   const virt = qslerp(qat(plan.virt, i0), qat(plan.virt, i1), f);
   const zoom = plan.zoom[i0] + (plan.zoom[i1] - plan.zoom[i0]) * f;
-  const src = motion.lens;
+  const src: LensModel = { ...motion.lens, n: plan.n };
   const rot = motion.video.rotation;
   const cw = src.width;
   const ch = src.height;
@@ -608,6 +630,9 @@ export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number
   const m = qmat(virt);
   const ofx = outL.fx, ofy = outL.fy, ocx = outL.cx, ocy = outL.cy;
   const sfx = src.fx, sfy = src.fy, scx = src.cx, scy = src.cy;
+  // Flat-port refraction: the source sees through water; a fisheye-look output keeps that look.
+  const srcN = src.n ?? 1;
+  const outN = outPin ? 1 : (outL.n ?? 1);
   const out: [number, number] = [0, 0];
   const far = (): readonly [number, number] => {
     out[0] = 1e6;
@@ -640,6 +665,7 @@ export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number
           const i = p | 0;
           th = lut.table[i] + (lut.table[i + 1] - lut.table[i]) * (p - i);
         }
+        if (outN !== 1) th = Math.asin(Math.min(1, Math.sin(th) / outN));
         const s = Math.sin(th) / td;
         rx = mx * s; ry = my * s; rz = Math.cos(th);
       }
@@ -668,7 +694,12 @@ export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number
       const sz = (R[o0 + 2] * c + R[o1 + 2] * a) * wx + (R[o0 + 5] * c + R[o1 + 5] * a) * wy + (R[o0 + 8] * c + R[o1 + 8] * a) * wz;
       if (srcFish) {
         const r = Math.sqrt(sx * sx + sy * sy);
-        const th = Math.atan2(r, sz);
+        let th = Math.atan2(r, sz);
+        if (srcN !== 1) {
+          const sn = srcN * Math.sin(th);
+          if (sn >= 1) return far();
+          th = Math.asin(sn);
+        }
         if (th > srcThMax) return far();
         if (r < 1e-12) { pu = scx; pv = scy; }
         else {
@@ -677,10 +708,20 @@ export function gyroWarpFnAtTime(motion: CameraMotion, plan: GyroPlan, t: number
           pu = scx + sfx * k * sx;
           pv = scy + sfy * k * sy;
         }
-      } else {
+      } else if (srcN === 1) {
         if (sz <= 1e-9) return far();
         pu = scx + (sfx * sx) / sz;
         pv = scy + (sfy * sy) / sz;
+      } else {
+        const r = Math.sqrt(sx * sx + sy * sy);
+        const sn = srcN * Math.sin(Math.atan2(r, sz));
+        if (sn >= 0.9999) return far();
+        if (r < 1e-12) { pu = scx; pv = scy; }
+        else {
+          const k = Math.tan(Math.asin(sn)) / r;
+          pu = scx + sfx * k * sx;
+          pv = scy + sfy * k * sy;
+        }
       }
       fy = pv / ch;
     }

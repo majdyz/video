@@ -19,6 +19,8 @@ export type LensModel = {
   k: [number, number, number, number];
   /** Where the profile came from, for the UI ("in-file calibration", "HERO10 Wide profile", ...). */
   source: string;
+  /** Refractive index in front of a flat port (1 or absent = air, 1.333 = underwater). */
+  n?: number;
 };
 
 /** Distorted angle θd(θ). */
@@ -56,22 +58,31 @@ export function thetaFromD(k: readonly number[], td: number, thMax = Math.PI): n
   return th;
 }
 
-/** Ray (any length) -> pixel. Returns NaN for rays the lens cannot see. */
+/**
+ * Flat-port refraction (Snell): a ray at angle θw from the axis in a medium
+ * of index n reaches the lens at θa = asin(n sin θw). Underwater (n ≈ 1.33)
+ * behind a flat port — GoPro's own lens cover and housings, DJI's — the
+ * lens sees a narrower, re-distorted cone; a dome port or air leaves n = 1.
+ * Returns NaN beyond total internal reflection.
+ */
+export function refractIn(thetaWater: number, n: number): number {
+  if (n === 1) return thetaWater;
+  const s = n * Math.sin(thetaWater);
+  return s >= 1 ? NaN : Math.asin(s);
+}
+
+export function refractOut(thetaAir: number, n: number): number {
+  return n === 1 ? thetaAir : Math.asin(Math.min(1, Math.sin(thetaAir) / n));
+}
+
+/** Ray (any length, in the medium) -> pixel. Returns NaN for rays the lens cannot see. */
 export function project(lens: LensModel, ray: Vec3, out: [number, number] = [0, 0], thMax = Math.PI): [number, number] {
   const [x, y, z] = ray;
-  if (lens.kind === "pinhole") {
-    if (z <= 1e-9) {
-      out[0] = NaN;
-      out[1] = NaN;
-      return out;
-    }
-    out[0] = lens.cx + (lens.fx * x) / z;
-    out[1] = lens.cy + (lens.fy * y) / z;
-    return out;
-  }
+  const n = lens.n ?? 1;
   const r = Math.hypot(x, y);
-  const th = Math.atan2(r, z);
-  if (th > thMax) {
+  let th = Math.atan2(r, z);
+  if (n !== 1) th = refractIn(th, n);
+  if (!(th <= thMax) || (lens.kind === "pinhole" && th >= Math.PI / 2 - 1e-9)) {
     out[0] = NaN;
     out[1] = NaN;
     return out;
@@ -81,23 +92,21 @@ export function project(lens: LensModel, ray: Vec3, out: [number, number] = [0, 
     out[1] = lens.cy;
     return out;
   }
-  const s = thetaD(lens.k, th) / r;
+  const s = (lens.kind === "pinhole" ? Math.tan(th) : thetaD(lens.k, th)) / r;
   out[0] = lens.cx + lens.fx * s * x;
   out[1] = lens.cy + lens.fy * s * y;
   return out;
 }
 
-/** Pixel -> unit ray. */
+/** Pixel -> unit ray (in the medium). */
 export function unproject(lens: LensModel, u: number, v: number, thMax = Math.PI): Vec3 {
   const mx = (u - lens.cx) / lens.fx;
   const my = (v - lens.cy) / lens.fy;
-  if (lens.kind === "pinhole") {
-    const n = Math.hypot(mx, my, 1);
-    return [mx / n, my / n, 1 / n];
-  }
   const td = Math.hypot(mx, my);
   if (td < 1e-12) return [0, 0, 1];
-  const th = thetaFromD(lens.k, td, thMax);
+  let th = lens.kind === "pinhole" ? Math.atan(td) : thetaFromD(lens.k, td, thMax);
+  const n = lens.n ?? 1;
+  if (n !== 1) th = refractOut(th, n);
   const s = Math.sin(th) / td;
   return [mx * s, my * s, Math.cos(th)];
 }

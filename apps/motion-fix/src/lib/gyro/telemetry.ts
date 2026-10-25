@@ -42,6 +42,21 @@ export type CameraMotion = {
   eis: { active: boolean; label: string };
   video: { width: number; height: number; rotation: 0 | 90 | 180 | 270; frameCount: number; duration: number; fps: number };
   notes: string[];
+  /** Picture check (medium.ts): which medium explains the tracked motion, and how well the gyro matches the picture. */
+  medium?: MediumCheck;
+};
+
+export type MediumCheck = {
+  /** null when the check could not decide (too little texture or motion). */
+  detected: "air" | "water" | null;
+  /** Median reprojection error (px at the coded size) of tracked points predicted from the gyro: air / water lens; and with no rotation at all. */
+  errAir: number;
+  errWater: number;
+  errStill: number;
+  pairs: number;
+  points: number;
+  /** False when the gyro barely predicts the picture's motion (trimmed/edited file, EIS warp, sync off). */
+  consistent: boolean;
 };
 
 export type TelemetryProbe =

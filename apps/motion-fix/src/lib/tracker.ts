@@ -577,6 +577,8 @@ export class MotionTracker {
   private previousMotion: Similarity = IDENTITY;
   // Track store (struct of arrays), compacted every frame.
   private n = 0;
+  /** Survivors of the last step (forward-backward + cell RANSAC), see lastMatches(). */
+  private matchCount = 0;
   private readonly tx: Float32Array;
   private readonly ty: Float32Array;
   private readonly age: Int32Array;
@@ -663,7 +665,19 @@ export class MotionTracker {
    * maps previous-frame points to this frame, in pixel coordinates centred
    * on the image (so rotation and scale pivot around the frame centre).
    */
+  /**
+   * Point correspondences of the last step (previous -> current frame,
+   * top-left analysis px) that survived the forward-backward check and the
+   * per-cell RANSAC — before the global similarity, so a lens-aware fit
+   * (gyro calibration) sees the fisheye periphery too. Copies.
+   */
+  lastMatches(): { px: Float32Array; py: Float32Array; qx: Float32Array; qy: Float32Array } {
+    const m = this.matchCount;
+    return { px: this.fitPx.slice(0, m), py: this.fitPy.slice(0, m), qx: this.fitQx.slice(0, m), qy: this.fitQy.slice(0, m) };
+  }
+
   stepGray(gray: Float32Array): FrameMotion {
+    this.matchCount = 0;
     if (gray !== this.gray) this.gray.set(gray);
     if (this.opts.claheClip > 0) clahe(this.gray, this.width, this.height, this.opts.claheTiles, this.opts.claheClip);
     this.next.build(this.gray);
@@ -713,6 +727,7 @@ export class MotionTracker {
       this.fitIdx[m] = i;
       m++;
     }
+    this.matchCount = m;
     const fit = this.robustFit(m);
     // 4. Keep only inliers as live tracks, advanced to their new positions,
     //    and collect them (centred) for the homography upgrade. The fit is

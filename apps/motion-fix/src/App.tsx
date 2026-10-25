@@ -83,6 +83,7 @@ export default function App() {
   const [crop, setCrop] = useState(DEFAULT_PARAMS.maxCrop);
   const [horizonLock, setHorizonLock] = useState(0);
   const [lensOut, setLensOut] = useState<"lens" | "rectilinear">("lens");
+  const [medium, setMedium] = useState<"auto" | "air" | "water">("auto");
   /** Which stabiliser runs, and what the user should know about the file's motion data. */
   const [badge, setBadge] = useState<{ kind: "gyro" | "visual"; text: string } | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -269,7 +270,8 @@ export default function App() {
       const startSmoothing = analysis.mode === "gyro" ? DEFAULT_GYRO_PARAMS.smoothing : DEFAULT_PARAMS.smoothing;
       setSmoothing(startSmoothing);
       setBusy("Solving camera path…");
-      const path = await client.solve(solveParams(startSmoothing, crop, horizonLock, lensOut));
+      setMedium("auto");
+      const path = await client.solve(solveParams(startSmoothing, crop, horizonLock, lensOut, "auto"));
       if (ctrl.signal.aborted) return;
       pathRef.current = path;
       setStatus(describe(analysis, path));
@@ -303,7 +305,7 @@ export default function App() {
       const client = clientRef.current;
       if (!client) return;
       try {
-        const path = await client.solve(solveParams(smoothing, crop, horizonLock, lensOut));
+        const path = await client.solve(solveParams(smoothing, crop, horizonLock, lensOut, medium));
         if (seq !== solveSeqRef.current) return;
         pathRef.current = path;
         if (analysisRef.current) setStatus(describe(analysisRef.current, path));
@@ -313,7 +315,7 @@ export default function App() {
       }
     }, 120);
     return () => clearTimeout(id);
-  }, [smoothing, crop, horizonLock, lensOut, analysisReady, drawCurrentFrame]);
+  }, [smoothing, crop, horizonLock, lensOut, medium, analysisReady, drawCurrentFrame]);
 
   // ---------------------------------------------------------------------
   // Playback controls
@@ -724,6 +726,13 @@ export default function App() {
             {gyroResult && (
               <>
                 <Segment
+                  label="Water"
+                  value={medium}
+                  options={[["auto", `Auto (${gyroResult.motion.medium?.detected === "water" ? "underwater" : gyroResult.motion.medium?.detected === "air" ? "air" : "?"})`], ["air", "Air"], ["water", "Underwater"]]}
+                  onChange={setMedium}
+                  disabled={controlsDisabled}
+                />
+                <Segment
                   label="Lens"
                   value={lensOut}
                   options={[["lens", "Original"], ["rectilinear", "Straight lines"]]}
@@ -786,8 +795,8 @@ export default function App() {
   );
 }
 
-function solveParams(smoothing: number, maxCrop: number, horizonLock: number, output: "lens" | "rectilinear"): SolveParams {
-  return { smoothing, maxCrop, horizonLock, output };
+function solveParams(smoothing: number, maxCrop: number, horizonLock: number, output: "lens" | "rectilinear", medium: "auto" | "air" | "water"): SolveParams {
+  return { smoothing, maxCrop, horizonLock, output, medium };
 }
 
 function frameRateOf(r: AnalysisResult | null): number | null {
@@ -800,7 +809,9 @@ function explain(r: AnalysisResult): { badge: { kind: "gyro" | "visual"; text: s
   if (r.mode === "gyro") {
     const m = r.motion;
     const extra = m.eis.active ? ` · ${m.eis.label} compensated` : m.readout > 0 ? ` · rolling shutter ${(m.readout * 1000).toFixed(1)} ms` : "";
-    return { badge: { kind: "gyro", text: `Gyro stabilisation (${m.camera})${extra}` }, warning: null };
+    const water = m.medium?.detected === "water" ? " · underwater lens" : "";
+    const mismatch = m.medium && !m.medium.consistent ? "The motion data barely matches the picture (an edited or re-timed copy?). If the result shakes, switch to Visual tracking." : null;
+    return { badge: { kind: "gyro", text: `Gyro stabilisation (${m.camera})${extra}${water}` }, warning: mismatch };
   }
   const t = r.telemetry;
   const badge = { kind: "visual" as const, text: "Visual stabilisation" };

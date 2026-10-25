@@ -52,6 +52,8 @@ export type StabilizeParams = {
   wobble?: boolean;
   /** Adaptive-zoom window (s): rolling maximum span; longer = slower, rarer crop changes. */
   zoomWindowSec?: number;
+  /** Rate-limited zoom instead of the rolling window: largest zoom change per second (e.g. 0.04). */
+  zoomRate?: number;
   /** L1 fidelity weight override (pull toward the real camera; Grundmann 0.1). */
   fidelityWeight?: number;
 };
@@ -152,6 +154,46 @@ export function requiredZoom(w: Similarity, hw: number, hh: number): number {
     }
   }
   return z;
+}
+
+/**
+ * Rate-limited zoom: the lowest curve that stays at or above every frame's
+ * required zoom while never changing faster than `maxRate` per second
+ * (zoom units), with its corners rounded. A forward pass lets the zoom
+ * fall back no faster than the limit after a peak, a backward pass starts
+ * zooming in early enough to reach the next peak at the limit — so the
+ * crop can only ever drift slowly, which is what reads as "no pumping",
+ * and a short clip with one shaky moment simply holds its zoom.
+ */
+export function rateLimitedZoom(required: Float32Array, fps: number, maxRate: number, maxZoom: number): Float32Array {
+  const n = required.length;
+  const step = maxRate / Math.max(1, fps);
+  const env = new Float64Array(n);
+  for (let t = 0; t < n; t++) env[t] = Math.min(maxZoom, Math.max(1, required[t]));
+  const limit = (a: Float64Array): void => {
+    for (let t = 1; t < n; t++) a[t] = Math.max(a[t], a[t - 1] - step);
+    for (let t = n - 2; t >= 0; t--) a[t] = Math.max(a[t], a[t + 1] - step);
+  };
+  limit(env);
+  // Round the corners (σ = 0.4 s), then restore the guarantees.
+  const sigma = Math.max(0.5, 0.4 * fps);
+  const r = Math.ceil(3 * sigma);
+  const sm = new Float64Array(n);
+  for (let t = 0; t < n; t++) {
+    let acc = 0;
+    let w = 0;
+    for (let i = -r; i <= r; i++) {
+      const u = Math.min(n - 1, Math.max(0, t + i));
+      const k = Math.exp(-(i * i) / (2 * sigma * sigma));
+      acc += k * env[u];
+      w += k;
+    }
+    sm[t] = Math.max(acc / w, Math.min(maxZoom, Math.max(1, required[t])));
+  }
+  limit(sm);
+  const out = new Float32Array(n);
+  for (let t = 0; t < n; t++) out[t] = Math.min(maxZoom, sm[t]);
+  return out;
 }
 
 /**
@@ -460,7 +502,7 @@ export function computeStabilizedPath(analysis: MotionAnalysis, params: Stabiliz
     }
   }
   const windowFrames = Math.max(8, Math.round(analysis.frameRate * (params.zoomWindowSec ?? 2.5)));
-  const zoom = smoothZoom(required, windowFrames, maxZoom);
+  const zoom = params.zoomRate ? rateLimitedZoom(required, analysis.frameRate, params.zoomRate, maxZoom) : smoothZoom(required, windowFrames, maxZoom);
 
   let meanZoom = 0;
   let maxUsedZoom = 1;
