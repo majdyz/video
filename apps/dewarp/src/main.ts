@@ -5,7 +5,7 @@ import { fitZoom, lensDiagonalFov, warpUniforms, type WarpUniforms, type Project
 import { Warper } from "./gpu";
 
 import { decodeFrameAt, describeBoxes, exportClip, indexTopLevelBoxes, probe, type ProbeResult } from "./pipeline";
-import { DEFAULT_PROFILE, PROFILES } from "./profiles";
+import { DEFAULT_PROFILE, FROM_FILE, PROFILES, resolveProfile } from "./profiles";
 
 const app = document.getElementById("app")!;
 
@@ -109,6 +109,11 @@ async function main() {
   const profileSelect = el("select") as HTMLSelectElement;
   for (const [id, p] of Object.entries(PROFILES)) profileSelect.append(el("option", { value: id }, p.label));
   profileSelect.value = DEFAULT_PROFILE;
+  // The clip's own lens, when its metadata carries one, is offered as the first option.
+  const fromFileOption = el("option", { value: FROM_FILE }, "This clip's own lens data") as HTMLOptionElement;
+  // ?quality=0 falls back to one bilinear tap per pixel (for A/B and slow GPUs).
+  const quality = new URLSearchParams(location.search).get("quality") === "0" ? 0 : 1;
+  const activeProfile = () => resolveProfile(profileSelect.value, info?.camera);
 
   const projectionSelect = el("select") as HTMLSelectElement;
   projectionSelect.append(el("option", { value: "rectilinear" }, "Straight lines"), el("option", { value: "stereographic" }, "Natural shapes"));
@@ -197,12 +202,13 @@ async function main() {
       strength: strength.input.valueAsNumber / 100,
       projection: projectionSelect.value as Projection,
       zoom: zoom.input.valueAsNumber / 100,
-      lens: PROFILES[profileSelect.value]?.lens,
+      lens: activeProfile().lens,
+      quality,
     });
 
   // The FOV slider starts at what the calibration implies for this clip's frame; the tweak at the profile's.
   const syncProfile = () => {
-    const p = PROFILES[profileSelect.value];
+    const p = activeProfile();
     const w = info?.width ?? p.lens?.width ?? 3840;
     const h = info?.height ?? p.lens?.height ?? 2160;
     const fovDeg = p.lens ? Math.round(lensDiagonalFov(p.lens, w, h)) : p.fovDeg;
@@ -213,9 +219,13 @@ async function main() {
     strength.input.value = String(Math.round((p.strength ?? 1) * 100));
     strength.input.dispatchEvent(new Event("input"));
     const aspectOff = p.lens && info ? Math.abs(info.width / info.height - p.lens.width / p.lens.height) > 0.02 : false;
-    profileNote.textContent = p.lens
+    const cam = info?.camera;
+    const who = cam?.brand ? `Detected ${[cam.brand, cam.model].filter(Boolean).join(" ")}${cam.lensMode ? `, ${cam.lensMode}` : ""}${cam.stabilization ? `, stabilisation ${cam.stabilization}` : ""}. ` : info ? "No camera metadata in this file; picked by frame shape. " : "";
+    profileNote.textContent = who + (p.lens
       ? `${p.source}, ${fovDeg}° diagonal${aspectOff ? " — this clip has a different aspect ratio than the calibration; check the preview edges" : ""}`
-      : "No calibration: set the field of view and edge tweak until lines look straight";
+      : p.strength === 0
+        ? "No correction: this footage is already straight"
+        : "No calibration: set the field of view and edge tweak until lines look straight");
   };
   syncProfile();
 
@@ -306,7 +316,8 @@ async function main() {
       k1: k1.input.valueAsNumber,
       strength: strength.input.valueAsNumber / 100,
       projection: projectionSelect.value as Projection,
-      lens: PROFILES[profileSelect.value]?.lens,
+      lens: activeProfile().lens,
+      quality,
     }, 0.6);
     zoom.input.value = String(Math.ceil(z * 100));
     zoom.input.dispatchEvent(new Event("input"));
@@ -348,6 +359,16 @@ async function main() {
     if (afterTarget?.kind === "gpu") afterTarget = { kind: "gpu", ctx: warper!.configureCanvas(after) };
     if (warper && modeReady) warper.prepareOutput(info.width, info.height);
     orientPreview(info.width, info.height, info.rotation);
+    // Preselect what the file says it is; the picker stays free to override.
+    const cam = info.camera;
+    if (cam.lens) {
+      fromFileOption.textContent = resolveProfile(FROM_FILE, cam).label;
+      profileSelect.prepend(fromFileOption);
+    } else {
+      fromFileOption.remove();
+    }
+    const suggested = cam.profileId === FROM_FILE ? (cam.lens ? FROM_FILE : undefined) : cam.profileId;
+    profileSelect.value = suggested && (suggested === FROM_FILE || PROFILES[suggested]) ? suggested : DEFAULT_PROFILE;
     syncProfile();
     applyFit();
     meta.textContent = `${info.width}×${info.height}, ${info.fps.toFixed(2)} fps, ${fmtTime(info.durationS)}, ${info.codec}${info.hasAudio ? ", audio" : ", no audio"}${info.rotation ? `, rotated ${info.rotation}°` : ""}`;

@@ -1,5 +1,6 @@
 import { createFile, DataStream, Endianness, type ISOFile, type Movie, type Sample } from "mp4box";
 import { Muxer, StreamTarget } from "mp4-muxer";
+import { detectCamera, type CameraInfo, type MetaSample } from "./camera-detect";
 import type { WarpUniforms } from "./fisheye";
 import type { Warper } from "./gpu";
 import { applyMetadata, readSourceMetadata } from "./metadata";
@@ -28,6 +29,8 @@ export type ProbeResult = {
   tenBit: boolean;
   hasAudio: boolean;
   rotation: 0 | 90 | 180 | 270;
+  /** Camera, lens mode and (when the file carries one) the clip's own lens, from its metadata. */
+  camera: CameraInfo;
 };
 
 type Box = { write(stream: DataStream): void };
@@ -145,6 +148,7 @@ export async function probe(file: File, log: (line: string) => void = () => {}):
   // HEVC Main 10 is "hvc1.2.4.…", H.264 High 10 is profile 0x6e.
   const tenBit = /^hvc1\.2\./.test(t.codec) || /^hev1\.2\./.test(t.codec) || /^avc1\.6e/i.test(t.codec);
   const durationS = t.duration / t.timescale;
+  const camera = await readCamera(file, mp4, info, boxes, t.track_width, t.track_height, log);
   return {
     width: t.track_width,
     height: t.track_height,
@@ -155,7 +159,33 @@ export async function probe(file: File, log: (line: string) => void = () => {}):
     tenBit,
     hasAudio: info.audioTracks.length > 0,
     rotation: rotationFromMatrix((t as unknown as { matrix?: ArrayLike<number> }).matrix),
+    camera,
   };
+}
+
+/** The moov bytes and the first sample of each timed metadata track (DJI djmd, GoPro gpmd), run through camera-detect. */
+async function readCamera(file: File, mp4: ISOFile, info: Movie, boxes: BoxRange[], width: number, height: number, log: (line: string) => void): Promise<CameraInfo> {
+  try {
+    const moovBox = boxes.find(b => b.type === "moov")!;
+    // A long clip's sample tables run to a few MB; the camera tags sit in udta near the end.
+    const moov = new Uint8Array(await file.slice(moovBox.start, moovBox.start + Math.min(moovBox.size, 64 << 20)).arrayBuffer());
+    const metaSamples: MetaSample[] = [];
+    for (const tr of info.tracks) {
+      const format = String(tr.codec ?? "").split(".")[0]!;
+      if (format !== "djmd" && format !== "gpmd") continue;
+      const trak = mp4.getTrackById(tr.id) as unknown as { samples?: { offset: number; size: number }[] };
+      const s0 = trak?.samples?.[0];
+      if (!s0 || s0.size <= 0 || s0.size > 1 << 20) continue;
+      metaSamples.push({ format, data: new Uint8Array(await file.slice(s0.offset, s0.offset + s0.size).arrayBuffer()) });
+    }
+    const camera = detectCamera({ moov, width, height, metaSamples });
+    const lens = camera.lens ? `, lens from file fx ${camera.lens.fx.toFixed(1)} k ${camera.lens.k.map(v => v.toFixed(4)).join(" ")}` : "";
+    log(`camera: ${[camera.brand, camera.model].filter(Boolean).join(" ") || "unknown"}${camera.lensMode ? `, ${camera.lensMode}` : ""}${camera.stabilization ? `, stabilisation ${camera.stabilization}` : ""} -> ${camera.profileId ?? "default"} (${camera.evidence.join("; ")})${lens}`);
+    return camera;
+  } catch (e) {
+    log(`camera detection failed: ${(e as Error).message}`);
+    return { evidence: ["metadata unreadable"] };
+  }
 }
 
 /**

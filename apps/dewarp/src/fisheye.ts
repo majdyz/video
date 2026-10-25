@@ -36,6 +36,8 @@ export type WarpParams = {
   zoom: number;
   /** Calibrated lens; scaled to the clip size by width. */
   lens?: Lens;
+  /** 1 (default): bicubic, or a box filter over the footprint where the warp shrinks; 0: one bilinear tap. */
+  quality?: number;
 };
 
 export type WarpUniforms = {
@@ -53,6 +55,8 @@ export type WarpUniforms = {
   center: [number, number];
   /** Largest angle the polynomial is trusted for; beyond it the fisheye radius is held. */
   thetaMax: number;
+  /** Resampling: 1 adaptive bicubic / footprint filter, 0 single bilinear tap. */
+  quality: number;
 };
 
 /** Distorted angle of the Kannala-Brandt polynomial. */
@@ -129,6 +133,7 @@ export function warpUniforms(p: WarpParams): WarpUniforms {
     fy,
     center,
     thetaMax: thetaMaxOf(k),
+    quality: p.quality ?? 1,
   };
 }
 
@@ -153,7 +158,7 @@ export function samplePoint(u: WarpUniforms, outX: number, outY: number): [numbe
 
 /**
  * Float32 layout the shader reads (16 floats, 64 bytes):
- * srcSize.xy, fFish, fOut, k1..k4, strength, zoom, projection, fy, center.xy, thetaMax, pad.
+ * srcSize.xy, fFish, fOut, k1..k4, strength, zoom, projection, fy, center.xy, thetaMax, quality.
  */
 export const UNIFORM_FLOATS = 16;
 export function packUniforms(u: WarpUniforms): Float32Array {
@@ -161,7 +166,7 @@ export function packUniforms(u: WarpUniforms): Float32Array {
     u.srcSize[0], u.srcSize[1], u.fFish, u.fOut,
     u.k[0], u.k[1], u.k[2], u.k[3],
     u.strength, u.zoom, u.projection, u.fy,
-    u.center[0], u.center[1], u.thetaMax, 0,
+    u.center[0], u.center[1], u.thetaMax, u.quality,
   ]);
 }
 

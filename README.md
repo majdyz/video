@@ -31,10 +31,14 @@ Three on-device PWAs for diver-shot footage, in one monorepo.
 - **Dewarp** · https://majdyz.github.io/video/dewarp/ — fisheye to
   rectilinear for action cameras. Calibrated OpenCV-fisheye (Kannala-Brandt
   k1..k4, principal point, fx/fy) lens profiles from the Gyroflow database
-  (Osmo Action Wide / Ultra Wide, GoPro HERO11-13 Wide), scaled to the clip
-  size; straight lines at 100 % by default, a Natural-shapes (stereographic)
-  option, strength and zoom, advanced focal trim and k1 tweak. One WebGPU (or
-  WebGL2) pass, WebCodecs export, AAC audio copied through.
+  (Osmo Action Wide / Ultra Wide, GoPro HERO9-13 Wide 16:9 / 4:3 / 8:7, Max
+  Lens Mod), scaled to the clip size. The camera is detected from the file
+  (GoPro FIRM/GPMF, DJI ©too and djmd metadata track) and the profile
+  preselected; HERO12/13 clips use the lens polynomial GoPro writes into
+  each clip, HyperSmooth crops are applied. Auto-fit zoom (no black corners),
+  a Natural-shapes (stereographic) option, strength, advanced focal trim and
+  k1 tweak. One WebGPU (or WebGL2) pass with adaptive Catmull-Rom / footprint
+  resampling, WebCodecs export, AAC copied or other audio re-encoded.
 - Landing page · https://majdyz.github.io/video/
 
 All three run entirely in the browser, install as standalone PWAs, and process
@@ -99,6 +103,11 @@ Tests: `node --experimental-strip-types apps/motion-fix/test/*.test.ts`.
   Action 4 / 5 Pro use the Action 3's 155° f/2.8 lens, the HERO12/13 the
   HERO11's. The shader maths is unit-tested against an independent OpenCV
   `projectPoints`.
+- GoPro's per-clip lens description (GPMF "Large FOV": ZFOV, POLY, ZMPL;
+  [gpmf-parser](https://github.com/gopro/gpmf-parser) docs) is converted to
+  Kannala-Brandt by a linear least-squares fit; DJI's djmd field numbers come
+  from [telemetry-parser](https://github.com/AdrianEddy/telemetry-parser)
+  (MIT/Apache-2.0).
 
 Tests: `pnpm --filter dewarp test`.
 
