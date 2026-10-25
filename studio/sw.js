@@ -8,8 +8,8 @@
 // network-first so a deploy never serves an index pointing at deleted
 // bundles. Each deploy gets a new cache and the old one is deleted on
 // activate.
-const VERSION = "studio-fbaa02ddc921";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./assets/analysis-worker-BJ5uGTov.js","./assets/analysis-worker-D2TOee3w.js","./assets/bridge-BS1jGyyU.js","./assets/colour-DuUcRLm3.js","./assets/dewarp-C_0c-JMk.js","./assets/dist-C1-5Ybmv.js","./assets/fisheye-ZQaGtv4_.js","./assets/id3-Ce-wct5t.js","./assets/index-BY92QG1N.js","./assets/index-DASDL9P1.css","./assets/media-CpNnhiqN.js","./assets/motion-_RE2Dq3t.js","./assets/opfs-worker-BuQ2QldH.js","./assets/person-worker-PK8s94hj.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-Ean3G7CM.js"];
+const VERSION = "studio-463cceaf91c2";
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-D2TOee3w.js","./assets/analysis-worker-P50HMd-I.js","./assets/bridge-Bm0PtgkX.js","./assets/colour-nBMAEl_T.js","./assets/dewarp-ITs6KAao.js","./assets/dist-C1-5Ybmv.js","./assets/fisheye-ZQaGtv4_.js","./assets/index-B-jMDBzc.js","./assets/index-BfNN1Azk.css","./assets/media-CGxdv0wG.js","./assets/motion-CY1fkuqM.js","./assets/opfs-worker-BuQ2QldH.js","./assets/person-worker-PK8s94hj.js","./assets/videoframe-colorspace-TxZahXPU.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-Ean3G7CM.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
