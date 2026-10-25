@@ -28,7 +28,7 @@ import { maxTheta, thetaD, type LensModel } from "./lens.ts";
 import { qat, qconj, qcontinuous, qdot, qlog, qmat, qmul, qnorm, qrot, qslerp, sampleOrientation, type Quat, type Vec3 } from "./quat.ts";
 import type { CameraMotion } from "./telemetry.ts";
 import { rateLimitedZoom } from "../stabilize.ts";
-import { gateResidual, jitter2, NO_HALF, smoothPath1D, TRANSLATION_WEIGHTS, wander2, type ResidualMotion } from "./hybrid.ts";
+import { DEFAULT_GATE, gateResidual, jitter2, NO_HALF, smoothPath1D, TRANSLATION_WEIGHTS, wander2, type ResidualMotion } from "./hybrid.ts";
 
 /** Hybrid kicks in only above these (analysis px): heave/sway RMS, and translation jitter. */
 export const HYBRID_MIN_WANDER = 0.3;
@@ -537,7 +537,7 @@ export function computeGyroPlan(motion: CameraMotion, params: GyroParams, residu
   // 4b. hybrid: residual translation from the picture, as a small extra view rotation.
   let hybrid: HybridStats | undefined;
   if (residual && (params.hybrid ?? 1) > 0) {
-    hybrid = applyHybrid(geo, virt, times, fps, maxZoom, residual, index, Math.min(1, params.hybrid ?? 1), rowsAt);
+    hybrid = applyHybrid(geo, virt, times, fps, maxZoom, residual, index, Math.min(1, params.hybrid ?? 1), rowsAt, speed);
     qcontinuous(virt);
   }
 
@@ -601,10 +601,13 @@ export function viewShiftQuat(ex: number, ey: number): Quat {
  * not fit. Modifies `virt` in place; falls back (untouched) when the
  * residual is not trustworthy or would not help.
  */
-function applyHybrid(geo: Geometry, virt: Float64Array, times: Float64Array, fps: number, maxZoom: number, residual: ResidualMotion, index: number, strength: number, rowsAt: (i: number) => RowRotations): HybridStats {
+function applyHybrid(geo: Geometry, virt: Float64Array, times: Float64Array, fps: number, maxZoom: number, residual: ResidualMotion, index: number, strength: number, rowsAt: (i: number) => RowRotations, speed: Float64Array): HybridStats {
   const n = times.length;
   const medium = index > 1.01 ? "water" : "air";
-  const g = gateResidual(residual, medium, times, fps);
+  // The rotation's picture motion per frame (analysis px at the centre), for the turn check.
+  const rotFlow = new Float64Array(n);
+  for (let i = 0; i < n; i++) rotFlow[i] = (speed[i] / fps) * residual.unitPx;
+  const g = gateResidual(residual, medium, times, fps, DEFAULT_GATE, rotFlow);
   const base = { acceptedFrac: g.acceptedFrac, rejected: g.rejected, jitterBefore: 0, jitterAfter: 0, wanderBefore: 0, wanderAfter: 0, maxShift: 0, limitedFrames: 0 };
   if (n < 8) return { ...base, applied: false, reason: "clip too short" };
   if (g.acceptedFrac < 0.3) return { ...base, applied: false, reason: `picture too unreliable (${Math.round(g.acceptedFrac * 100)}% of frames usable)` };

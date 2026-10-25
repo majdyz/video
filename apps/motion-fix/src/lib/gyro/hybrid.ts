@@ -325,6 +325,13 @@ export type GateOptions = {
   /** A group this large that stays put while the fit moves vetoes the frame (fish over a static scene). */
   maxZeroSupport: number;
   /**
+   * Turns: frames whose rotation moves the picture by more than this
+   * (analysis px per frame) are not measured. Any lens, sync or rolling-
+   * shutter error scales with the rotation and would read as translation
+   * (Avata turn: +20 px of false drift).
+   */
+  maxRotFlow: number;
+  /**
    * Rejected stretches between usable frames are filled by interpolating
    * the step (constant-velocity guess) up to this long, seconds; longer
    * ones fade the neighbours' step to zero over half a second from each side.
@@ -334,7 +341,7 @@ export type GateOptions = {
   bridgeSec: number;
 };
 
-export const DEFAULT_GATE: GateOptions = { minPoints: 20, minInlierFrac: 0.55, minCoverage: 5 / 16, maxSpeedPx: 160, maxRms: 1.5, maxZeroSupport: 0.3, bridgeSec: 1 };
+export const DEFAULT_GATE: GateOptions = { minPoints: 20, minInlierFrac: 0.55, minCoverage: 5 / 16, maxSpeedPx: 160, maxRms: 1.5, maxZeroSupport: 0.3, maxRotFlow: 3, bridgeSec: 1 };
 
 export type GatedResidual = {
   /** Per plan frame: residual step (analysis px at the centre), 0 where rejected. */
@@ -345,15 +352,16 @@ export type GatedResidual = {
   index: Int32Array;
   acceptedFrac: number;
   /** Why frames were dropped (counts). */
-  rejected: { missing: number; points: number; inliers: number; coverage: number; rms: number; speed: number; still: number; spike: number };
+  rejected: { missing: number; points: number; inliers: number; coverage: number; rms: number; speed: number; still: number; turn: number; spike: number };
 };
 
 /**
- * Per plan frame residual steps. Frames that fail a check get an
+ * Per plan frame residual steps (`rotFlow`: the rotation's picture motion
+ * per frame, analysis px, for the turn check). Frames that fail a check get an
  * interpolated step (bridgeSec), or one fading to zero (gyro-only
  * behaviour) in long stretches and at the ends of the clip.
  */
-export function gateResidual(res: ResidualMotion, medium: "air" | "water", frameTimes: Float64Array, fps: number, opts: GateOptions = DEFAULT_GATE): GatedResidual {
+export function gateResidual(res: ResidualMotion, medium: "air" | "water", frameTimes: Float64Array, fps: number, opts: GateOptions = DEFAULT_GATE, rotFlow?: Float64Array): GatedResidual {
   const n = frameTimes.length;
   const data = medium === "water" ? res.water : res.air;
   const S = RESIDUAL_STRIDE;
@@ -361,7 +369,7 @@ export function gateResidual(res: ResidualMotion, medium: "air" | "water", frame
   const dy = new Float64Array(n);
   const ok = new Uint8Array(n);
   const index = new Int32Array(n).fill(-1);
-  const rej = { missing: 0, points: 0, inliers: 0, coverage: 0, rms: 0, speed: 0, still: 0, spike: 0 };
+  const rej = { missing: 0, points: 0, inliers: 0, coverage: 0, rms: 0, speed: 0, still: 0, turn: 0, spike: 0 };
   const dt = 1 / Math.max(1, fps);
   const maxStep = opts.maxSpeedPx * dt;
   const u = res.unitPx;
@@ -379,7 +387,8 @@ export function gateResidual(res: ResidualMotion, medium: "air" | "water", frame
     const x = data[o] * u;
     const y = data[o + 1] * u;
     const step = Math.hypot(x, y);
-    if (res.points[j] < opts.minPoints) rej.points++;
+    if (rotFlow && rotFlow[i] > opts.maxRotFlow) rej.turn++;
+    else if (res.points[j] < opts.minPoints) rej.points++;
     else if (data[o + 3] < opts.minInlierFrac) rej.inliers++;
     else if (data[o + 5] < opts.minCoverage) rej.coverage++;
     else if (data[o + 4] > opts.maxRms) rej.rms++;
