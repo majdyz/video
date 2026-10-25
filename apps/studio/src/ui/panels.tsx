@@ -63,7 +63,7 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
   if (tool === "dewarp" && enabled && info && profileAspectMismatch(tools.dewarp.profile, info.codedW, info.codedH)) status = <span className="status-warn">Calibrated for a different aspect ratio</span>;
   // Gyro stabilisation + Dewarp: the gyro warp straightens through the clip's own lens model.
   const gyroLens = tool === "dewarp" && enabled && tools.stabilise.enabled && stab.state === "ready" && stab.info?.mode === "gyro";
-  if (gyroLens) status = <span className="status-good">Straightened with the gyro data's lens ({stab.info?.camera})</span>;
+  if (gyroLens) status = <span className="status-good">{detected ? `Detected: ${detected}` : stab.info?.camera} · gyro lens model</span>;
   const note = tool === "stabilise" && enabled && stab.info?.warning ? stab.info.warning : null;
 
   return (

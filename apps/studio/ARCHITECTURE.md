@@ -7,7 +7,7 @@ imported, not forked:
 | Tool      | Engine (imported)                                         | Studio glue                       |
 |-----------|-----------------------------------------------------------|-----------------------------------|
 | Colour    | `apps/aqua-fix/src/engine` (`GradeEngine`, params, lock)   | `src/pipeline/studio.ts`          |
-| Stabilise | `apps/motion-fix/src/lib` (`AnalysisClient`, `warpFnAtTime`) | `src/pipeline/geometry*.ts`     |
+| Stabilise | `apps/motion-fix/src/lib` v3 (`AnalysisClient`, `analysis-run`, `plan.ts` `planWarpFn`) | `src/pipeline/geometry*.ts`, `stab-info.ts` |
 | Dewarp    | `apps/dewarp/src/fisheye.ts`, `profiles.ts`                | `src/pipeline/geometry*.ts`       |
 | Export    | `packages/shared` (`exportWithCodec`, `squarePixels`)       | `Studio.exportVideo()`            |
 
@@ -138,6 +138,31 @@ bitmap is EXIF-oriented and bounded to the browser's limits (WebKit's
 there is no frame loop, so the photo is analysed once, snapped, and
 re-analysed (debounced) when the framing changes. Output keeps no EXIF.
 
+## Stabilise (Motion Fix v3)
+
+The Stabilise tool runs Motion Fix v3's analysis (`analyzeAny` in the
+worker): GoPro `gpmd` / DJI `djmd` gyro telemetry when the file has usable
+data (rotation-exact through the clip's lens, rolling shutter, flat-port
+underwater refraction checked against the picture), feature tracking
+otherwise. `stab-info.ts` turns the result into the status line
+("Gyro stabilisation · GoPro HERO10 Black" / "Visual stabilisation") and
+the warning under it (EIS on in camera, no motion data: import the original
+from the SD card, gyro/picture mismatch). Advanced offers the motion
+source (gyro data / visual tracking: a re-analysis), the lens port (auto /
+air / underwater), Keep level (when the clip knows gravity) and the crop
+budget. One Strength drives both paths (`solveParams`: Steady = 0.8 on the
+visual path, v3's tuned 0.6 on the gyro path, 100 = full smoothing).
+
+The per-vertex warp is `planWarpFn(result, plan, t, displayW, displayH)`
+(output centred display px → source centred display px), the same
+contract as v2, so the geometry pass is unchanged. With gyro data and
+Dewarp on, the plan is solved with `output: "rectilinear"`: the gyro warp
+projects through the clip's own lens model into straight lines, and the
+shader's separate Kannala-Brandt pass is skipped (it would undo the lens
+twice). Toggling Dewarp re-solves. Without gyro data the order stays
+dewarp (shader) → visual stabilise (mesh), with the approximation noted
+above.
+
 ## Camera detection
 
 When a clip opens, `pipeline/camera.ts` reads the moov box and the first
@@ -212,14 +237,30 @@ off), `?dock=open|closed` (phone dock).
 
 ## Open issues
 
-* With a geometry tool on, `GradeEngine.render()` on the stage during an
-  offline export showed a magnified crop in headless WebGL2 (the exported
-  frames are correct). The stage live view is therefore disabled on that
-  path; the export sheet's thumbnails (bitmaps of the encoded frames) are
-  the live view. Likely the backend's on-screen size after a full-size
-  `renderToFrame` of a canvas source; investigate with the single-pass work.
+* The stage's magnified crop during offline exports is gone by design (the
+  stage shows bitmaps of the encoded frames, never the resized render
+  canvas). Its root cause in the engine's on-screen canvas was not
+  isolated; it only matters if someone renders the engine canvas on the
+  stage during an export again.
+* Playwright's Linux WebKit has no MediaRecorder, so the real-time path was
+  verified in Chrome (`?rt=1`) and the WebKit run fell back to the offline
+  path, which fails there inside mediabunny's VideoFrame init
+  ("colorSpace.primaries must be one of …"). iOS/macOS Safari have
+  MediaRecorder and take the real-time path; the offline fallback on
+  WebKit still needs a fix before it can be relied on (drawing decoded
+  samples through a 2D canvas did not avoid it: the rejected colour space
+  is set later in the shared encode path).
+* MediaPipe's person detector does not start in Playwright WebKit (no
+  WebGL2 in its worker); the grade runs without the person mask there.
+* Exported photos carry no EXIF (date, location, camera). Copying the
+  source's EXIF block into the JPEG is a small follow-up.
+* HEIC decoding was not exercised headless (Chrome cannot decode it; the
+  Linux WebKit build was not tried with a HEIC file).
+* Real-time export on a slow renderer: after the ¼-speed half-size step
+  the recorder keeps whatever frames it gets (as in Aqua Fix).
+* The gyro warp is evaluated per mesh vertex (33×19) and interpolated
+  linearly between; with rectilinear output on very wide lenses a denser
+  mesh (or the single-pass per-fragment warp) would be more exact at the
+  edges.
 * One headless run logged "WebGL: too many errors" after ~20 minutes idle
   post-export; not reproduced in a 60 s idle run.
-* Photos (Aqua Fix supports stills) are not wired into the Studio yet.
-* The bundled sample clip's attribution (Wikimedia Commons, CC BY-SA)
-  needs the exact author/title before a store release.

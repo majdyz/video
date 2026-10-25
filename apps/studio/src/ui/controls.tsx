@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 
 /** Labelled slider: drawn track + fill, with a native range input on top for touch, keyboard and a11y. */
 export function Slider({
@@ -69,8 +69,16 @@ export function Chips<T extends string>({
   disabled?: boolean;
   label: string;
 }) {
+  // Keep the selected chip in view (a preselected camera can sit past the scroll edge).
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const row = ref.current, on = row?.querySelector<HTMLElement>('[aria-checked="true"]');
+    if (!row || !on || row.scrollWidth <= row.clientWidth) return;
+    const left = on.offsetLeft - row.offsetLeft, right = left + on.offsetWidth;
+    if (left < row.scrollLeft || right > row.scrollLeft + row.clientWidth) row.scrollLeft = Math.max(0, left - 16);
+  }, [value]);
   return (
-    <div className="chips" role="radiogroup" aria-label={label}>
+    <div className="chips" role="radiogroup" aria-label={label} ref={ref}>
       {items.map((it) => (
         <button
           key={it.id}
