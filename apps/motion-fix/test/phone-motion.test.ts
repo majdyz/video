@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { angleAxisToQuat, decodeCamm } from "../src/lib/gyro/camm.ts";
 import { applyOrientation, gyroflowToCamera, parseImuLog, validOrientation } from "../src/lib/gyro/imu-log.ts";
 import { pinholeFromFov, project, unproject, type LensModel } from "../src/lib/gyro/lens.ts";
-import { calibrateRawGyro, checkAndCalibrate, displayToCoded, syncLogClock, type MatchPair } from "../src/lib/gyro/medium.ts";
+import { calibrateRawGyro, checkAndCalibrate, checkWindowsFor, displayToCoded, syncLogClock, type MatchPair } from "../src/lib/gyro/medium.ts";
 import { bytesReader, readMp4Index } from "../src/lib/gyro/mp4-index.ts";
 import { qangle, qat, qexp, qmat, qmul, qconj, sampleOrientation, type Quat, type Vec3 } from "../src/lib/gyro/quat.ts";
 import { defaultGoProOrin, integrateGoProGyro, integrateRates, phoneLens, probeTelemetry, probeWithLog, type CameraMotion } from "../src/lib/gyro/telemetry.ts";
@@ -288,6 +288,16 @@ function pairsFrom(truth: CameraMotion, l: LensModel, windows: [number, number][
     close(m.lens.fx, lens.fx, 0.06 * lens.fx, "focal after calibration");
     assert.ok(check.consistent && check.errAir < 1.5, `consistent, err ${check.errAir.toFixed(2)} px`);
     console.log(`sidecar calibration: ${m.notes.join("; ")}`);
+    // Trimmed clip (Studio trim 9–11 s, analysis span ± 0.5 s): the picture check only
+    // decodes windows inside the span, the sync still searches the whole log.
+    const span = { start: 8.5, end: 11.5 };
+    const tw = checkWindowsFor({ ...probe.motion, source: "imu-log" }, span);
+    assert.ok(tw.every(([a, b]) => a >= span.start && b <= span.end), `windows inside the span: ${JSON.stringify(tw)}`);
+    const mt: CameraMotion = { ...m, timeOffset: 0, lens: { ...phoneLens(1280, 720, null, "guess") }, notes: [] };
+    const st = syncLogClock(mt, pairsFrom(truth, lens, tw, fps, 7), m.syncRange!);
+    assert.ok(st, "trimmed: synced");
+    close(st!.offset, start, 0.006, "trimmed: log clock offset recovered from the span's pairs");
+    console.log(`trimmed log sync (3 s span of a 60 s log): ${st!.offset.toFixed(3)} s (truth ${start}), correlation ${st!.correlation.toFixed(2)}`);
   }
   // Wall clocks: the log started 5 s before the clip (mvhd creation time); the sync searches ±3 s around it.
   const parsedWall = parseImuLog(gcsv.replace("tscale", "timestamp,1700000000\ntscale"), "clip.gcsv");
