@@ -8,7 +8,7 @@
     "build": "node scripts/build-icons.mjs && tsc -b && vite build",
     "preview": "vite preview",
     "icons": "node scripts/build-icons.mjs",
-    "test": "node --experimental-strip-types --no-warnings test/geometry.test.ts && node --experimental-strip-types --no-warnings test/tools.test.ts"
+    "test": "node --experimental-strip-types --no-warnings test/geometry.test.ts && node --experimental-strip-types --no-warnings test/tools.test.ts && node --experimental-strip-types --no-warnings test/profiles.test.ts"
   },
   "dependencies": {
     "@dive-tools/shared": "workspace:*",

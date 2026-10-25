@@ -95,11 +95,13 @@ export type DewarpState = {
 };
 
 export const DEWARP_PROFILES: Chip<string>[] = [
-  { id: "osmo-action-wide", label: "Osmo Wide", hint: PROFILES["osmo-action-wide"].label },
-  { id: "osmo-action-wide-raw", label: "Osmo Wide · raw", hint: PROFILES["osmo-action-wide-raw"].label },
-  { id: "osmo-action-ultra-wide", label: "Osmo Ultra Wide", hint: PROFILES["osmo-action-ultra-wide"].label },
-  { id: "gopro-hero11-wide", label: "GoPro Wide", hint: PROFILES["gopro-hero11-wide"].label },
-  { id: "generic-fisheye", label: "Other", hint: PROFILES["generic-fisheye"].label },
+  { id: "osmo-action-wide", label: "Osmo Wide", hint: PROFILES["osmo-action-wide"]?.label ?? "" },
+  { id: "osmo-action-wide-raw", label: "Osmo Wide · raw", hint: PROFILES["osmo-action-wide-raw"]?.label ?? "" },
+  { id: "osmo-action-ultra-wide", label: "Osmo Ultra Wide", hint: PROFILES["osmo-action-ultra-wide"]?.label ?? "" },
+  { id: "gopro-wide-16x9", label: "GoPro Wide", hint: PROFILES["gopro-wide-16x9"]?.label ?? "" },
+  { id: "gopro-wide-4x3", label: "GoPro Wide 4:3", hint: PROFILES["gopro-wide-4x3"]?.label ?? "" },
+  { id: "none", label: "Already straight", hint: PROFILES["none"]?.label ?? "" },
+  { id: "generic-fisheye", label: "Other", hint: PROFILES["generic-fisheye"]?.label ?? "" },
 ];
 
 export function profileDefaults(id: string): Pick<DewarpState, "profile" | "strength" | "fovDeg"> {
