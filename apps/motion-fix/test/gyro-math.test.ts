@@ -16,7 +16,7 @@ import { fitFisheye, maxTheta, project, refractIn, refractOut, thetaD, thetaFrom
 import { checkMedium, type MatchPair } from "../src/lib/gyro/medium.ts";
 import { makeRng } from "./synth.ts";
 import { qangle, qat, qconj, qexp, qlog, qmat, qmul, qrot, qslerp, sampleOrientation, type Quat, type Vec3 } from "../src/lib/gyro/quat.ts";
-import { fisheyeFromGoProPoly, GOPRO_WIDE_K, type CameraMotion } from "../src/lib/gyro/telemetry.ts";
+import { defaultGoProOrin, fisheyeFromGoProPoly, GOPRO_WIDE_K, integrateGoProGyro, type CameraMotion } from "../src/lib/gyro/telemetry.ts";
 
 const close = (a: number, b: number, tol: number, msg: string): void => assert.ok(Math.abs(a - b) <= tol, `${msg}: ${a} vs ${b} (tol ${tol})`);
 const deg = Math.PI / 180;
@@ -295,6 +295,22 @@ const shake = (t: number): Vec3 => [
   const forced = computeGyroPlan({ ...motion, medium: inWater }, { smoothing: 0.6, maxCrop: 0.15, horizonLock: 0, output: "lens", medium: "air" });
   assert.equal(forced.n, 1);
   console.log(`air/water check: air clip ${inAir.errAir.toFixed(2)} vs ${inAir.errWater.toFixed(2)} px, water clip ${inWater.errAir.toFixed(2)} vs ${inWater.errWater.toFixed(2)} px, scrambled best ${Math.min(nonsense.errAir, nonsense.errWater).toFixed(1)} vs still ${nonsense.errStill.toFixed(1)} px`);
+}
+// Bodies without ORIN: measured channel orders (HERO6 differs from HERO5).
+{
+  assert.equal(defaultGoProOrin("HERO6 Black"), "YxZ");
+  assert.equal(defaultGoProOrin("HERO5 Black"), "ZXY");
+  assert.equal(defaultGoProOrin(null), "ZXY");
+  // The HERO6 default integrates exactly like an explicit "YxZ" ORIN.
+  const n = 201;
+  const t = Float64Array.from({ length: n }, (_, i) => i / 200);
+  const v = new Float64Array(3 * n);
+  for (let i = 0; i < n; i++) v[3 * i] = 0.5; // 0.5 rad/s on the first channel
+  const a = integrateGoProGyro(t, v, null, "HERO6 Black")!;
+  const b = integrateGoProGyro(t, v, "YxZ")!;
+  const qa = qat(a.quats, n - 1), qb = qat(b.quats, n - 1);
+  for (let k = 0; k < 4; k++) close(qa[k], qb[k], 1e-12, "HERO6 default = YxZ");
+  close(qangle(qa), 0.5, 1e-9, "integrated angle");
 }
 console.log("gyro maths tests passed");
 

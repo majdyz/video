@@ -31,7 +31,7 @@ import { rateLimitedZoom } from "../stabilize.ts";
 import { DEFAULT_GATE, gateResidual, jitter2, NO_HALF, smoothPath1D, TRANSLATION_WEIGHTS, wander2, type ResidualMotion } from "./hybrid.ts";
 
 /** Hybrid kicks in only above these (analysis px): heave/sway RMS, and translation jitter. */
-export const HYBRID_MIN_WANDER = 0.3;
+export const HYBRID_MIN_WANDER = 1;
 export const HYBRID_MIN_JITTER = 0.15;
 /** Largest ratio between how far the upper and the lower half of the picture move (deeper scenes stay gyro-only). */
 export const HYBRID_MAX_DEPTH_CONTRAST = 1.6;
@@ -716,7 +716,8 @@ function applyHybrid(geo: Geometry, virt: Float64Array, times: Float64Array, fps
       }
     }
     // Worth it only when the picture shows heave/sway or shake above the tracking noise that the path removes.
-    const wanderGain = wanderBefore >= HYBRID_MIN_WANDER && wanderAfter < 0.8 * wanderBefore;
+    // Crop is spent on it, so it has to be worth seeing: at least 1 px of heave (480 px frame), 40 % and 0.8 px of it removed.
+    const wanderGain = wanderBefore >= HYBRID_MIN_WANDER && wanderAfter < 0.6 * wanderBefore && wanderBefore - wanderAfter >= 0.8;
     const jitterGain = jitterBefore >= HYBRID_MIN_JITTER && jitterAfter < 0.8 * jitterBefore;
     if (!wanderGain && !jitterGain) return { ...base, jitterBefore, jitterAfter, wanderBefore, wanderAfter, applied: false, reason: "no measurable bobbing to remove" };
   }
