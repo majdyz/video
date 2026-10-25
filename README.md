@@ -101,7 +101,14 @@ cumulative residual is smoothed by a 1-D L1 path (same LP core) inside the
 margins the rotation left in the crop budget, and the difference is applied
 as a small extra rotation of the virtual camera. Clips where under 30 % of
 the frames are usable, or where nothing measurable would be removed, stay
-gyro-only. Real underwater test material: GoPro HERO5 Black originals with
+gyro-only; so do frames during whip pans and deep scenes (upper and lower
+half of the picture travelling more than 1.6x apart). Measured (CPU twin,
+640 px): a real pool clip with an injected 1 Hz heave/sway bob the gyro
+cannot see, bob left 9.5 → 2.5 px, tracked heave 9.3 → 1.4 px, zoom
+1.01 → 1.10; the same real clip family without injection (GOPR0376) heave
+13.0 → 9.8 px; the Avata drone flight, the clean HERO10 samples, a river
+fish school, featureless blue water and a pool scrum stay gyro-only or
+unchanged. Real underwater test material: GoPro HERO5 Black originals with
 `gpmd` (raw GYRO) from the archive.org item
 [GOPR0507](https://archive.org/details/GOPR0507) (underwater hockey,
 pool, 2017; no license stated — used for local tests only, not
