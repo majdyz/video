@@ -147,8 +147,22 @@ function seriesQuat(v: Float64Array, i: number): Quat {
  * against CORI: 0.008°/frame.
  */
 export const GOPRO_GYRO_LEAD = 0.006;
-export function integrateGoProGyro(times: Float64Array, values: Float64Array, orin: string | null): { times: Float64Array; quats: Float64Array } | null {
-  const o = orin && /^[XYZxyz]{3}$/.test(orin) ? orin : "ZXY";
+
+/**
+ * Channel order for bodies that write no ORIN, measured by tracking
+ * features through public clips and searching all 48 signed axis orders
+ * (scratchpad uw-axes.ts, 25 Oct 2026): HERO5 Black ZXY (gpmf-parser
+ * sample 1.12 px vs 5.37 px with no rotation; underwater GOPR0507 too),
+ * HERO6 Black YxZ (gpmf-parser sample 1.81 vs 4.02 px, Gyroflow test clip
+ * 7.3 vs 29.3 px; ZXY made the HERO6 picture shake worse than no
+ * stabilisation at all).
+ */
+export function defaultGoProOrin(model: string | null | undefined): string {
+  return model && /HERO6/i.test(model) ? "YxZ" : "ZXY";
+}
+
+export function integrateGoProGyro(times: Float64Array, values: Float64Array, orin: string | null, model?: string | null): { times: Float64Array; quats: Float64Array } | null {
+  const o = orin && /^[XYZxyz]{3}$/.test(orin) ? orin : defaultGoProOrin(model);
   // Camera axis (0 x, 1 y, 2 z) and sign for each GoPro letter.
   const axisOf: Record<string, [number, number]> = { X: [0, -1], Z: [1, -1], Y: [2, -1] };
   const map = [...o].map((ch) => {
@@ -204,7 +218,7 @@ export async function probeTelemetry(read: RangeReader, fileSize: number, opts: 
       if (g.globals.eise === "Y") {
         return { status: "unusable", source: "gopro", camera, reason: "HyperSmooth was on and this GoPro does not record its correction; turn HyperSmooth off for gyro stabilisation", eisActive: true };
       }
-      const integrated = g.gyro ? integrateGoProGyro(g.gyro.times, g.gyro.values, g.gyroOrin) : null;
+      const integrated = g.gyro ? integrateGoProGyro(g.gyro.times, g.gyro.values, g.gyroOrin, g.globals.model) : null;
       if (!integrated) return { status: "unusable", source: "gopro", camera, reason: "no usable gyro stream in the GoPro metadata", eisActive: false };
       const lensR = goproLens(g, coded.w, coded.h, false);
       if ("error" in lensR) return { status: "unusable", source: "gopro", camera, reason: lensR.error, eisActive: false };

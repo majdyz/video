@@ -108,7 +108,15 @@ cannot see, bob left 9.5 → 2.5 px, tracked heave 9.3 → 1.4 px, zoom
 1.01 → 1.10; the same real clip family without injection (GOPR0376) heave
 13.0 → 9.8 px; the Avata drone flight, the clean HERO10 samples, a river
 fish school, featureless blue water and a pool scrum stay gyro-only or
-unchanged. Real underwater test material: GoPro HERO5 Black originals with
+unchanged. Topside originals (Gyroflow test files, gpmf-parser samples, a
+CC-BY HERO8 dash clip; list in `apps/motion-fix/test/fixtures/real-clips.json`):
+on real walking clips the measured heave is small (1-2 px at 480 px) next
+to the rotation the gyro already handles, and the hybrid is neutral in the
+tracked output (HERO10 walk jitter 0.290 → 0.288 px); dash cam, calm and
+deep or busy scenes stay gyro-only. Raw-gyro GoPros (HERO5-7) also get
+their time offset and focal fitted to the picture: the HERO6 Black's axis
+order is YxZ, and with both fixes the Gyroflow HERO6 trail clip goes from
+jitter 8.2 px (source) / 16.5 px (old gyro) to 2.9 px. Real underwater test material: GoPro HERO5 Black originals with
 `gpmd` (raw GYRO) from the archive.org item
 [GOPR0507](https://archive.org/details/GOPR0507) (underwater hockey,
 pool, 2017; no license stated — used for local tests only, not

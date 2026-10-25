@@ -168,3 +168,72 @@ export function windowVotes(motion: CameraMotion, air: LensModel, water: LensMod
   }
   return out;
 }
+
+export type GyroCalibration = { offsetMs: number; focalScale: number; errBefore: number; errAfter: number };
+
+/**
+ * Self-calibration for raw-gyro GoPros (HERO5–7, no in-file lens, timing
+ * spread over the payload): the time offset and focal length that make
+ * the gyro reproduce the tracked points best, searched coarse to fine on
+ * the picture-check pairs. Measured need: a public HERO6 clip wants
+ * −35 ms and 0.8x the guessed focal (7.3 → 3.9 px against 29 px with no
+ * rotation). Returns null when the pairs cannot tell (too little motion)
+ * or the gain is under 15 %.
+ */
+export function calibrateRawGyro(motion: CameraMotion, pairs: MatchPair[]): GyroCalibration | null {
+  const points = pairs.reduce((a, p) => a + p.px.length, 0);
+  if (points < 300) return null;
+  // Subsample to ~1500 points: the search runs ~40 evaluations.
+  const step = Math.max(1, Math.floor(points / 1500));
+  const sub = pairs.map((p) => {
+    const keep = (v: Float32Array): Float32Array => v.filter((_, i) => i % step === 0);
+    return { ...p, px: keep(p.px), py: keep(p.py), qx: keep(p.qx), qy: keep(p.qy) };
+  });
+  const air: LensModel = { ...motion.lens, n: 1 };
+  const still = median(reprojectionErrors(motion, air, sub, false));
+  if (!(still > 3 * (motion.lens.width / 1000))) return null;
+  const err = (off: number, scale: number): number =>
+    median(reprojectionErrors({ ...motion, timeOffset: motion.timeOffset + off }, { ...air, fx: air.fx * scale, fy: air.fy * scale }, sub));
+  const before = err(0, 1);
+  let bo = 0, bs = 1, be = before;
+  for (let o = -0.08; o <= 0.0801; o += 0.01) {
+    const e = err(o, 1);
+    if (e < be) { be = e; bo = o; }
+  }
+  // Kept narrow: a larger focal is also what a flat port underwater looks like, and the medium check decides that.
+  for (let sc = 0.8; sc <= 1.1001; sc += 0.05) {
+    const e = err(bo, sc);
+    if (e < be) { be = e; bs = sc; }
+  }
+  for (let o = bo - 0.01; o <= bo + 0.0101; o += 0.002) {
+    const e = err(o, bs);
+    if (e < be) { be = e; bo = o; }
+  }
+  if (!(be < 0.85 * before)) return null;
+  return { offsetMs: Math.round(bo * 1000), focalScale: Math.round(bs * 100) / 100, errBefore: before, errAfter: be };
+}
+
+/**
+ * Applies a calibration in place: telemetry moves on its own timeline (frame
+ * times stay), the lens focal scales about the centre.
+ */
+export function applyGyroCalibration(motion: CameraMotion, c: GyroCalibration): void {
+  const off = c.offsetMs / 1000;
+  motion.times = motion.times.map((t) => t - off);
+  motion.lens = { ...motion.lens, fx: motion.lens.fx * c.focalScale, fy: motion.lens.fy * c.focalScale, source: `${motion.lens.source}, self-calibrated ${c.focalScale}x` };
+  motion.notes = [...motion.notes, `gyro self-calibrated from the picture: ${c.offsetMs} ms, focal ${c.focalScale}x (${c.errBefore.toFixed(1)} → ${c.errAfter.toFixed(1)} px)`];
+}
+
+/** True for telemetry that benefits from self-calibration (integrated raw gyro, no in-file lens). */
+export function needsGyroCalibration(motion: CameraMotion): boolean {
+  return motion.source === "gopro" && motion.notes.some((n) => /raw gyro/.test(n)) && !/in-file/.test(motion.lens.source);
+}
+
+/** The picture check plus, for raw-gyro bodies, self-calibration first (mutates `motion`). */
+export function checkAndCalibrate(motion: CameraMotion, pairs: MatchPair[]): MediumCheck {
+  if (needsGyroCalibration(motion)) {
+    const c = calibrateRawGyro(motion, pairs);
+    if (c) applyGyroCalibration(motion, c);
+  }
+  return checkMedium(motion, pairs);
+}
