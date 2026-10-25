@@ -676,10 +676,16 @@ export default function App() {
           Phones correct rolling shutter in-camera, so the visual path applies
           no per-row readout model: with a guessed readout time it adds jello
           rather than removing it. Clips with a large moving subject that
-          fills the frame will follow the subject. The gyro path removes
-          rotation only: it cannot (and should not) undo the camera moving
-          through the water, and shared or re-encoded copies lose the motion
-          data — import the original file from the SD card.
+          fills the frame will follow the subject. The gyro measures rotation
+          only; with <i>Bobbing: Remove</i> the clip is also tracked in the
+          background after the gyro result appears, with the gyro's rotation
+          taken out of every tracked point, and the heave and sway that is
+          left (fin kicks) is smoothed inside the crop budget. Frames with
+          too little texture, fish or particles moving against the scene,
+          fast turns and deep scenes are left to the gyro alone. Deliberate
+          travel through the water is followed, not undone. Shared or
+          re-encoded copies lose the motion data — import the original file
+          from the SD card.
         </p>
         <h4>References</h4>
         <ul>
