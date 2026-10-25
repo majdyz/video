@@ -52,13 +52,26 @@ export type StabilizeParams = {
   wobble?: boolean;
   /** Adaptive-zoom window (s): rolling maximum span; longer = slower, rarer crop changes. */
   zoomWindowSec?: number;
-  /** Rate-limited zoom instead of the rolling window: largest zoom change per second (e.g. 0.04). */
+  /** Largest zoom change per second (default PATH_ZOOM_RATE; 0 = the older rolling-window zoom). */
   zoomRate?: number;
-  /** L1 fidelity weight override (pull toward the real camera; Grundmann 0.1). */
+  /** L1 fidelity weight override (default PATH_FIDELITY; Grundmann 0.1). */
   fidelityWeight?: number;
 };
 
 export const DEFAULT_PARAMS: StabilizeParams = { smoothing: 0.8, maxCrop: 0.15 };
+
+/**
+ * L1 fidelity weight (pull toward the real camera). Grundmann's 0.1 lets the
+ * path spend the whole crop budget on every clip (zoom ~1.3 even on calm
+ * footage) and kink where it meets the crop wall; 1.0 keeps the path near
+ * the camera unless the shake is worth the crop. Output-tracked jitter on
+ * the scratch set (base -> 1.0 with rate-limited zoom): sea-lion swim
+ * 3.48 -> 2.31 px, guppies 0.42 -> 0.17, mullet 0.23 -> 0.16, reef wobble
+ * 0.21 -> 0.19, GBR 0.04 -> 0.08; mean zoom 1.20-1.32 -> 1.03-1.16.
+ */
+export const PATH_FIDELITY = 1;
+/** Zoom drift limit for the visual path (zoom units per second); 0 = rolling-window zoom. */
+export const PATH_ZOOM_RATE = 0.025;
 
 /** Keyframe spacing of the wobble suppression (Grundmann 2011 uses 30). */
 export const WOBBLE_KEYFRAME_INTERVAL = 30;
@@ -437,7 +450,7 @@ export function computeStabilizedPath(analysis: MotionAnalysis, params: Stabiliz
     halfHeight: hh,
     cropHalfWidth: hw * solverCropRatio,
     cropHalfHeight: hh * solverCropRatio,
-    weights: params.fidelityWeight === undefined ? GRUNDMANN_WEIGHTS : { ...GRUNDMANN_WEIGHTS, fidelity: params.fidelityWeight },
+    weights: { ...GRUNDMANN_WEIGHTS, fidelity: params.fidelityWeight ?? PATH_FIDELITY },
   });
 
   // Back to source pixels.
@@ -502,7 +515,8 @@ export function computeStabilizedPath(analysis: MotionAnalysis, params: Stabiliz
     }
   }
   const windowFrames = Math.max(8, Math.round(analysis.frameRate * (params.zoomWindowSec ?? 2.5)));
-  const zoom = params.zoomRate ? rateLimitedZoom(required, analysis.frameRate, params.zoomRate, maxZoom) : smoothZoom(required, windowFrames, maxZoom);
+  const zoomRate = params.zoomRate ?? PATH_ZOOM_RATE;
+  const zoom = zoomRate > 0 ? rateLimitedZoom(required, analysis.frameRate, zoomRate, maxZoom) : smoothZoom(required, windowFrames, maxZoom);
 
   let meanZoom = 0;
   let maxUsedZoom = 1;

@@ -574,7 +574,8 @@ export default function App() {
             <code>10·|D¹| + 1·|D²| + 100·|D³|</code> of the path (affine
             entries weighted 100:1 against translation) subject to the crop
             window staying inside every frame and the warp staying near
-            identity. The result is made of still, constant-velocity and
+            identity, plus a fidelity term (weight 1, ten times the paper's) so
+            the path only spends crop where the shake is worth it. The result is made of still, constant-velocity and
             constant-acceleration segments — tripod, dolly and crane moves —
             instead of a blurred average of the shake. The linear program is
             solved exactly with a banded primal-dual interior-point method
@@ -598,10 +599,11 @@ export default function App() {
           <li>
             <b>Zoom</b> — instead of a constant crop, each frame gets the
             smallest zoom that fills the output (measured on the warped
-            border, wobble included), smoothed with a 2.5 s rolling maximum
-            and a Gaussian, within the <i>Max crop</i> budget. The crop
-            breathes slowly and invisibly rather than cropping the whole clip
-            for its worst second.
+            border, wobble included); the zoom track is the lowest curve
+            above every frame's need that never changes by more than 2.5 % per
+            second, within the <i>Max crop</i> budget. The crop drifts slowly
+            instead of pumping, and a short clip with one shaky moment simply
+            holds its zoom.
           </li>
           <li>
             <b>Render</b> — a 64×36 WebGL mesh samples the source where the
