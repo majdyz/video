@@ -460,14 +460,14 @@ export class Studio {
       try {
         await waitForEvent(v, ["loadedmetadata"], ["error"], 20_000, "Could not read this video");
       } catch (err) {
-        throw new Error(codecHelp(info?.codecString) ?? (err as Error).message);
+        throw new Error(playerHelp(info) ?? (err as Error).message);
       }
       if (gen !== this.gen) return;
       // iOS only decodes once playback starts: play muted and wait for a frame.
       await v.play().catch(() => undefined);
       await waitForFirstFrame(v, 15_000);
       if (gen !== this.gen) return;
-      if (!v.videoWidth) throw new Error(codecHelp(info?.codecString) ?? "This video has no decodable picture (unsupported codec?)");
+      if (!v.videoWidth) throw new Error(playerHelp(info) ?? "This video has no decodable picture (unsupported codec?)");
       // HDR / wide-gamut tags: learn how this browser hands the signal over before the first frame is drawn.
       const kind = calibKindOf(info?.colorTags);
       if (kind && this.geo) {
@@ -1339,6 +1339,17 @@ export class Studio {
     if (r) URL.revokeObjectURL(r.url);
     this.set({ exp: IDLE_EXPORT });
   }
+}
+
+/**
+ * Why the <video> element couldn't show a clip: the codec when this browser
+ * can't decode it at all; otherwise (WebCodecs decodes it but the player
+ * refuses the file, e.g. a container or audio track it can't handle) say so.
+ */
+function playerHelp(info: ClipInfo | null): string | null {
+  if (!info) return null;
+  if (info.canDecode) return `This browser decodes the video (${parseCodec(info.codecString).label ?? "codec"}) but its player can't open this file. Try re-saving it as MP4 (e.g. export from Photos), or open it in Safari or Chrome.`;
+  return codecHelp(info.codecString);
 }
 
 /** Calibration clip for a clip's colour tags (null: plain Rec.709, nothing to measure). */

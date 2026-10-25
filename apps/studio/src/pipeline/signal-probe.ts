@@ -71,6 +71,10 @@ async function probeVideo(url: string, geo: GeometryRenderer, log: string[]): Pr
   v.muted = true;
   v.playsInline = true;
   v.preload = "auto";
+  // In the document and rendered (1 px, transparent): WebKit doesn't decode a detached or display:none video.
+  v.setAttribute("style", "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1");
+  v.setAttribute("aria-hidden", "true");
+  document.body.append(v);
   v.src = url;
   try {
     await new Promise<void>((resolve, reject) => {
@@ -83,6 +87,8 @@ async function probeVideo(url: string, geo: GeometryRenderer, log: string[]): Pr
     v.pause();
     if (!v.videoWidth) throw new Error("no picture");
     const read = geo.sample(v, CW, CH, false, POINTS);
+    // An all-black read means no frame reached the texture, not a conversion.
+    if (read.every((p) => p.every((x) => x < 0.02))) throw new Error("no frame uploaded (black)");
     const err = calibError(read);
     log.push(`<video>: ${fmt(read)} (max err ${err.toFixed(3)})`);
     return err <= RAW_TOLERANCE ? "raw" : "browser";
@@ -92,6 +98,7 @@ async function probeVideo(url: string, geo: GeometryRenderer, log: string[]): Pr
   } finally {
     v.removeAttribute("src");
     v.load();
+    v.remove();
   }
 }
 

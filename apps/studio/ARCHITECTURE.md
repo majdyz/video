@@ -353,6 +353,11 @@ off), `?dock=open|closed` (phone dock).
   and the Safari / Chrome-with-HW-HEVC upload paths could not be run here
   (no HEVC decode in headless Linux Chrome, no Safari): those platforms
   fall back to "assume raw" only if the calibration clip fails to load.
+* Playwright's Linux WebKit (GStreamer) refuses iPhone Dolby Vision 8.4
+  files in `<video>` (MEDIA_ERR_SRC_NOT_SUPPORTED; once it played a remux)
+  while its WebCodecs decodes them; the error then says the player, not
+  the codec, is the problem. A WebCodecs-driven preview would cover such
+  files everywhere; not built.
 * Chrome decodes BT.2020 YCbCr blue ~6 % low on its WebCodecs and
   `<video>` paths (a 0.5 blue patch reads 0.47); the conversion is exact
   on what it receives.
