@@ -9,6 +9,7 @@
 // the clip's length. The trade-off is MediaRecorder's own frame timing
 // (duplicated / dropped frames when the renderer can't keep up).
 
+import "./videoframe-colorspace";
 import {
   ALL_FORMATS,
   BlobSource,

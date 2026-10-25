@@ -6,6 +6,7 @@
 // packets through, and streams the muxed bytes into private on-device storage
 // so a long 4K clip never has to fit in page memory.
 
+import "./videoframe-colorspace";
 import {
   ALL_FORMATS,
   AudioSampleSink,

@@ -4,6 +4,8 @@
 // workers. Uses mediabunny directly rather than the shared index so the
 // worker bundle does not drag React along.
 
+// WebKit reports "unspecified" colour spaces mediabunny rejects; patch VideoFrame in this worker too.
+import "@dive-tools/shared/videoframe-colorspace.ts";
 import { ALL_FORMATS, BlobSource, Input, VideoSampleSink } from "mediabunny";
 import { homographyFromSimilarity, rescaleH } from "./homography.ts";
 import { HOMOGRAPHY_STATE, MODEL_CODE, type MotionAnalysis } from "./stabilize.ts";
