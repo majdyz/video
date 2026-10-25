@@ -8,8 +8,8 @@
 // network-first so a deploy never serves an index pointing at deleted
 // bundles. Each deploy gets a new cache and the old one is deleted on
 // activate.
-const VERSION = "studio-463cceaf91c2";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-D2TOee3w.js","./assets/analysis-worker-P50HMd-I.js","./assets/bridge-Bm0PtgkX.js","./assets/colour-nBMAEl_T.js","./assets/dewarp-ITs6KAao.js","./assets/dist-C1-5Ybmv.js","./assets/fisheye-ZQaGtv4_.js","./assets/index-B-jMDBzc.js","./assets/index-BfNN1Azk.css","./assets/media-CGxdv0wG.js","./assets/motion-CY1fkuqM.js","./assets/opfs-worker-BuQ2QldH.js","./assets/person-worker-PK8s94hj.js","./assets/videoframe-colorspace-TxZahXPU.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-Ean3G7CM.js"];
+const VERSION = "studio-38fcb7e19617";
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-BFrCHJ6u.js","./assets/analysis-worker-D2TOee3w.js","./assets/bridge-DmqxNAfC.js","./assets/colour-BrMcfbhc.js","./assets/dewarp-BrdW-foE.js","./assets/dist-C1-5Ybmv.js","./assets/fisheye-ZQaGtv4_.js","./assets/index-BfNN1Azk.css","./assets/index-pMmHCv8N.js","./assets/media-nfLfQZpe.js","./assets/motion-BB3lFcuq.js","./assets/opfs-worker-BuQ2QldH.js","./assets/person-worker-PK8s94hj.js","./assets/videoframe-colorspace-SED8DwnZ.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-Ean3G7CM.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
