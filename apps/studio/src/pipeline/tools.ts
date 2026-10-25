@@ -74,6 +74,8 @@ export type StabiliseState = {
   lens: "auto" | "air" | "water";
   /** Advanced: use visual tracking even when the file carries gyro data. */
   visual: boolean;
+  /** Gyro path: also track the picture and remove heave / sway the gyro cannot see (Motion Fix hybrid). */
+  bobbing: boolean;
 };
 
 export const STAB_PRESETS: (Chip<StabPreset> & { strength: number; maxCrop: number })[] = [
@@ -82,7 +84,7 @@ export const STAB_PRESETS: (Chip<StabPreset> & { strength: number; maxCrop: numb
   { id: "locked", label: "Locked", hint: "Tripod-like, crops more", strength: 100, maxCrop: 0.25 },
 ];
 
-export const DEFAULT_STABILISE: StabiliseState = { enabled: false, preset: "steady", strength: Math.round(STAB_DEFAULTS.smoothing * 100), maxCrop: STAB_DEFAULTS.maxCrop, keepLevel: false, lens: "auto", visual: false };
+export const DEFAULT_STABILISE: StabiliseState = { enabled: false, preset: "steady", strength: Math.round(STAB_DEFAULTS.smoothing * 100), maxCrop: STAB_DEFAULTS.maxCrop, keepLevel: false, lens: "auto", visual: false, bobbing: true };
 
 /** Motion Fix v3's gyro default smoothing (DEFAULT_GYRO_PARAMS.smoothing; test/tools.test.ts keeps it equal). */
 export const GYRO_DEFAULT_SMOOTHING = 0.6;
@@ -111,6 +113,7 @@ export function solveParams(s: StabiliseState, mode: "gyro" | "visual", output: 
     horizonLock: s.keepLevel ? 1 : 0,
     output,
     medium: s.lens,
+    hybrid: s.bobbing === false ? 0 : 1,
   };
 }
 

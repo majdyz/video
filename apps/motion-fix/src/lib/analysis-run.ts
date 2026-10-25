@@ -25,7 +25,10 @@ export async function analyzeAny(file: File, forceVisual: boolean, onProgress: (
       const check = await checkPicture(file, probe.motion, signal);
       if (check) probe.motion.medium = check;
     } catch (e) {
-      if (e instanceof DOMException && e.name === "AbortError") throw e;
+      // Only a cancel by the caller ends the analysis: a decoder that aborts on its own
+      // (WebCodecs reports a reset or reclaimed decoder as AbortError) just skips the check.
+      if (signal.aborted) throw e;
+      console.warn("[motion] picture check failed, using the in-air lens", e);
     }
     const result: AnalysisResult = { mode: "gyro", motion: probe.motion, probeMs: performance.now() - t0 };
     return options.hybrid ? refineHybrid(file, result, onProgress, signal) : result;
@@ -46,7 +49,8 @@ export async function refineHybrid(file: File, result: AnalysisResult, onProgres
     const residual = await trackResidual(file, result.motion, onProgress, signal);
     return residual ? { ...result, residual } : result;
   } catch (e) {
-    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    if (signal.aborted) throw e;
+    console.warn("[motion] bobbing pass failed, keeping the gyro result", e);
     return result;
   }
 }

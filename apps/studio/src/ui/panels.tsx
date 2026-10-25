@@ -95,6 +95,14 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
               onChange={(id) => setTools((t) => ({ ...t, stabilise: { ...applyStabPreset(t.stabilise, id), enabled: true } }))} />
             <Slider emphasis label="Strength" value={tools.stabilise.strength} min={0} max={100} defaultValue={DEFAULT_STABILISE.strength} disabled={disabled}
               onChange={(v) => setTools((t) => ({ ...t, stabilise: { ...t.stabilise, strength: v, preset: "custom", enabled: true } }))} />
+            {enabled && stab.info?.mode === "gyro" && stab.info.canBobbing && (
+              <div className="adv__field">
+                <span className="adv__label">Bobbing <small aria-live="polite">{stab.bobbing ?? "Heave and sway from walking or fin kicks, which the gyro cannot see"}</small></span>
+                <Segmented label="Bobbing" value={tools.stabilise.bobbing === false ? "off" : "on"} disabled={disabled}
+                  onChange={(v) => setTools((t) => ({ ...t, stabilise: { ...t.stabilise, bobbing: v === "on" } }))}
+                  items={[{ id: "on", label: "Remove" }, { id: "off", label: "Gyro only" }]} />
+              </div>
+            )}
           </>
         )}
         {tool === "dewarp" && (
@@ -163,7 +171,7 @@ export function AdvancedControls({ tool, tools, setTools, stab }: { tool: ToolId
           </div>
         )}
         {stab?.summary && <p className="adv__hint">{stab.summary}</p>}
-        <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, stabilise: { ...DEFAULT_STABILISE, enabled: t.stabilise.enabled, visual: t.stabilise.visual } }))}>Reset stabilise</button>
+        <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, stabilise: { ...DEFAULT_STABILISE, enabled: t.stabilise.enabled, visual: t.stabilise.visual, bobbing: t.stabilise.bobbing } }))}>Reset stabilise</button>
       </div>
     );
   }

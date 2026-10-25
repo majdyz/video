@@ -16,6 +16,7 @@ import {
 } from "../src/pipeline/tools.ts";
 import { DEFAULT_GYRO_PARAMS } from "../../motion-fix/src/lib/gyro/gyro-stabilize.ts";
 import { dewarpParams, dewarpUniforms } from "../src/pipeline/dewarp.ts";
+import { bobbingNote } from "../src/pipeline/stab-info.ts";
 import { DEFAULT_SETTINGS } from "../../aqua-fix/src/engine/params.ts";
 import { DEFAULT_PARAMS } from "../../motion-fix/src/lib/stabilize.ts";
 import { samplePoint } from "../../dewarp/src/fisheye.ts";
@@ -80,5 +81,21 @@ assert.equal(cut.length, 2);
 assert.equal(cut[1].from, 2.5);
 assert.deepEqual(cut[1].window, [2, 3]);
 assert.equal(cut[1].params.wb[0], 1.1);
+
+// Bobbing (Motion Fix hybrid): on by default, off -> gyro only; older saved state (no field) counts as on.
+assert.equal(solveParams(DEFAULT_TOOLS.stabilise, "gyro", "lens").hybrid, 1);
+assert.equal(solveParams({ ...DEFAULT_TOOLS.stabilise, bobbing: false }, "gyro", "lens").hybrid, 0);
+{
+  const { bobbing: _, ...legacy } = DEFAULT_TOOLS.stabilise;
+  assert.equal(solveParams(legacy as typeof DEFAULT_TOOLS.stabilise, "gyro", "lens").hybrid, 1);
+}
+{
+  const gyroPlan = (hybrid: unknown) => ({ kind: "gyro", plan: { hybrid } }) as unknown as Parameters<typeof bobbingNote>[0];
+  assert.equal(bobbingNote(null, "running", 0.42), "Measuring bobbing 42%…");
+  assert.match(bobbingNote(null, "unavailable", 0)!, /gyro only/);
+  assert.match(bobbingNote(gyroPlan({ applied: true, wanderBefore: 4.2, wanderAfter: 0.8, reason: "bobbing removed" }), "done", 1)!, /4\.2 → 0\.8/);
+  assert.match(bobbingNote(gyroPlan({ applied: false, reason: "scene too deep: x" }), "done", 1)!, /gyro only \(scene too deep/);
+  assert.equal(bobbingNote(gyroPlan(undefined), "idle", 0), null);
+}
 
 console.log("tools: ok");

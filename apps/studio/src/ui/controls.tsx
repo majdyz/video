@@ -105,11 +105,11 @@ export function Switch({ checked, onChange, label, disabled }: { checked: boolea
   );
 }
 
-export function Segmented<T extends string>({ items, value, onChange, label }: { items: { id: T; label: string }[]; value: T; onChange: (v: T) => void; label: string }) {
+export function Segmented<T extends string>({ items, value, onChange, label, disabled }: { items: { id: T; label: string }[]; value: T; onChange: (v: T) => void; label: string; disabled?: boolean }) {
   return (
     <div className="segmented" role="radiogroup" aria-label={label}>
       {items.map((it) => (
-        <button key={it.id} type="button" role="radio" aria-checked={value === it.id} className={value === it.id ? "is-on" : ""} onClick={() => onChange(it.id)}>
+        <button key={it.id} type="button" role="radio" aria-checked={value === it.id} className={value === it.id ? "is-on" : ""} disabled={disabled} onClick={() => onChange(it.id)}>
           {it.label}
         </button>
       ))}

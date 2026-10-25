@@ -17,6 +17,8 @@ export type StabInfo = {
   canLevel: boolean;
   /** The file has usable gyro data (whether or not the user picked visual tracking). */
   canSwitch: boolean;
+  /** Gyro path on an unrotated clip: the bobbing (hybrid) pass can run. */
+  canBobbing: boolean;
 };
 
 export function stabInfo(r: AnalysisResult): StabInfo {
@@ -33,10 +35,11 @@ export function stabInfo(r: AnalysisResult): StabInfo {
       mediumDetected: m.medium?.detected ?? null,
       canLevel: !!m.down,
       canSwitch: true,
+      canBobbing: m.video.rotation === 0,
     };
   }
   const t = r.telemetry;
-  const base = { mode: "visual" as const, badge: "Visual stabilisation", camera: null, mediumDetected: null, canLevel: false };
+  const base = { mode: "visual" as const, badge: "Visual stabilisation", camera: null, mediumDetected: null, canLevel: false, canBobbing: false };
   if (t.status === "declined") return { ...base, warning: null, canSwitch: true };
   if (t.status === "unusable") {
     if (t.eisActive && t.source === "dji") {
@@ -51,7 +54,9 @@ export function stabInfo(r: AnalysisResult): StabInfo {
 export function stabSummary(r: AnalysisResult, plan: Plan): string | null {
   if (r.mode === "gyro" && plan.kind === "gyro") {
     const s = plan.plan.stats;
-    return `Shake ${s.rawJitter.toFixed(2)} → ${s.virtJitter.toFixed(2)}°/frame² · zoom ${s.maxUsedZoom.toFixed(2)}×`;
+    const h = plan.plan.hybrid;
+    const bob = h?.applied ? ` · bobbing ${h.wanderBefore.toFixed(1)} → ${h.wanderAfter.toFixed(1)} px` : "";
+    return `Shake ${s.rawJitter.toFixed(2)} → ${s.virtJitter.toFixed(2)}°/frame²${bob} · zoom ${s.maxUsedZoom.toFixed(2)}×`;
   }
   if (r.mode === "visual" && plan.kind === "visual") {
     const a = r.analysis;
@@ -61,4 +66,18 @@ export function stabSummary(r: AnalysisResult, plan: Plan): string | null {
     return `Tracked ${q}% of frames · zoom ${plan.path.stats.maxUsedZoom.toFixed(2)}×`;
   }
   return null;
+}
+
+/**
+ * Short line about the bobbing pass for the Stabilise panel: progress, the
+ * result, or why the clip stayed gyro-only. Null when there is nothing to say.
+ */
+export function bobbingNote(plan: Plan | null, refine: "idle" | "running" | "done" | "unavailable", progress: number): string | null {
+  if (refine === "running") return `Measuring bobbing ${Math.round(progress * 100)}%…`;
+  if (refine === "unavailable") return "Bobbing: gyro only (the picture could not be measured)";
+  if (refine !== "done" || !plan || plan.kind !== "gyro") return null;
+  const h = plan.plan.hybrid;
+  if (!h) return null;
+  if (h.applied) return `Bobbing removed · ${h.wanderBefore.toFixed(1)} → ${h.wanderAfter.toFixed(1)} px`;
+  return `Bobbing: gyro only (${h.reason})`;
 }

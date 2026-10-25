@@ -24,7 +24,7 @@ import { GeometryRenderer, type GeometrySource } from "./geometry.ts";
 import type { GeometryParams, QuarterTurns } from "./geometry-math.ts";
 import type { ClipInfo } from "./probe.ts";
 import { colourSettings, DEFAULT_TOOLS, exportSuffix, solveParams, type ToolsState } from "./tools.ts";
-import { stabInfo, stabSummary, type StabInfo } from "./stab-info.ts";
+import { bobbingNote, stabInfo, stabSummary, type StabInfo } from "./stab-info.ts";
 import { seekVideo, waitForEvent, waitForFirstFrame, type VideoWithRVFC } from "./video.ts";
 import { decodePhoto, encodeJpeg, isPhotoFile, photoLimits } from "./photo.ts";
 import { readExif, withExif } from "./photo-exif.ts";
@@ -73,6 +73,11 @@ export type StabStatus = {
   message: string | null;
   /** Which path ran (gyro / visual), why, and what the Advanced sheet can offer. */
   info: StabInfo | null;
+  /** The bobbing (hybrid) pass on gyro clips: tracks the picture after the gyro result is shown. */
+  refine: "idle" | "running" | "done" | "unavailable";
+  refineProgress: number;
+  /** Short line for the panel: progress, result, or why the clip stayed gyro-only. */
+  bobbing: string | null;
 };
 export type ExportStatus = {
   state: "idle" | "preparing" | "running" | "done" | "error";
@@ -158,7 +163,7 @@ export function codecHelp(codecString: string | null | undefined): string | null
 }
 
 const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null };
-const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null };
+const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null, refine: "idle", refineProgress: 0, bobbing: null };
 
 /** Real-time recorder default: WebKit (offline capture is ~10 fps there); `?rt=1` / `?rt=0` force it. */
 function wantRealtime(): boolean | null {
@@ -204,6 +209,7 @@ export class Studio {
   private analysis: AnalysisResult | null = null;
   private path: Plan | null = null;
   private stabAbort: AbortController | null = null;
+  private refineAbort: AbortController | null = null;
   private solveSeq = 0;
   private solveTimer = 0;
 
@@ -381,12 +387,14 @@ export class Studio {
         // Gyro data ↔ visual tracking: a different analysis, not just a re-solve.
         this.stabAbort?.abort();
         this.stabAbort = null;
+        this.cancelRefine();
         this.analysis = null;
         this.path = null;
         if (a.enabled) void this.analyseMotion();
       } else if (a.enabled && this.analysis) {
         const outputChanged = this.analysis.mode === "gyro" && next.dewarp.enabled !== prev.dewarp.enabled;
-        if (a.strength !== b.strength || a.maxCrop !== b.maxCrop || a.keepLevel !== b.keepLevel || a.lens !== b.lens || outputChanged) this.scheduleSolve();
+        if (a.strength !== b.strength || a.maxCrop !== b.maxCrop || a.keepLevel !== b.keepLevel || a.lens !== b.lens || a.bobbing !== b.bobbing || outputChanged) this.scheduleSolve();
+        if (a.bobbing !== false && b.bobbing === false) this.maybeRefine();
       }
     }
     this.set({ visible: next.colour.enabled ? "colour" : "geo" });
@@ -522,7 +530,7 @@ export class Studio {
       this.set({ busy: null });
       this.startPreview();
       if (this.tools.colour.enabled) void this.profileColour();
-      if (this.tools.stabilise.enabled) void this.analyseMotion();
+      if (this.tools.stabilise.enabled && !this.stabAbort && !this.analysis) void this.analyseMotion();
     } catch (err) {
       if (gen !== this.gen) return;
       this.set({ busy: null, phase: "empty", kind: null, fileName: null, info: null, footage: FOOTAGE_NONE });
@@ -679,6 +687,7 @@ export class Studio {
     this.exportAbort?.abort();
     this.stabAbort?.abort();
     this.stabAbort = null;
+    this.cancelRefine();
     this.analysis = null;
     this.path = null;
     this.profiling = null;
@@ -930,6 +939,8 @@ export class Studio {
     const file = this.file;
     if (!file || this.snap.kind !== "video") return;
     const gen = this.gen;
+    // A second start (tool switched on while the clip was still opening) replaces the first quietly.
+    this.stabAbort?.abort();
     const ctrl = new AbortController();
     this.stabAbort = ctrl;
     this.setStab({ state: "analysing", progress: 0, message: null });
@@ -952,21 +963,79 @@ export class Studio {
       const path = await client.solve(solveParams(this.tools.stabilise, analysis.mode, this.stabOutput()));
       if (gen !== this.gen || ctrl.signal.aborted) return;
       this.path = path;
-      this.setStab({ state: "ready", summary: this.stabSummary() });
+      this.setStab({ state: "ready", summary: this.stabSummary(), bobbing: this.bobbingText() });
       this.repaint();
+      this.maybeRefine();
     } catch (e) {
       if (gen !== this.gen || ctrl.signal.aborted) return;
+      console.warn("[stabilise] analysis failed", e instanceof Error ? `${e.name}: ${e.message}\n${e.stack}` : e);
       this.setStab({ state: "error", message: e instanceof Error ? e.message : String(e) });
     } finally {
       if (this.stabAbort === ctrl) this.stabAbort = null;
     }
   }
 
+  private bobbingText(): string | null {
+    if (!this.tools.stabilise.bobbing || this.analysis?.mode !== "gyro") return null;
+    return bobbingNote(this.path, this.snap.stab.refine, this.snap.stab.refineProgress);
+  }
+
+  /**
+   * The bobbing pass (Motion Fix hybrid): with the gyro result already on
+   * screen, the worker decodes and tracks the clip; when the measurements
+   * land the plan is re-solved with them. A failure or fallback keeps the
+   * gyro result and only changes the note.
+   */
+  private maybeRefine(): void {
+    const client = this.stabClient;
+    const st = this.snap.stab;
+    if (!client || this.analysis?.mode !== "gyro" || !st.info?.canBobbing || !this.tools.stabilise.bobbing) return;
+    if (st.refine === "running" || st.refine === "done" || st.refine === "unavailable") return;
+    const gen = this.gen;
+    const analysis = this.analysis;
+    const ctrl = new AbortController();
+    this.refineAbort = ctrl;
+    this.setStab({ refine: "running", refineProgress: 0 });
+    this.setStab({ bobbing: this.bobbingText() });
+    let last = 0;
+    client
+      .refine((fraction) => {
+        const now = performance.now();
+        if (now - last > 200) {
+          last = now;
+          this.setStab({ refineProgress: fraction });
+          this.setStab({ bobbing: this.bobbingText() });
+        }
+      }, ctrl.signal)
+      .then((ok) => {
+        if (gen !== this.gen || ctrl.signal.aborted || analysis !== this.analysis) return;
+        console.info(`[stabilise] bobbing pass ${ok ? "done" : "unavailable (gyro only)"}`);
+        this.setStab({ refine: ok ? "done" : "unavailable" });
+        this.setStab({ bobbing: this.bobbingText() });
+        if (ok) this.scheduleSolve(0);
+      })
+      .catch((e: unknown) => {
+        if (gen !== this.gen || ctrl.signal.aborted) return;
+        console.warn("[stabilise] bobbing pass failed, keeping the gyro result", e);
+        this.setStab({ refine: "unavailable" });
+        this.setStab({ bobbing: this.bobbingText() });
+      })
+      .finally(() => {
+        if (this.refineAbort === ctrl) this.refineAbort = null;
+      });
+  }
+
+  private cancelRefine(): void {
+    this.refineAbort?.abort();
+    this.refineAbort = null;
+    if (this.snap.stab.refine !== "idle") this.setStab({ refine: "idle", refineProgress: 0, bobbing: null });
+  }
+
   private stabSummary(): string | null {
     return this.analysis && this.path ? stabSummary(this.analysis, this.path) : null;
   }
 
-  private scheduleSolve(): void {
+  private scheduleSolve(delay = 120): void {
     clearTimeout(this.solveTimer);
     const seq = ++this.solveSeq;
     this.solveTimer = window.setTimeout(async () => {
@@ -979,17 +1048,18 @@ export class Studio {
         if (seq !== this.solveSeq) return;
         this.path = path;
         this.setStab({ state: "ready", summary: this.stabSummary() });
+        this.setStab({ bobbing: this.bobbingText() });
         this.repaint();
       } catch (e) {
         this.setStab({ state: "error", message: e instanceof Error ? e.message : String(e) });
       }
-    }, 120);
+    }, delay);
   }
 
   /** Resolves once the motion path is ready (or rejects if analysis failed). */
   private async waitForPath(): Promise<void> {
-    if (!this.tools.stabilise.enabled || this.path) return;
-    if (!this.stabAbort && !this.analysis) void this.analyseMotion();
+    if (!this.tools.stabilise.enabled) return;
+    if (!this.path && !this.stabAbort && !this.analysis) void this.analyseMotion();
     while (!this.path) {
       if (this.snap.stab.state === "error") throw new Error("Motion analysis failed: " + (this.snap.stab.message ?? ""));
       if (this.exportAbort?.signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -997,6 +1067,18 @@ export class Studio {
       this.setExp({ detail: `Analysing motion ${pct}%` });
       await new Promise((r) => setTimeout(r, 200));
     }
+    // The export must use the refined plan: wait for the bobbing pass and the re-solve it triggers.
+    while (this.tools.stabilise.bobbing && (this.snap.stab.refine === "running" || this.refinedSolvePending())) {
+      if (this.exportAbort?.signal.aborted) throw new DOMException("Aborted", "AbortError");
+      if (this.snap.stab.state === "error") break;
+      this.setExp({ detail: `Measuring bobbing ${Math.round(this.snap.stab.refineProgress * 100)}%` });
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+
+  /** The bobbing measurements are in but the plan on screen was solved without them. */
+  private refinedSolvePending(): boolean {
+    return this.snap.stab.refine === "done" && this.path?.kind === "gyro" && !this.path.plan.hybrid;
   }
 
   // ------------------------------------------------------------ export
@@ -1049,6 +1131,10 @@ export class Studio {
         await this.profiling;
       }
       await this.waitForPath();
+      if (this.stabActive() && this.path?.kind === "gyro") {
+        const h = this.path.plan.hybrid;
+        console.info(`[export] stabilise: gyro${h ? (h.applied ? " + bobbing removed" : ` (bobbing: ${h.reason})`) : " only"}`);
+      }
       // The profile restarts the preview when it finishes; stop it again.
       this.previewOn = false;
       v.pause();
