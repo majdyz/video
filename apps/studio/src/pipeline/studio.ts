@@ -347,8 +347,9 @@ export class Studio {
       const mod = await loadColour();
       this.colour = mod;
       const engine = await mod.GradeEngine.create(canvas, (e) => this.set({ error: e.message }), !q.has("webgl2"));
-      engine.settings = colourSettings(this.tools.colour);
+      engine.settings = this.colourFor(this.tools.colour);
       engine.personEnabled = q.get("person") !== "0";
+      engine.temporalEnabled = q.get("temporal") !== "0";
       this.engine = engine;
       this.set({ engine: engine.backend.kind });
       return engine;
@@ -412,6 +413,13 @@ export class Studio {
   }
 
   // ------------------------------------------------------------ tools
+
+  /** Engine settings for the colour tool (debug `?pop=1` forces Subject pop on for headless checks). */
+  private colourFor(c: ToolsState["colour"]) {
+    const s = colourSettings(c);
+    if (new URLSearchParams(location.search).get("pop") === "1") s.subjectPop = true;
+    return s;
+  }
 
   setTools(next: ToolsState): void {
     const prev = this.tools;
@@ -962,9 +970,9 @@ export class Studio {
   /** The engine settings for the frame at clip time `t`: its segment's look when the clip is split. */
   private settingsAt(t: number): ReturnType<typeof colourSettings> {
     const s = this.segs;
-    if (this.snap.kind !== "video" || !s.cuts.length) return colourSettings(this.tools.colour);
+    if (this.snap.kind !== "video" || !s.cuts.length) return this.colourFor(this.tools.colour);
     const i = lookIndexAt(s.cuts, t, this.trim, this.snap.duration, this.snap.info?.fps || 30);
-    return colourSettings(s.looks[i] ?? this.tools.colour);
+    return this.colourFor(s.looks[i] ?? this.tools.colour);
   }
 
   /** Puts the segment's settings on the engine for the frame at `t`; true when the segment changed since the last frame. */

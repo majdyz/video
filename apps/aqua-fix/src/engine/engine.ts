@@ -17,6 +17,7 @@ import { inCutWindow as lockInCutWindow, noteCut as lockNoteCut, segmentAt, type
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
 import { linearToOklab } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
+import { POP_GATE, gateTarget, subjectMask } from "./pop-gate.ts";
 import {
   CLAHE_BINS,
   CLAHE_TILES_X,
@@ -41,6 +42,10 @@ const TAU_PARAMS_S = 0.6;
 const TAU_MAPS_S = 0.4;
 // Local-contrast tiles describe tone, not geometry: they can lag longer.
 const TAU_CLAHE_S = 0.7;
+// In open water the object channel is the whole-animal subject map: it must
+// follow a swimming animal (a lagging map leaves a toned ghost where it was
+// and untoned parts where it went); the shaders trim it per pixel.
+const TAU_CONF_OPEN_S = 0.05;
 const SCENE_CUT_MEAN_DIFF = 0.16;
 // Person segmentation runs on every Nth analysis (it costs ~25–40 ms of
 // worker CPU on the same thumbnail the analysis uses).
@@ -108,6 +113,13 @@ export class GradeEngine {
   personEvery = PERSON_EVERY;
   /** Person segmentation on/off (debug `?person=0`). */
   personEnabled = true;
+  /** Temporal layer on/off (debug `?temporal=0`). */
+  temporalEnabled = true;
+  private lastRenderSec = -1;
+  /** Subject-pop stability gate (pop-gate.ts): eased value, target, last mask. */
+  private popGate = 0;
+  private popTarget = 0;
+  private popMask: ReturnType<typeof subjectMask> | null = null;
   private personWorker: Worker | null = null;
   private personInflight = false;
   private personReqId = 0;
@@ -235,7 +247,9 @@ export class GradeEngine {
   private applyLock(p: GradeParams): GradeParams {
     const l = this.lockedAt(this.lastTickSec);
     if (!l) return p;
-    return this.lockRange ? { ...l } : { ...l, zLo: p.zLo, zHi: p.zHi };
+    // The backdrop surface describes this frame's view of the water (it moves with the camera): never locked.
+    const fit = p.backdropFit ?? l.backdropFit;
+    return this.lockRange ? { ...l, backdropFit: fit } : { ...l, zLo: p.zLo, zHi: p.zHi, backdropFit: fit };
   }
 
   /** Runs one analysis of the current source and returns its raw parameters and mean colour (clip profiling). */
@@ -498,10 +512,23 @@ export class GradeEngine {
     this.stats.analysisMs = packet.ms;
     const cut = this.lastMean !== null && meanDiff(this.lastMean, packet.mean) > SCENE_CUT_MEAN_DIFF;
     this.lastMean = packet.mean;
+    // Subject-pop gate: temporal stability of the subject map (only when the
+    // tone could apply at all; a cut restarts it from zero).
+    if (this.settings.subjectPop && (packet.params.backdrop ?? 0) > 0) {
+      const f = packet.fields;
+      const m = subjectMask(f.data, f.width, f.height);
+      this.popTarget = cut ? 0 : gateTarget(this.popMask, m);
+      this.popMask = m;
+    } else {
+      this.popTarget = 0;
+      this.popMask = null;
+    }
+    if (cut) this.popGate = 0;
     if (!this.hasAnalysis || cut) {
       if (cut) {
         this.stats.sceneCuts++;
         this.noteSceneCut(this.lastTickSec);
+        this.backend.resetTemporal?.();
         // New scene: the detector must speak again before any mask counts.
         this.personBoxes = null;
         this.personPasses = 0;
@@ -534,22 +561,29 @@ export class GradeEngine {
 
   private smooth(dt: number): void {
     if (dt <= 0) return;
+    {
+      const tau = this.popTarget < this.popGate ? POP_GATE.tauDown : POP_GATE.tauUp;
+      this.popGate += (this.popTarget - this.popGate) * (1 - Math.exp(-dt / tau));
+    }
     if (this.target) {
       const a = 1 - Math.exp(-dt / TAU_PARAMS_S);
       this.current = lerpParams(this.current, this.target, a);
     }
     const am = 1 - Math.exp(-dt / TAU_MAPS_S);
     const ac = 1 - Math.exp(-dt / TAU_CLAHE_S);
-    const ease = (cur: Packed | null, tgt: Packed | null, rate = am): Packed | null => {
+    const ease = (cur: Packed | null, tgt: Packed | null, rate = am, rate1 = rate): Packed | null => {
       if (!tgt) return cur;
       if (!cur || cur.width !== tgt.width || cur.height !== tgt.height || cur.data.length !== tgt.data.length) return tgt;
       // Blend into a private copy so the packet's buffer stays pristine.
       const out = cur === this.lastEased.get(tgt) ? cur : { ...cur, data: new Float32Array(cur.data) };
-      lerpInto(out.data, tgt.data, rate);
+      if (rate1 === rate) lerpInto(out.data, tgt.data, rate);
+      else lerpInto4(out.data, tgt.data, rate, rate1);
       this.lastEased.set(tgt, out);
       return out;
     };
-    const f = ease(this.fields, this.fieldsTarget);
+    const open = Math.min(1, Math.max(0, this.current.backdrop ?? 0));
+    const aConf = am + (1 - Math.exp(-dt / TAU_CONF_OPEN_S) - am) * open;
+    const f = ease(this.fields, this.fieldsTarget, am, aConf);
     const g = ease(this.guide, this.guideTarget);
     const c = ease(this.clahe, this.claheTarget, ac);
     if (f !== this.fields || g !== this.guide || c !== this.clahe) this.dirtyData = true;
@@ -621,13 +655,28 @@ export class GradeEngine {
     this.stats.personCoverage = 0;
     this.stats.personBoxes = verdict ? verdict.length : -1;
     this.settlePerson();
+    this.lastRenderSec = -1;
+    this.backend.resetTemporal?.();
+    // An export of the clip just previewed keeps the gate (like the person verdict).
+    if (!opts.keepPerson) {
+      this.popGate = 0;
+      this.popTarget = 0;
+      this.popMask = null;
+    }
   }
 
   private pack(): Float32Array {
     const depth: DepthMap = { width: this.fields!.width, height: this.fields!.height, fields: new Float32Array(0), guide: new Float32Array(0) };
     const clahe: ClaheLuts = { tilesX: CLAHE_TILES_X, tilesY: CLAHE_TILES_Y, bins: CLAHE_BINS, data: new Float32Array(0) };
     const settings = this.hasAnalysis ? this.settings : { ...this.settings, intensity: 0 };
-    return packUniforms(this.current, settings, depth, clahe, 0, this.split);
+    const u = packUniforms(this.current, settings, depth, clahe, 0, this.split);
+    u[93] = this.temporalEnabled ? 1 : 0;
+    u[90] *= this.popGate;
+    // A seek (or a jump back) breaks the motion history.
+    const t = this.lastTickSec;
+    if (this.lastRenderSec >= 0 && (t < this.lastRenderSec - 1e-3 || t - this.lastRenderSec > 0.3)) this.backend.resetTemporal?.();
+    this.lastRenderSec = t;
+    return u;
   }
 
   /** Renders the current source with the current grade into the canvas. */
@@ -730,6 +779,11 @@ function growMask(raw: Float32Array, fw: number, fh: number, guide: Float32Array
 
 function lerpInto(dst: Float32Array, src: Float32Array, t: number): void {
   for (let i = 0; i < dst.length; i++) dst[i] += (src[i] - dst[i]) * t;
+}
+
+/** lerpInto on RGBA texels, channel 1 (the object channel) at its own rate. */
+function lerpInto4(dst: Float32Array, src: Float32Array, t: number, t1: number): void {
+  for (let i = 0; i < dst.length; i++) dst[i] += (src[i] - dst[i]) * ((i & 3) === 1 ? t1 : t);
 }
 
 function meanDiff(a: Vec3, b: Vec3): number {

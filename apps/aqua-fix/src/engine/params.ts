@@ -34,6 +34,12 @@ export type UserSettings = {
   preset: ScenePreset;
   /** Debug (?hazeauto=0): disables the haze-adaptive default for A/B runs. */
   hazeAuto?: boolean;
+  /**
+   * "Subject pop" (opt-in, default off): in open blue water, subjects (a
+   * shark, a diver, a big fish) are toned silver and lifted against the
+   * water (OBJECT_NEUTRAL, backdrop.ts, tracked by the temporal layer).
+   */
+  subjectPop?: boolean;
 };
 
 /**
@@ -57,7 +63,7 @@ export const PRESET_ADJUST: Record<ScenePreset, { red: number; blue: number; red
   reef: { red: 1, blue: 1, redMax: 1.6, dehaze: 0, clarity: -0.1, exposure: 0.97, hazeLift: 0 },
 };
 
-export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto" };
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto", subjectPop: false };
 export const INTENSITY_MAX = 2;
 
 /** Internal controls the shader reads, derived from the intensity. */
@@ -84,6 +90,8 @@ export type GradeSettings = {
    * soft toe (see hazeLiftRatio). 0 in clear frames.
    */
   hazeLift: number;
+  /** Open-water subject tone on (UserSettings.subjectPop). */
+  subjectPop?: boolean;
 };
 
 /**
@@ -144,6 +152,113 @@ export function hazeLiftRatio(Y: number, t: number): number {
   const s2 = HAZE_LIFT.soft * HAZE_LIFT.soft;
   return 0.5 * (q + HAZE_LIFT.floor + Math.sqrt(d * d + s2)) - 0.5 * (Math.sqrt(d1 * d1 + s2) - d1);
 }
+
+/**
+ * Artifact guard (compression blocks, sensor noise). Every gain stage of the
+ * grade (haze-lift toe, levels, CLAHE, dehaze, white balance) amplifies
+ * whatever sits in a dark, flat region along with the signal - on a heavily
+ * compressed clip that is 8x8/16x16 macroblock steps and grain, which then
+ * crawl from frame to frame. The grade therefore runs on an edge-preserving
+ * base of the source (a sigma filter: taps whose colour differs from the
+ * pixel by more than the noise floor drop out) and the pixel's own residual
+ * detail is put back as a luminance ratio at unit gain. Edges and texture
+ * above the floor are in the base and get the full grade; detail below the
+ * floor is neither amplified nor removed (chroma noise below it goes).
+ *  sigma: noise floor as RMS sRGB difference per channel (~2.3 codes; 3.3 lost
+ *  some murky-reef texture, 1.7 let macroblock steps through);
+ *  k = 1 / (2*3*sigma^2) per squared RGB distance; eps: luminance offset of
+ *  the detail ratio (tames it in near-black); rMin/rMax clamp it.
+ */
+export const DETAIL_GUARD = { sigma: 0.009, k: 1 / (2 * 3 * 0.009 * 0.009), eps: 0.004, rMin: 0.5, rMax: 2 };
+/**
+ * Guard taps (source texels, half-texel offsets -> each is a 2x2 mean), with
+ * spatial weight. Closed under 90-degree rotation/reflection so the result
+ * does not depend on the source orientation.
+ */
+export const DETAIL_TAPS: readonly (readonly [number, number, number])[] = [
+  [-2.5, -2.5, 1], [2.5, -2.5, 1], [-2.5, 2.5, 1], [2.5, 2.5, 1],
+  [-6.5, -1.5, 0.7], [6.5, 1.5, 0.7], [-1.5, 6.5, 0.7], [1.5, -6.5, 0.7],
+  [-6.5, 1.5, 0.7], [6.5, -1.5, 0.7], [1.5, 6.5, 0.7], [-1.5, -6.5, 0.7],
+];
+/**
+ * Object neutral tone. Under water the red channel of a far object is gone,
+ * and white balance cannot restore what is not there: after the veil is
+ * subtracted a grey shark or a white belly comes out green-cyan (the colour
+ * of "grey minus red"), which reads as a colour the subject never had. Object
+ * pixels whose corrected hue lies on that red-deficit side (within bandIn of
+ * the cyan axis, fading out by bandOut; the band opens to every hue when
+ * the source red is fully gone, since a red gain over nothing turns a belly
+ * orange just as its absence leaves it cyan) and
+ * whose source red is negligible next to green/blue (r/max(g, b) below rLo,
+ * fading by rHi) and that are light (Oklab L from lLo to lHi: a dark far
+ * reef keeps the water's tint) and whose source hue is within farLo..farHi
+ * of the veil's (a yellow fish already escaped the cast) lose up to `mix` of their chroma, so the subject reads as a
+ * natural neutral against the water instead of as more water. Water-path
+ * pixels are never touched (weighted by object confidence). In the same
+ * frames object mid-tones gain up to `lift` Oklab lightness (fading out
+ * toward black and white), so the subject steps forward from the water.
+ */
+export const OBJECT_NEUTRAL = { hue: (195 * Math.PI) / 180, bandIn: (45 * Math.PI) / 180, bandOut: (85 * Math.PI) / 180, rLo: 0.08, rHi: 0.3, mix: 0.92, silver: 0.022, lLo: 0.12, lHi: 0.32, farLo: (30 * Math.PI) / 180, farHi: (60 * Math.PI) / 180, lift: 0.05, confLo: 0.05, confHi: 0.5, warmHue: (50 * Math.PI) / 180, warmLo: 0.1, warmHi: 0.5 };
+/**
+ * Object-neutral strength for a frame (uniform p16.w): only frames that are
+ * mostly open water with subjects in them (backdrop validity) — on a reef
+ * that fills the frame, green coral is a real colour, not a red deficit.
+ */
+export function objectNeutralOf(p: GradeParams): number {
+  // Not on frames without a cast at all (topside: a smooth sky is a backdrop too).
+  return Math.min(1, Math.max(0, p.backdrop ?? 0)) * (1 - Math.min(1, Math.max(0, p.calmTone ?? 0)));
+}
+
+/** Guard strength for a frame (uniform p16.z; 0 = off, 1 = noise floor DETAIL_GUARD.sigma). */
+export function detailGuardOf(_p: GradeParams): number {
+  return 1;
+}
+
+/**
+ * Temporal layer (temporal.ts; GPU only — the CPU reference grades single
+ * frames, where every term below is the identity). A motion-compensated
+ * history at 1/8 resolution serves two jobs:
+ *  - anti-crawl: the low-resolution correction (graded / source per channel)
+ *    is blended in the log domain with the previous frame's, aligned by block
+ *    flow; the full-resolution grade is multiplied by stabilised / current
+ *    (clamped kMin..kMax), so the correction can no longer change faster
+ *    than the scene. betaMax: history weight at a perfect match; betaDiff:
+ *    log-ratio change at which the history is dropped (a real change).
+ *  - subject tracking: the previous frame's subject mask, warped by the same
+ *    flow (decay per frame), is a prior for the open-water subject weight,
+ *    kept wherever the pixel departs from the water at all (priorLo..priorHi
+ *    of the backdrop departure) — the same object as one frame ago.
+ *  - dark flat water gets a light motion-adaptive temporal denoise (denoise
+ *    × flow confidence × flatness × darkness × not-subject × similarity to
+ *    the warped previous output, tau in sRGB units).
+ * Block flow: 3×3 luma patches, ±flowR low-res texels (±24 px at 1/8),
+ * lambda: per-texel bias toward zero motion; conf ramps out by sadLo..sadHi.
+ */
+export const TEMPORAL = {
+  scale: 8,
+  flowR: 3,
+  lambda: 0.004,
+  sadLo: 0.012,
+  sadHi: 0.04,
+  betaMax: 0.8,
+  betaDiff: 0.15,
+  kMin: 0.8,
+  kMax: 1.25,
+  decay: 0.9,
+  priorLo: 0.006,
+  priorHi: 0.02,
+  /** Deep inside a tracked object (prior above this) the per-pixel test no longer cuts: the object is toned whole. */
+  priorIn: 0.8,
+  /** … where only plain water (departure below inLo..inHi) is still cut, so a fast tail leaves no toned trail. */
+  inLo: 0.004,
+  inHi: 0.012,
+  denoise: 0.5,
+  tau: 5 / 255,
+  flatLo: 3 / 255,
+  flatHi: 8 / 255,
+  darkLo: 0.3,
+  darkHi: 0.5,
+};
 
 /**
  * Vivid objects keep their colour: a pixel that is strongly chromatic in the
@@ -216,6 +331,7 @@ export function resolveSettings(s: UserSettings): GradeSettings {
     look: Math.min(1, Math.max(0, s.look)),
     dehaze: 0.6 * t,
     hazeLift: 0,
+    subjectPop: !!s.subjectPop,
   };
 }
 
@@ -389,6 +505,16 @@ export type GradeParams = {
    */
   calm?: number;
   calmTone?: number;
+  /**
+   * Validity of the smooth-water backdrop model (backdrop.ts), 0..1: the
+   * frame is mostly open water with subjects in it. Drives the object
+   * neutral tone (see OBJECT_NEUTRAL). Optional for older packets.
+   */
+  backdrop?: number;
+  /** The backdrop surface (18 coefficients: Oklab L, a, b over upright uv; backdrop.ts). Per frame, never clip-locked. */
+  backdropFit?: number[];
+  /** 1 when the frame holds an open-water animal with a lit side (backdrop.ts growSubjects); clip-locked, it gates the subject tone. */
+  subjectTone?: number;
 };
 
 export const IDENTITY_PARAMS: GradeParams = {
@@ -476,7 +602,7 @@ export type FrameAnalysis = {
   /** Mean sRGB of the thumbnail, for scene-cut detection. */
   mean: Vec3;
   /** Diagnostics (harness only; the worker does not post it). */
-  diag?: { sandWeight: number; sandFrac: number; sandMask: Uint8Array; calm: CalmEvidence };
+  diag?: { sandWeight: number; sandFrac: number; sandMask: Uint8Array; calm: CalmEvidence; backdrop?: number };
 };
 
 export const CLAHE_TILES_X = 8;
@@ -500,8 +626,10 @@ export const CLAHE_BINS = 32;
  *  p11: waterWb.rgb, hueFarHi
  *  p12: confLo, confHi, cosLo, cosHi
  *  p15: knee, subLo, subHi, hueFarLo
- *  p16: hazeWeight, deepHaze, 0, 0
+ *  p16: hazeWeight, deepHaze, detail guard, object-neutral strength
  *  p17: haze-lift subtraction per channel (hazeLiftT), neutral subtraction (hazeLift·hazeBlack)
+ *  p18–p22: backdrop surface (18 coefficients, L / a / b; backdrop.ts), p22.z subject tone, 1 spare
+ *  p23: temporal history valid (backend), temporal layer on (engine), 0, 0
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -540,8 +668,12 @@ export function packUniforms(
     u.set([a / c, b / c, params.waterExposure, params.zMean], 56);
   }
   u.set([params.knee, params.subLo, params.subHi, params.hueFarLo], 60);
-  u.set([hazeWeight(params), deepHaze(params), 0, 0], 64);
+  u.set([hazeWeight(params), deepHaze(params), detailGuardOf(params), objectNeutralOf(params)], 64);
   u.set([...hazeLiftT(params, s.hazeLift), s.hazeLift * params.hazeBlack], 68);
+  if (params.backdropFit && params.backdropFit.length === 18) u.set(params.backdropFit, 72);
+  u[90] = settings.subjectPop ? Math.min(1, Math.max(0, params.subjectTone ?? 0)) : 0;
+  // p23: history valid (set by the backend per frame), temporal layer on, 0, 0
+  u[93] = 1;
   return u;
 }
 
@@ -629,5 +761,8 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     subHi: m(a.subHi, b.subHi),
     calm: m(a.calm ?? 0, b.calm ?? 0),
     calmTone: m(a.calmTone ?? 0, b.calmTone ?? 0),
+    backdrop: m(a.backdrop ?? 0, b.backdrop ?? 0),
+    subjectTone: m(a.subjectTone ?? 0, b.subjectTone ?? 0),
+    backdropFit: a.backdropFit && b.backdropFit && a.backdropFit.length === b.backdropFit.length ? a.backdropFit.map((x, i) => m(x, b.backdropFit![i])) : b.backdropFit,
   };
 }

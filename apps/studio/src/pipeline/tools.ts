@@ -26,7 +26,12 @@ export type ColourState = {
   saturation: number;
   clarity: number;
   veil: number;
+  /** Advanced: "Subject pop" (opt-in): subjects in open blue water toned silver and lifted. */
+  subjectPop?: boolean;
 };
+
+/** The "Subject pop" switch stays hidden until its mask tracking is clean (the engine path ships off; `?pop=1` forces it on for checks). */
+export const SUBJECT_POP_UI = false;
 
 export const COLOUR_PRESETS: Chip<ScenePreset>[] = SCENE_PRESETS.map((p) => ({ id: p.id, label: p.id === "reef" ? "Reef" : p.label, hint: p.hint }));
 
@@ -38,6 +43,7 @@ export const DEFAULT_COLOUR: ColourState = {
   saturation: DEFAULT_SETTINGS.saturation,
   clarity: DEFAULT_SETTINGS.clarity,
   veil: DEFAULT_SETTINGS.veil,
+  subjectPop: false,
 };
 
 /** A segment's colour settings (Split on the timeline): everything but the on/off, which stays global. */
@@ -57,6 +63,7 @@ export function colourSettings(c: ColourLook): UserSettings {
     saturation: c.saturation,
     clarity: c.clarity,
     veil: c.veil,
+    subjectPop: !!c.subjectPop,
   };
 }
 

@@ -56,11 +56,13 @@ export interface GpuBackend {
    * render at full size regardless.
    */
   setPreviewScale(scale: number): void;
+  /** Forgets the temporal history (scene cut, seek, new clip); optional. */
+  resetTemporal?(): void;
   dispose(): void;
 }
 
 /** Floats in the uniform block (multiple of 4). Layout lives in uniforms.ts. */
-export const UNIFORM_FLOATS = 72;
+export const UNIFORM_FLOATS = 96;
 export const DATA_SLOTS = 3;
 
 export function uprightSize(width: number, height: number, rotation: Rotation): [number, number] {

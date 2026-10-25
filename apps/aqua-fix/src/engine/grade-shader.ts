@@ -5,8 +5,9 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, HAZE_LIFT, LOOK, PERSON_LUM, SKIN, VIVID } from "./params.ts";
+import { TEMPORAL, CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, VIVID } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
+import { BACKDROP } from "./backdrop.ts";
 
 // Look constants shared by both shaders, emitted as literals.
 const LOOK_CONSTS_GLSL = `
@@ -67,6 +68,42 @@ const float SKIN_MIX = ${SKIN.mix.toFixed(4)};
 const float SKIN_W_LO = ${SKIN.wLo.toFixed(4)};
 const float SKIN_W_HI = ${SKIN.wHi.toFixed(4)};
 const float SKIN_C_MIN = ${SKIN.cMin.toFixed(4)};
+const float TP_PRIOR_LO = ${TEMPORAL.priorLo.toFixed(4)};
+const float TP_PRIOR_HI = ${TEMPORAL.priorHi.toFixed(4)};
+const float TP_PRIOR_IN = ${TEMPORAL.priorIn.toFixed(4)};
+const float TP_IN_LO = ${TEMPORAL.inLo.toFixed(4)};
+const float TP_IN_HI = ${TEMPORAL.inHi.toFixed(4)};
+const float DG_K = ${DETAIL_GUARD.k.toFixed(4)};
+const float DG_EPS = ${DETAIL_GUARD.eps.toFixed(5)};
+const float DG_R_MIN = ${DETAIL_GUARD.rMin.toFixed(4)};
+const float DG_R_MAX = ${DETAIL_GUARD.rMax.toFixed(4)};
+const float ON_COS = ${Math.cos(OBJECT_NEUTRAL.hue).toFixed(6)};
+const float ON_SIN = ${Math.sin(OBJECT_NEUTRAL.hue).toFixed(6)};
+const float ON_COS_OUT = ${Math.cos(OBJECT_NEUTRAL.bandOut).toFixed(6)};
+const float ON_COS_IN = ${Math.cos(OBJECT_NEUTRAL.bandIn).toFixed(6)};
+const float ON_R_LO = ${OBJECT_NEUTRAL.rLo.toFixed(4)};
+const float ON_R_HI = ${OBJECT_NEUTRAL.rHi.toFixed(4)};
+const float ON_L_LO = ${OBJECT_NEUTRAL.lLo.toFixed(4)};
+const float ON_L_HI = ${OBJECT_NEUTRAL.lHi.toFixed(4)};
+const float ON_MIX = ${OBJECT_NEUTRAL.mix.toFixed(4)};
+const float ON_FAR_LO = ${OBJECT_NEUTRAL.farLo.toFixed(6)};
+const float ON_FAR_HI = ${OBJECT_NEUTRAL.farHi.toFixed(6)};
+const float ON_LIFT = ${OBJECT_NEUTRAL.lift.toFixed(4)};
+const float ON_SILVER = ${OBJECT_NEUTRAL.silver.toFixed(4)};
+const float BD_VETO_LO = ${BACKDROP.vetoLo.toFixed(4)};
+const float BD_VETO_HI = ${BACKDROP.vetoHi.toFixed(4)};
+const float BD_RING_R = ${BACKDROP.ringR.toFixed(1)};
+const float BD_CORE_IN = ${BACKDROP.coreIn.toFixed(4)};
+const float BD_SUBJ_LO = ${BACKDROP.subjLo.toFixed(4)};
+const float BD_SUBJ_HI = ${BACKDROP.subjHi.toFixed(4)};
+const float BD_DARK = ${BACKDROP.vetoDark.toFixed(4)};
+const float BD_AB2 = ${(BACKDROP.abWeight * BACKDROP.abWeight).toFixed(4)};
+const float ON_CONF_LO = ${OBJECT_NEUTRAL.confLo.toFixed(4)};
+const float ON_CONF_HI = ${OBJECT_NEUTRAL.confHi.toFixed(4)};
+const float ON_WARM_COS = ${Math.cos(OBJECT_NEUTRAL.warmHue).toFixed(6)};
+const float ON_WARM_SIN = ${Math.sin(OBJECT_NEUTRAL.warmHue).toFixed(6)};
+const float ON_WARM_LO = ${OBJECT_NEUTRAL.warmLo.toFixed(4)};
+const float ON_WARM_HI = ${OBJECT_NEUTRAL.warmHi.toFixed(4)};
 `;
 const LOOK_CONSTS_WGSL = LOOK_CONSTS_GLSL.replace(/const float (\w+) = ([^;]+);/g, "const $1: f32 = $2;");
 
@@ -260,7 +297,81 @@ float sampleClahe(vec2 uv, float value, int tilesX, int tilesY, int bins) {
   return mix(top, bot, t.y);
 }
 
-vec3 grade(vec3 src, vec2 uv) {
+// Object neutral tone (see OBJECT_NEUTRAL in params.ts; mirrors apply.ts objectNeutral).
+float objectNeutral(float L, vec2 ab, vec3 lin, float srcFar, float conf, float strength) {
+  if (strength <= 0.0 || conf <= 0.0) return 0.0;
+  float C = length(ab);
+  if (C < 1e-5) return 0.0;
+  float cosang = (ab.x * ON_COS + ab.y * ON_SIN) / C;
+  float band = smoothstepf(ON_COS_OUT, ON_COS_IN, cosang);
+  float redDef = 1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)));
+  float light = smoothstepf(ON_L_LO, ON_L_HI, L);
+  return strength * ON_MIX * conf * (band + (1.0 - band) * redDef) * redDef * light * (1.0 - srcFar);
+}
+// Per-pixel departure from the backdrop surface in p18–p22 (backdrop.ts backdropSubject before its ramp).
+float backdropDev(vec3 lab, vec2 uv) {
+  float x = uv.x - 0.5, y = uv.y - 0.5;
+  vec4 q = vec4(1.0, x, y, x * x);
+  float xy = x * y, yy = y * y;
+  float eL = dot(p[18], q) + p[19].x * xy + p[19].y * yy;
+  float eA = p[19].z + p[19].w * x + dot(p[20], vec4(y, x * x, xy, yy));
+  float eB = dot(p[21], q) + p[22].x * xy + p[22].y * yy;
+  float dl = lab.x - eL;
+  float el = dl > 0.0 ? dl : dl * BD_DARK;
+  float ea = lab.y - eA, eb = lab.z - eB;
+  return sqrt(el * el + BD_AB2 * (ea * ea + eb * eb));
+}
+// Open-water subject weight (mirrors apply.ts subjectWeight / mapConfAt).
+float mapConf(vec2 uv) {
+  ivec2 size = textureSize(u_data0, 0);
+  vec2 f = clamp(uv * vec2(size) - 0.5, vec2(0.0), vec2(size) - 1.0);
+  ivec2 i0 = ivec2(floor(f));
+  ivec2 i1 = min(i0 + 1, size - 1);
+  vec2 t = f - vec2(i0);
+  float a = mix(texelFetch(u_data0, i0, 0).y, texelFetch(u_data0, ivec2(i1.x, i0.y), 0).y, t.x);
+  float b = mix(texelFetch(u_data0, ivec2(i0.x, i1.y), 0).y, texelFetch(u_data0, i1, 0).y, t.x);
+  return mix(a, b, t.y);
+}
+float subjectWeight(vec2 uv, float coreJbu, float dev) {
+  vec2 r = BD_RING_R / vec2(textureSize(u_data0, 0));
+  float core = clamp(coreJbu, 0.0, 1.0);
+  float ring = 0.0;
+  ring = max(ring, mapConf(uv + vec2(r.x, 0.0)));
+  ring = max(ring, mapConf(uv - vec2(r.x, 0.0)));
+  ring = max(ring, mapConf(uv + vec2(0.0, r.y)));
+  ring = max(ring, mapConf(uv - vec2(0.0, r.y)));
+  ring = max(ring, mapConf(uv + 0.7071 * vec2(r.x, r.y)));
+  ring = max(ring, mapConf(uv + 0.7071 * vec2(-r.x, r.y)));
+  ring = max(ring, mapConf(uv + 0.7071 * vec2(r.x, -r.y)));
+  ring = max(ring, mapConf(uv - 0.7071 * vec2(r.x, r.y)));
+  float trim = smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, dev);
+  return max(core * mix(smoothstepf(BD_CORE_IN, 1.0, core), 1.0, trim), min(min(1.0, ring), trim));
+}
+// Object weight and warm clamp (see apply.ts objectWeight / warmClamp).
+float objectWeight(float conf) { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
+float warmClamp(vec2 ab, vec3 lin, float srcFar, float person, float strength) {
+  if (strength <= 0.0) return 1.0;
+  float C = length(ab);
+  if (C < 1e-5) return 1.0;
+  float cosw = (ab.x * ON_WARM_COS + ab.y * ON_WARM_SIN) / C;
+  float redDef = 1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)));
+  return 1.0 - strength * redDef * smoothstepf(ON_WARM_LO, ON_WARM_HI, cosw) * (1.0 - srcFar) * (1.0 - clamp(person, 0.0, 1.0));
+}
+// Object lift (see OBJECT_NEUTRAL.lift; mirrors apply.ts objectLift).
+float objectLift(float L, float conf, float strength) {
+  if (strength <= 0.0 || conf <= 0.0) return 0.0;
+  return ON_LIFT * strength * conf * smoothstepf(ON_L_LO - 0.1, ON_L_HI - 0.1, L) * (1.0 - smoothstepf(0.82, 0.95, L));
+}
+// Artifact guard: the source pixel's luminance against its base's (see DETAIL_GUARD; apply.ts detailRatio).
+float detailRatio(vec3 src, vec3 baseLin) {
+  float ys = lum(srgbToLinear(src));
+  return clamp((ys + DG_EPS) / (lum(baseLin) + DG_EPS), DG_R_MIN, DG_R_MAX);
+}
+// Temporal layer hooks (temporal.ts): subject prior in, raw subject mask out.
+float g_subjPrior = 0.0;
+float g_subjOut = 0.0;
+vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
+  g_subjOut = 0.0;
   float split = p[0].y;
   float strength = p[0].z;
   if (uv.x < split || strength <= 0.0) return src;
@@ -281,10 +392,11 @@ vec3 grade(vec3 src, vec2 uv) {
   vec2 veilHue = p[14].xy;
   float waterExposure = p[14].z, zMean = p[14].w;
 
-  vec3 lin = srgbToLinear(src);
+  // The grade runs on the artifact guard's base (see DETAIL_GUARD).
+  vec3 lin = srgbToLinear(base);
   // Range proxy: joint-bilateral fields where the map still matches the
   // pixel, the per-pixel prior where it doesn't.
-  float dPix = mu.x + mu.y * max(src.g, src.b) + mu.z * src.r;
+  float dPix = mu.x + mu.y * max(base.g, base.b) + mu.z * base.r;
   float k, personMap;
   vec4 fld = sampleFields(uv, lin, k, personMap);
   float person = clamp(personMap, 0.0, 1.0);
@@ -313,11 +425,21 @@ vec3 grade(vec3 src, vec2 uv) {
   // hue + signal tests (the analysis runs the same on the thumbnail).
   float confSignal = smoothstepf(confLo, confHi, sig);
   float confBright = smoothstepf(CONF_BRIGHT_LO, CONF_BRIGHT_HI, sig);
-  float confPix = min(confSignal, max(hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), confBright));
+  // Open water: the backdrop test replaces the hue test and vetoes the lagging map (see apply.ts).
+  float bdev = p[16].w > 0.0 ? backdropDev(lab0, uv) : 1.0;
+  float bsub = smoothstepf(BD_VETO_LO, BD_VETO_HI, bdev);
+  float veto = mix(1.0, bsub, p[16].w);
+  float confPix = min(confSignal, max(hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma) * veto, confBright));
   // Whatever the map says, a pixel the veil model would nearly erase
   // (tiny D) must take the water path — the physics path would crush it
   // to black, which is the dark ghost on moving content.
-  float conf = max(mix(confPix, clamp(fld.y, 0.0, 1.0), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal;
+  // Open blue water: no source red → the water path's colour (see apply.ts).
+  float conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  // Raw subject mask (before the tone gate) is also the temporal tracker's output; the warped
+  // previous mask (g_subjPrior) holds wherever the pixel departs from the water at all.
+  float subjRaw = p[16].w > 0.0 ? max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * mix(smoothstepf(TP_PRIOR_LO, TP_PRIOR_HI, bdev), smoothstepf(TP_IN_LO, TP_IN_HI, bdev), smoothstepf(TP_PRIOR_IN, 1.0, g_subjPrior))) : 0.0;
+  g_subjOut = subjRaw;
+  float subj = subjRaw * p[16].w * p[22].z;
   if (p[0].w > 0.5) return vec3(k, confPix, clamp(fld.y, 0.0, 1.0));
   vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   vec3 full = D * rangeGain * wb;
@@ -371,11 +493,18 @@ vec3 grade(vec3 src, vec2 uv) {
   float cMin = VIVID_KEEP * cSrc * vividW;
   if (C > 1e-6 && C * scale < cMin) scale = cMin / C;
   scale *= saturation;
-  vec3 o1 = oklabToLinear(capChroma(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y), cSrc));
-  vec3 o2 = fitToGamut(o1);
+  float onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
+  float tN = objectNeutral(lab.x, lab.yz, lin, onFar, objectWeight(subj), p[16].w);
+  float personS = person * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  scale *= warmClamp(lab.yz, lin, onFar, personS, p[16].w);
+  vec2 nab = mix(lab.yz * scale, veilHue * ON_SILVER, tN);
+  float Ls = lab.x + objectLift(lab.x, objectWeight(subj), p[16].w);
+  vec3 o1 = oklabToLinear(capChroma(deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y), cSrc));
+  vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
-}`;
+}
+vec3 grade(vec3 src, vec2 uv) { return gradeD(src, src, uv); }`;
 
 export const GRADE_WGSL = `${LOOK_CONSTS_WGSL}
 const JBU_SIGMA: f32 = 0.12;
@@ -557,7 +686,76 @@ fn sampleClahe(uv: vec2<f32>, value: f32, tilesX: i32, tilesY: i32, bins: i32) -
   return mix(top, bot, t.y);
 }
 
-fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+fn objectNeutral(L: f32, ab: vec2<f32>, lin: vec3<f32>, srcFar: f32, conf: f32, strength: f32) -> f32 {
+  if (strength <= 0.0 || conf <= 0.0) { return 0.0; }
+  let C = length(ab);
+  if (C < 1e-5) { return 0.0; }
+  let cosang = (ab.x * ON_COS + ab.y * ON_SIN) / C;
+  let band = smoothstepf(ON_COS_OUT, ON_COS_IN, cosang);
+  let redDef = 1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)));
+  let light = smoothstepf(ON_L_LO, ON_L_HI, L);
+  return strength * ON_MIX * conf * (band + (1.0 - band) * redDef) * redDef * light * (1.0 - srcFar);
+}
+fn backdropDev(lab: vec3<f32>, uv: vec2<f32>) -> f32 {
+  let p = params.p;
+  let x = uv.x - 0.5; let y = uv.y - 0.5;
+  let q = vec4<f32>(1.0, x, y, x * x);
+  let xy = x * y; let yy = y * y;
+  let eL = dot(p[18], q) + p[19].x * xy + p[19].y * yy;
+  let eA = p[19].z + p[19].w * x + dot(p[20], vec4<f32>(y, x * x, xy, yy));
+  let eB = dot(p[21], q) + p[22].x * xy + p[22].y * yy;
+  let dl = lab.x - eL;
+  let el = select(dl * BD_DARK, dl, dl > 0.0);
+  let ea = lab.y - eA; let eb = lab.z - eB;
+  return sqrt(el * el + BD_AB2 * (ea * ea + eb * eb));
+}
+fn mapConf(uv: vec2<f32>) -> f32 {
+  let size = vec2<i32>(textureDimensions(u_data0, 0));
+  let f = clamp(uv * vec2<f32>(size) - 0.5, vec2(0.0), vec2<f32>(size) - 1.0);
+  let i0 = vec2<i32>(floor(f));
+  let i1 = min(i0 + 1, size - 1);
+  let t = f - vec2<f32>(i0);
+  let a = mix(textureLoad(u_data0, i0, 0).y, textureLoad(u_data0, vec2<i32>(i1.x, i0.y), 0).y, t.x);
+  let b = mix(textureLoad(u_data0, vec2<i32>(i0.x, i1.y), 0).y, textureLoad(u_data0, i1, 0).y, t.x);
+  return mix(a, b, t.y);
+}
+fn subjectWeight(uv: vec2<f32>, coreJbu: f32, dev: f32) -> f32 {
+  let r = BD_RING_R / vec2<f32>(textureDimensions(u_data0, 0));
+  let core = clamp(coreJbu, 0.0, 1.0);
+  var ring = 0.0;
+  ring = max(ring, mapConf(uv + vec2<f32>(r.x, 0.0)));
+  ring = max(ring, mapConf(uv - vec2<f32>(r.x, 0.0)));
+  ring = max(ring, mapConf(uv + vec2<f32>(0.0, r.y)));
+  ring = max(ring, mapConf(uv - vec2<f32>(0.0, r.y)));
+  ring = max(ring, mapConf(uv + 0.7071 * vec2<f32>(r.x, r.y)));
+  ring = max(ring, mapConf(uv + 0.7071 * vec2<f32>(-r.x, r.y)));
+  ring = max(ring, mapConf(uv + 0.7071 * vec2<f32>(r.x, -r.y)));
+  ring = max(ring, mapConf(uv - 0.7071 * vec2<f32>(r.x, r.y)));
+  let trim = smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, dev);
+  return max(core * mix(smoothstepf(BD_CORE_IN, 1.0, core), 1.0, trim), min(min(1.0, ring), trim));
+}
+fn objectWeight(conf: f32) -> f32 { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
+fn warmClamp(ab: vec2<f32>, lin: vec3<f32>, srcFar: f32, person: f32, strength: f32) -> f32 {
+  if (strength <= 0.0) { return 1.0; }
+  let C = length(ab);
+  if (C < 1e-5) { return 1.0; }
+  let cosw = (ab.x * ON_WARM_COS + ab.y * ON_WARM_SIN) / C;
+  let redDef = 1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)));
+  return 1.0 - strength * redDef * smoothstepf(ON_WARM_LO, ON_WARM_HI, cosw) * (1.0 - srcFar) * (1.0 - clamp(person, 0.0, 1.0));
+}
+fn objectLift(L: f32, conf: f32, strength: f32) -> f32 {
+  if (strength <= 0.0 || conf <= 0.0) { return 0.0; }
+  return ON_LIFT * strength * conf * smoothstepf(ON_L_LO - 0.1, ON_L_HI - 0.1, L) * (1.0 - smoothstepf(0.82, 0.95, L));
+}
+fn detailRatio(src: vec3<f32>, baseLin: vec3<f32>) -> f32 {
+  let ys = lum(srgbToLinear(src));
+  return clamp((ys + DG_EPS) / (lum(baseLin) + DG_EPS), DG_R_MIN, DG_R_MAX);
+}
+fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> { return gradeD(src, src, uv); }
+var<private> g_subjPrior: f32 = 0.0;
+var<private> g_subjOut: f32 = 0.0;
+fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+  g_subjOut = 0.0;
   let p = params.p;
   let split = p[0].y;
   let strength = p[0].z;
@@ -579,8 +777,8 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let veilHue = p[14].xy;
   let waterExposure = p[14].z; let zMean = p[14].w;
 
-  let lin = srgbToLinear(src);
-  let dPix = mu.x + mu.y * max(src.g, src.b) + mu.z * src.r;
+  let lin = srgbToLinear(base);
+  let dPix = mu.x + mu.y * max(base.g, base.b) + mu.z * base.r;
   let sf = sampleFields(uv, lin);
   let fld = sf[0];
   let k = sf[1].w;
@@ -604,8 +802,14 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let D = mix(lin * max(floorFrac, 1.0 - lumBs / lumI), per, vec3(wSub));
   let confSignal = smoothstepf(confLo, confHi, sig);
   let confBright = smoothstepf(CONF_BRIGHT_LO, CONF_BRIGHT_HI, sig);
-  let confPix = min(confSignal, max(hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), confBright));
-  let conf = max(mix(confPix, clamp(fld.y, 0.0, 1.0), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal;
+  let bdev = select(1.0, backdropDev(lab0, uv), p[16].w > 0.0);
+  let bsub = smoothstepf(BD_VETO_LO, BD_VETO_HI, bdev);
+  let veto = mix(1.0, bsub, p[16].w);
+  let confPix = min(confSignal, max(hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma) * veto, confBright));
+  let conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  let subjRaw = select(0.0, max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * mix(smoothstepf(TP_PRIOR_LO, TP_PRIOR_HI, bdev), smoothstepf(TP_IN_LO, TP_IN_HI, bdev), smoothstepf(TP_PRIOR_IN, 1.0, g_subjPrior))), p[16].w > 0.0);
+  g_subjOut = subjRaw;
+  let subj = subjRaw * p[16].w * p[22].z;
   if (p[0].w > 0.5) { return vec3(k, confPix, clamp(fld.y, 0.0, 1.0)); }
   let rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   let full = D * rangeGain * wb;
@@ -651,8 +855,54 @@ fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let cMin = VIVID_KEEP * cSrc * vividW;
   if (C > 1e-6 && C * scale < cMin) { scale = cMin / C; }
   scale *= saturation;
-  let o1 = oklabToLinear(capChroma(deepBlueLook(vec3(lab.x, skinTone(lab.x, lab.yz * scale, person)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y), cSrc));
-  let o2 = fitToGamut(o1);
+  let onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
+  let tN = objectNeutral(lab.x, lab.yz, lin, onFar, objectWeight(subj), p[16].w);
+  let personS = person * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  scale *= warmClamp(lab.yz, lin, onFar, personS, p[16].w);
+  let nab = mix(lab.yz * scale, veilHue * ON_SILVER, tN);
+  let Ls = lab.x + objectLift(lab.x, objectWeight(subj), p[16].w);
+  let o1 = oklabToLinear(capChroma(deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y), cSrc));
+  let o2 = fitToGamut(o1 * detailRatio(src, lin));
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);
+}`;
+
+// Artifact guard base (see DETAIL_GUARD in params.ts; mirrors apply.ts
+// detailBase tap for tap): needs the source texture, so it lives with the
+// fragment plumbing in shaders.ts, which includes these after the bindings.
+const tapsGlsl = DETAIL_TAPS.map(([x, y, w]) => `  dgTap(suv + vec2(${x.toFixed(1)}, ${y.toFixed(1)}) * tx, src, ${w.toFixed(4)}, kk, acc, sw);`).join("\n");
+const tapsWgsl = DETAIL_TAPS.map(([x, y, w]) => `  acc += dgTap(suv + vec2<f32>(${x.toFixed(1)}, ${y.toFixed(1)}) * tx, src, ${w.toFixed(4)}, kk);`).join("\n");
+export const DETAIL_GLSL = `
+void dgTap(vec2 uv, vec3 src, float ws, float kk, inout vec3 acc, inout float sw) {
+  vec3 c = textureLod(u_source, uv, 0.0).rgb;
+  vec3 d = c - src;
+  float w = ws * exp(-dot(d, d) * kk);
+  acc += w * c;
+  sw += w;
+}
+vec3 detailBase(vec2 suv, vec3 src) {
+  float guard = p[16].z;
+  if (guard <= 0.0) return src;
+  vec2 tx = 1.0 / vec2(textureSize(u_source, 0));
+  float kk = DG_K / (guard * guard);
+  vec3 acc = src;
+  float sw = 1.0;
+${tapsGlsl}
+  return acc / sw;
+}`;
+export const DETAIL_WGSL = `
+fn dgTap(uv: vec2<f32>, src: vec3<f32>, ws: f32, kk: f32) -> vec4<f32> {
+  let c = textureSampleLevel(u_source, samp, uv, 0.0).rgb;
+  let d = c - src;
+  let w = ws * exp(-dot(d, d) * kk);
+  return vec4<f32>(c * w, w);
+}
+fn detailBase(suv: vec2<f32>, src: vec3<f32>) -> vec3<f32> {
+  let guard = params.p[16].z;
+  if (guard <= 0.0) { return src; }
+  let tx = 1.0 / vec2<f32>(textureDimensions(u_source));
+  let kk = DG_K / (guard * guard);
+  var acc = vec4<f32>(src, 1.0);
+${tapsWgsl}
+  return acc.xyz / acc.w;
 }`;
