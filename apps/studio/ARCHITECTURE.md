@@ -119,6 +119,15 @@ Two paths, picked per browser when a clip opens (`Studio.pickExportMode`):
   re-times it, so every frame still lands in the file), then at half
   size. The first frame is analysed before recording starts.
   `?rt=1` / `?rt=0` force the path on or off anywhere.
+* **Native** (only inside the Capacitor app, `apps/mobile`, for clips opened
+  with the native picker): the page decodes and renders exactly as the
+  offline path does, then `NativeFrameSink` (`src/native/bridge.ts`) posts
+  each frame's pixels to the app's encoder over a loopback socket
+  (AVAssetWriter / MediaCodec), and the app copies the audio from the source
+  file. `src/native/` is a lazy chunk (with `@capacitor/core`) that the web
+  build never loads; `src/native/registry.ts` (no Capacitor import) is all the
+  shell sees. `?native=0` keeps the web paths in the app. Design and
+  background behaviour: `apps/mobile/MOBILE.md`.
 * **Photos**: one full-size render (`renderToFrame`, or the geometry
   canvas with colour off) drawn into a 2D canvas and encoded as JPEG
   (quality 0.92).

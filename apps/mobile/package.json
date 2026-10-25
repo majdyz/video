@@ -1,0 +1,26 @@
+{
+  "name": "mobile",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Capacitor shell (iOS + Android) around the Studio web build.",
+  "scripts": {
+    "build:web": "node scripts/build-web.mjs",
+    "assets": "node scripts/native-assets.mjs",
+    "brand": "node scripts/apply-brand.mjs",
+    "sync": "node scripts/build-web.mjs && cap sync",
+    "sync:only": "cap sync",
+    "open:ios": "cap open ios",
+    "open:android": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/ios": "^8.5.3",
+    "@capacitor/share": "^8.0.3",
+    "@capacitor/splash-screen": "^8.0.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.3",
+    "sharp": "^0.34.5"
+  }
+}

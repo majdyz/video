@@ -11,6 +11,7 @@ import { Sheet } from "./ui/sheet";
 import { IconButton, Segmented } from "./ui/controls";
 import { IconClose, IconCompare, IconExport, IconMore, IconPlus, IconWarning } from "./ui/icons";
 import { useMedia } from "./ui/use-media";
+import { isNativeShell } from "./native/registry.ts";
 
 type Theme = "abyss" | "coral" | "depth";
 const THEMES: { id: Theme; label: string }[] = [
@@ -132,6 +133,20 @@ export default function App() {
     setSplit(0.5);
     void studio.open(f);
   };
+  // In the app (apps/mobile) clips come from the native pickers: originals,
+  // telemetry tracks intact, and a sandbox path the native exporter reads the
+  // audio from. The web keeps <input type=file>.
+  const native = isNativeShell();
+  const pick = (source: "photos" | "files" = "photos") => {
+    if (!native) {
+      fileInputRef.current?.click();
+      return;
+    }
+    void import("./native/bridge.ts")
+      .then((nat) => nat.pickNativeFile(source))
+      .then((f) => { if (f) openFile(f); })
+      .catch((e: unknown) => console.error("[native] pick failed", e));
+  };
   const aspect = s.info ? s.info.displayW / s.info.displayH : null;
   const dockOpen = dockPref ?? (aspect !== null && aspect > 1.05);
   const pill = s.busy ?? (tools.stabilise.enabled && !photo && !exporting && (s.stab.state === "analysing" || s.stab.state === "solving")
@@ -168,7 +183,7 @@ export default function App() {
         <h1 className="wordmark">{BRAND.name}</h1>
         <div className="topbar__actions">
           {s.phase !== "empty" && (
-            <IconButton label="Open another clip or photo" onClick={() => fileInputRef.current?.click()} disabled={exporting}>
+            <IconButton label="Open another clip or photo" onClick={() => pick()} disabled={exporting}>
               <IconPlus size={18} />
             </IconButton>
           )}
@@ -200,7 +215,7 @@ export default function App() {
             showPlayHint={ready && !photo && !s.busy && !exporting}
             resetKey={`${s.fileName}:${s.info?.displayW}x${s.info?.displayH}`}
           >
-            {s.phase === "empty" && <EmptyState accept={ACCEPT} onFile={openFile} onSample={() => { setSplit(0.5); void studio.openUrl(`${import.meta.env.BASE_URL}samples/${SAMPLE.file}`, SAMPLE.file); }} busy={s.busy} />}
+            {s.phase === "empty" && <EmptyState accept={ACCEPT} onFile={openFile} onPick={native ? pick : undefined} onSample={() => { setSplit(0.5); void studio.openUrl(`${import.meta.env.BASE_URL}samples/${SAMPLE.file}`, SAMPLE.file); }} busy={s.busy} />}
             {s.phase !== "empty" && pill && (
               <div className="pill" role="status"><span className="pill__dot" aria-hidden="true" />{pill}</div>
             )}
@@ -327,7 +342,7 @@ export default function App() {
           <p className="about__fine">
             {s.engine === "webgpu" ? "WebGPU" : s.engine === "webgl2" ? "WebGL2" : s.engine === "failed" ? "No GPU" : "GPU starting"}
             {" · "}
-            {s.exportMode === "realtime" ? "real-time export (plays the clip through once)" : "WebCodecs export"}
+            {s.exportMode === "realtime" ? "real-time export (plays the clip through once)" : s.exportMode === "native" ? "native hardware encoder" : "WebCodecs export"}
           </p>
           <div className="about__credit">
             <h3>Sample clip</h3>
