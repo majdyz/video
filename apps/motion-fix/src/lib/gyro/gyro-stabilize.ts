@@ -357,6 +357,27 @@ function requiredZoom(g: Geometry, virt: Quat, rows: RowRotations, lo: number, h
   return b;
 }
 
+/**
+ * Same answer as requiredZoom(1, hi) but bracketed around the previous
+ * frame's zoom first (it moves little between frames): about half the
+ * probes on a typical clip.
+ */
+function requiredZoomNear(g: Geometry, virt: Quat, rows: RowRotations, guess: number, hi: number): number {
+  const span = 0.01;
+  const lo0 = Math.max(1, guess - span);
+  const hi0 = Math.min(hi, guess + span);
+  if (lo0 <= 1) return requiredZoom(g, virt, rows, 1, hi);
+  if (fits(g, virt, rows, lo0) || !fits(g, virt, rows, hi0)) return requiredZoom(g, virt, rows, 1, hi);
+  let a = lo0;
+  let b = hi0;
+  for (let i = 0; i < 8; i++) {
+    const m = (a + b) / 2;
+    if (fits(g, virt, rows, m)) b = m;
+    else a = m;
+  }
+  return b;
+}
+
 /** Rectilinear output: the focal (× source fx) at which the un-rotated view just fits. */
 function rectilinearBase(motion: CameraMotion, src: LensModel, srcThMax: number, border: Float64Array): number {
   const g: Geometry = { motion, src, srcThMax, output: "rectilinear", rectBase: 1, border };
@@ -485,7 +506,11 @@ export function computeGyroPlan(motion: CameraMotion, params: GyroParams): GyroP
   // Every frame: with high-frequency vibration the correction can change by
   // a degree between frames, so neighbours are no stand-in.
   const required = new Float32Array(n);
-  for (let i = 0; i < n; i++) required[i] = Math.min(maxZoom, requiredZoom(geo, qat(virt, i), rowsAt(i), 1, maxZoom));
+  let guess = 1;
+  for (let i = 0; i < n; i++) {
+    required[i] = Math.min(maxZoom, requiredZoomNear(geo, qat(virt, i), rowsAt(i), guess, maxZoom));
+    guess = required[i];
+  }
 
   // Rate-limited: the crop drifts at most ZOOM_RATE per second, so it never visibly pumps.
   const zoom = params.zoomRate === 0 ? smoothZoomTrack(required, Math.max(8, Math.round(fps * 3)), maxZoom) : rateLimitedZoom(required, fps, params.zoomRate ?? ZOOM_RATE, maxZoom);
