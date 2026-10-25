@@ -1,7 +1,7 @@
 // Tracker accuracy on synthetic shaky sequences with known ground truth.
 //   node --experimental-strip-types apps/motion-fix/test/tracker.test.ts
 import assert from "node:assert/strict";
-import { MotionTracker, compose, invert, type Similarity } from "../src/lib/tracker.ts";
+import { FramePrep, MotionTracker, compose, invert, prepOptions, type PreparedFrame, type Similarity } from "../src/lib/tracker.ts";
 import { angleDeg, makeRng, makeWorld, relativeMotion, renderFrame, scaleOf, similarityFrom } from "./synth.ts";
 
 const FW = 640;
@@ -118,6 +118,25 @@ function runSequence(name: string, poses: Similarity[], noise: number, trackerOp
   }
   console.log(`low contrast: max translation error ${maxErr.toFixed(3)} px`);
   assert.ok(maxErr < 0.5, `low-contrast error ${maxErr}`);
+}
+
+// 5. Frames prepared ahead (FramePrep, as the frame workers do) track exactly like stepGray,
+//    with buffers rotated the way the pipeline recycles them (three sets in flight).
+{
+  const rng = makeRng(99);
+  const world = makeWorld(1100, 700, rng);
+  const a = new MotionTracker(FW, FH);
+  const b = new MotionTracker(FW, FH);
+  const prep = new FramePrep(FW, FH, prepOptions());
+  const pool: PreparedFrame[] = [prep.allocate(), prep.allocate(), prep.allocate()];
+  const frame = new Float32Array(FW * FH);
+  for (let t = 0; t < 25; t++) {
+    renderFrame(world, similarityFrom(0.3 * Math.sin(t), 1 + 0.002 * t, 6 * Math.sin(t * 1.7), 4 * t), FW, FH, frame, 3, rng);
+    const pf = prep.prepare(frame, pool[t % 3]);
+    const ma = a.stepGray(frame);
+    const mb = b.stepPrepared(pf);
+    assert.deepEqual(mb, ma, `prepared frame ${t} differs`);
+  }
 }
 
 console.log("tracker tests passed");

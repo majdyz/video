@@ -26,7 +26,7 @@
 //     render warp and the crop search stay exactly as they are.
 
 import { solveL1Lp, type L1Term, type LinearConstraint } from "../path-l1.ts";
-import { MotionTracker } from "../tracker.ts";
+import { MotionTracker, prepOptions, type PreparedFrame, type PrepOptions } from "../tracker.ts";
 import { unproject, type LensModel } from "./lens.ts";
 import { qmat, sampleOrientation } from "./quat.ts";
 import type { CameraMotion } from "./telemetry.ts";
@@ -251,10 +251,19 @@ export class ResidualCollector {
     this.noise = 0.6 / this.unitPx;
   }
 
-  /** Next frame (gray 0..255 at the analysis size, coded orientation) at media time `time`. */
-  push(time: number, gray: Float32Array): void {
+  /** What frames handed to push() as `prepared` must be prepared with. */
+  get prepOptions(): PrepOptions {
+    return prepOptions(this.tracker.opts);
+  }
+
+  /**
+   * Next frame (gray 0..255 at the analysis size, coded orientation) at media
+   * time `time`; `prepared`: the same frame prepared ahead (frame workers).
+   */
+  push(time: number, gray: Float32Array, prepared?: PreparedFrame): void {
     const t0 = performance.now();
-    this.tracker.stepGray(gray);
+    if (prepared) this.tracker.stepPrepared(prepared);
+    else this.tracker.stepGray(gray);
     if (this.prevTime === null) this.addMatches(time, null);
     else {
       const m = this.tracker.lastMatches();

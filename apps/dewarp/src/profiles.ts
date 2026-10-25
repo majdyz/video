@@ -105,6 +105,14 @@ export const PROFILES: Record<string, FisheyeProfile> = {
 
 export const DEFAULT_PROFILE = "osmo-action-wide";
 
+/**
+ * Profile for a clip whose metadata names no lens (no action-camera
+ * evidence): a fisheye profile on a phone or web clip over-warps and crops
+ * it, so such clips start straight and the user picks the lens.
+ */
+export const UNRECOGNISED_PROFILE = "none";
+export const UNRECOGNISED_HINT = "Camera not recognised — pick your lens";
+
 /** Option value of the per-clip lens the camera wrote into the file. */
 export const FROM_FILE = "from-file";
 

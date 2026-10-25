@@ -5,7 +5,7 @@ import { fitZoom, lensDiagonalFov, warpUniforms, type WarpUniforms, type Project
 import { Warper } from "./gpu";
 
 import { decodeFrameAt, describeBoxes, exportClip, indexTopLevelBoxes, probe, type ProbeResult } from "./pipeline";
-import { DEFAULT_PROFILE, FROM_FILE, PROFILES, resolveProfile } from "./profiles";
+import { DEFAULT_PROFILE, FROM_FILE, PROFILES, UNRECOGNISED_HINT, UNRECOGNISED_PROFILE, resolveProfile } from "./profiles";
 
 const app = document.getElementById("app")!;
 
@@ -220,7 +220,7 @@ async function main() {
     strength.input.dispatchEvent(new Event("input"));
     const aspectOff = p.lens && info ? Math.abs(info.width / info.height - p.lens.width / p.lens.height) > 0.02 : false;
     const cam = info?.camera;
-    const who = cam?.brand ? `Detected ${[cam.brand, cam.model].filter(Boolean).join(" ")}${cam.lensMode ? `, ${cam.lensMode}` : ""}${cam.stabilization ? `, stabilisation ${cam.stabilization}` : ""}. ` : info ? "No camera metadata in this file; picked by frame shape. " : "";
+    const who = cam?.brand ? `Detected ${[cam.brand, cam.model].filter(Boolean).join(" ")}${cam.lensMode ? `, ${cam.lensMode}` : ""}${cam.stabilization ? `, stabilisation ${cam.stabilization}` : ""}. ` : info ? `${UNRECOGNISED_HINT}. ` : "";
     profileNote.textContent = who + (p.lens
       ? `${p.source}, ${fovDeg}° diagonal${aspectOff ? " — this clip has a different aspect ratio than the calibration; check the preview edges" : ""}`
       : p.strength === 0
@@ -368,7 +368,7 @@ async function main() {
       fromFileOption.remove();
     }
     const suggested = cam.profileId === FROM_FILE ? (cam.lens ? FROM_FILE : undefined) : cam.profileId;
-    profileSelect.value = suggested && (suggested === FROM_FILE || PROFILES[suggested]) ? suggested : DEFAULT_PROFILE;
+    profileSelect.value = suggested && (suggested === FROM_FILE || PROFILES[suggested]) ? suggested : cam.profileId ? DEFAULT_PROFILE : UNRECOGNISED_PROFILE;
     syncProfile();
     applyFit();
     meta.textContent = `${info.width}×${info.height}, ${info.fps.toFixed(2)} fps, ${fmtTime(info.durationS)}, ${info.codec}${info.hasAudio ? ", audio" : ", no audio"}${info.rotation ? `, rotated ${info.rotation}°` : ""}`;

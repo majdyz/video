@@ -4,6 +4,7 @@ import {
   DEFAULT_COLOUR,
   DEFAULT_STABILISE,
   cameraLabel,
+  unrecognisedCameraHint,
   dewarpChips,
   STAB_PRESETS,
   TOOL_LABEL,
@@ -60,6 +61,8 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
   if (tool === "colour" && enabled) status = colourProfiled ? <span className="status-good">{photo ? "Balanced for this photo" : "Scene-locked to this clip"}</span> : <span className="status-live">Reading the water…</span>;
   const detected = cameraLabel(camera);
   if (tool === "dewarp" && detected) status = <span className="status-good">Detected: {detected}</span>;
+  const unrecognised = tool === "dewarp" ? unrecognisedCameraHint(camera) : null;
+  if (unrecognised) status = <span className="status-live">{unrecognised}</span>;
   if (tool === "dewarp" && enabled && info && profileAspectMismatch(tools.dewarp.profile, info.codedW, info.codedH)) status = <span className="status-warn">Calibrated for a different aspect ratio</span>;
   // Gyro stabilisation + Dewarp: the gyro warp straightens through the clip's own lens model.
   const gyroLens = tool === "dewarp" && enabled && tools.stabilise.enabled && stab.state === "ready" && stab.info?.mode === "gyro";

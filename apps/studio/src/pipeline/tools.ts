@@ -6,7 +6,7 @@ import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, type ScenePreset, type 
 import type { StabilizeParams } from "../../../motion-fix/src/lib/stabilize.ts";
 import type { SolveParams } from "../../../motion-fix/src/lib/plan.ts";
 import type { Projection } from "../../../dewarp/src/fisheye.ts";
-import { DEFAULT_PROFILE, FROM_FILE, PROFILES } from "../../../dewarp/src/profiles.ts";
+import { DEFAULT_PROFILE, FROM_FILE, PROFILES, UNRECOGNISED_HINT, UNRECOGNISED_PROFILE } from "../../../dewarp/src/profiles.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 
 export type ToolId = "colour" | "stabilise" | "dewarp";
@@ -156,12 +156,22 @@ export function dewarpChips(camera: CameraInfo | null | undefined): Chip<string>
   return camera?.lens ? [FROM_FILE_CHIP, ...DEWARP_PROFILES] : DEWARP_PROFILES;
 }
 
-/** The profile the detector suggests for this clip (null: nothing detected, keep the user's pick). */
+/**
+ * The profile the detector suggests for this clip (null: detection not in
+ * yet, or a suggestion the chips don't offer; keep the user's pick). A clip
+ * whose metadata names no lens starts straight (see UNRECOGNISED_PROFILE).
+ */
 export function detectedProfile(camera: CameraInfo | null | undefined): string | null {
-  const id = camera?.profileId;
-  if (!id) return null;
+  if (!camera) return null;
+  const id = camera.profileId;
+  if (!id) return UNRECOGNISED_PROFILE;
   if (id === FROM_FILE) return camera?.lens ? FROM_FILE : null;
   return id in PROFILES && DEWARP_PROFILES.some((c) => c.id === id) ? id : null;
+}
+
+/** The Dewarp status line for a clip without camera metadata, else null. */
+export function unrecognisedCameraHint(c: CameraInfo | null | undefined): string | null {
+  return c && !c.brand && !c.profileId ? UNRECOGNISED_HINT : null;
 }
 
 /** "GoPro HERO12 Black · Wide" style label, or null when nothing was detected. */

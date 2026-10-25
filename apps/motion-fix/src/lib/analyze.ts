@@ -9,7 +9,8 @@ import "@dive-tools/shared/videoframe-colorspace.ts";
 import { ALL_FORMATS, BlobSource, Input, VideoSampleSink } from "mediabunny";
 import { homographyFromSimilarity, rescaleH } from "./homography.ts";
 import { HOMOGRAPHY_STATE, MODEL_CODE, type MotionAnalysis } from "./stabilize.ts";
-import { MotionTracker, analysisSize } from "./tracker.ts";
+import { grayFrames, type GrayFrameStats } from "./frame-gray.ts";
+import { MotionTracker, analysisSize, prepOptions } from "./tracker.ts";
 
 export type AnalysisProgress = (fraction: number, frames: number) => void;
 
@@ -39,11 +40,7 @@ export async function analyzeVideoFile(file: File, onProgress: AnalysisProgress,
     const stats = await track.computePacketStats(200).catch(() => null);
     const sourceFps = stats?.averagePacketRate ?? 30;
     const { width: aw, height: ah } = analysisSize(width, height, sourceFps >= 50 ? 480 : 640);
-    const canvas = new OffscreenCanvas(aw, ah);
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) throw new Error("2D canvas unavailable");
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "medium";
+    const readStats: GrayFrameStats = { route: "undecided", planesMs: 0, canvasMs: 0, meanDiff: 0, frames: 0, readMs: 0, copyMs: 0, threaded: false };
 
     const tracker = new MotionTracker(aw, ah);
     const scale = width / aw; // analysis px -> source px
@@ -61,57 +58,57 @@ export async function analyzeVideoFile(file: File, onProgress: AnalysisProgress,
     let cTX = 0;
     let cTY = 0;
     let trackMs = 0;
+    let readMs = 0;
     let lastProgress = 0;
+    const tStart = performance.now();
 
     const sink = new VideoSampleSink(track);
-    for await (const sample of sink.samples()) {
-      // Every sample is closed inside the loop: the sink decodes a few
-      // frames ahead and anything we hold is memory the decoder can't reuse.
-      try {
-        throwIfAborted(signal);
-        // sample.draw applies the container rotation, so portrait phone clips
-        // are tracked the way they are displayed.
-        sample.draw(ctx, 0, 0, aw, ah);
-        const img = ctx.getImageData(0, 0, aw, ah);
-        const t0 = performance.now();
-        const m = tracker.step(img.data);
-        trackMs += performance.now() - t0;
-        const tx = m.tx * scale;
-        const ty = m.ty * scale;
-        motion.push(m.a, m.b, tx, ty);
-        // C_t = M_t ∘ C_{t-1}
-        const nA = m.a * cA - m.b * cB;
-        const nB = m.b * cA + m.a * cB;
-        const nTX = m.a * cTX - m.b * cTY + tx;
-        const nTY = m.b * cTX + m.a * cTY + ty;
-        cA = nA;
-        cB = nB;
-        cTX = nTX;
-        cTY = nTY;
-        cumulative.push(cA, cB, cTX, cTY);
-        times.push(sample.timestamp);
-        inliers.push(m.inliers);
-        tracked.push(m.tracked);
-        rms.push(m.rms);
-        model.push(MODEL_CODE[m.model]);
-        // The homography is kept in source pixels like the translations;
-        // a pair the similarity explains as well stores the similarity, so
-        // chains can run straight through it.
-        const h = m.homography ? rescaleH(m.homography, scale) : homographyFromSimilarity({ a: m.a, b: m.b, tx, ty });
-        for (let i = 0; i < 9; i++) homography.push(h[i]);
-        homographyState.push(HOMOGRAPHY_STATE[m.homographyState]);
-        const now = performance.now();
-        if (duration > 0 && now - lastProgress > 80) {
-          lastProgress = now;
-          onProgress(Math.min(1, Math.max(0, sample.timestamp / duration)), times.length);
-        }
-      } finally {
-        sample.close();
+    // Frames are read (decoded frame -> green at the analysis size, container
+    // rotation applied so portrait phone clips are tracked the way they are
+    // displayed) on a second thread while this one tracks.
+    let tr = performance.now();
+    for await (const { gray, timestamp, prepared } of grayFrames(sink.samples(), aw, ah, { stats: readStats, prep: prepOptions(tracker.opts) })) {
+      throwIfAborted(signal);
+      const t0 = performance.now();
+      readMs += t0 - tr;
+      const m = prepared ? tracker.stepPrepared(prepared) : tracker.stepGray(gray);
+      trackMs += performance.now() - t0;
+      const tx = m.tx * scale;
+      const ty = m.ty * scale;
+      motion.push(m.a, m.b, tx, ty);
+      // C_t = M_t ∘ C_{t-1}
+      const nA = m.a * cA - m.b * cB;
+      const nB = m.b * cA + m.a * cB;
+      const nTX = m.a * cTX - m.b * cTY + tx;
+      const nTY = m.b * cTX + m.a * cTY + ty;
+      cA = nA;
+      cB = nB;
+      cTX = nTX;
+      cTY = nTY;
+      cumulative.push(cA, cB, cTX, cTY);
+      times.push(timestamp);
+      inliers.push(m.inliers);
+      tracked.push(m.tracked);
+      rms.push(m.rms);
+      model.push(MODEL_CODE[m.model]);
+      // The homography is kept in source pixels like the translations;
+      // a pair the similarity explains as well stores the similarity, so
+      // chains can run straight through it.
+      const h = m.homography ? rescaleH(m.homography, scale) : homographyFromSimilarity({ a: m.a, b: m.b, tx, ty });
+      for (let i = 0; i < 9; i++) homography.push(h[i]);
+      homographyState.push(HOMOGRAPHY_STATE[m.homographyState]);
+      const now = performance.now();
+      if (duration > 0 && now - lastProgress > 80) {
+        lastProgress = now;
+        onProgress(Math.min(1, Math.max(0, timestamp / duration)), times.length);
       }
+      tr = performance.now();
     }
     throwIfAborted(signal);
     const n = times.length;
     if (n === 0) throw new Error("Decoder produced no frames");
+    const st = readStats;
+    console.info(`[motion] analysed ${n} frames in ${((performance.now() - tStart) / 1000).toFixed(1)} s at ${aw}x${ah}: tracking ${(trackMs / n).toFixed(1)} ms/frame, waiting for frames ${(readMs / n).toFixed(1)} ms/frame (reading ${(st.readMs / Math.max(1, st.frames)).toFixed(1)} ms/frame (copy ${(st.copyMs / Math.max(1, st.frames)).toFixed(1)}) via ${st.route}${st.threaded ? " on the frame worker" : ""}; calibration planes ${st.planesMs.toFixed(1)} vs canvas ${st.canvasMs.toFixed(1)} ms, diff ${st.meanDiff.toFixed(2)})`);
     onProgress(1, n);
     return {
       width,

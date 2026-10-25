@@ -317,17 +317,82 @@ export class Pyramid {
     this.tmp = new Float32Array(w * h);
   }
 
+  /** Scratch for the downsampling passes (w x h floats). */
+  get scratch(): Float32Array {
+    return this.tmp;
+  }
+
   /** Fills every level from a (w x h) gray image. */
   build(gray: Float32Array): void {
-    const l0 = this.levels[0];
+    this.levels[0].img.set(gray);
+    buildPyramid(this.levels, this.tmp);
+  }
+}
+
+/** Gradients of level 0 (already filled), then every coarser level from the one above. */
+function buildPyramid(levels: PyramidLevel[], tmp: Float32Array): void {
+  gradients(levels[0]);
+  for (let i = 1; i < levels.length; i++) {
+    const src = levels[i - 1];
+    const dst = levels[i];
+    downsample(src.img, src.w, src.h, dst.img, dst.w, dst.h, tmp);
+    gradients(dst);
+  }
+}
+
+/** What the tracker reads of a frame's pyramid. */
+export type PyramidLike = { readonly levels: PyramidLevel[] };
+
+/**
+ * A frame's image work done ahead of tracking (possibly on another thread):
+ * CLAHE, the pyramid with gradients, and the Shi-Tomasi response of level 1.
+ * Everything that depends only on the frame, so MotionTracker.stepPrepared
+ * gives exactly what stepGray gives on the same gray frame.
+ */
+export type PreparedFrame = { levels: PyramidLevel[]; response: Float32Array };
+
+/** The tracker options a frame's preparation depends on. */
+export type PrepOptions = Pick<TrackerOptions, "levels" | "claheClip" | "claheTiles">;
+
+export function prepOptions(options: Partial<TrackerOptions> = {}): PrepOptions {
+  const o = { ...DEFAULT_TRACKER_OPTIONS, ...options };
+  return { levels: o.levels, claheClip: o.claheClip, claheTiles: o.claheTiles };
+}
+
+/** Prepares frames (see PreparedFrame) into reusable or fresh buffers. */
+export class FramePrep {
+  readonly width: number;
+  readonly height: number;
+  private readonly opts: PrepOptions;
+  private readonly pyramid: Pyramid;
+  private readonly rowA: Float32Array;
+  private readonly rowB: Float32Array;
+  private readonly rowC: Float32Array;
+
+  constructor(width: number, height: number, opts: PrepOptions) {
+    this.width = width;
+    this.height = height;
+    this.opts = opts;
+    this.pyramid = new Pyramid(width, height, opts.levels);
+    this.rowA = new Float32Array(3 * width);
+    this.rowB = new Float32Array(3 * width);
+    this.rowC = new Float32Array(3 * width);
+  }
+
+  /** Fresh buffers shaped for this size (to fill with prepare()). */
+  allocate(): PreparedFrame {
+    const levels = this.pyramid.levels.map((l) => ({ w: l.w, h: l.h, img: new Float32Array(l.w * l.h), gx: new Float32Array(l.w * l.h), gy: new Float32Array(l.w * l.h) }));
+    return { levels, response: new Float32Array(levels[Math.min(1, levels.length - 1)].w * levels[Math.min(1, levels.length - 1)].h) };
+  }
+
+  /** Prepares a gray frame (0..255, width x height; left untouched) into `into`. */
+  prepare(gray: Float32Array, into: PreparedFrame): PreparedFrame {
+    const l0 = into.levels[0];
     l0.img.set(gray);
-    gradients(l0);
-    for (let i = 1; i < this.levels.length; i++) {
-      const src = this.levels[i - 1];
-      const dst = this.levels[i];
-      downsample(src.img, src.w, src.h, dst.img, dst.w, dst.h, this.tmp);
-      gradients(dst);
-    }
+    if (this.opts.claheClip > 0) clahe(l0.img, this.width, this.height, this.opts.claheTiles, this.opts.claheClip);
+    buildPyramid(into.levels, this.pyramid.scratch);
+    shiTomasi(into.levels[Math.min(1, into.levels.length - 1)], into.response, this.rowA, this.rowB, this.rowC);
+    return into;
   }
 }
 
@@ -358,7 +423,7 @@ export class LucasKanade {
   }
 
   /** Full pyramid track from `prev` to `next`, starting at (x, y) with no prior. */
-  track(prev: Pyramid, next: Pyramid, x: number, y: number, out: Float32Array, o: number): boolean {
+  track(prev: PyramidLike, next: PyramidLike, x: number, y: number, out: Float32Array, o: number): boolean {
     const top = prev.levels.length - 1;
     let dx = 0;
     let dy = 0;
@@ -378,7 +443,7 @@ export class LucasKanade {
    * Finest-level-only refinement from a known displacement: used for the
    * backward check, where the forward result is already a good start.
    */
-  refine(prev: Pyramid, next: Pyramid, x: number, y: number, dx: number, dy: number, out: Float32Array, o: number): boolean {
+  refine(prev: PyramidLike, next: PyramidLike, x: number, y: number, dx: number, dy: number, out: Float32Array, o: number): boolean {
     const r = this.trackLevel(prev.levels[0], next.levels[0], x, y, dx, dy);
     if (r === null) return false;
     out[o] = x + r[0];
@@ -580,10 +645,14 @@ export class MotionTracker {
   private readonly cellW: number;
   private readonly cellH: number;
   private readonly capacity: number;
-  private prev: Pyramid;
-  private next: Pyramid;
+  /** The tracker's own pyramids (stepGray alternates between them). */
+  private readonly own: [Pyramid, Pyramid];
+  private prev: PyramidLike;
+  private next: PyramidLike;
   private readonly gray: Float32Array;
   private readonly response: Float32Array;
+  /** Response map replenish() reads: `response`, or a prepared frame's. */
+  private activeResponse: Float32Array;
   private readonly rowA: Float32Array;
   private readonly rowB: Float32Array;
   private readonly rowC: Float32Array;
@@ -630,10 +699,12 @@ export class MotionTracker {
     this.cellW = width / this.cellsX;
     this.cellH = height / this.cellsY;
     this.capacity = this.cellsX * this.cellsY * this.opts.perCell;
-    this.prev = new Pyramid(width, height, this.opts.levels);
-    this.next = new Pyramid(width, height, this.opts.levels);
+    this.own = [new Pyramid(width, height, this.opts.levels), new Pyramid(width, height, this.opts.levels)];
+    this.prev = this.own[0];
+    this.next = this.own[1];
     this.gray = new Float32Array(width * height);
     this.response = new Float32Array(width * height);
+    this.activeResponse = this.response;
     this.rowA = new Float32Array(3 * width);
     this.rowB = new Float32Array(3 * width);
     this.rowC = new Float32Array(3 * width);
@@ -693,20 +764,33 @@ export class MotionTracker {
   }
 
   stepGray(gray: Float32Array): FrameMotion {
-    this.matchCount = 0;
     if (gray !== this.gray) this.gray.set(gray);
     if (this.opts.claheClip > 0) clahe(this.gray, this.width, this.height, this.opts.claheTiles, this.opts.claheClip);
-    this.next.build(this.gray);
+    const target = this.prev === this.own[0] ? this.own[1] : this.own[0];
+    target.build(this.gray);
+    return this.advance(target, null);
+  }
+
+  /**
+   * Same as stepGray on the frame `frame` was prepared from (FramePrep with
+   * this tracker's prepOptions). The tracker keeps reading `frame` as the
+   * previous frame until the next step: don't reuse its buffers before then.
+   */
+  stepPrepared(frame: PreparedFrame): FrameMotion {
+    return this.advance(frame, frame.response);
+  }
+
+  private advance(next: PyramidLike, response: Float32Array | null): FrameMotion {
+    this.matchCount = 0;
+    this.next = next;
     let motion: FrameMotion;
     if (!this.hasPrev) {
       motion = { ...IDENTITY, model: "identity", tracked: 0, inliers: 0, rms: 0, homography: null, homographyState: "none", homographyGain: 0 };
     } else {
       motion = this.estimate();
     }
-    this.replenish();
-    const swap = this.prev;
-    this.prev = this.next;
-    this.next = swap;
+    this.replenish(response);
+    this.prev = next;
     this.hasPrev = true;
     this.previousMotion = motion;
     return motion;
@@ -1018,8 +1102,8 @@ export class MotionTracker {
    * "a textured spot" — the 15x15 window at level 0 does not care whether the
    * corner sits a pixel off its centre.
    */
-  private replenish(): void {
-    const { opts, cellCount, response } = this;
+  private replenish(prepared: Float32Array | null): void {
+    const { opts, cellCount } = this;
     const level = this.next.levels[1];
     const lw = level.w;
     const margin = Math.ceil((opts.halfWindow + 2) / 2);
@@ -1029,7 +1113,12 @@ export class MotionTracker {
     let needed = false;
     for (let c = 0; c < cellCount.length; c++) if (cellCount[c] < opts.perCell) needed = true;
     if (!needed || this.n >= this.capacity) return;
-    shiTomasi(level, response, this.rowA, this.rowB, this.rowC);
+    if (prepared) this.activeResponse = prepared;
+    else {
+      shiTomasi(level, this.response, this.rowA, this.rowB, this.rowC);
+      this.activeResponse = this.response;
+    }
+    const response = this.activeResponse;
     const cand = this.candidates;
     for (let cy = 0; cy < this.cellsY; cy++) {
       for (let cx = 0; cx < this.cellsX; cx++) {
@@ -1111,7 +1200,7 @@ export class MotionTracker {
 
   private isLocalMax(level: PyramidLevel, x: number, y: number, v: number): boolean {
     const w = level.w;
-    const r = this.response;
+    const r = this.activeResponse;
     for (let j = -1; j <= 1; j++) {
       for (let i = -1; i <= 1; i++) {
         if (i === 0 && j === 0) continue;
