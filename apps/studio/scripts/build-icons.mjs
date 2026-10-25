@@ -7,7 +7,7 @@ import sharp from "sharp";
 const here = dirname(fileURLToPath(import.meta.url));
 const pub = resolve(here, "../public");
 const svg = readFileSync(resolve(pub, "icon.svg"));
-const BG = { r: 8, g: 9, b: 11, alpha: 1 };
+const BG = { r: 10, g: 10, b: 11, alpha: 1 };
 
 const targets = [
   { name: "icon-192.png", size: 192, pad: 0 },

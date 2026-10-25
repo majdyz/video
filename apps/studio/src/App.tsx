@@ -84,13 +84,14 @@ export default function App() {
     void studio.open(f);
   };
   const aspect = s.info ? s.info.displayW / s.info.displayH : null;
+  const pill = s.busy ?? (tools.stabilise.enabled && !exporting && (s.stab.state === "analysing" || s.stab.state === "solving")
+    ? (s.stab.state === "solving" ? "Planning a smooth path…" : `Analysing motion ${Math.round(s.stab.progress * 100)}%`)
+    : null);
 
   return (
-    <div className={`app phase-${s.phase}`}>
+    <div className={`app phase-${s.phase}`} data-stab={s.stab.state} data-export={s.exp.state}>
       <header className="topbar">
-        <div className="wordmark" aria-label={BRAND.name}>
-          {BRAND.wordmark[0]}<b>{BRAND.wordmark[1]}</b>
-        </div>
+        <div className="wordmark">{BRAND.name}</div>
         <div className="topbar__actions">
           {s.phase !== "empty" && (
             <IconButton label="Open another clip" onClick={() => fileInputRef.current?.click()} disabled={exporting}>
@@ -118,8 +119,8 @@ export default function App() {
             showPlayHint={ready && !s.busy && !exporting}
           >
             {s.phase === "empty" && <EmptyState onFile={openFile} onSample={() => { setSplit(0.5); void studio.openUrl(`${import.meta.env.BASE_URL}samples/reef.mp4`, "reef-sample.mp4"); }} busy={s.busy} />}
-            {s.phase !== "empty" && s.busy && (
-              <div className="pill" role="status"><span className="pill__dot" />{s.busy}</div>
+            {s.phase !== "empty" && pill && (
+              <div className="pill" role="status"><span className="pill__dot" />{pill}</div>
             )}
           </Stage>
           {s.phase !== "empty" && (
@@ -149,6 +150,27 @@ export default function App() {
             <div className="controls__panel">
               <ToolPanel tool={tab} tools={tools} setTools={setTools} stab={s.stab} info={s.info} colourProfiled={s.colourProfiled} disabled={exporting || !ready} onAdvanced={() => setAdvOpen(true)} />
             </div>
+            <section className="chain" aria-label="Processing order">
+              <h4 className="chain__label">Processing order</h4>
+              <ol>
+                {(["dewarp", "stabilise", "colour"] as ToolId[]).map((id) => {
+                  const Icon = TOOL_ICON[id];
+                  const on = tools[id].enabled;
+                  const note = !on ? "Off"
+                    : id === "stabilise" ? (s.stab.state === "ready" ? "Ready" : s.stab.state === "error" ? "Failed" : s.stab.state === "off" ? "Waiting" : `${Math.round(s.stab.progress * 100)}%`)
+                    : id === "colour" ? (s.colourProfiled ? "Scene-locked" : "Analysing") : "On";
+                  return (
+                    <li key={id} className={on ? "is-on" : ""}>
+                      <button type="button" onClick={() => setTab(id)} className={tab === id ? "is-current" : ""}>
+                        <span className="chain__icon"><Icon size={16} /></span>
+                        <span className="chain__name">{TOOL_LABEL[id]}</span>
+                        <span className="chain__note">{note}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ol>
+            </section>
             <button type="button" className="btn btn--primary export-btn" onClick={() => setExportOpen(true)} disabled={!ready || !s.canExport}>
               <IconExport size={18} />
               <span>Export</span>

@@ -1,21 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <defs>
-    <radialGradient id="bg" cx="0.5" cy="0.32" r="0.8">
-      <stop offset="0" stop-color="#14181d"/>
-      <stop offset="1" stop-color="#08090b"/>
-    </radialGradient>
-    <linearGradient id="lens" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#7ff0ff"/>
-      <stop offset="1" stop-color="#3ee6ff"/>
-    </linearGradient>
-    <clipPath id="below"><rect x="0" y="262" width="512" height="250"/></clipPath>
+    <clipPath id="lens"><circle cx="256" cy="256" r="121"/></clipPath>
   </defs>
-  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-  <!-- the lens: open ring, a waterline through it, the corrected half filled -->
-  <circle cx="256" cy="256" r="136" fill="none" stroke="url(#lens)" stroke-width="30"/>
-  <g clip-path="url(#below)">
-    <circle cx="256" cy="256" r="100" fill="#3ee6ff" opacity="0.18"/>
+  <rect width="512" height="512" rx="112" fill="#0a0a0b"/>
+  <!-- a lens with a waterline: the lower half is the corrected picture -->
+  <g clip-path="url(#lens)">
+    <path d="M120 270c34-22 68-22 102 0s68 22 102 0 52-20 68-12V420H120Z" fill="#2c2c31"/>
   </g>
-  <path d="M120 262c34-22 68-22 102 0s68 22 102 0 52-20 68-12" fill="none" stroke="#3ee6ff" stroke-width="18" stroke-linecap="round"/>
-  <circle cx="318" cy="196" r="14" fill="#f2f4f7"/>
+  <circle cx="256" cy="256" r="136" fill="none" stroke="#e9ebee" stroke-width="26"/>
+  <path d="M120 270c34-22 68-22 102 0s68 22 102 0 52-20 68-12" fill="none" stroke="#e9ebee" stroke-width="14" stroke-linecap="round" clip-path="url(#lens)"/>
 </svg>

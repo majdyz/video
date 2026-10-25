@@ -110,6 +110,11 @@ default in Oct 2026.
   and motion live. Three looks are defined (`abyss` default, `coral`,
   `depth`) and switchable in the About sheet; a new direction is one more
   `[data-theme]` block.
+* Restraint rules (user feedback): the wordmark is one plain colour
+  (`BRAND.name` in `src/brand.ts` is a placeholder); the accent appears
+  only on Export, the active slider fill and focus rings; selection,
+  switches, values and icons are neutral greys; no glows, glass blur,
+  gradients or all-caps tracked labels.
 * Fonts are self-hosted via fontsource (bundled by Vite), no runtime
   network fetch: Space Grotesk (wordmark/headings) and Inter (UI) for
   Abyss, Manrope and Fraunces for the alternatives.

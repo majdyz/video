@@ -29,16 +29,16 @@ writeFileSync(
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<meta name="theme-color" content="#08090b" />
+<meta name="theme-color" content="#0a0a0b" />
 <title>deepfix</title>
 <meta http-equiv="refresh" content="0; url=./studio/" />
 <link rel="canonical" href="./studio/" />
 <script>location.replace("./studio/" + location.search + location.hash);</script>
 <style>
-  html, body { margin: 0; height: 100%; background: #08090b; color: #f2f4f7; font: 15px/1.5 -apple-system, system-ui, sans-serif; }
+  html, body { margin: 0; height: 100%; background: #0a0a0b; color: #ededf0; font: 15px/1.5 -apple-system, system-ui, sans-serif; }
   main { min-height: 100%; display: grid; place-content: center; gap: 12px; text-align: center; padding: 24px; }
-  a { color: #3ee6ff; text-decoration: none; }
-  small { color: #7d8590; }
+  a { color: #ededf0; text-underline-offset: 3px; text-decoration-color: rgba(255,255,255,.25); }
+  small { color: #76767e; }
 </style>
 </head>
 <body>

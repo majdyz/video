@@ -557,8 +557,7 @@ export class Studio {
     if (!this.analysis || !this.path) return null;
     const before = rawMotion(this.analysis).jitterRms;
     const after = residualMotion(this.analysis, this.path).jitterRms;
-    const pct = before > 0 ? Math.max(0, Math.round((1 - after / before) * 100)) : 0;
-    return `Shake −${pct}% · crop ${Math.round((this.path.stats.maxUsedZoom - 1) * 100)}%`;
+    return `Jitter ${before.toFixed(1)} → ${after.toFixed(1)} px · zoom ${this.path.stats.maxUsedZoom.toFixed(2)}×`;
   }
 
   private scheduleSolve(): void {

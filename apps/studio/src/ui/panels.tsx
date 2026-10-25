@@ -53,7 +53,7 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, d
     else if (stab.state === "error") status = <span className="status-bad">Analysis failed: {stab.message}</span>;
   }
   if (tool === "colour" && enabled) status = colourProfiled ? <span className="status-good">Scene-locked to this clip</span> : <span className="status-live">Reading the water…</span>;
-  if (tool === "dewarp" && enabled && info && profileAspectMismatch(tools.dewarp.profile, info.codedW, info.codedH)) status = <span className="status-warn">This lens profile expects a different frame shape</span>;
+  if (tool === "dewarp" && enabled && info && profileAspectMismatch(tools.dewarp.profile, info.codedW, info.codedH)) status = <span className="status-warn">Calibrated for a different aspect ratio</span>;
 
   return (
     <div className={`panel${enabled ? "" : " is-off"}`}>

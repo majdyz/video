@@ -3,7 +3,7 @@ import type { ExportStatus, Studio } from "../pipeline/studio.ts";
 import type { ClipInfo } from "../pipeline/probe.ts";
 import { processingChain, type ToolsState } from "../pipeline/tools.ts";
 import { Sheet } from "./sheet";
-import { IconCheck, IconDownload, IconExport, IconShare, IconWarning } from "./icons";
+import { IconDownload, IconExport, IconShare, IconWarning } from "./icons";
 import { formatTime } from "./timeline";
 
 function fmtBytes(n: number): string {
@@ -89,10 +89,6 @@ export function ExportSheet({
               <IconExport size={22} />
             </div>
           )}
-          {running && <div className="export__scan" style={{ left: `${pct}%` }} />}
-          {exp.state === "done" && (
-            <div className="export__badge"><IconCheck size={16} /> Rendered</div>
-          )}
         </div>
 
         {exp.state === "idle" && (
@@ -133,11 +129,11 @@ export function ExportSheet({
             </dl>
             <div className="export__actions">
               {canShareFiles() && (
-                <button type="button" className="btn btn--primary" onClick={() => void share()}>
+                <button type="button" className="btn btn--strong" onClick={() => void share()}>
                   <IconShare size={18} /> Share
                 </button>
               )}
-              <button type="button" className={`btn ${canShareFiles() ? "btn--secondary" : "btn--primary"}`} onClick={save}>
+              <button type="button" className={`btn ${canShareFiles() ? "btn--secondary" : "btn--strong"}`} onClick={save}>
                 <IconDownload size={18} /> Save
               </button>
             </div>
@@ -148,7 +144,7 @@ export function ExportSheet({
         {exp.state === "error" && (
           <>
             <div className="export__error"><IconWarning size={18} /> <span>{exp.message}</span></div>
-            <button type="button" className="btn btn--primary btn--block" onClick={() => void studio.exportVideo()}>Try again</button>
+            <button type="button" className="btn btn--strong btn--block" onClick={() => void studio.exportVideo()}>Try again</button>
           </>
         )}
       </div>

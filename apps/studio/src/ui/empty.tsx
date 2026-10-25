@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
-import { IconColour, IconDewarp, IconFilm, IconPlus, IconStabilise } from "./icons";
+import { IconFilm } from "./icons";
 
-/** First run: one big target to open a clip, plus a sample to try. */
+/** No clip yet: the stage area itself is the drop target, with one button to open a file. */
 export function EmptyState({ onFile, onSample, busy }: { onFile: (f: File) => void; onSample: () => void; busy: string | null }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
@@ -17,22 +17,18 @@ export function EmptyState({ onFile, onSample, busy }: { onFile: (f: File) => vo
         if (f) onFile(f);
       }}
     >
-      <div className="empty__glow" aria-hidden="true" />
-      <div className="empty__inner">
-        <button type="button" className="empty__target" onClick={() => inputRef.current?.click()} disabled={!!busy}>
-          <span className="empty__ring"><IconFilm size={30} /></span>
-          <span className="empty__title">{busy ?? "Open a dive clip"}</span>
-          <span className="empty__sub">MP4 or MOV, up to 4K. Everything stays on this device.</span>
-          <span className="btn btn--primary empty__cta"><IconPlus size={18} /> Choose video</span>
-        </button>
-        <button type="button" className="btn btn--quiet empty__sample" onClick={onSample} disabled={!!busy}>
-          No clip handy? Try a sample
-        </button>
-        <ul className="empty__tools" aria-label="What it does">
-          <li><IconColour size={16} /><span><b>Colour</b> restores reds the water took</span></li>
-          <li><IconStabilise size={16} /><span><b>Stabilise</b> smooths swimming shots</span></li>
-          <li><IconDewarp size={16} /><span><b>Dewarp</b> straightens action-cam fisheye</span></li>
-        </ul>
+      <div className="empty__drop">
+        <IconFilm size={28} className="empty__icon" />
+        <h2 className="empty__title">{busy ?? "No clip open"}</h2>
+        <p className="empty__sub">Open an MP4 or MOV from your camera roll, or drop it here. Processing stays on this device.</p>
+        <div className="empty__actions">
+          <button type="button" className="btn btn--strong" onClick={() => inputRef.current?.click()} disabled={!!busy}>
+            Open video
+          </button>
+          <button type="button" className="btn btn--quiet empty__sample" onClick={onSample} disabled={!!busy}>
+            Use sample clip
+          </button>
+        </div>
       </div>
       <input
         ref={inputRef}
