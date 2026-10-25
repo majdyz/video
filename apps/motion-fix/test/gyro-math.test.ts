@@ -13,7 +13,7 @@ import {
   WATER_INDEX,
 } from "../src/lib/gyro/gyro-stabilize.ts";
 import { fitFisheye, maxTheta, project, refractIn, refractOut, thetaD, thetaFromD, unproject, type LensModel } from "../src/lib/gyro/lens.ts";
-import { checkMedium, type MatchPair } from "../src/lib/gyro/medium.ts";
+import { applyGyroCalibration, calibrateRawGyro, checkMedium, type MatchPair } from "../src/lib/gyro/medium.ts";
 import { makeRng } from "./synth.ts";
 import { qangle, qat, qconj, qexp, qlog, qmat, qmul, qrot, qslerp, sampleOrientation, type Quat, type Vec3 } from "../src/lib/gyro/quat.ts";
 import { defaultGoProOrin, fisheyeFromGoProPoly, GOPRO_WIDE_K, integrateGoProGyro, type CameraMotion } from "../src/lib/gyro/telemetry.ts";
@@ -311,6 +311,43 @@ const shake = (t: number): Vec3 => [
   const qa = qat(a.quats, n - 1), qb = qat(b.quats, n - 1);
   for (let k = 0; k < 4; k++) close(qa[k], qb[k], 1e-12, "HERO6 default = YxZ");
   close(qangle(qa), 0.5, 1e-9, "integrated angle");
+}
+// Raw-gyro self-calibration: telemetry 30 ms late and a focal guessed 12 % long are recovered from tracked points.
+{
+  const fps = 30;
+  const sway = (t: number): Vec3 => [4 * deg * Math.sin(2 * Math.PI * 1.1 * t), 6 * deg * Math.sin(2 * Math.PI * 0.7 * t + 1), 2 * deg * Math.sin(2 * Math.PI * 1.9 * t)];
+  const truth = synthMotion(300, fps, sway, hero);
+  const rng = makeRng(9);
+  const pairs: MatchPair[] = [];
+  for (let k = 0; k < 40; k++) {
+    const t0 = 0.3 + k * 0.2;
+    const t1 = t0 + 1 / fps;
+    const m0 = qmat(sampleOrientation(truth.times, truth.quats, t0));
+    const m1 = qmat(sampleOrientation(truth.times, truth.quats, t1));
+    const px: number[] = [], py: number[] = [], qx: number[] = [], qy: number[] = [];
+    for (let i = 0; i < 30; i++) {
+      const x = 100 + rng() * 1720, y = 80 + rng() * 920;
+      const r = unproject(hero, x, y);
+      const w = [m0[0] * r[0] + m0[1] * r[1] + m0[2] * r[2], m0[3] * r[0] + m0[4] * r[1] + m0[5] * r[2], m0[6] * r[0] + m0[7] * r[1] + m0[8] * r[2]];
+      const c: Vec3 = [m1[0] * w[0] + m1[3] * w[1] + m1[6] * w[2], m1[1] * w[0] + m1[4] * w[1] + m1[7] * w[2], m1[2] * w[0] + m1[5] * w[1] + m1[8] * w[2]];
+      const p = project(hero, c);
+      if (!Number.isFinite(p[0])) continue;
+      px.push(x); py.push(y); qx.push(p[0] + (rng() - 0.5) * 0.6); qy.push(p[1] + (rng() - 0.5) * 0.6);
+    }
+    pairs.push({ t0, t1, px: Float32Array.from(px), py: Float32Array.from(py), qx: Float32Array.from(qx), qy: Float32Array.from(qy) });
+  }
+  // What a raw-gyro file gives: samples timed 30 ms late, a focal guessed 1/0.9 too long.
+  const off: CameraMotion = { ...truth, times: truth.times.map((t) => t + 0.03), lens: { ...hero, fx: hero.fx / 0.9, fy: hero.fy / 0.9 }, notes: ["orientation integrated from the raw gyro"] };
+  const cal = calibrateRawGyro(off, pairs)!;
+  assert.ok(cal, "calibration found");
+  close(cal.offsetMs, 30, 3, "offset recovered (ms)");
+  close(cal.focalScale, 0.9, 0.051, "focal recovered");
+  assert.ok(cal.errAfter < 0.5 * cal.errBefore, `error ${cal.errBefore.toFixed(2)} -> ${cal.errAfter.toFixed(2)} px`);
+  applyGyroCalibration(off, cal);
+  close(off.lens.fx, hero.fx, 0.06 * hero.fx, "lens after calibration");
+  console.log(`raw-gyro self-calibration: ${cal.offsetMs} ms, focal ${cal.focalScale}x, ${cal.errBefore.toFixed(2)} -> ${cal.errAfter.toFixed(2)} px`);
+  // A clip that is already right stays untouched.
+  assert.equal(calibrateRawGyro({ ...truth, notes: ["orientation integrated from the raw gyro"] }, pairs), null, "no calibration when nothing to gain");
 }
 console.log("gyro maths tests passed");
 

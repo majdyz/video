@@ -34,7 +34,9 @@ import { DEFAULT_GATE, gateResidual, jitter2, NO_HALF, smoothPath1D, TRANSLATION
 export const HYBRID_MIN_WANDER = 1;
 export const HYBRID_MIN_JITTER = 0.15;
 /** Largest ratio between how far the upper and the lower half of the picture move (deeper scenes stay gyro-only). */
-export const HYBRID_MAX_DEPTH_CONTRAST = 1.6;
+export const HYBRID_MAX_DEPTH_CONTRAST = 2;
+/** Largest share of frames with a still group contradicting the fit (moving subjects). */
+export const HYBRID_MAX_MOVING = 0.1;
 
 export type GyroParams = {
   /** 0 = follow the camera, 1 = heaviest smoothing. */
@@ -613,6 +615,11 @@ function applyHybrid(geo: Geometry, virt: Float64Array, times: Float64Array, fps
   const base = { acceptedFrac: g.acceptedFrac, rejected: g.rejected, jitterBefore: 0, jitterAfter: 0, wanderBefore: 0, wanderAfter: 0, maxShift: 0, limitedFrames: 0 };
   if (n < 8) return { ...base, applied: false, reason: "clip too short" };
   if (g.acceptedFrac < 0.3) return { ...base, applied: false, reason: `picture too unreliable (${Math.round(g.acceptedFrac * 100)}% of frames usable)` };
+  // Frames where a sizeable group of points stays put while the fit moves: people, fish or
+  // particles moving against the scene. When that is common the fit follows them as often
+  // as the camera (a public HERO6 indoor clip: 15 % such frames, the hybrid output shook
+  // more than gyro-only); 0-9 % on the clips where it helps.
+  if (g.rejected.still > HYBRID_MAX_MOVING * (n - 1)) return { ...base, applied: false, reason: `moving subjects in ${Math.round((100 * g.rejected.still) / (n - 1))}% of frames` };
   const u = residual.unitPx;
   // Cumulative residual (analysis px at the centre): where the scene has drifted in the gyro-stabilised view.
   const cx = new Float64Array(n);

@@ -4,7 +4,7 @@
 
 import { ALL_FORMATS, BlobSource, Input, VideoSampleSink } from "mediabunny";
 import { analysisSize, greenChannel } from "../tracker.ts";
-import { checkMedium, checkWindows, PairCollector } from "./medium.ts";
+import { checkAndCalibrate, checkWindows, PairCollector } from "./medium.ts";
 import type { CameraMotion, MediumCheck } from "./telemetry.ts";
 
 export async function checkPicture(file: File, motion: CameraMotion, signal?: AbortSignal): Promise<MediumCheck | null> {
@@ -36,7 +36,8 @@ export async function checkPicture(file: File, motion: CameraMotion, signal?: Ab
         }
       }
     }
-    return checkMedium(motion, collector.pairs);
+    // Raw-gyro GoPros also get their time offset and focal fitted to the picture (mutates motion).
+    return checkAndCalibrate(motion, collector.pairs);
   } finally {
     input.dispose();
   }

@@ -1,0 +1,70 @@
+{
+  "_about": "Public camera originals with motion telemetry used to validate the gyro / hybrid stabiliser and the Studio's dewarp (25 Oct 2026). References only: the clips are not committed (licences unstated or attribution-only). Run with scripts/hybrid-cpu.ts and apps/studio/scripts/dewarp-check.ts.",
+  "clips": [
+    {
+      "id": "gopr0507-uwh",
+      "scene": "underwater, pool hockey (scrum, swimmers, bubbles)",
+      "camera": "GoPro HERO5 Black, raw GYRO, 1920x1080 29.97",
+      "url": "https://archive.org/download/GOPR0507/GOPR0507.MP4",
+      "page": "https://archive.org/details/GOPR0507",
+      "licence": "none stated",
+      "notes": "same item also holds GOPR0372 / GOPR0376 (1920x1440 59.94, pool, caustics); 90 more originals"
+    },
+    {
+      "id": "utep-dash-r6",
+      "scene": "car dash mount, campus road",
+      "camera": "GoPro HERO8 Black, CORI/IORI, HyperSmooth High, 1920x1080 59.94",
+      "url": "https://zenodo.org/api/records/6780102/files/GoPro%20-%202021-05-25.zip/content",
+      "page": "https://zenodo.org/records/6780102",
+      "licence": "CC-BY-4.0",
+      "notes": "member R6 of an 11.5 GB zip (fetched by HTTP range); R1-R5, R7 are more dash clips"
+    },
+    {
+      "id": "gyroflow-hero8",
+      "scene": "walk along a shoreline fence",
+      "camera": "GoPro HERO8 Black, 3840x2160 59.94",
+      "url": "https://drive.google.com/uc?export=download&id=1hGQGEijGEidf01FPfgfQ4GMTxHKihZ9M",
+      "page": "https://docs.gyroflow.xyz/app/readme/test-files.md",
+      "licence": "none stated (Gyroflow test files)",
+      "notes": "4 GB original; tests used a 90 s video+gpmd remux (camera tags lost, so no dewarp detection)"
+    },
+    {
+      "id": "gyroflow-hero6",
+      "scene": "following a hiker on a mountain trail",
+      "camera": "GoPro HERO6 Black, raw GYRO (YxZ), 2704x2028 29.97",
+      "url": "https://drive.google.com/uc?export=download&id=1_gEzRlw9B38FEf3xdxxEsS9G4v_kavNX",
+      "page": "https://docs.gyroflow.xyz/app/readme/test-files.md",
+      "licence": "none stated (Gyroflow test files)"
+    },
+    {
+      "id": "gyroflow-hero5-session",
+      "scene": "mountain bike POV, forest singletrack",
+      "camera": "GoPro HERO5 Session, raw GYRO, 3840x2160 29.97",
+      "url": "https://drive.google.com/uc?export=download&id=1gSEu87FcxHYFCk9FSIWPasZdX6Pa8QxC",
+      "page": "https://docs.gyroflow.xyz/app/readme/test-files.md",
+      "licence": "none stated (Gyroflow test files)",
+      "notes": "no axis order explains the picture (vibration / blur); no camera tags for dewarp"
+    },
+    {
+      "id": "gyroflow-hero10",
+      "scene": "handheld walk past a building and lawn (HyperSmooth off and High variants)",
+      "camera": "GoPro HERO10 Black, CORI/IORI, 1920x1080 59.94",
+      "page": "https://docs.gyroflow.xyz/app/readme/test-files.md",
+      "licence": "none stated (Gyroflow test files)"
+    },
+    {
+      "id": "gyroflow-avata",
+      "scene": "FPV drone flight over terrain",
+      "camera": "DJI Avata (FC8183), djmd with in-file lens",
+      "page": "https://docs.gyroflow.xyz/app/readme/test-files.md",
+      "licence": "none stated (Gyroflow test files)"
+    },
+    {
+      "id": "gpmf-parser-samples",
+      "scene": "short walks (hero5, hero7, hero8, max), indoor handheld (hero6)",
+      "camera": "GoPro HERO5-8 / MAX, 848x480",
+      "page": "https://github.com/gopro/gpmf-parser/tree/main/samples",
+      "licence": "per the gpmf-parser repository (Apache-2.0 / MIT)"
+    }
+  ]
+}

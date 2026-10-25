@@ -14,7 +14,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { computeGyroPlan, frameTimesOf, gyroWarpFnAtTime, DEFAULT_GYRO_PARAMS, WATER_INDEX, type GyroPlan } from "../src/lib/gyro/gyro-stabilize.ts";
 import { ResidualCollector, type ResidualMotion } from "../src/lib/gyro/hybrid.ts";
-import { checkMedium, checkWindows, PairCollector } from "../src/lib/gyro/medium.ts";
+import { checkAndCalibrate, checkWindows, PairCollector } from "../src/lib/gyro/medium.ts";
 import type { RangeReader } from "../src/lib/gyro/mp4-index.ts";
 import { probeTelemetry, type CameraMotion } from "../src/lib/gyro/telemetry.ts";
 import { pinholeFromFov } from "../src/lib/gyro/lens.ts";
@@ -172,7 +172,8 @@ const tg = new Float32Array(track.w * track.h);
       collector.push(times[t], tg);
     }
   }
-  motion.medium = checkMedium(motion, collector.pairs);
+  motion.medium = checkAndCalibrate(motion, collector.pairs);
+  if (motion.notes.some((n) => /self-calibrated/.test(n))) console.log(`  ${motion.notes[motion.notes.length - 1]}`);
   const m = motion.medium;
   console.log(`  picture check: ${m.pairs} pairs, ${m.points} points; median error air ${m.errAir.toFixed(2)} px, water ${m.errWater.toFixed(2)} px, still ${m.errStill.toFixed(2)} px -> ${m.detected ?? "undecided"}${m.consistent ? "" : " (gyro does NOT match the picture)"}`);
 }
