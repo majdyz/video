@@ -46,7 +46,7 @@ export function Timeline({
   const [drag, setDrag] = useState<Drag | null>(null);
   const range = drag?.kind === "in" || drag?.kind === "out" ? drag.range : trim ?? fullRange(duration);
   const trimmed = isTrimmed(range, duration);
-  const shown = drag?.kind === "scrub" ? drag.t : drag?.kind === "in" ? range.start : drag?.kind === "out" ? range.end : time;
+  const shown = drag?.kind === "scrub" ? drag.t : drag?.kind === "in" ? range.start : drag?.kind === "out" ? range.end : Math.min(range.end, Math.max(range.start, time));
   const inPct = pctOf(range.start, duration);
   const outPct = pctOf(range.end, duration);
   const headPct = pctOf(shown, duration);
