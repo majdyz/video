@@ -167,6 +167,11 @@ final class FrameEncoderTests: XCTestCase {
 
 final class ExportHubTests: XCTestCase {
     func testFramesOverLoopback() async throws {
+        let logLock = NSLock()
+        var logs: [String] = []
+        LoopbackServer.debugLog = { line in logLock.lock(); logs.append(line); logLock.unlock() }
+        defer { LoopbackServer.debugLog = nil }
+        func dump() -> String { logLock.lock(); defer { logLock.unlock() }; return logs.joined(separator: "\n") }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("dive-hub-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let hub = ExportHub(exportsDir: root.appendingPathComponent("exports"), filesDir: root.appendingPathComponent("files"))
@@ -178,8 +183,13 @@ final class ExportHubTests: XCTestCase {
         // Wrong token.
         var bad = URLRequest(url: URL(string: "\(base)/ping?token=nope")!)
         bad.httpMethod = "GET"
-        let (_, badRes) = try await URLSession.shared.data(for: bad)
-        XCTAssertEqual((badRes as? HTTPURLResponse)?.statusCode, 403)
+        do {
+            let (_, badRes) = try await URLSession.shared.data(for: bad)
+            XCTAssertEqual((badRes as? HTTPURLResponse)?.statusCode, 403)
+        } catch {
+            XCTFail("first request failed: \(error)\nserver log:\n\(dump())")
+            throw error
+        }
 
         let out = hub.outputURL(for: "clip-fixed.mp4")
         try await hub.begin(id: "t1", config: EncoderConfig(output: out, width: 96, height: 64, fps: 25, bitrate: 500_000, durationSec: 0.4))

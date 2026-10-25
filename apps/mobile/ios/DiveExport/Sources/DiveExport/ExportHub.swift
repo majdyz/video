@@ -80,9 +80,13 @@ public final class ExportHub {
 
     public func begin(id: String, config: EncoderConfig) async throws {
         let encoder = try await FrameEncoder.make(config)
-        lock.lock()
-        sessions[id] = Session(id: id, encoder: encoder)
-        lock.unlock()
+        store(Session(id: id, encoder: encoder))
+    }
+
+    // Synchronous helper: NSLock.lock() is unavailable directly in async functions.
+    private func store(_ s: Session) {
+        lock.lock(); defer { lock.unlock() }
+        sessions[s.id] = s
     }
 
     public func finish(id: String) async throws -> EncoderResult {
