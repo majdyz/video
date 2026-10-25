@@ -24,7 +24,7 @@ import {
   type FrameAnalysis,
   type GradeParams,
   type Vec3,
- CONF_BRIGHT } from "./params.ts";
+ CONF_BRIGHT, HAZE_AUTO, hazeLiftRatio, hazeWeightOf } from "./params.ts";
 
 /** Thumbnail size the engine analyses at (upright, 16:9 box). */
 export const ANALYSIS_W = 256;
@@ -402,10 +402,30 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     const ew = Math.pow(exposure, WATER_EXPOSURE);
     for (let i = 0; i < n; i++) Y[i] = mixYAt(i, exposure, ew);
   }
-  const [black, white] = percentiles(Y, [0.004, 0.996]);
+  const [black] = percentiles(Y, [0.004]);
+  // Per-channel lifted black (the colour of the haze floor), same blend as Y.
+  const hazeFloor: Vec3 = [0, 0, 0];
+  {
+    const ew = Math.pow(exposure, WATER_EXPOSURE);
+    const ch = temp("hazeCh", n);
+    for (let c = 0; c < 3; c++) {
+      for (let i = 0; i < n; i++) {
+        const wv = waterLin[i * 3 + c] * ew;
+        ch[i] = wv + (J[i * 3 + c] * exposure - wv) * conf[i];
+      }
+      hazeFloor[c] = percentiles(ch, [0.004])[0];
+    }
+  }
+  // The default haze-lift removal (see HAZE_LIFT) runs before levels in the
+  // shader: levels and CLAHE are measured on the lifted-black-removed image.
+  {
+    const tLift = HAZE_AUTO.lift * hazeWeightOf(clamp01(black / HAZE_BLACK_REF)) * black;
+    if (tLift > 0) for (let i = 0; i < n; i++) Y[i] *= hazeLiftRatio(Y[i], tLift);
+  }
+  const [blackL, white] = percentiles(Y, [0.004, 0.996]);
   // A black point is a crush by definition; keep it tiny so a frame that
   // darkens under a smoothed, brighter-frame black point loses nothing.
-  const blackPt = Math.min(black, 0.015);
+  const blackPt = Math.min(blackL, 0.015);
   // Never stretch more than ~1.5×: a dim clip should stay dim-ish rather
   // than have its brighter patches shoved to white.
   const whitePt = Math.min(1.0, Math.max(white, blackPt + 0.2, LEVELS_WHITE_MIN));
@@ -441,6 +461,8 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     // references stretch hazy frames down to a real black point and leave
     // clear, contrasty frames alone).
     haze: clamp01(black / HAZE_BLACK_REF),
+    hazeBlack: black,
+    hazeFloor,
     achroma: ACHROMA,
     waterExposure: WATER_EXPOSURE,
     exposure,

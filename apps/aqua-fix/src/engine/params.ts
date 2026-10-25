@@ -48,11 +48,12 @@ export const SCENE_PRESETS: { id: ScenePreset; label: string; hint: string }[] =
   { id: "deep", label: "Deep blue", hint: "Deep or far, blue cast" },
   { id: "reef", label: "Shallow reef", hint: "Bright, close, little cast" },
 ];
-export const PRESET_ADJUST: Record<ScenePreset, { red: number; blue: number; redMax: number; dehaze: number; clarity: number; exposure: number }> = {
-  auto: { red: 1, blue: 1, redMax: 5, dehaze: 0, clarity: 0, exposure: 1 },
-  murky: { red: 1.1, blue: 1.2, redMax: 5, dehaze: 0.65, clarity: 0.35, exposure: 1.1 },
-  deep: { red: 1.5, blue: 0.9, redMax: 5, dehaze: 0.25, clarity: 0.15, exposure: 1.05 },
-  reef: { red: 1, blue: 1, redMax: 1.6, dehaze: 0, clarity: -0.1, exposure: 0.97 },
+export const PRESET_ADJUST: Record<ScenePreset, { red: number; blue: number; redMax: number; dehaze: number; clarity: number; exposure: number; hazeLift: number }> = {
+  auto: { red: 1, blue: 1, redMax: 5, dehaze: 0, clarity: 0, exposure: 1, hazeLift: 0 },
+  // Haze lift scales the frame's own lifted black, so a full lift on a clear frame does little.
+  murky: { red: 1.1, blue: 1.2, redMax: 5, dehaze: 0.65, clarity: 0.35, exposure: 1.1, hazeLift: 0.9 },
+  deep: { red: 1.5, blue: 0.9, redMax: 5, dehaze: 0.25, clarity: 0.15, exposure: 1.05, hazeLift: 0.5 },
+  reef: { red: 1, blue: 1, redMax: 1.6, dehaze: 0, clarity: -0.1, exposure: 0.97, hazeLift: 0 },
 };
 
 export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto" };
@@ -76,6 +77,12 @@ export type GradeSettings = {
    * raises it so murky far reef gains contrast and water goes darker.
    */
   dehaze: number;
+  /**
+   * Haze lift removal, 0..1: share of the frame's lifted black
+   * (GradeParams.hazeBlack) subtracted from every pixel's luminance with a
+   * soft toe (see hazeLiftRatio). 0 in clear frames.
+   */
+  hazeLift: number;
 };
 
 /**
@@ -99,6 +106,45 @@ export const PERSON_LUM = { lo: 0.06, hi: 0.18 };
 export const DEHAZE_LUM = { lo: 0.05, hi: 0.2 };
 
 /**
+ * Haze lift removal (murky water): a murky frame's darkest pixels sit far
+ * above black — the scattered light is added to everything. Subtracting a
+ * share t of that lifted black from each channel, (v − t)/(1 − t), restores
+ * the contrast the haze took. It is a function of the pixel's own colour and
+ * frame-wide constants only (no masks, no water/object split), so it can
+ * never draw an edge inside a garment; the soft toe keeps every channel at
+ * ≥ `floor` × its value, so dark pixels darken smoothly instead of clipping
+ * to black blobs. `soft` is the width of the smooth max between the toe and
+ * the line; `chroma` is the share of t that follows the measured haze colour
+ * (per-channel floor) rather than neutral grey. Driven by HAZE_AUTO.lift ×
+ * hazeWeight, so clear frames are untouched. Pixels whose hue is far from the
+ * veil (yellow algae, an orange fish: they have escaped the cast) take a
+ * hue-preserving luminance ratio with `farKeep` less of the subtraction.
+ */
+export const HAZE_LIFT = { floor: 0.25, soft: 0.12, chroma: 0.7, farKeep: 0.6 };
+
+/**
+ * Per-channel haze-lift subtraction: `lift` × a blend of the luminance black
+ * (neutral) and the measured per-channel floor (the haze colour, capped at
+ * 2× the luminance black so one channel is never stripped alone).
+ */
+export function hazeLiftT(p: GradeParams, lift: number): Vec3 {
+  if (lift <= 0 || p.hazeBlack <= 0) return [0, 0, 0];
+  const k = HAZE_LIFT.chroma;
+  return p.hazeFloor.map((f) => lift * ((1 - k) * p.hazeBlack + k * Math.min(Math.max(f, 0), 2 * p.hazeBlack))) as Vec3;
+}
+
+/** Luminance ratio of the haze-lift removal at luminance Y for subtraction t (see HAZE_LIFT; mirrored in the shaders). */
+export function hazeLiftRatio(Y: number, t: number): number {
+  if (t <= 0) return 1;
+  const q = (Y - t) / ((1 - t) * Math.max(Y, 1e-6));
+  const d = q - HAZE_LIFT.floor;
+  // Smooth max(q, floor), minus its bias at q = 1 so t → 0 is the identity.
+  const d1 = 1 - HAZE_LIFT.floor;
+  const s2 = HAZE_LIFT.soft * HAZE_LIFT.soft;
+  return 0.5 * (q + HAZE_LIFT.floor + Math.sqrt(d * d + s2)) - 0.5 * (Math.sqrt(d1 * d1 + s2) - d1);
+}
+
+/**
  * Vivid objects keep their colour: a pixel that is strongly chromatic in the
  * source and far from the veil hue (an orange fish, a red sea fan) has
  * already escaped the cast, and the grade must not wash it out — its output
@@ -114,6 +160,8 @@ export const LOOK = {
   // per-pixel shadow crush.
   gamma: 0.0,
   dim: 0.5, // refit 7 Oct: both hazy references sit ≈0.82× below the 0.3 result
+  liftRelief: 0.6, // the dim backs off by up to this share when the haze lift is subtracting …
+  liftRef: 0.1, // … this much (linear luminance) or more
   hazeDehaze: 0.4, // hazy frames: the look also dehazes the water path …
   hazeClarity: 0.4, // … local contrast (dark garments are safe now that dehaze skips them; more than this does nothing visible — CLAHE_CLIP caps it) …
   hazeLevels: 0.15, // … and a slightly fuller levels stretch
@@ -166,6 +214,7 @@ export function resolveSettings(s: UserSettings): GradeSettings {
     veil: s.veil + 0.3 * t,
     look: Math.min(1, Math.max(0, s.look)),
     dehaze: 0.6 * t,
+    hazeLift: 0,
   };
 }
 
@@ -183,7 +232,10 @@ export function deepHaze(p: GradeParams): number {
 }
 
 export function hazeWeight(p: GradeParams): number {
-  const t = Math.min(1, Math.max(0, (p.haze - LOOK.hazeLo) / (LOOK.hazeHi - LOOK.hazeLo)));
+  return hazeWeightOf(p.haze);
+}
+export function hazeWeightOf(haze: number): number {
+  const t = Math.min(1, Math.max(0, (haze - LOOK.hazeLo) / (LOOK.hazeHi - LOOK.hazeLo)));
   return t * t * (3 - 2 * t);
 }
 
@@ -200,7 +252,7 @@ export function presetSettings(g: GradeSettings, s: UserSettings): GradeSettings
   if (!s.preset || s.preset === "auto" || !a) return g;
   // Reef: little haze by definition — also damp the automatic dehaze.
   const dehaze = s.preset === "reef" ? Math.min(g.dehaze, 0.15) : Math.min(1, Math.max(g.dehaze, a.dehaze));
-  return { ...g, dehaze, clarity: Math.min(1, Math.max(0, g.clarity + a.clarity)) };
+  return { ...g, dehaze, clarity: Math.min(1, Math.max(0, g.clarity + a.clarity)), hazeLift: Math.max(g.hazeLift, a.hazeLift) };
 }
 
 /** Look-driven global adjustments (exposure dim in hazy scenes). */
@@ -208,7 +260,11 @@ export function lookParams(p: GradeParams, s: UserSettings): GradeParams {
   const look = Math.min(1, Math.max(0, s.look));
   if (look <= 0) return p;
   const hw = hazeWeight(p) * look;
-  return { ...p, exposure: p.exposure * (1 - LOOK.dim * hw), levelsMix: Math.min(0.85, p.levelsMix + LOOK.hazeLevels * hw) };
+  // The automatic haze lift already darkens a murky frame: the look's dim
+  // backs off in proportion to the lift (else the two stack to near-black).
+  const tl = s.hazeAuto !== false ? HAZE_AUTO.lift * hazeWeight(p) * p.hazeBlack : 0;
+  const relief = LOOK.liftRelief * Math.min(1, tl / LOOK.liftRef);
+  return { ...p, exposure: p.exposure * (1 - LOOK.dim * hw * (1 - relief)), levelsMix: Math.min(0.85, p.levelsMix + LOOK.hazeLevels * hw) };
 }
 
 /**
@@ -217,11 +273,11 @@ export function lookParams(p: GradeParams, s: UserSettings): GradeParams {
  * at the default Intensity while clear scenes are untouched.
  */
 // clarity 0.3 cost ~35 % temporal grain on hazy clips (review A/B, 4 Oct); 0.15 keeps most of the clearing.
-export const HAZE_AUTO = { dehaze: 0.5, clarity: 0.15, levels: 0.15 };
+export const HAZE_AUTO = { dehaze: 0.5, clarity: 0.15, levels: 0.15, lift: 0.9 };
 export function hazeSettings(g: GradeSettings, p: GradeParams): GradeSettings {
   const hw = hazeWeight(p);
   if (hw <= 0) return g;
-  return { ...g, dehaze: Math.max(g.dehaze, HAZE_AUTO.dehaze * hw), clarity: Math.min(1, g.clarity + HAZE_AUTO.clarity * hw) };
+  return { ...g, dehaze: Math.max(g.dehaze, HAZE_AUTO.dehaze * hw), clarity: Math.min(1, g.clarity + HAZE_AUTO.clarity * hw), hazeLift: Math.max(g.hazeLift, HAZE_AUTO.lift * hw) };
 }
 export function hazeParams(p: GradeParams): GradeParams {
   const hw = hazeWeight(p);
@@ -293,6 +349,10 @@ export type GradeParams = {
   hueFarHi: number;
   /** Water-path share of the frame (0 clear objects … 1 all water/haze); drives the look's dimming. */
   haze: number;
+  /** Lifted black: p0.4 of the exposed luminance, uncapped (the haze-lift stage subtracts a share of it). */
+  hazeBlack: number;
+  /** Per-channel lifted black (p0.4 of each exposed channel): the colour of the haze floor. */
+  hazeFloor: Vec3;
   /** Oklab chroma below which a pixel is achromatic and always counts as an object. */
   achroma: number;
   /** Exponent on the exposure for the water path (water keeps its brightness). */
@@ -339,6 +399,8 @@ export const IDENTITY_PARAMS: GradeParams = {
   hueFarLo: 3,
   hueFarHi: 3.1,
   haze: 0,
+  hazeBlack: 0,
+  hazeFloor: [0, 0, 0],
   achroma: 0,
   waterExposure: 1,
   exposure: 1,
@@ -380,7 +442,7 @@ export type DepthMap = {
  * are untouched.
  */
 export const SKIN = {
-  hue: (35 * Math.PI) / 180,
+  hue: (18 * Math.PI) / 180, // pink: the reference skin measures ~19° (35° read peach/cream)
   bandHue: (65 * Math.PI) / 180, // candidates: hue within ~15°–115° …
   bandIn: (50 * Math.PI) / 180,
   bandOut: (75 * Math.PI) / 180,
@@ -389,10 +451,10 @@ export const SKIN = {
   lHi: 0.55,
   cLo: 0.07, // not vivid
   cHi: 0.1,
-  mix: 0.9, // how far the hue moves toward SKIN.hue
+  mix: 1.0, // how far the hue moves toward SKIN.hue
   wLo: 0.1, // person weight saturates: smoothstep(wLo, wHi, person)
   wHi: 0.5,
-  cMin: 0.045, // chroma floor
+  cMin: 0.05, // chroma floor
 };
 
 /** CLAHE tile LUTs: `tilesX*tilesY` rows of `bins` entries (R channel). */
@@ -428,6 +490,7 @@ export const CLAHE_BINS = 32;
  *  p12: confLo, confHi, cosLo, cosHi
  *  p15: knee, subLo, subHi, hueFarLo
  *  p16: hazeWeight, deepHaze, 0, 0
+ *  p17: haze-lift subtraction per channel (hazeLiftT), neutral subtraction (hazeLift·hazeBlack)
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -466,6 +529,7 @@ export function packUniforms(
   }
   u.set([params.knee, params.subLo, params.subHi, params.hueFarLo], 60);
   u.set([hazeWeight(params), deepHaze(params), 0, 0], 64);
+  u.set([...hazeLiftT(params, s.hazeLift), s.hazeLift * params.hazeBlack], 68);
   return u;
 }
 
@@ -533,6 +597,8 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     hueFarLo: m(a.hueFarLo, b.hueFarLo),
     hueFarHi: m(a.hueFarHi, b.hueFarHi),
     haze: m(a.haze, b.haze),
+    hazeBlack: m(a.hazeBlack, b.hazeBlack),
+    hazeFloor: v(a.hazeFloor, b.hazeFloor),
     achroma: m(a.achroma, b.achroma),
     waterExposure: m(a.waterExposure, b.waterExposure),
     exposure: ml(a.exposure, b.exposure),
