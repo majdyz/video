@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Studio } from "./pipeline/studio.ts";
-import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, profileDefaults, type ToolId, type ToolsState } from "./pipeline/tools.ts";
+import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, lookOf, profileDefaults, type ToolId, type ToolsState } from "./pipeline/tools.ts";
 import { BRAND, SAMPLE } from "./brand.ts";
 import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
@@ -13,7 +13,8 @@ import { IconClose, IconCompare, IconExport, IconMore, IconPlus, IconWarning } f
 import { useMedia } from "./ui/use-media";
 import { FootageField } from "./ui/footage";
 import { isNativeShell } from "./native/registry.ts";
-import { trimAt } from "./pipeline/trim.ts";
+import { formatTimecode, trimAt } from "./pipeline/trim.ts";
+import { lookAfterRemove, removeCut, segmentAtTime, segmentNumber, splitAt, visibleSegments } from "./pipeline/segments.ts";
 
 type Theme = "abyss" | "coral" | "depth";
 const THEMES: { id: Theme; label: string }[] = [
@@ -56,6 +57,8 @@ export default function App() {
   const [tools, setToolsState] = useState<ToolsState>(initialTools);
   const [tab, setTab] = useState<ToolId>(() => (new URLSearchParams(location.search).get("tab") as ToolId) || "colour");
   const [split, setSplit] = useState<number | null>(0.5);
+  /** Selected timeline segment (its region index, segments.ts): what the Colour panel edits once the clip is split. */
+  const [selLook, setSelLook] = useState(0);
   const [holding, setHolding] = useState(false);
   const [advOpen, setAdvOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -102,6 +105,45 @@ export default function App() {
   const exporting = s.exp.state === "preparing" || s.exp.state === "running";
   const ready = s.phase === "ready";
   const photo = s.kind === "photo";
+
+  // ---- split / per-segment colour
+  const segs = s.segments;
+  const visibleSegs = visibleSegments(segs.cuts, s.trim, s.duration);
+  // The selected segment, or (when it is outside the trim) the one under the playhead.
+  const selSeg = visibleSegs.find((g) => g.look === selLook) ?? segmentAtTime(segs.cuts, s.currentTime, s.trim, s.duration);
+  /** Region whose look the Colour panel edits; null = unsplit (tools.colour, as before splits). */
+  const editLook = segs.cuts.length && !photo ? selSeg.look : null;
+  const segNum = editLook !== null ? segmentNumber(segs.cuts, editLook, s.trim, s.duration) : null;
+  const segScope = segNum ? `Segment ${segNum.index} of ${segNum.count} · ${formatTimecode(selSeg.start)}–${formatTimecode(selSeg.end)}` : null;
+  // The panels read and write tools.colour; once split, that is the selected segment's look (on/off stays global).
+  const panelTools: ToolsState = editLook !== null && segs.looks[editLook] ? { ...tools, colour: { ...segs.looks[editLook], enabled: tools.colour.enabled } } : tools;
+  const setPanelTools = (fn: (t: ToolsState) => ToolsState) => {
+    if (editLook === null) return setToolsState(fn);
+    const next = fn(panelTools);
+    const looks = segs.looks.slice();
+    looks[editLook] = lookOf(next.colour);
+    studio.setSegments({ cuts: segs.cuts, looks }, false);
+    setToolsState((t) => ({ ...t, stabilise: next.stabilise, dewarp: next.dewarp, colour: { ...t.colour, enabled: next.colour.enabled } }));
+  };
+  const canSplit = ready && !photo && !exporting && splitAt(segs, s.currentTime, s.trim, s.duration, lookOf(tools.colour)) !== null;
+  const doSplit = () => {
+    const snap = studio.getSnapshot();
+    const t = studio.playhead();
+    const next = splitAt(snap.segments, t, snap.trim, snap.duration, lookOf(tools.colour));
+    if (!next) return;
+    studio.setSegments(next, true);
+    // The new segment (right of the cut) is the one the user goes on to grade.
+    setSelLook(next.cuts.indexOf(t) + 1);
+  };
+  const removeSplit = (k: number) => {
+    const next = removeCut(studio.getSnapshot().segments, k);
+    setSelLook((l) => lookAfterRemove(l, k));
+    // Back to one segment: its look becomes the clip's colour again.
+    if (!next.cuts.length && next.looks[0]) setToolsState((t) => ({ ...t, colour: { ...next.looks[0], enabled: t.colour.enabled } }));
+    studio.setSegments(next, true);
+  };
+  const splitRef = useRef(doSplit);
+  splitRef.current = doSplit;
   // The live overlay covers the stage while an offline (or photo) export renders; the real-time
   // recorder paints the visible canvas itself.
   const liveOn = exporting && s.exportMode !== "realtime" && hasLive;
@@ -128,10 +170,16 @@ export default function App() {
       }
       // I / O: trim in / out point at the playhead (desktop editors' convention).
       const k = e.key.toLowerCase();
-      if ((k === "i" || k === "o") && ready && !photo && !exporting && !e.metaKey && !e.ctrlKey && !e.altKey && !(e.target as HTMLElement).closest("input,textarea,select,[contenteditable],[role=dialog]")) {
+      const editorKey = ready && !photo && !exporting && !e.metaKey && !e.ctrlKey && !e.altKey && !(e.target as HTMLElement).closest("input,textarea,select,[contenteditable],[role=dialog]");
+      if ((k === "i" || k === "o") && editorKey) {
         e.preventDefault();
         const snap = studio.getSnapshot();
         studio.setTrim(trimAt(k === "i" ? "in" : "out", snap.currentTime, snap.trim, snap.duration), true);
+      }
+      // S: split at the playhead.
+      if (k === "s" && editorKey) {
+        e.preventDefault();
+        splitRef.current();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -140,6 +188,7 @@ export default function App() {
 
   const openFile = (f: File) => {
     setSplit(0.5);
+    setSelLook(0);
     void studio.open(f);
   };
   // In the app (apps/mobile) clips come from the native pickers: originals,
@@ -187,7 +236,11 @@ export default function App() {
           {compare}
         </>
       ) : (
-        <Timeline time={s.currentTime} duration={s.duration} playing={s.playing} disabled={!ready || exporting} trim={s.trim} thumbs={s.thumbs} onToggle={() => studio.togglePlay()} onSeek={(t) => studio.seek(t)} onTrim={(r, commit) => studio.setTrim(r, commit)}>
+        <Timeline time={s.currentTime} duration={s.duration} playing={s.playing} disabled={!ready || exporting} trim={s.trim} thumbs={s.thumbs} onToggle={() => studio.togglePlay()} onSeek={(t) => studio.seek(t)} onTrim={(r, commit) => studio.setTrim(r, commit)}
+          cuts={segs.cuts} selected={editLook} canSplit={canSplit} onSplit={doSplit}
+          onSelect={setSelLook}
+          onCuts={(cuts, commit) => studio.setSegments({ cuts, looks: studio.getSnapshot().segments.looks }, commit)}
+          onRemoveCut={removeSplit}>
           {compare}
         </Timeline>
       )}
@@ -232,7 +285,7 @@ export default function App() {
             showPlayHint={ready && !photo && !s.busy && !exporting}
             resetKey={`${s.fileName}:${s.info?.displayW}x${s.info?.displayH}`}
           >
-            {s.phase === "empty" && <EmptyState accept={ACCEPT} onFile={openFile} onPick={native ? pick : undefined} onSample={() => { setSplit(0.5); void studio.openUrl(`${import.meta.env.BASE_URL}samples/${SAMPLE.file}`, SAMPLE.file); }} busy={s.busy} />}
+            {s.phase === "empty" && <EmptyState accept={ACCEPT} onFile={openFile} onPick={native ? pick : undefined} onSample={() => { setSplit(0.5); setSelLook(0); void studio.openUrl(`${import.meta.env.BASE_URL}samples/${SAMPLE.file}`, SAMPLE.file); }} busy={s.busy} />}
             {s.phase !== "empty" && pill && (
               <div className="pill" role="status"><span className="pill__dot" aria-hidden="true" />{pill}</div>
             )}
@@ -286,7 +339,7 @@ export default function App() {
                   <button type="button" className="link-btn" onClick={() => { setTab("colour"); setAdvOpen(true); }} disabled={exporting}>Change</button>
                 </p>
               )}
-              <ToolPanel tool={tab} tools={tools} setTools={setTools} stab={s.stab} info={s.info} colourProfiled={s.colourProfiled} photo={photo} camera={s.camera} disabled={exporting || !ready} onAdvanced={() => setAdvOpen(true)} />
+              <ToolPanel tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} scope={tab === "colour" ? segScope : null} stab={s.stab} info={s.info} colourProfiled={s.colourProfiled} photo={photo} camera={s.camera} disabled={exporting || !ready} onAdvanced={() => setAdvOpen(true)} />
             </div>
             <div className="tabs" role="tablist" aria-label="Tool">
               {tabs.map((id) => {
@@ -343,8 +396,8 @@ export default function App() {
       <video ref={videoRef} className="source-video" muted playsInline aria-hidden="true" />
       <input ref={fileInputRef} type="file" accept={ACCEPT} hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) openFile(f); }} />
 
-      <Sheet open={advOpen} onClose={() => setAdvOpen(false)} title={`${TOOL_LABEL[tab]} · Advanced`}>
-        <AdvancedControls tool={tab} tools={tools} setTools={setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined} />
+      <Sheet open={advOpen} onClose={() => setAdvOpen(false)} title={`${TOOL_LABEL[tab]} · Advanced${tab === "colour" && segNum ? ` · Segment ${segNum.index} of ${segNum.count}` : ""}`}>
+        <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined} />
         {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
       </Sheet>
 

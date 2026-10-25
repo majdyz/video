@@ -43,10 +43,12 @@ type Props = {
   camera?: CameraInfo | null;
   disabled: boolean;
   onAdvanced: () => void;
+  /** What the controls apply to when the clip is split, e.g. "Segment 2 of 3 · 0:03.0–0:06.5". */
+  scope?: string | null;
 };
 
 /** The active tool's controls: header with on/off, preset chips, one Strength, Advanced. */
-export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, photo, camera, disabled, onAdvanced }: Props) {
+export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, photo, camera, disabled, onAdvanced, scope }: Props) {
   const enabled = tools[tool].enabled;
   const Icon = TOOL_ICON[tool];
   const setEnabled = (v: boolean) => setTools((t) => ({ ...t, [tool]: { ...t[tool], enabled: v } }));
@@ -80,6 +82,7 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
         <Switch checked={enabled} onChange={setEnabled} label={`${TOOL_LABEL[tool]} on`} disabled={disabled} />
       </div>
       {note && <p className="panel__note" role="note">{note}</p>}
+      {scope && <p className="panel__scope" aria-live="polite">{scope}</p>}
       {tool === "stabilise" && stab.state === "analysing" && enabled && (
         <div className="progress-line"><div style={{ width: `${Math.round(stab.progress * 100)}%` }} /></div>
       )}

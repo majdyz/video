@@ -48,6 +48,14 @@ export const IconCompare = (p: P) => (
     <path d="M3.5 16.5 9 11l3 3" opacity=".55" />
   </Svg>
 );
+/** Split at the playhead: scissors. */
+export const IconSplit = (p: P) => (
+  <Svg {...p}>
+    <circle cx="6.5" cy="6.5" r="2.5" />
+    <circle cx="6.5" cy="17.5" r="2.5" />
+    <path d="M8.6 8 19 18M8.6 16 19 6" />
+  </Svg>
+);
 export const IconSwap = (p: P) => (
   <Svg {...p}>
     <path d="M9 7 5 12l4 5M15 7l4 5-4 5" />

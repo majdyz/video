@@ -415,6 +415,74 @@ a {
   box-shadow: inset 0 2px 0 var(--trim-frame), inset 0 -2px 0 var(--trim-frame);
   pointer-events: none;
 }
+/*
+ * Split: the selected segment gets a light frame (like the trim selection's),
+ * the cuts a thin neutral divider. Hit-testing is in JS (16 px each side).
+ */
+.trim__seg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-shadow: inset 0 0 0 2px var(--text-1);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.trim__cut {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text-2);
+  box-shadow: 0 0 0 1px var(--bg);
+  outline: none;
+  z-index: 1;
+  transition: background var(--dur-2) var(--ease-out);
+}
+.trim__cut.is-open,
+.timeline.is-dragging .trim__cut:hover {
+  background: var(--text-1);
+}
+.trim__cut:focus-visible {
+  box-shadow: 0 0 0 2px var(--focus);
+}
+/* Tap on a divider: its time and Remove, above the strip (kept on screen at the ends by its transform). */
+.trim__menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 4px 4px 4px 10px;
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+  box-shadow: 0 0 0 1px var(--line-2);
+  white-space: nowrap;
+  z-index: 4;
+  cursor: default;
+  animation: fade-in var(--dur-2) var(--ease-out);
+}
+.trim__menu-time {
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.trim__menu button {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--r-xs);
+  color: var(--text-1);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  transition: background var(--dur-2) var(--ease-out);
+}
+.trim__menu button:hover {
+  background: var(--surface-4);
+}
+.trim__menu button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
 .trim__handle {
   position: absolute;
   top: 0;
@@ -763,6 +831,13 @@ a {
 }
 .status-bad {
   color: var(--danger);
+}
+/* Split clip: which segment the Colour controls edit. */
+.panel__scope {
+  margin: var(--s-3) 0 0;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
 }
 .panel__body {
   margin-top: var(--s-4);

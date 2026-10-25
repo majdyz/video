@@ -197,6 +197,36 @@ on commit, after 500 ms, `applyTrim()` re-runs what depends on it:
   already use to cut the audio (no native change). The file name gets
   `-trimmed`; the export sheet shows the output length.
 
+## Split and per-segment colour
+
+Split (scissors in the player bar, or S) puts a cut at the playhead; maths in
+`pipeline/segments.ts`, tested in `test/segments.test.ts`. The clip state
+holds `segments = { cuts, looks }` (next to `trim` in the Studio snapshot,
+reset when a clip opens): `cuts.length + 1` regions, each with its own
+`ColourLook` (preset, strength, advanced; Colour on/off, Stabilise and Dewarp
+stay global). Only cuts at least 0.5 s inside the trim and apart are in
+force; the rest are kept but ignored, so trimming back out restores them.
+Unsplit (no cuts), everything reads `tools.colour` exactly as before.
+
+* **UI**: a tap on a segment selects it (light frame); the Colour panel and
+  its Advanced sheet then edit that region's look ("Segment 2 of 3 · 0:02.0–0:04.0").
+  A tap on a divider opens Remove (the merge keeps the left look), a drag
+  moves it. Removing the last cut copies the remaining look back into `tools.colour`.
+* **Settings per frame**: `GradeEngine.settings` is a public field read at
+  render time (`packUniforms`), so the Studio sets it from the frame's region
+  before every `tick`/`render` (preview, offline, native, real-time).
+* **Scene lock at the cut**: no engine change. `lockWithCuts` takes the
+  automatic profile lock and forces a new `LockSegment` at each cut
+  (`from` = cut − ½ frame, no detection window), estimated from the profile
+  samples inside that segment (median of ≥ 2; the profile adds 2 frames to a
+  segment that has fewer); automatic scene cuts inside a segment stay, their
+  windows clipped. `GradeEngine.tick` already snaps the globals when the
+  lock segment changes. On the first frame of a new segment the exports also
+  run `analyzeNow(true)` (maps snap too); real-time and preview force an
+  analysis with `tick(t, true)`.
+* **Transition**: a hard cut. The engine has no settings transition and the
+  preset is categorical, so a cross-fade would need two renders per frame.
+
 ## Photos
 
 JPEG / PNG / WebP everywhere, HEIC where the browser decodes it (Safari;

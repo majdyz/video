@@ -40,7 +40,15 @@ export const DEFAULT_COLOUR: ColourState = {
   veil: DEFAULT_SETTINGS.veil,
 };
 
-export function colourSettings(c: ColourState): UserSettings {
+/** A segment's colour settings (Split on the timeline): everything but the on/off, which stays global. */
+export type ColourLook = Omit<ColourState, "enabled">;
+
+export function lookOf(c: ColourState): ColourLook {
+  const { enabled: _enabled, ...look } = c;
+  return look;
+}
+
+export function colourSettings(c: ColourLook): UserSettings {
   return {
     ...DEFAULT_SETTINGS,
     preset: c.preset,
@@ -213,11 +221,11 @@ export function enabledTools(t: ToolsState): ToolId[] {
 }
 
 /** Order the processing runs in (matches the render graph): geometry first, colour last. */
-export function processingChain(t: ToolsState): string {
+export function processingChain(t: ToolsState, colourSegments = 1): string {
   const parts: string[] = [];
   if (t.dewarp.enabled) parts.push("Dewarp");
   if (t.stabilise.enabled) parts.push("Stabilise");
-  if (t.colour.enabled) parts.push("Colour");
+  if (t.colour.enabled) parts.push(colourSegments > 1 ? `Colour (${colourSegments} segments)` : "Colour");
   return parts.length ? parts.join(" → ") : "Original";
 }
 

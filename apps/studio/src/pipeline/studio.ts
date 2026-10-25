@@ -23,7 +23,8 @@ import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometrySource } from "./geometry.ts";
 import type { GeometryParams, QuarterTurns } from "./geometry-math.ts";
 import type { ClipInfo } from "./probe.ts";
-import { colourSettings, DEFAULT_TOOLS, exportSuffix, solveParams, type ToolsState } from "./tools.ts";
+import { colourSettings, DEFAULT_TOOLS, exportSuffix, solveParams, type ColourLook, type ToolsState } from "./tools.ts";
+import { activeCuts, lockWithCuts, lookIndexAt, topUpTimes, visibleSegments, type Segments } from "./segments.ts";
 import { bobbingNote, stabInfo, stabSummary, type StabInfo } from "./stab-info.ts";
 import { seekVideo, waitForEvent, waitForFirstFrame, type VideoWithRVFC } from "./video.ts";
 import { decodePhoto, encodeJpeg, isPhotoFile, photoLimits } from "./photo.ts";
@@ -144,7 +145,14 @@ export type Snapshot = {
   trim: TrimRange | null;
   /** Filmstrip thumbnails (object URLs, "" for a frame that didn't decode); null until decoded or unavailable. */
   thumbs: string[] | null;
+  /**
+   * Split points (clip seconds) and each region's colour settings (segments.ts).
+   * No cuts = one segment that uses tools.colour, exactly as before splits existed.
+   */
+  segments: Segments<ColourLook>;
 };
+
+const NO_SEGMENTS: Segments<ColourLook> = { cuts: [], looks: [] };
 
 export type FootageStatus = {
   choice: FootageChoice;
@@ -208,6 +216,7 @@ export class Studio {
     footage: FOOTAGE_NONE,
     trim: null,
     thumbs: null,
+    segments: NO_SEGMENTS,
   };
   private listeners = new Set<() => void>();
   private frameListeners = new Set<(b: ImageBitmap) => void>();
@@ -262,6 +271,14 @@ export class Studio {
   /** Span of the motion analysis in flight. */
   private pendingSpan: TrimRange | null = null;
   private thumbAbort: AbortController | null = null;
+  /** Split points and per-region looks; mirrored in the snapshot. */
+  private segs: Segments<ColourLook> = NO_SEGMENTS;
+  /** Profile samples already taken for this clip and colour input (a new split only samples what it lacks). */
+  private sampleCache: import("./colour.ts").ProfileSample[] = [];
+  /** The automatic scene lock of the last profile (before the user's cuts are forced in) and its samples. */
+  private autoLock: { lock: Parameters<Engine["lockGlobals"]>[0]; samples: import("./colour.ts").ProfileSample[] } | null = null;
+  /** Region index of the last frame drawn (preview) / encoded (export): a change forces a fresh analysis. */
+  private lastLook = -1;
 
   // ------------------------------------------------------------ store
 
@@ -400,12 +417,16 @@ export class Studio {
     const prev = this.tools;
     this.tools = next;
     const e = this.engine;
-    if (e) e.settings = colourSettings(next.colour);
+    if (e) e.settings = this.settingsAt(this.video?.currentTime ?? 0);
+    // The profile samples what the colour engine is fed: a new framing makes them stale for later top-ups.
+    if (next.dewarp !== prev.dewarp || next.stabilise.enabled !== prev.stabilise.enabled) this.sampleCache = [];
     const info = this.snap.info;
     if (info && (next.dewarp !== prev.dewarp || !this.dewarpU)) void this.updateDewarp();
     const video = this.snap.kind === "video";
     if (this.snap.phase === "ready" && video) {
       if (next.colour.enabled && !this.snap.colourProfiled && !this.profiling) void this.profileColour();
+      // Cuts placed while Colour was off: their locks are built now.
+      else if (next.colour.enabled && !prev.colour.enabled && this.segs.cuts.length) this.relock();
       if (next.stabilise.enabled && !this.analysis && !this.stabAbort) void this.analyseMotion();
       const a = next.stabilise, b = prev.stabilise;
       if (a.visual !== b.visual && (this.analysis || this.stabAbort)) {
@@ -486,7 +507,7 @@ export class Studio {
     this.teardown();
     const gen = ++this.gen;
     this.file = file;
-    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null });
+    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS });
     try {
       await touchFile(file);
       const media = await loadMedia();
@@ -573,6 +594,7 @@ export class Studio {
     this.setFootageStatus(this.snap.footage.info);
     if (this.snap.kind !== "video" || this.snap.phase !== "ready") return;
     this.dropStill();
+    this.sampleCache = [];
     if (this.tools.colour.enabled && this.engine && !this.exporting) {
       this.engine.lockGlobals(null);
       this.set({ colourProfiled: false });
@@ -653,7 +675,7 @@ export class Studio {
     const gen = ++this.gen;
     this.file = file;
     this.signal = null;
-    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null });
+    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS });
     try {
       await touchFile(file);
       const { bitmap, original } = await decodePhoto(file, photoLimits(isWebKit(), e.backend.kind));
@@ -704,7 +726,7 @@ export class Studio {
   /** Back to the empty state. */
   close(): void {
     this.teardown();
-    this.set({ phase: "empty", kind: null, fileName: null, info: null, duration: 0, currentTime: 0, playing: false, busy: null, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, trim: null, thumbs: null });
+    this.set({ phase: "empty", kind: null, fileName: null, info: null, duration: 0, currentTime: 0, playing: false, busy: null, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, trim: null, thumbs: null, segments: NO_SEGMENTS });
   }
 
   private teardown(): void {
@@ -722,6 +744,10 @@ export class Studio {
     clearTimeout(this.trimTimer);
     this.trimTimer = 0;
     this.trim = null;
+    this.segs = NO_SEGMENTS;
+    this.sampleCache = [];
+    this.autoLock = null;
+    this.lastLook = -1;
     this.analysedSpan = null;
     this.profiledSpan = null;
     this.pendingSpan = null;
@@ -817,7 +843,9 @@ export class Studio {
     if (!info) return;
     if (this.tools.colour.enabled && this.engine) {
       this.uploadToEngine(src, t, true);
-      if (advance) this.engine.tick(t);
+      // Crossing into another segment while playing: analyse this frame now (the lock snaps in tick).
+      const changed = this.applyLook(t);
+      if (advance) this.engine.tick(t, changed);
       this.engine.render();
     } else if (this.geo) {
       const [w, h] = this.previewSize();
@@ -912,6 +940,12 @@ export class Studio {
     this.video?.pause();
   }
 
+  /** The playhead right now (the snapshot's currentTime lags playback by up to ~70 ms). */
+  playhead(): number {
+    const v = this.video;
+    return v && this.snap.kind === "video" ? v.currentTime : this.snap.currentTime;
+  }
+
   seek(t: number): void {
     const v = this.video;
     if (!v || this.exporting || this.snap.phase !== "ready" || this.snap.kind !== "video") return;
@@ -921,6 +955,83 @@ export class Studio {
       // ignore
     }
     this.set({ currentTime: v.currentTime });
+  }
+
+  // ------------------------------------------------------------ segments
+
+  /** The engine settings for the frame at clip time `t`: its segment's look when the clip is split. */
+  private settingsAt(t: number): ReturnType<typeof colourSettings> {
+    const s = this.segs;
+    if (this.snap.kind !== "video" || !s.cuts.length) return colourSettings(this.tools.colour);
+    const i = lookIndexAt(s.cuts, t, this.trim, this.snap.duration, this.snap.info?.fps || 30);
+    return colourSettings(s.looks[i] ?? this.tools.colour);
+  }
+
+  /** Puts the segment's settings on the engine for the frame at `t`; true when the segment changed since the last frame. */
+  private applyLook(t: number): boolean {
+    const e = this.engine;
+    if (!e) return false;
+    e.settings = this.settingsAt(t);
+    const s = this.segs;
+    const look = this.snap.kind === "video" && s.cuts.length ? lookIndexAt(s.cuts, t, this.trim, this.snap.duration, this.snap.info?.fps || 30) : 0;
+    const changed = this.lastLook >= 0 && look !== this.lastLook;
+    this.lastLook = look;
+    return changed;
+  }
+
+  /**
+   * Split points and per-region looks (segments.ts builds them). Cheap on
+   * every call (the preview follows at once); with `commit` (a split, a
+   * removed or released divider) the scene lock is rebuilt with a new lock
+   * at every cut, sampling the segments that lack frames of their own.
+   */
+  setSegments(next: Segments<ColourLook>, commit: boolean): void {
+    if (this.snap.kind !== "video" || this.exporting) return;
+    const cutsChanged = next.cuts.length !== this.segs.cuts.length || next.cuts.some((c, i) => c !== this.segs.cuts[i]);
+    this.segs = next.cuts.length ? next : NO_SEGMENTS;
+    this.set({ segments: this.segs });
+    if (commit && cutsChanged) this.relock();
+    this.repaint();
+  }
+
+  /** Cut times in force (inside the trim). */
+  private boundaries(): number[] {
+    return activeCuts(this.segs.cuts, this.trim, this.snap.duration).map((i) => this.segs.cuts[i]);
+  }
+
+  /** Re-applies the scene lock for the current cuts: from the profile in hand, or a top-up profile when a segment has no samples. */
+  private relock(): void {
+    const e = this.engine, mod = this.colour;
+    if (!e || !mod || !this.tools.colour.enabled || this.snap.phase !== "ready") return;
+    if (this.profiling) {
+      // The profile in flight reads the cuts when it finishes; run again if it sampled for older ones.
+      void this.profiling.then(() => this.relock());
+      return;
+    }
+    if (!this.snap.colourProfiled || !this.autoLock) return;
+    const segs = visibleSegments(this.segs.cuts, this.trim, this.snap.duration);
+    const missing = topUpTimes(this.autoLock.samples.map((x) => x.t), segs).filter((t) => !this.cachedSample(t));
+    if (missing.length) {
+      void this.profileColour();
+      return;
+    }
+    const samples = [...this.autoLock.samples, ...topUpTimes(this.autoLock.samples.map((x) => x.t), segs).map((t) => this.cachedSample(t)!)];
+    this.lockFrom(this.autoLock.lock, samples);
+  }
+
+  private cachedSample(t: number) {
+    return this.sampleCache.find((x) => Math.abs(x.t - t) < 1e-3) ?? null;
+  }
+
+  /** Locks the engine: the automatic lock with a new locked estimate forced in at every cut. */
+  private lockFrom(auto: Parameters<Engine["lockGlobals"]>[0], samples: import("./colour.ts").ProfileSample[]): void {
+    const e = this.engine, mod = this.colour;
+    if (!e || !mod) return;
+    const bounds = this.boundaries();
+    const lock = lockWithCuts(auto, [...samples].sort((a, b) => a.t - b.t), bounds, mod.medianParams, this.snap.info?.fps || 30);
+    e.lockGlobals(lock);
+    this.lastLook = -1;
+    if (bounds.length) console.info(`[segments] ${bounds.length + 1} segments (cuts at ${bounds.map((b) => b.toFixed(2)).join(", ")} s): ${lock ? `${lock.length} locked estimate(s)` : "unlocked"}`);
   }
 
   // ------------------------------------------------------------ trim
@@ -966,6 +1077,8 @@ export class Studio {
       if (this.profiling) void this.profiling.then(again);
       else again();
     }
+    // The trim decides which cuts are in force: their locks follow (after any re-profile above).
+    if (this.segs.cuts.length) this.relock();
     if (this.tools.stabilise.enabled && (this.analysis || this.stabAbort)) {
       const want = this.motionSpan();
       if (this.stabAbort) {
@@ -1021,28 +1134,33 @@ export class Studio {
       const span = this.trim;
       const times = rangeTimes(mod.profileTimes, span, v.duration);
       if (!times.length) return;
+      // Split: every segment gets frames of its own for its lock (the base spacing may miss a short one).
+      const extra = topUpTimes(times, visibleSegments(this.segs.cuts, span, v.duration));
+      const needed = [...times, ...extra].filter((t) => !this.cachedSample(t));
       const wasPaused = v.paused;
       const resumeAt = v.currentTime;
       this.previewOn = false;
       v.pause();
       this.set({ busy: "Profiling colour…" });
-      const samples: import("./colour.ts").ProfileSample[] = [];
       try {
-        for (const t of times) {
+        for (const t of needed) {
           if (gen !== this.gen || this.exporting) return;
           await seekVideo(v, t);
           this.uploadToEngine(v, t, false);
           try {
             const r = await e.analyzeRaw();
-            samples.push({ t, params: r.params, mean: r.mean });
+            this.sampleCache.push({ t, params: r.params, mean: r.mean });
           } catch {
             // a failed sample just doesn't vote
           }
         }
         if (gen !== this.gen) return;
+        const samples = times.map((t) => this.cachedSample(t)).filter((x) => x !== null);
         const lock = mod.segmentProfile(samples, mod.SCENE_CUT_MEAN_DIFF);
-        if (lock) e.lockGlobals(lock);
-        console.info(`[profile] ${lock ? `locked ${lock.length} segment(s)` : "skipped"}: ${samples.length}/${times.length} samples${span ? ` in ${span.start.toFixed(2)}–${span.end.toFixed(2)} s` : ""}`);
+        this.autoLock = { lock, samples };
+        // The user's cuts force a new lock each (segments.ts lockWithCuts); unsplit, this is the automatic lock.
+        if (lock) this.lockFrom(lock, [...samples, ...extra.map((t) => this.cachedSample(t)).filter((x) => x !== null)]);
+        console.info(`[profile] ${lock ? `locked ${lock.length} segment(s)` : "skipped"}: ${samples.length}/${times.length} samples${extra.length ? ` (+${extra.length} for short segments)` : ""}${span ? ` in ${span.start.toFixed(2)}–${span.end.toFixed(2)} s` : ""}`);
         this.profiledSpan = span;
         this.set({ colourProfiled: true });
       } finally {
@@ -1363,6 +1481,7 @@ export class Studio {
     await this.settleEngine();
     e.reset({ keepPerson: true });
     e.split = 0;
+    this.lastLook = -1;
     e.analysisIntervalMs = 150;
     e.personEvery = 4;
   }
@@ -1430,10 +1549,13 @@ export class Studio {
                 eng.upload(frame, frame.displayWidth, frame.displayHeight, rot);
               }
               // First frame waits for its analysis and snaps; near a profiled
-              // cut the exact frame matters; otherwise analysis runs alongside.
+              // cut the exact frame matters, and the first frame of a split
+              // segment starts its lock fresh; otherwise analysis runs alongside.
+              const segStart = this.applyLook(fi.timeSec);
               if (frames === 0) await eng.analyzeNow(true).catch(() => undefined);
-              else if (eng.inCutWindow(fi.timeSec)) await eng.analyzeNow(true).catch(() => undefined);
+              else if (segStart || eng.inCutWindow(fi.timeSec)) await eng.analyzeNow(true).catch(() => undefined);
               else eng.analyzeSoon();
+              eng.settings = this.settingsAt(fi.timeSec);
               eng.tick(fi.timeSec);
               out = await eng.renderToFrame(rotE, ts, dur);
             }
@@ -1566,8 +1688,10 @@ export class Studio {
             } else {
               eng.upload(frame, frame.displayWidth, frame.displayHeight, rot);
             }
-            if (frames === 0 || eng.inCutWindow(fi.timeSec)) await eng.analyzeNow(true).catch(() => undefined);
+            const segStart = this.applyLook(fi.timeSec);
+            if (frames === 0 || segStart || eng.inCutWindow(fi.timeSec)) await eng.analyzeNow(true).catch(() => undefined);
             else eng.analyzeSoon();
+            eng.settings = this.settingsAt(fi.timeSec);
             eng.tick(fi.timeSec);
             out = await eng.renderToFrame(rotE, ts, dur);
           }
@@ -1688,7 +1812,9 @@ export class Studio {
                 const t = meta?.mediaTime ?? v.currentTime;
                 if (colourOn && e) {
                   this.uploadToEngine(v, t, false, [W, H]);
-                  e.tick(t);
+                  // Real time can't wait for an analysis: a new segment asks for one at once and the lock snaps in tick.
+                  const segStart = this.applyLook(t);
+                  e.tick(t, segStart);
                   e.render();
                 } else {
                   geo.resize(W, H);
