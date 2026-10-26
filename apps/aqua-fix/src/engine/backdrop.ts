@@ -66,6 +66,11 @@ export const BACKDROP = {
   relKeep: 0.3,
   solidLo: 0.2,
   solidHi: 0.26,
+  /** Share of the frame width (lo..hi) a region spans along the bottom edge at which it is the seabed, a reef or
+   * something held from below (a spear gun), never an animal: in open water a swimming animal does not rest its
+   * whole length on the bottom edge (its texture alone does not tell a coral from a shark at this resolution). */
+  bottomLo: 0.04,
+  bottomHi: 0.08,
   /** Margin (thumbnail pixels) around far-hue pixels that the whole-animal flood never enters. */
   farMargin: 2,
   /** Whole-animal growth (growSubjects): seed threshold (share of validity), the veto-ramped departure a
@@ -339,6 +344,11 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     // A region with no confident seed still counts when it has an outline
     // (a dim, far animal); a sun glow departs just as far but has none.
     let accept = seeded ? 1 : smoothstep(BACKDROP.growEdgeLo, BACKDROP.growEdgeHi, edge);
+    {
+      let bottom = 0;
+      for (let m = 0; m < cnt; m++) if (members[m] >= n - w) bottom++;
+      accept *= 1 - smoothstep(BACKDROP.bottomLo, BACKDROP.bottomHi, bottom / w);
+    }
     // A subject much of whose outline borders far-hue pixels is a colourful fish (a blue body with a yellow
     // tail): toned, it would turn half grey; it keeps its colour.
     if (block) {

@@ -7,8 +7,7 @@
 //              mask as prior; writes the stabilised correction (graded /
 //              source per channel, blended in the log domain with the warped
 //              history) + the tracked mask (target 0, next frame's history)
-//              and stabilised / current + the whole-or-nothing subject factor
-//              (target 1, read by the grade; its alpha is next frame's history)
+//              and stabilised / current + mask (target 1, read by the grade)
 // The full-resolution grade (shaders.ts) then multiplies its output by
 // stabilised / current, uses the tracked mask as subject prior, and blends
 // dark flat water with the flow-warped previous output.
@@ -50,9 +49,6 @@ const float TP_DECAY = ${f(TEMPORAL.decay)};
 const float TP_SUP_R = ${f(TEMPORAL.supportR)};
 const float TP_SUP_LO = ${f(TEMPORAL.supportLo)};
 const float TP_SUP_HI = ${f(TEMPORAL.supportHi)};
-const float TP_COV_R = ${f(TEMPORAL.covR)};
-const float TP_COV_LO = ${f(TEMPORAL.covLo)};
-const float TP_COV_HI = ${f(TEMPORAL.covHi)};
 const float TP_DENOISE = ${f(TEMPORAL.denoise)};
 const float TP_TAU = ${f(TEMPORAL.tau)};
 const float TP_FLAT_LO = ${f(TEMPORAL.flatLo)};
@@ -177,10 +173,10 @@ export const GLSL_TP_FIELD = `${HEAD_GLSL}
 uniform sampler2D u_data0;
 uniform sampler2D u_data1;
 uniform sampler2D u_data2;
+uniform sampler2D u_data3;
 uniform sampler2D u_lum;
 uniform sampler2D u_flow;
 uniform sampler2D u_histf;
-uniform sampler2D u_histg;
 in vec2 v_uv;
 layout(location = 0) out vec4 o_f0;
 layout(location = 1) out vec4 o_f1;
@@ -200,24 +196,6 @@ void main() {
     sup = max(sup, mapConf(v_uv + vec2(cos(a), sin(a)) * sr));
   }
   g_subjPrior = hist.a * conf * TP_DECAY * smoothstepf(TP_SUP_LO, TP_SUP_HI, sup);
-  // Whole-or-nothing factor: how much of what departs from the water around here the (previous) tracked mask tones.
-  ivec2 fo = ivec2(round(fl.xy));
-  vec2 ls = vec2(textureSize(u_lum, 0));
-  float num = 0.0, den = 0.0;
-  for (int i = 0; i < 17; i++) {
-    float r = i == 0 ? 0.0 : (i < 9 ? 0.5 : 1.0) * TP_COV_R;
-    float a = float(i) * 0.7853982 + (i >= 9 ? 0.3926991 : 0.0);
-    ivec2 q = clamp(x + ivec2(round(vec2(cos(a), sin(a)) * r)), ivec2(0), hi);
-    vec2 quv = v_uv + vec2(q - x) / ls * vec2(1.0, -1.0);
-    float dq = backdropDev(linearToOklab(srgbToLinear(texelFetch(u_lum, q, 0).rgb)), quv);
-    float w = smoothstepf(2.0 * BD_CORE_LO, 2.0 * BD_CORE_HI, dq);
-    den += w;
-    num += w * texelFetch(u_histf, clamp(q + fo, ivec2(0), hi), 0).a;
-  }
-  float covT = den < 0.75 ? 1.0 : smoothstepf(TP_COV_LO, TP_COV_HI, num / den);
-  float hf = p[23].x > 0.5 ? texelFetch(u_histg, clamp(x + fo, ivec2(0), hi), 0).a : covT;
-  float factor = mix(hf, covT, p[23].z);
-  g_subjFactor = hf;
   vec3 g = gradeD(lm.rgb, lm.rgb, v_uv);
   vec3 cur = (srgbToLinear(g) + 0.003) / (srgbToLinear(lm.rgb) + 0.003);
   vec3 lc = log(cur);
@@ -227,7 +205,7 @@ void main() {
   float beta = TP_BETA * conf * exp(-(d * d) / (TP_BDIFF * TP_BDIFF));
   vec3 stab = exp(mix(lc, lp, beta));
   o_f0 = vec4(stab, g_subjOut);
-  o_f1 = vec4(stab / cur, factor);
+  o_f1 = vec4(stab / cur, g_subjOut);
 }`;
 export const WGSL_TP_FIELD = `
 struct Params { p: array<vec4<f32>, 24> };
@@ -235,10 +213,10 @@ struct Params { p: array<vec4<f32>, 24> };
 @group(0) @binding(3) var u_data0: texture_2d<f32>;
 @group(0) @binding(4) var u_data1: texture_2d<f32>;
 @group(0) @binding(5) var u_data2: texture_2d<f32>;
+@group(0) @binding(10) var u_data3: texture_2d<f32>;
 @group(0) @binding(6) var u_lum: texture_2d<f32>;
 @group(0) @binding(7) var u_flow: texture_2d<f32>;
 @group(0) @binding(8) var u_histf: texture_2d<f32>;
-@group(0) @binding(9) var u_histg: texture_2d<f32>;
 struct FieldOut { @location(0) f0: vec4<f32>, @location(1) f1: vec4<f32> };
 ${VS_WGSL}
 ${TP_CONSTS_WGSL}
@@ -257,25 +235,6 @@ ${GRADE_WGSL}
     sup = max(sup, mapConf(in.uv + vec2<f32>(cos(a), sin(a)) * sr));
   }
   g_subjPrior = hist.a * conf * TP_DECAY * smoothstepf(TP_SUP_LO, TP_SUP_HI, sup);
-  // Whole-or-nothing factor: how much of what departs from the water around here the (previous) tracked mask tones.
-  let fo = vec2<i32>(round(fl.xy));
-  let ls = vec2<f32>(textureDimensions(u_lum));
-  var num = 0.0;
-  var den = 0.0;
-  for (var i = 0; i < 17; i++) {
-    let r = select(select(TP_COV_R, 0.5 * TP_COV_R, i < 9), 0.0, i == 0);
-    let a = f32(i) * 0.7853982 + select(0.0, 0.3926991, i >= 9);
-    let q = clamp(x + vec2<i32>(round(vec2<f32>(cos(a), sin(a)) * r)), vec2<i32>(0), hi);
-    let quv = in.uv + vec2<f32>(q - x) / ls;
-    let dq = backdropDev(linearToOklab(srgbToLinear(textureLoad(u_lum, q, 0).rgb)), quv);
-    let w = smoothstepf(2.0 * BD_CORE_LO, 2.0 * BD_CORE_HI, dq);
-    den += w;
-    num += w * textureLoad(u_histf, clamp(q + fo, vec2<i32>(0), hi), 0).a;
-  }
-  let covT = select(smoothstepf(TP_COV_LO, TP_COV_HI, num / max(den, 1e-4)), 1.0, den < 0.75);
-  let hf = select(covT, textureLoad(u_histg, clamp(x + fo, vec2<i32>(0), hi), 0).a, params.p[23].x > 0.5);
-  let factor = mix(hf, covT, params.p[23].z);
-  g_subjFactor = hf;
   let g = gradeD(lm.rgb, lm.rgb, in.uv);
   let cur = (srgbToLinear(g) + 0.003) / (srgbToLinear(lm.rgb) + 0.003);
   let lc = log(cur);
@@ -286,7 +245,7 @@ ${GRADE_WGSL}
   let stab = exp(mix(lc, lp, vec3<f32>(beta)));
   var o: FieldOut;
   o.f0 = vec4(stab, g_subjOut);
-  o.f1 = vec4(stab / cur, factor);
+  o.f1 = vec4(stab / cur, g_subjOut);
   return o;
 }`;
 

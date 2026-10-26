@@ -2,6 +2,7 @@
 // constants as GLSL/WGSL in grade-shader.ts — used by the Node harness and
 // the unit tests, never in the render path.
 
+import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
 import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
@@ -175,7 +176,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // Raw mask (before the tone gate) also takes the temporal layer's warped previous mask (GPU only; 0 here by default).
   const bdevP = ow > 0 && fit && fit.length === 18 ? backdropDev(lab0[0], pa, pb, u, v, fit) : 1;
   const subjRaw = ow > 0 && fit && fit.length === 18 ? Math.max(subjectWeight(ctx.depth, u, v, clamp(confMap, 0, 1) * k, bdevP), subjPrior * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) : 0;
-  const subj = subjRaw * ow * tone;
+  const [anS, anCore] = animalStrengthAt(ctx.depth, u, v);
+  const subj = Math.max(subjRaw, ow > 0 ? anCore : 0) * ow * tone * anS;
   if (ctx.debug) return [k, confPix, clamp(confMap, 0, 1)];
   const out = [0, 0, 0];
   const ew = Math.pow(p.exposure, p.waterExposure);
@@ -521,4 +523,26 @@ export function applyGrade(ctxIn: ApplyContext, rgba: Uint8ClampedArray, w: numb
     }
   }
   return out;
+}
+
+/**
+ * Per-animal Subject pop strength and interior hold at upright (u, v) for a still (animals.ts stillStrength: each animal at its own
+ * whole-or-nothing target; the engine tracks and eases them over time instead). Mirrors grade-shader animalStrength.
+ */
+const STILL_STRENGTH = new WeakMap<AnimalMap, Float32Array>();
+function animalStrengthAt(d: DepthMap, u: number, v: number): [number, number] {
+  const am = d.animals;
+  if (!am) return [0, 0];
+  let s = STILL_STRENGTH.get(am);
+  if (!s) { s = stillStrength(am).data; STILL_STRENGTH.set(am, s); }
+  const W = am.width, H = am.height;
+  const x = Math.min(W - 1, Math.max(0, Math.floor(u * W)));
+  const y = Math.min(H - 1, Math.max(0, Math.floor(v * H)));
+  // Interior hold read bilinearly (soft edge), as in the shaders.
+  const fx = Math.min(Math.max(u * W - 0.5, 0), W - 1), fy = Math.min(Math.max(v * H - 0.5, 0), H - 1);
+  const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(x0 + 1, W - 1), y1 = Math.min(y0 + 1, H - 1);
+  const tx = fx - x0, ty = fy - y0;
+  const g = (xx: number, yy: number) => s[(yy * W + xx) * 4 + 1];
+  const core = (g(x0, y0) * (1 - tx) + g(x1, y0) * tx) * (1 - ty) + (g(x0, y1) * (1 - tx) + g(x1, y1) * tx) * ty;
+  return [s[(y * W + x) * 4], core];
 }
