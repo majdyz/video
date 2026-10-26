@@ -28,6 +28,10 @@ export const BACKDROP = {
   coreIn: 0.85,
   coreLo: 0.012,
   coreHi: 0.03,
+  /** Deep inside a tracked animal (animals.ts interior hold) only water the surface predicts (departure below
+   * holdLo..holdHi) is still left out: a stretch of body lit like the water is toned with the rest. */
+  holdLo: 0.004,
+  holdHi: 0.01,
   /** Chroma distance counts this much relative to lightness. */
   abWeight: 1.5,
   /** A pixel darker than the water counts this much of its lightness gap: a faint

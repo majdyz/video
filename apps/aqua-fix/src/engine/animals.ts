@@ -43,6 +43,8 @@ export const ANIMALS = {
   leadMaxCells: 12,
   /** The strength map reaches this many texels past the animal (the outline comes from the per-pixel test). */
   dilate: 2,
+  /** A tap binds to an animal within this many map texels of the tapped point. */
+  tapReach: 3,
 };
 
 export type Animal = {
@@ -58,6 +60,23 @@ export type Animal = {
 };
 /** Labels per map texel (0 = none, k = list[k − 1]). */
 export type AnimalMap = { width: number; height: number; labels: Uint8Array; list: Animal[] };
+
+/**
+ * A user correction of the Subject pop selection (tap to include / exclude), stored with the clip like trim and
+ * splits. It is anchored in clip time and frame position (upright uv, 0..1), not to a run-time animal id: when
+ * playback or an export reaches `t`, it binds to the animal found at (u, v) and follows that animal's track from
+ * then on (ids are not stable across runs; the anchor is). An `include` that finds no animal is a seed for the
+ * analysis (`seeds`) to start a new subject from.
+ */
+export type SubjectOverride = { t: number; u: number; v: number; action: "include" | "exclude" };
+
+/** What the UI draws and hit-tests: the animals at the current time (ids per map texel, 0 = none). */
+export type SubjectSelection = {
+  width: number;
+  height: number;
+  ids: Uint16Array;
+  animals: { id: number; strength: number; override?: "include" | "exclude" }[];
+};
 
 function smoothstep(e0: number, e1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
@@ -226,6 +245,8 @@ type Track = {
   base: number;
   /** Has a velocity estimate (two analyses). */
   moved: boolean;
+  /** A user correction bound to this animal. */
+  override?: "include" | "exclude";
   s: number;
 };
 
@@ -241,9 +262,59 @@ export class AnimalTracker {
   private h = 0;
   /** Clip time of the latest analysis. */
   private lastT = -1;
+  /** User corrections (see SubjectOverride) and the track each one has bound to (override index → track id). */
+  private overrides: SubjectOverride[] = [];
+  private bound = new Map<number, number>();
 
   reset(): void {
     this.tracks = [];
+    this.bound.clear();
+  }
+
+  /** Replaces the user corrections (re-bound as the clip reaches each anchor). */
+  setOverrides(list: readonly SubjectOverride[]): void {
+    this.overrides = list.slice();
+    this.bound.clear();
+  }
+
+  /** Binds the corrections whose anchor time has come to the animal under their point, then applies them. */
+  private applyOverrides(t: number): void {
+    for (let i = 0; i < this.overrides.length; i++) {
+      const o = this.overrides[i];
+      if (this.bound.has(i) || o.t > t + 0.05) continue;
+      const x = Math.min(this.w - 1, Math.max(0, Math.floor(o.u * this.w))), y = Math.min(this.h - 1, Math.max(0, Math.floor(o.v * this.h)));
+      let best: Track | null = null, bestD = ANIMALS.tapReach + 1;
+      for (const tr of this.tracks) {
+        if (tr.t !== this.lastT) continue;
+        for (const c of tr.cells) {
+          const d = Math.max(Math.abs((c % this.w) - x), Math.abs(Math.floor(c / this.w) - y));
+          if (d < bestD) { bestD = d; best = tr; }
+        }
+      }
+      if (best) this.bound.set(i, best.id);
+    }
+    for (const [i, id] of this.bound) {
+      const tr = this.tracks.find((x) => x.id === id);
+      if (!tr) continue;
+      tr.override = this.overrides[i].action;
+    }
+    for (const tr of this.tracks) {
+      if (tr.override === "exclude") tr.target = 0;
+      else if (tr.override === "include" && tr.t === this.lastT) tr.target = 1;
+    }
+  }
+
+  /** Points of `include` corrections that found no animal yet (anchor passed within the last second): seeds. */
+  seeds(t: number): { u: number; v: number }[] {
+    return this.overrides.filter((o, i) => o.action === "include" && !this.bound.has(i) && o.t <= t && t - o.t < 1).map((o) => ({ u: o.u, v: o.v }));
+  }
+
+  /** The animals at clip time `t` for the UI (outline, hit test, current state). */
+  selection(t: number): SubjectSelection | null {
+    if (!this.w) return null;
+    const ids = new Uint16Array(this.w * this.h);
+    for (const tr of this.tracks) for (const c of this.shifted(tr, t)) if (!ids[c]) ids[c] = tr.id;
+    return { width: this.w, height: this.h, ids, animals: this.tracks.map((tr) => ({ id: tr.id, strength: tr.s, override: tr.override })) };
   }
 
   get count(): number {
@@ -321,6 +392,7 @@ export class AnimalTracker {
       if (tr.s > 0.005) next.push(tr);
     }
     this.tracks = next;
+    this.applyOverrides(t);
   }
 
   /**
@@ -330,7 +402,7 @@ export class AnimalTracker {
   snap(): void {
     for (const tr of this.tracks) {
       if (tr.t !== this.lastT) continue;
-      tr.target = tr.base;
+      tr.target = tr.override === "exclude" ? 0 : tr.override === "include" ? 1 : tr.base;
       tr.s = tr.target;
     }
   }

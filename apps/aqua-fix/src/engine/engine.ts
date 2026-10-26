@@ -18,7 +18,7 @@ import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput 
 import { linearToOklab, oklabToLinear } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
 import { POP_GATE, gateTarget, subjectMask } from "./pop-gate.ts";
-import { AnimalTracker } from "./animals.ts";
+import { AnimalTracker, type SubjectOverride, type SubjectSelection } from "./animals.ts";
 import {
   CLAHE_BINS,
   CLAHE_TILES_X,
@@ -674,6 +674,20 @@ export class GradeEngine {
     this.guideTarget = led ? { ...base.guide, data: led.guide } : base.guide;
     // The strength map follows the animals every frame.
     if (this.animals.count) this.dirtyData = true;
+  }
+
+  /**
+   * Subject pop corrections for this clip (tap to include / exclude; see animals.ts SubjectOverride). Stored by the
+   * app with the clip state and set before preview and every export.
+   */
+  setSubjectOverrides(list: readonly SubjectOverride[]): void {
+    this.animals.setOverrides(list);
+    this.dirtyData = true;
+  }
+
+  /** The tracked animals now (ids per map texel + state), for drawing outlines and hit-testing taps. */
+  subjectSelection(): SubjectSelection | null {
+    return this.settings.subjectPop ? this.animals.selection(this.lastTickSec) : null;
   }
 
   /** Reset temporal state for a new file. */

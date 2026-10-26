@@ -92,6 +92,8 @@ const float BD_RING_R = ${BACKDROP.ringR.toFixed(1)};
 const float BD_CORE_IN = ${BACKDROP.coreIn.toFixed(4)};
 const float BD_CORE_LO = ${BACKDROP.coreLo.toFixed(4)};
 const float BD_CORE_HI = ${BACKDROP.coreHi.toFixed(4)};
+const float BD_HOLD_LO = ${BACKDROP.holdLo.toFixed(4)};
+const float BD_HOLD_HI = ${BACKDROP.holdHi.toFixed(4)};
 const float BD_SUBJ_LO = ${BACKDROP.subjLo.toFixed(4)};
 const float BD_SUBJ_HI = ${BACKDROP.subjHi.toFixed(4)};
 const float BD_DARK = ${BACKDROP.vetoDark.toFixed(4)};
@@ -458,7 +460,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   float subjRaw = p[16].w > 0.0 ? max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev)) : 0.0;
   g_subjOut = subjRaw;
   vec2 an = animalStrength(uv);
-  float subj = max(subjRaw, p[16].w > 0.0 ? an.y : 0.0) * p[16].w * p[22].z * an.x;
+  float subj = max(subjRaw, p[16].w > 0.0 ? an.y * smoothstepf(BD_HOLD_LO, BD_HOLD_HI, bdev) : 0.0) * p[16].w * p[22].z * an.x;
   if (p[0].w > 0.5) return vec3(k, confPix, clamp(fld.y, 0.0, 1.0));
   vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   vec3 gainV = rangeGain * wb;
@@ -851,7 +853,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let subjRaw = select(0.0, max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev)), p[16].w > 0.0);
   g_subjOut = subjRaw;
   let an = animalStrength(uv);
-  let subj = max(subjRaw, select(0.0, an.y, p[16].w > 0.0)) * p[16].w * p[22].z * an.x;
+  let subj = max(subjRaw, select(0.0, an.y * smoothstepf(BD_HOLD_LO, BD_HOLD_HI, bdev), p[16].w > 0.0)) * p[16].w * p[22].z * an.x;
   if (p[0].w > 0.5) { return vec3(k, confPix, clamp(fld.y, 0.0, 1.0)); }
   let rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   var gainV = rangeGain * wb;

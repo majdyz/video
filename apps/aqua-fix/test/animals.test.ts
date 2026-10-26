@@ -65,4 +65,27 @@ const at = (s: { width: number; data: Float32Array }, x: number, y: number) => s
   const shift = right(led!.fields) - right(fields);
   assert.ok(shift >= 4 && shift <= ANIMALS.leadMaxCells, `map moved ahead by ${shift} texels`);
 }
+// User corrections: anchored at (t, u, v), bound to the animal there and followed; exclude fades it out, include tones
+// an animal the coverage test would leave alone; an include on empty water is a seed.
+{
+  const tr = new AnimalTracker();
+  const two = (dx: number) => scene([[60 + dx, 50, 30, 12, 1, 1], [190 + dx, 100, 30, 12, 1, 0.02]]);
+  tr.setOverrides([
+    { t: 0.1, u: 60 / W, v: 50 / H, action: "exclude" },
+    { t: 0.1, u: 190 / W, v: 100 / H, action: "include" },
+    { t: 0.1, u: 0.5, v: 0.05, action: "include" },
+  ]);
+  for (let k = 0; k < 6; k++) {
+    const s = two(2 * k);
+    tr.update(labelAnimals(s.map, s.dev, W, H, MW, MH), 0.1 * k);
+    for (let i = 0; i < 3; i++) tr.step(1 / 30);
+  }
+  for (let i = 0; i < 90; i++) tr.step(1 / 30);
+  const st = tr.strength(0.5);
+  const sel = tr.selection(0.5)!;
+  assert.ok(at(st, Math.round((70 * MW) / W), Math.round((50 * MH) / H)) < 0.05, "excluded animal faded out");
+  assert.ok(at(st, Math.round((200 * MW) / W), Math.round((100 * MH) / H)) > 0.9, "included animal toned despite coverage");
+  assert.equal(sel.animals.filter((a) => a.override).length, 2, "both corrections bound and followed");
+  assert.deepEqual(tr.seeds(0.5), [{ u: 0.5, v: 0.05 }], "an include on water is a seed");
+}
 console.log("ok  animals");

@@ -188,7 +188,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const bdevP = ow > 0 && fit && fit.length === 18 ? backdropDev(lab0[0], pa, pb, u, v, fit) : 1;
   const subjRaw = ow > 0 && fit && fit.length === 18 ? Math.max(subjectWeight(ctx.depth, u, v, clamp(confMap, 0, 1) * k, bdevP), subjPrior * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) : 0;
   const [anS, anCore] = animalStrengthAt(ctx.depth, u, v);
-  const subj = Math.max(subjRaw, ow > 0 ? anCore : 0) * ow * tone * anS;
+  const subj = Math.max(subjRaw, ow > 0 ? anCore * smoothstep(BACKDROP.holdLo, BACKDROP.holdHi, bdevP) : 0) * ow * tone * anS;
   if (ctx.debug) return [k, confPix, clamp(confMap, 0, 1)];
   const out = [0, 0, 0];
   const ew = Math.pow(p.exposure, p.waterExposure);
