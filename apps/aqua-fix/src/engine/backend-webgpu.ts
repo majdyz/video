@@ -140,7 +140,7 @@ export class WebGPUBackend implements GpuBackend {
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
         tex(3, "unfilterable-float"), tex(4, "unfilterable-float"), tex(5, "unfilterable-float"),
-        tex(6, "unfilterable-float"), tex(7, "unfilterable-float"), tex(8, "unfilterable-float"),
+        tex(6, "unfilterable-float"), tex(7, "unfilterable-float"), tex(8, "unfilterable-float"), tex(9, "unfilterable-float"),
       ],
     });
     const fieldModule = device.createShaderModule({ code: WGSL_TP_FIELD });
