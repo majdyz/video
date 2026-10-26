@@ -61,11 +61,23 @@ export const CALM = {
   floorMin: 0.015,
   floorWarmLo: 1.05,
   floorWarmHi: 1.2,
+  // … but only a magenta floor (blue up with red, B/G of the bright pixels
+  // at or above neutral) is a cast to remove: a warm floor under yellow-brown
+  // bright pixels (B/G well below 1, R/G above 1) is graded or lit footage —
+  // a sea floor under ROV lights, already balanced — and is left alone.
+  floorMagentaLo: 0.85,
+  floorMagentaHi: 1.0,
   // Clear air: the lifted-black haze measure (GradeParams.haze) above which
   // a frame is murky water, not topside.
   // (An overcast sea measures ~0.2; murky water and hazy reefs 0.35+.)
   hazeLo: 0.2,
   hazeHi: 0.35,
+  // Strong healthy reds (a red share well above any raw underwater frame:
+  // lionfish, red coral, sponges under daylight or a light) mean the camera
+  // already recorded the scene — graded or lit footage — and also back off
+  // the tone stages (exposure, levels, local contrast), in clear water only.
+  redToneLo: 0.06,
+  redToneHi: 0.12,
   // How far each score moves its stages toward the identity at 1.
   colourMax: 0.9,
   toneMax: 0.9,
@@ -149,7 +161,7 @@ export function calmEvidence(lin: Float32Array, n: number): CalmEvidence {
   const noCast =
     smoothstep(CALM.rgLo, CALM.rgHi, rgMed) *
     smoothstep(CALM.bgLo0, CALM.bgLo1, bgMed) * (1 - smoothstep(CALM.bgHi0, CALM.bgHi1, bgMed)) *
-    smoothstep(CALM.floorLo, CALM.floorHi, floor) * (1 - smoothstep(CALM.floorWarmLo, CALM.floorWarmHi, floor));
+    smoothstep(CALM.floorLo, CALM.floorHi, floor) * (1 - smoothstep(CALM.floorWarmLo, CALM.floorWarmHi, floor) * smoothstep(CALM.floorMagentaLo, CALM.floorMagentaHi, bgMed));
   return { warm: warmFrac, rg: rgMed, bg: bgMed, floor, reds: smoothstep(CALM.warmLo, CALM.warmHi, warmFrac), noCast };
 }
 
@@ -161,8 +173,10 @@ export function calmEvidence(lin: Float32Array, n: number): CalmEvidence {
  * the haze.
  */
 export function calmScores(e: CalmEvidence, haze: number): { calm: number; calmTone: number } {
-  const topside = e.noCast * (1 - smoothstep(CALM.hazeLo, CALM.hazeHi, haze));
-  return { calm: CALM.colourMax * Math.max(e.reds, topside), calmTone: CALM.toneMax * topside };
+  const clear = 1 - smoothstep(CALM.hazeLo, CALM.hazeHi, haze);
+  const topside = e.noCast * clear;
+  const graded = smoothstep(CALM.redToneLo, CALM.redToneHi, e.warm) * clear;
+  return { calm: CALM.colourMax * Math.max(e.reds, topside), calmTone: CALM.toneMax * Math.max(topside, graded) };
 }
 
 /** Tone calm of a parameter set (0 when absent). */

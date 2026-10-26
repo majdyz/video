@@ -17,6 +17,7 @@
 
 import { BACKDROP, backdropObjectness, growSubjects } from "./backdrop.ts";
 import { calmEvidence, calmScores } from "./calm.ts";
+import { RED, greenCastOf } from "./red.ts";
 import { SRGB_TO_LINEAR_LUT, linearToOklab, linearToSrgb, luminance, oklabHueDeg } from "./color.ts";
 import {
   CLAHE_BINS,
@@ -293,6 +294,9 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // in green murk departs from the surface and keeps it).
   for (let i = 0; i < n; i++) objHue[i] = Math.max(hueObj[i] * (1 - backdropValidity * (1 - bdDev[i])), backdrop[i]);
   const veilScale = veilScaleMap(lin, objHue, bfArr, w, h, temp("veilScale", n));
+  // Green water (red.ts): every object shares the green veil's hue, so the hue
+  // test calls the whole scene water; there the signal test decides alone.
+  const greenObj = greenCastOf(binf) * RED.greenObj;
   const J = temp("J", n * 3);
   const conf = temp("conf", n);
   const wbWeight = temp("wbWeight", n);
@@ -326,7 +330,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     // glow under the surface is brighter water without an outline, and only
     // what the backdrop calls a subject keeps the brightness rule.
     const confBright = smoothstep(CONF_BRIGHT.lo, CONF_BRIGHT.hi, sig) * (1 - backdropValidity + backdrop[i]);
-    conf[i] = Math.min(confSignal, Math.max(objHue[i], confBright));
+    conf[i] = Math.min(confSignal, Math.max(objHue[i], confBright, greenObj));
 
     // The balance vote uses the signal test alone: in a blue scene nearly
     // every object shares the water's hue and the hue test would starve the
@@ -349,16 +353,18 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     sw += wgt;
   }
   const wb: Vec3 = [1, 1, 1];
+  // Green water (red.ts): the balance limits open up under a green veil.
+  const green = greenCastOf(binf);
   if (sw > 0) {
     const er = Math.pow(sr / sw, 1 / P) + 1e-5;
     const eg = Math.pow(sg / sw, 1 / P) + 1e-5;
     const eb = Math.pow(sb / sw, 1 / P) + 1e-5;
-    wb[0] = Math.min(WB_R_MAX, Math.max(WB_R_MIN, eg / er));
+    wb[0] = Math.min(WB_R_MAX + (RED.greenRMax - WB_R_MAX) * green, Math.max(WB_R_MIN, eg / er));
     // Blue is the last channel the water takes: a blue gain above 1 is only
     // physical when the water itself is green (chlorophyll absorbs blue).
     // Under a blue veil a gray-world blue push is a yellow subject (algae,
     // sand) being neutralised, so cap it by the veil's green:blue ratio.
-    const bMax = Math.min(WB_B_MAX, Math.max(1, binf[1] / Math.max(1e-4, binf[2])));
+    const bMax = Math.min(WB_B_MAX + (RED.greenBMax - WB_B_MAX) * green, Math.max(1, binf[1] / Math.max(1e-4, binf[2])));
     wb[2] = Math.min(bMax, Math.max(WB_B_MIN, eg / eb));
   }
   // Mostly-water scenes: shrink toward identity.
@@ -398,6 +404,13 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
     }
     return zs;
   };
+  // Green water (red.ts): a green-water scene averages warm (sand, rock,
+  // brown algae under the cast), not grey: the gray-world vote aims there
+  // (a sand reference, below, overrides it).
+  if (green > 0) {
+    wb[0] *= 1 + (RED.greenWarmR - 1) * green;
+    wb[2] *= 1 + (RED.greenWarmB - 1) * green;
+  }
   const sandMask = new Uint8Array(n);
   const sand = sandReference(sandSub, conf, hueObj, chroma, veilCos, lum, w, h, sandMask);
   if (sand.weight > 0) {
@@ -442,6 +455,8 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // the backdrop model says the frame is open water, and only under a blue
   // (not cyan or green) veil.
   if (waterWb[2] < 1) waterWb[2] += (1 - waterWb[2]) * backdropValidity * smoothstep(1, 1.25, binf[2] / Math.max(1e-4, binf[1]));
+  // Green water (red.ts): the water is the cast; it takes (most of) the full balance.
+  if (green > 0) for (const c of [0, 2]) waterWb[c] = Math.exp(Math.log(waterWb[c]) + (Math.log(wb[c]) - Math.log(waterWb[c])) * green * RED.greenWater);
   // Final per-pixel signal before exposure: mix(water, physics, conf). The
   // exposure is solved below on the physics path; the water path takes
   // exposure^WATER_EXPOSURE, which the shader applies per pixel.

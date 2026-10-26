@@ -5,6 +5,7 @@
 import { UNIFORM_FLOATS } from "./backend.ts";
 import { linearToOklab } from "./color.ts";
 import { calmParams, calmSettings, type CalmEvidence } from "./calm.ts";
+import { greenSettings, greenWeight } from "./red.ts";
 
 /** ULAP depth prior (Song et al. 2018): d = mu0 + mu1·max(G,B) + mu2·R on 0..1 sRGB. */
 export const ULAP = { mu0: 0.53214829, mu1: 0.51309827, mu2: -0.91066194 };
@@ -635,7 +636,7 @@ export const CLAHE_BINS = 32;
  *  p15: knee, subLo, subHi, hueFarLo
  *  p16: hazeWeight, deepHaze, detail guard, object-neutral strength
  *  p17: haze-lift subtraction per channel (hazeLiftT), neutral subtraction (hazeLift·hazeBlack)
- *  p18–p22: backdrop surface (18 coefficients, L / a / b; backdrop.ts), p22.z subject tone, 1 spare
+ *  p18–p22: backdrop surface (18 coefficients, L / a / b; backdrop.ts), p22.z subject tone, p22.w green-water weight (red.ts)
  *  p23: temporal history valid (backend), temporal layer on (engine), 0, 0
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
@@ -651,7 +652,7 @@ export function packUniforms(
   const u = new Float32Array(UNIFORM_FLOATS);
   const hz = settings.hazeAuto !== false;
   params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(params), pushOf(settings)), settings)), settings);
-  const base = presetSettings(calmSettings(resolveSettings(settings), params), settings);
+  const base = greenSettings(presetSettings(calmSettings(resolveSettings(settings), params), settings), params);
   const s = lookSettings(hz ? hazeSettings(base, params) : base, params);
   u.set([rotation, split, s.strength, 0], 0);
   u.set([...params.binf, s.veil], 4);
@@ -679,6 +680,7 @@ export function packUniforms(
   u.set([...hazeLiftT(params, s.hazeLift), s.hazeLift * params.hazeBlack], 68);
   if (params.backdropFit && params.backdropFit.length === 18) u.set(params.backdropFit, 72);
   u[90] = settings.subjectPop ? Math.min(1, Math.max(0, params.subjectTone ?? 0)) : 0;
+  u[91] = greenWeight(params); // p22.w: green-water weight (red.ts)
   // p23: history valid (set by the backend per frame), temporal layer on, 0, 0
   u[93] = 1;
   return u;
