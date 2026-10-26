@@ -226,8 +226,9 @@ export function detailGuardOf(_p: GradeParams): number {
  *    log-ratio change at which the history is dropped (a real change).
  *  - subject tracking: the previous frame's subject mask, warped by the same
  *    flow (decay per frame), is a prior for the open-water subject weight,
- *    kept wherever the pixel departs from the water at all (priorLo..priorHi
- *    of the backdrop departure) — the same object as one frame ago.
+ *    kept near the current analysis map where the pixel departs from the
+ *    water like a subject (BACKDROP.subjLo..subjHi, the same trim as the
+ *    map's own reach) — the same object as one frame ago.
  *  - dark flat water gets a light motion-adaptive temporal denoise (denoise
  *    × flow confidence × flatness × darkness × not-subject × similarity to
  *    the warped previous output, tau in sRGB units).
@@ -245,13 +246,12 @@ export const TEMPORAL = {
   kMin: 0.8,
   kMax: 1.25,
   decay: 0.9,
-  priorLo: 0.006,
-  priorHi: 0.02,
-  /** Deep inside a tracked object (prior above this) the per-pixel test no longer cuts: the object is toned whole. */
-  priorIn: 0.8,
-  /** … where only plain water (departure below inLo..inHi) is still cut, so a fast tail leaves no toned trail. */
-  inLo: 0.004,
-  inHi: 0.012,
+  /** The prior is carried only near the current analysis map (its max within supportR map texels, ramped
+   * supportLo..supportHi): it bridges the map's lag and per-pixel dropouts, but never feeds itself into a
+   * trail where the animal no longer is. */
+  supportR: 2,
+  supportLo: 0.2,
+  supportHi: 0.6,
   denoise: 0.5,
   tau: 5 / 255,
   flatLo: 3 / 255,

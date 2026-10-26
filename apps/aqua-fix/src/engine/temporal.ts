@@ -46,6 +46,9 @@ const float TP_BDIFF = ${f(TEMPORAL.betaDiff)};
 const float TP_KMIN = ${f(TEMPORAL.kMin)};
 const float TP_KMAX = ${f(TEMPORAL.kMax)};
 const float TP_DECAY = ${f(TEMPORAL.decay)};
+const float TP_SUP_R = ${f(TEMPORAL.supportR)};
+const float TP_SUP_LO = ${f(TEMPORAL.supportLo)};
+const float TP_SUP_HI = ${f(TEMPORAL.supportHi)};
 const float TP_DENOISE = ${f(TEMPORAL.denoise)};
 const float TP_TAU = ${f(TEMPORAL.tau)};
 const float TP_FLAT_LO = ${f(TEMPORAL.flatLo)};
@@ -185,7 +188,13 @@ void main() {
   vec4 fl = texelFetch(u_flow, x, 0);
   vec4 hist = texelFetch(u_histf, clamp(x + ivec2(round(fl.xy)), ivec2(0), hi), 0);
   float conf = fl.z * step(0.5, p[23].x);
-  g_subjPrior = hist.a * conf * TP_DECAY;
+  vec2 sr = TP_SUP_R / vec2(textureSize(u_data0, 0));
+  float sup = mapConf(v_uv);
+  for (int i = 0; i < 8; i++) {
+    float a = float(i) * 0.7853982;
+    sup = max(sup, mapConf(v_uv + vec2(cos(a), sin(a)) * sr));
+  }
+  g_subjPrior = hist.a * conf * TP_DECAY * smoothstepf(TP_SUP_LO, TP_SUP_HI, sup);
   vec3 g = gradeD(lm.rgb, lm.rgb, v_uv);
   vec3 cur = (srgbToLinear(g) + 0.003) / (srgbToLinear(lm.rgb) + 0.003);
   vec3 lc = log(cur);
@@ -217,7 +226,13 @@ ${GRADE_WGSL}
   let fl = textureLoad(u_flow, x, 0);
   let hist = textureLoad(u_histf, clamp(x + vec2<i32>(round(fl.xy)), vec2<i32>(0), hi), 0);
   let conf = fl.z * step(0.5, params.p[23].x);
-  g_subjPrior = hist.a * conf * TP_DECAY;
+  let sr = TP_SUP_R / vec2<f32>(textureDimensions(u_data0, 0));
+  var sup = mapConf(in.uv);
+  for (var i = 0; i < 8; i++) {
+    let a = f32(i) * 0.7853982;
+    sup = max(sup, mapConf(in.uv + vec2<f32>(cos(a), sin(a)) * sr));
+  }
+  g_subjPrior = hist.a * conf * TP_DECAY * smoothstepf(TP_SUP_LO, TP_SUP_HI, sup);
   let g = gradeD(lm.rgb, lm.rgb, in.uv);
   let cur = (srgbToLinear(g) + 0.003) / (srgbToLinear(lm.rgb) + 0.003);
   let lc = log(cur);

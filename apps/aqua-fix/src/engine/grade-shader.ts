@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { TEMPORAL, CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, VIVID } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, VIVID } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 import { BACKDROP } from "./backdrop.ts";
 
@@ -68,11 +68,6 @@ const float SKIN_MIX = ${SKIN.mix.toFixed(4)};
 const float SKIN_W_LO = ${SKIN.wLo.toFixed(4)};
 const float SKIN_W_HI = ${SKIN.wHi.toFixed(4)};
 const float SKIN_C_MIN = ${SKIN.cMin.toFixed(4)};
-const float TP_PRIOR_LO = ${TEMPORAL.priorLo.toFixed(4)};
-const float TP_PRIOR_HI = ${TEMPORAL.priorHi.toFixed(4)};
-const float TP_PRIOR_IN = ${TEMPORAL.priorIn.toFixed(4)};
-const float TP_IN_LO = ${TEMPORAL.inLo.toFixed(4)};
-const float TP_IN_HI = ${TEMPORAL.inHi.toFixed(4)};
 const float DG_K = ${DETAIL_GUARD.k.toFixed(4)};
 const float DG_EPS = ${DETAIL_GUARD.eps.toFixed(5)};
 const float DG_R_MIN = ${DETAIL_GUARD.rMin.toFixed(4)};
@@ -436,8 +431,8 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // Open blue water: no source red → the water path's colour (see apply.ts).
   float conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
   // Raw subject mask (before the tone gate) is also the temporal tracker's output; the warped
-  // previous mask (g_subjPrior) holds wherever the pixel departs from the water at all.
-  float subjRaw = p[16].w > 0.0 ? max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * mix(smoothstepf(TP_PRIOR_LO, TP_PRIOR_HI, bdev), smoothstepf(TP_IN_LO, TP_IN_HI, bdev), smoothstepf(TP_PRIOR_IN, 1.0, g_subjPrior))) : 0.0;
+  // previous mask (g_subjPrior, kept near the map by the temporal layer) holds where the pixel departs like a subject.
+  float subjRaw = p[16].w > 0.0 ? max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev)) : 0.0;
   g_subjOut = subjRaw;
   float subj = subjRaw * p[16].w * p[22].z;
   if (p[0].w > 0.5) return vec3(k, confPix, clamp(fld.y, 0.0, 1.0));
@@ -807,7 +802,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let veto = mix(1.0, bsub, p[16].w);
   let confPix = min(confSignal, max(hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma) * veto, confBright));
   let conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
-  let subjRaw = select(0.0, max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * mix(smoothstepf(TP_PRIOR_LO, TP_PRIOR_HI, bdev), smoothstepf(TP_IN_LO, TP_IN_HI, bdev), smoothstepf(TP_PRIOR_IN, 1.0, g_subjPrior))), p[16].w > 0.0);
+  let subjRaw = select(0.0, max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev)), p[16].w > 0.0);
   g_subjOut = subjRaw;
   let subj = subjRaw * p[16].w * p[22].z;
   if (p[0].w > 0.5) { return vec3(k, confPix, clamp(fld.y, 0.0, 1.0)); }

@@ -584,7 +584,9 @@ export class GradeEngine {
     const open = Math.min(1, Math.max(0, this.current.backdrop ?? 0));
     const aConf = am + (1 - Math.exp(-dt / TAU_CONF_OPEN_S) - am) * open;
     const f = ease(this.fields, this.fieldsTarget, am, aConf);
-    const g = ease(this.guide, this.guideTarget);
+    // Subject pop: the guide that steers the subject map's joint-bilateral upsampling follows as fast as the map
+    // itself, or a lagging guide steers the map onto the water where the animal (a fast tail) just was.
+    const g = ease(this.guide, this.guideTarget, this.settings.subjectPop ? aConf : am);
     const c = ease(this.clahe, this.claheTarget, ac);
     if (f !== this.fields || g !== this.guide || c !== this.clahe) this.dirtyData = true;
     if (this.person && this.personTarget && this.personTarget.length === this.person.length) {

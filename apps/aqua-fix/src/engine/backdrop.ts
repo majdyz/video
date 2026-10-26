@@ -43,10 +43,26 @@ export const BACKDROP = {
   edgeHi: 0.014,
   edgeRadius: 10,
   /** The shaders reach this far (map texels, 160×90 map) around a pixel for the subject map: a moving
-   * subject that has left the (lagging) map is still found there and trimmed to its outline per pixel. */
-  ringR: 6,
+   * subject that has left the (lagging) map is still found there and trimmed to its outline per pixel.
+   * Kept short: a wide reach tones lit water beside a fast tail (the per-pixel trim cannot tell it from the
+   * animal); following motion is the temporal prior's job (temporal.ts). */
+  ringR: 2,
   /** Closing radius (thumbnail pixels) of the whole-animal map. */
   closeR: 4,
+  /** A closed region that bridges this many separate animals is a school, toned not at all (bridged, the water
+   * between them would be toned too). */
+  schoolN: 3,
+  /** Share of a subject's outline that borders far-hue pixels (lo..hi) at which it is a colourful fish, left alone. */
+  farShareLo: 0.15,
+  farShareHi: 0.3,
+  /** Solidity: share of a closed subject (lo..hi) that departs from the water strongly (veto-ramped departure ≥ solidDev).
+   * A near animal is mostly solid; a hazy, far group the flood joined through lit water is mostly faint and
+   * would tone as a grey cloud with the water in it. */
+  solidDev: 0.8,
+  /** Share of a subject's own strong departure (its 90th percentile) a pixel needs to stay in it. */
+  relKeep: 0.3,
+  solidLo: 0.2,
+  solidHi: 0.26,
   /** Margin (thumbnail pixels) around far-hue pixels that the whole-animal flood never enters. */
   farMargin: 2,
   /** Whole-animal growth (growSubjects): seed threshold (share of validity), the veto-ramped departure a
@@ -294,6 +310,7 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
   const label = new Int32Array(n).fill(-1);
   const stack = new Int32Array(n);
   const members = new Int32Array(n);
+  const accepted = new Uint8Array(n);
   const seed = BACKDROP.seedFrac * validity;
   const grad = (i: number) => {
     const x = i % w;
@@ -318,7 +335,18 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     }
     // A region with no confident seed still counts when it has an outline
     // (a dim, far animal); a sun glow departs just as far but has none.
-    const accept = seeded ? 1 : smoothstep(BACKDROP.growEdgeLo, BACKDROP.growEdgeHi, edge);
+    let accept = seeded ? 1 : smoothstep(BACKDROP.growEdgeLo, BACKDROP.growEdgeHi, edge);
+    // A subject much of whose outline borders far-hue pixels is a colourful fish (a blue body with a yellow
+    // tail): toned, it would turn half grey; it keeps its colour.
+    if (block) {
+      let bTot = 0, bFar = 0;
+      for (let m = 0; m < cnt; m++) {
+        const i = members[m], x = i % w;
+        const nb = [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i >= w ? i - w : -1, i < n - w ? i + w : -1];
+        for (const j of nb) if (j >= 0 && label[j] !== s) { bTot++; if (block[j] > 0) bFar++; }
+      }
+      accept *= 1 - smoothstep(BACKDROP.farShareLo, BACKDROP.farShareHi, bFar / Math.max(1, bTot));
+    }
     // Does the frame hold an animal with a lit side (a shark's flank and
     // belly)? Clip-locked, this decides whether subjects are toned at all: a
     // diver in a black suit or a dim far silhouette alone would read as a
@@ -326,10 +354,19 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     // frames (the same shark turning away) keep the same tone.
     const lit = L && fit ? smoothstep(BACKDROP.lightShareLo, BACKDROP.lightShareHi, light / cnt) : 1;
     litAny = Math.max(litAny, lit * accept * smoothstep(BACKDROP.minArea, 2 * BACKDROP.minArea, cnt / n));
-    const sizeW = accept * smoothstep(BACKDROP.minArea, 2 * BACKDROP.minArea, cnt / n);
+    // Steep size ramp: a subject is toned whole or not at all (the engine eases the change over time).
+    const sizeW = accept * smoothstep(1.5 * BACKDROP.minArea, 2 * BACKDROP.minArea, cnt / n);
     if (sizeW <= 0) continue;
+    accepted[s] = 1;
     // The whole region gets one strength (no internal seams); the shaders feather it at the true outline.
-    for (let m = 0; m < cnt; m++) out[members[m]] = sizeW;
+    // Relative hysteresis: lit water the flood crept into around a bright animal departs only weakly next to the
+    // animal's own body; it is left out (a dim, far animal, weak everywhere, keeps all of itself). The closing
+    // below re-joins short gaps inside the body.
+    const ds = new Float32Array(cnt);
+    for (let m = 0; m < cnt; m++) ds[m] = dev[members[m]];
+    ds.sort();
+    const keepDev = BACKDROP.relKeep * ds[Math.min(cnt - 1, Math.floor(0.9 * cnt))];
+    for (let m = 0; m < cnt; m++) if (dev[members[m]] >= keepDev || objectness[members[m]] >= seed) out[members[m]] = sizeW;
   }
   // Closing (max then min filter): a narrow stretch of the body that happens
   // to match the water (a tail stock lit like the water) joins the parts on
@@ -339,5 +376,29 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
   for (let i = 0; i < n; i++) tmp[i] = 1 - tmp[i];
   maxFilter(tmp, out, w, h, BACKDROP.closeR);
   for (let i = 0; i < n; i++) out[i] = 1 - out[i];
+  // A closed region bridging several animals is a school: none of it is toned.
+  const comp = new Uint8Array(n);
+  for (let s0 = 0; s0 < n; s0++) {
+    if (comp[s0] || out[s0] <= 0) continue;
+    let top = 0, cnt = 0, solid = 0;
+    const regions = new Set<number>();
+    stack[top++] = s0; comp[s0] = 1;
+    while (top > 0) {
+      const i = stack[--top];
+      members[cnt++] = i;
+      if (label[i] >= 0 && accepted[label[i]]) regions.add(label[i]);
+      if (dev[i] >= BACKDROP.solidDev) solid++;
+      const x = i % w;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = x + dx, j = i + dy * w + dx;
+        if ((dx | dy) === 0 || xx < 0 || xx >= w || j < 0 || j >= n || comp[j] || out[j] <= 0) continue;
+        comp[j] = 1; stack[top++] = j;
+      }
+    }
+    // Whole or not at all: a school, or a mostly faint region (a hazy group joined through lit water), is dropped;
+    // solidity is judged over the joined animal, so a dim far body keeps the tone its tail earns.
+    const keep = regions.size >= BACKDROP.schoolN ? 0 : smoothstep(BACKDROP.solidLo, BACKDROP.solidHi, solid / cnt);
+    if (keep < 1) for (let m = 0; m < cnt; m++) out[members[m]] *= keep;
+  }
   return litAny;
 }

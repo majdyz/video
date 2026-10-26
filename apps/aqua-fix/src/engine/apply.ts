@@ -3,7 +3,7 @@
 // the unit tests, never in the render path.
 
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { TEMPORAL, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -174,7 +174,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const tone = ctx.settings.subjectPop ? clamp(p.subjectTone ?? 0, 0, 1) : 0;
   // Raw mask (before the tone gate) also takes the temporal layer's warped previous mask (GPU only; 0 here by default).
   const bdevP = ow > 0 && fit && fit.length === 18 ? backdropDev(lab0[0], pa, pb, u, v, fit) : 1;
-  const subjRaw = ow > 0 && fit && fit.length === 18 ? Math.max(subjectWeight(ctx.depth, u, v, clamp(confMap, 0, 1) * k, bdevP), subjPrior * (smoothstep(TEMPORAL.priorLo, TEMPORAL.priorHi, bdevP) + (smoothstep(TEMPORAL.inLo, TEMPORAL.inHi, bdevP) - smoothstep(TEMPORAL.priorLo, TEMPORAL.priorHi, bdevP)) * smoothstep(TEMPORAL.priorIn, 1, subjPrior))) : 0;
+  const subjRaw = ow > 0 && fit && fit.length === 18 ? Math.max(subjectWeight(ctx.depth, u, v, clamp(confMap, 0, 1) * k, bdevP), subjPrior * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) : 0;
   const subj = subjRaw * ow * tone;
   if (ctx.debug) return [k, confPix, clamp(confMap, 0, 1)];
   const out = [0, 0, 0];

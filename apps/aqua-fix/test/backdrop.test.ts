@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { backdropObjectness } from "../src/engine/backdrop.ts";
 import { detailBase, detailRatio, objectNeutral, warmClamp } from "../src/engine/apply.ts";
-import { backdropSubject } from "../src/engine/backdrop.ts";
+import { backdropSubject, growSubjects } from "../src/engine/backdrop.ts";
 import { linearToOklab, srgbToLinear } from "../src/engine/color.ts";
 
 const W = 256, H = 144, n = W * H;
@@ -101,5 +101,24 @@ const run = (px: Uint8ClampedArray) => { const { L, A, B } = lab(px); const out 
   const fit = new Array(18).fill(0); fit[0] = 0.6; fit[6] = -0.05; fit[12] = -0.12;
   assert.equal(backdropSubject(0.6, -0.05, -0.12, 0.3, 0.7, fit), 0);
   assert.equal(backdropSubject(0.8, 0, 0, 0.3, 0.7, fit), 1);
+}
+// Whole-animal map: a solid animal is kept whole; a faint, hazy region (a far group joined through lit water) and a
+// school of animals bridged by the closing are dropped entirely.
+{
+  const w = 160, h = 90, n = w * h;
+  const obj = new Float32Array(n), dev = new Float32Array(n), out = new Float32Array(n);
+  const blob = (cx: number, cy: number, rx: number, ry: number, d: number) => {
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 < 1) { dev[y * w + x] = d; obj[y * w + x] = 1; }
+  };
+  blob(30, 20, 22, 9, 1); // solid animal
+  blob(110, 20, 22, 9, 0.3); // faint group
+  // a school: three solid animals a few texels apart (the closing bridges them)
+  blob(20, 70, 11, 7, 1); blob(45, 70, 11, 7, 1); blob(70, 70, 11, 7, 1);
+  blob(130, 70, 11, 7, 1); // the same animal alone
+  growSubjects(obj, dev, 1, w, h, out);
+  assert.equal(out[20 * w + 30], 1, "solid animal toned whole");
+  assert.equal(out[20 * w + 110], 0, "faint group dropped");
+  assert.equal(out[70 * w + 45], 0, "school dropped");
+  assert.equal(out[70 * w + 130], 1, "a lone animal of the same size is kept");
 }
 console.log("ok  backdrop / artifact guard / object neutral / warm clamp");
