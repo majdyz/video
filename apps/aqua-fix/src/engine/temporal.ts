@@ -200,7 +200,7 @@ void main() {
     sup = max(sup, mapConf(v_uv + vec2(cos(a), sin(a)) * sr));
   }
   g_subjPrior = hist.a * conf * TP_DECAY * smoothstepf(TP_SUP_LO, TP_SUP_HI, sup);
-  // Whole-or-nothing factor: how much of the subject map around here the (previous) tracked mask tones.
+  // Whole-or-nothing factor: how much of what departs from the water around here the (previous) tracked mask tones.
   ivec2 fo = ivec2(round(fl.xy));
   vec2 ls = vec2(textureSize(u_lum, 0));
   float num = 0.0, den = 0.0;
@@ -210,7 +210,7 @@ void main() {
     ivec2 q = clamp(x + ivec2(round(vec2(cos(a), sin(a)) * r)), ivec2(0), hi);
     vec2 quv = v_uv + vec2(q - x) / ls * vec2(1.0, -1.0);
     float dq = backdropDev(linearToOklab(srgbToLinear(texelFetch(u_lum, q, 0).rgb)), quv);
-    float w = mapConf(quv) * smoothstepf(BD_CORE_LO, BD_CORE_HI, dq);
+    float w = smoothstepf(2.0 * BD_CORE_LO, 2.0 * BD_CORE_HI, dq);
     den += w;
     num += w * texelFetch(u_histf, clamp(q + fo, ivec2(0), hi), 0).a;
   }
@@ -257,7 +257,7 @@ ${GRADE_WGSL}
     sup = max(sup, mapConf(in.uv + vec2<f32>(cos(a), sin(a)) * sr));
   }
   g_subjPrior = hist.a * conf * TP_DECAY * smoothstepf(TP_SUP_LO, TP_SUP_HI, sup);
-  // Whole-or-nothing factor: how much of the subject map around here the (previous) tracked mask tones.
+  // Whole-or-nothing factor: how much of what departs from the water around here the (previous) tracked mask tones.
   let fo = vec2<i32>(round(fl.xy));
   let ls = vec2<f32>(textureDimensions(u_lum));
   var num = 0.0;
@@ -268,7 +268,7 @@ ${GRADE_WGSL}
     let q = clamp(x + vec2<i32>(round(vec2<f32>(cos(a), sin(a)) * r)), vec2<i32>(0), hi);
     let quv = in.uv + vec2<f32>(q - x) / ls;
     let dq = backdropDev(linearToOklab(srgbToLinear(textureLoad(u_lum, q, 0).rgb)), quv);
-    let w = mapConf(quv) * smoothstepf(BD_CORE_LO, BD_CORE_HI, dq);
+    let w = smoothstepf(2.0 * BD_CORE_LO, 2.0 * BD_CORE_HI, dq);
     den += w;
     num += w * textureLoad(u_histf, clamp(q + fo, vec2<i32>(0), hi), 0).a;
   }
