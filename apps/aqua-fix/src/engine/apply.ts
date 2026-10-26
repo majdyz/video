@@ -7,6 +7,7 @@ import { TEMPORAL, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, obj
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
+import { RED, chromaRebuild, greenNeutral, greenWeight, guideSmooth, greenSettings, redGainStrength, redGuard, waterRedGain } from "./red.ts";
 
 export type ApplyContext = {
   /** When set, gradePixel returns (k, confPix, confMap) instead of a colour. */
@@ -25,7 +26,7 @@ type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings }
 export function resolveContext(ctx: ApplyContext): PixelContext {
   const hz = ctx.settings.hazeAuto !== false;
   const params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(ctx.params), pushOf(ctx.settings)), ctx.settings)), ctx.settings);
-  const base = presetSettings(calmSettings(resolveSettings(ctx.settings), params), ctx.settings);
+  const base = greenSettings(presetSettings(calmSettings(resolveSettings(ctx.settings), params), ctx.settings), params);
   return { ...ctx, params, settings: lookSettings(hz ? hazeSettings(base, params) : base, params) };
 }
 
@@ -140,13 +141,23 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const pa = lab0[1], pb = lab0[2];
   const wSub = smoothstep(p.subLo, p.subHi, sig) * (1 - hueFar(pa, pb, p));
   const prop = Math.max(p.floorFrac, 1 - lumBs / lumI);
+  // Red restoration (red.ts): channels the grade amplifies are rebuilt from
+  // the smoothed, edge-aware chroma with the detail of the others; the red
+  // gain follows the region's red SNR.
+  const rg3 = [0, 1, 2].map((c) => Math.min(p.gainCap, Math.max(1 / p.gainCap, Math.exp(p.attn[c] * (z - p.zMean)))));
+  const rb = chromaRebuild(src, guideSmooth(ctx.depth, u, v, r0, g0, b0), rg3.map((g, c) => Math.max(g * p.wb[c], p.waterWb[c])), Bv);
+  const srcC = rb.c;
+  const redS = redGainStrength(rb.snrR);
+  // Water-hued pixels that still hold red above the local water (reef under a
+  // cyan cast) take more of the full red gain (red.ts waterRedGain).
+  const waterRed = waterRedGain(p.waterWb[0], rg3[0] * p.wb[0], rb.snrR);
   const full = [0, 0, 0];
   for (let c = 0; c < 3; c++) {
-    const I = src[c];
+    const I = srcC[c];
     const per = Math.max(I - Bs[c], I * p.floorFrac);
     const D = I * prop + (per - I * prop) * wSub;
-    const rangeGain = Math.min(p.gainCap, Math.max(1 / p.gainCap, Math.exp(p.attn[c] * (z - p.zMean))));
-    full[c] = D * rangeGain * p.wb[c];
+    const gainC = rg3[c] * p.wb[c];
+    full[c] = D * (c === 0 ? 1 + (gainC - 1) * redS : gainC);
   }
   // Per-pixel classification for the fallback: hue against the veil and
   // the signal fraction, the same tests the analysis runs on the thumbnail.
@@ -156,7 +167,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const ow = objectNeutralOf(p);
   const fit = p.backdropFit;
   const bsub = ow > 0 && fit && fit.length === 18 ? backdropSubject(lab0[0], pa, pb, u, v, fit) : 1;
-  const confPix = Math.min(confSignal, Math.max(hueConf(pa, pb, p) * (1 + (bsub - 1) * ow), confBright));
+  const confPix = Math.min(confSignal, Math.max(hueConf(pa, pb, p) * (1 + (bsub - 1) * ow), confBright, greenWeight(p) * RED.greenObj));
   // A pixel the veil model would nearly erase takes the water path whatever
   // the map says (see grade-shader.ts).
   // A detected person is an object whatever the colour tests say (the
@@ -183,7 +194,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // dehaze (gives up part of the veil fraction; floor keeps pure water lit).
   const wd = 1 - s.dehaze * Math.min(0.9, lumBs / lumI) * smoothstep(DEHAZE_LUM.lo, DEHAZE_LUM.hi, lumI);
   for (let c = 0; c < 3; c++) {
-    const water = src[c] * p.waterWb[c] * ew * wd;
+    const water = srcC[c] * (c === 0 ? waterRed : p.waterWb[c]) * ew * wd;
     out[c] = water + (full[c] * p.exposure - water) * conf;
   }
   // Haze lift removal (murky frames): subtract a share of the frame's lifted
@@ -244,7 +255,9 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // the saturation control.
   const [, a0, bb0] = linearToOklab(r0, g0, b0);
   const cSrc = Math.hypot(a0, bb0);
-  const [L, a, b] = linearToOklab(Math.max(0, out[0]), Math.max(0, out[1]), Math.max(0, out[2]));
+  const lab1 = linearToOklab(Math.max(0, out[0]), Math.max(0, out[1]), Math.max(0, out[2]));
+  const L = lab1[0];
+  let a = lab1[1], b = lab1[2];
   let C = Math.hypot(a, b);
   const cMax = p.chromaK * cSrc + p.chromaC0;
   let scale = C > cMax ? cMax / C : 1;
@@ -257,6 +270,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // Red-starved subject chroma goes to a cool silver (a faint tint of the
   // water's own hue): a dead-neutral or greenish grey next to saturated blue
   // water reads peach by simultaneous contrast.
+  // Green water (red.ts): the cast the balance could not remove goes to a muted blue-grey.
+  [a, b] = greenNeutral(L, a, b, greenWeight(p) * (1 - RED.gnObjKeep * conf));
   const tN = objectNeutral(L, a, b, r0, g0, b0, onFar, objectWeight(subj), objectNeutralOf(p));
   // In open blue water the person detector also fires on sharks and big
   // fish: skin colour only where the source has red left to be skin.
@@ -272,7 +287,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // Water-likeness for the look comes from the pixel's own hue (the mask or
   // the water/object split would cut one garment into differently treated parts).
   const looked = deepBlueLook(Ls, skinned[0], skinned[1], s.look, 1 - hueConf(pa, pb, p), hazeWeight(p), deepHaze(p));
-  const capped = capChroma(looked[0], looked[1], looked[2], cSrc);
+  const guarded = redGuard(looked[0], looked[1], looked[2], a0, bb0, person, onFar);
+  const capped = capChroma(looked[0], guarded[0], guarded[1], cSrc);
   const [r1, g1, b1] = oklabToLinear(looked[0], capped[0], capped[1]);
   void C;
 
@@ -282,7 +298,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const rs = linearToSrgb(r2), gs = linearToSrgb(g2), bs = linearToSrgb(b2);
   if (ctx.trace) {
     const f3 = (v: number[]) => v.map((x) => +x.toFixed(3));
-    Object.assign(ctx.trace, { lin: f3([r0, g0, b0]), z: +z.toFixed(2), k: +k.toFixed(2), conf: +conf.toFixed(2), veilScale: +veilScale.toFixed(2), B: f3(Bv), sig: +sig.toFixed(2), wSub: +wSub.toFixed(2), full: f3(full), outPreLevels: f3(out.map((v) => v)), Y: +Y.toFixed(3), C: +C.toFixed(3), cMax: +cMax.toFixed(3), scale: +scale.toFixed(2), o1: f3([r1, g1, b1]), o2: f3([r2, g2, b2]) });
+    Object.assign(ctx.trace, { srcC: f3(srcC), redS: +redS.toFixed(2), lin: f3([r0, g0, b0]), z: +z.toFixed(2), k: +k.toFixed(2), conf: +conf.toFixed(2), veilScale: +veilScale.toFixed(2), B: f3(Bv), sig: +sig.toFixed(2), wSub: +wSub.toFixed(2), full: f3(full), outPreLevels: f3(out.map((v) => v)), Y: +Y.toFixed(3), C: +C.toFixed(3), cMax: +cMax.toFixed(3), scale: +scale.toFixed(2), o1: f3([r1, g1, b1]), o2: f3([r2, g2, b2]) });
   }
   return [
     sr + (rs - sr) * s.strength,
