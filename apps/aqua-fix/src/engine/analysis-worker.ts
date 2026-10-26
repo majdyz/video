@@ -5,7 +5,7 @@ import { analyzeThumbnail } from "./analyze.ts";
 import { claheTexture, fieldsTexture, guideTexture, type GradeParams, type Vec3 } from "./params.ts";
 import type { AnimalMap } from "./animals.ts";
 
-export type AnalysisRequest = { id: number; rgba: ArrayBuffer; width: number; height: number };
+export type AnalysisRequest = { id: number; rgba: ArrayBuffer; width: number; height: number; /** Subject pop: points (upright uv) to start a subject from (a user's tap). */ seeds?: { u: number; v: number }[] };
 
 export type AnalysisPacket = {
   id: number;
@@ -21,9 +21,9 @@ export type AnalysisPacket = {
 };
 
 self.onmessage = (e: MessageEvent<AnalysisRequest>) => {
-  const { id, rgba, width, height } = e.data;
+  const { id, rgba, width, height, seeds } = e.data;
   const t0 = performance.now();
-  const a = analyzeThumbnail(new Uint8ClampedArray(rgba), width, height);
+  const a = analyzeThumbnail(new Uint8ClampedArray(rgba), width, height, { seeds });
   const fields = fieldsTexture(a.depth);
   const guide = guideTexture(a.depth);
   const clahe = claheTexture(a.clahe);

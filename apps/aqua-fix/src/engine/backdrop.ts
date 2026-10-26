@@ -54,6 +54,8 @@ export const BACKDROP = {
    * Kept short: a wide reach tones lit water beside a fast tail (the per-pixel trim cannot tell it from the
    * animal); following motion is the temporal prior's job (temporal.ts). */
   ringR: 2,
+  /** A user seed (tap) marks pixels within this radius (thumbnail pixels) of it. */
+  seedR: 2,
   /** Closing radius (thumbnail pixels) of the whole-animal map. */
   closeR: 4,
   /** A closed region that bridges this many separate animals is a school, toned not at all (bridged, the water
@@ -304,10 +306,17 @@ export function backdropDev(L: number, a: number, b: number, u: number, v: numbe
  * frame): small fish keep the normal grade and their own colour. `dev` is the
  * veto-ramped departure (backdropObjectness devOut). Output 0..1 in `out`.
  */
-export function growSubjects(objectness: Float32Array, dev: Float32Array, validity: number, w: number, h: number, out: Float32Array, L?: Float32Array, fit?: ArrayLike<number>, waterW?: Float32Array): number {
+export function growSubjects(objectness: Float32Array, dev: Float32Array, validity: number, w: number, h: number, out: Float32Array, L?: Float32Array, fit?: ArrayLike<number>, waterW?: Float32Array, seeds?: readonly { u: number; v: number }[]): number {
   const n = w * h;
   out.fill(0, 0, n);
   if (validity <= 0) return 0;
+  // User seeds (a tap asking for a subject there, animals.ts): pixels near each start a flood that is accepted
+  // whatever the automatic tests say (size, solidity, edges), as long as it departs from the water at all.
+  const userSeed = new Uint8Array(n);
+  for (const sd of seeds ?? []) {
+    const cx = Math.round(sd.u * w - 0.5), cy = Math.round(sd.v * h - 0.5), r = BACKDROP.seedR;
+    for (let y = Math.max(0, cy - r); y <= Math.min(h - 1, cy + r); y++) for (let x = Math.max(0, cx - r); x <= Math.min(w - 1, cx + r); x++) userSeed[y * w + x] = 1;
+  }
   // Pixels whose hue cannot be water (a yellow fish), and a small margin
   // around them (their blur halo), belong to another object: the flood never
   // enters them, so a fish touching the shark is neither toned nor merged.
@@ -332,12 +341,13 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
   };
   for (let s = 0; s < n; s++) {
     if (label[s] >= 0 || (block && block[s] > 0) || (objectness[s] < seed && dev[s] < BACKDROP.growDev)) continue;
-    let top = 0, cnt = 0, seeded = false, edge = 0, light = 0;
+    let top = 0, cnt = 0, seeded = false, edge = 0, light = 0, user = false;
     stack[top++] = s; label[s] = s;
     while (top > 0) {
       const i = stack[--top];
       members[cnt++] = i;
       if (objectness[i] >= seed) seeded = true;
+      if (userSeed[i]) user = true;
       if (L && fit) { const fx = ((i % w) + 0.5) / w - 0.5, fy = (Math.floor(i / w) + 0.5) / h - 0.5; if (L[i] - evalAt3(fit, fx, fy) > BACKDROP.lightDL) light++; }
       const g = grad(i);
       if (g > edge) edge = g;
@@ -372,9 +382,9 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     const lit = L && fit ? smoothstep(BACKDROP.lightShareLo, BACKDROP.lightShareHi, light / cnt) : 1;
     litAny = Math.max(litAny, lit * accept * smoothstep(BACKDROP.minArea, 2 * BACKDROP.minArea, cnt / n));
     // Steep size ramp: a subject is toned whole or not at all (the engine eases the change over time).
-    const sizeW = accept * smoothstep(1.5 * BACKDROP.minArea, 2 * BACKDROP.minArea, cnt / n);
+    const sizeW = user ? (cnt / n >= 0.25 * BACKDROP.minArea ? 1 : 0) : accept * smoothstep(1.5 * BACKDROP.minArea, 2 * BACKDROP.minArea, cnt / n);
     if (sizeW <= 0) continue;
-    accepted[s] = 1;
+    accepted[s] = user ? 2 : 1;
     // The whole region gets one strength (no internal seams); the shaders feather it at the true outline.
     // Relative hysteresis: lit water the flood crept into around a bright animal departs only weakly next to the
     // animal's own body; it is left out (a dim, far animal, weak everywhere, keeps all of itself). The closing
@@ -414,7 +424,9 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     }
     // Whole or not at all: a school, or a mostly faint region (a hazy group joined through lit water), is dropped;
     // solidity is judged over the joined animal, so a dim far body keeps the tone its tail earns.
-    const keep = regions.size >= BACKDROP.schoolN ? 0 : smoothstep(BACKDROP.solidLo, BACKDROP.solidHi, solid / cnt);
+    let userRegion = false;
+    for (const r of regions) if (accepted[r] === 2) userRegion = true;
+    const keep = userRegion ? 1 : regions.size >= BACKDROP.schoolN ? 0 : smoothstep(BACKDROP.solidLo, BACKDROP.solidHi, solid / cnt);
     if (keep < 1) for (let m = 0; m < cnt; m++) out[members[m]] *= keep;
   }
   return litAny;

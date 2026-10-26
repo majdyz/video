@@ -147,7 +147,10 @@ function MotionLogField({ name, onChange }: { name: string | null; onChange: (fi
 }
 
 /** Everything that isn't the main Strength. */
-export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus; onMotionLog?: (file: File | null) => void }) {
+/** Subject pop selection controls (App owns the select mode; the studio keeps the corrections). */
+export type SubjectControls = { selecting: boolean; corrections: number; onSelect: () => void; onReset: () => void };
+
+export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, subjects }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus; onMotionLog?: (file: File | null) => void; subjects?: SubjectControls }) {
   if (tool === "colour") {
     const c = tools.colour;
     const up = (patch: Partial<typeof c>) => setTools((t) => ({ ...t, colour: { ...t.colour, ...patch } }));
@@ -162,6 +165,15 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog }: {
           <div className="adv__field adv__field--row">
             <span className="adv__label">Subject pop<span className="adv__beta">Beta</span> <small>Separates fish, divers and animals from open blue water</small></span>
             <Switch checked={!!c.subjectPop} onChange={(v) => up({ subjectPop: v })} label="Subject pop" />
+          </div>
+        )}
+        {subjectPopVisible() && c.subjectPop && subjects && (
+          <div className="adv__field">
+            <span className="adv__label">Subjects <small>{subjects.corrections ? `${subjects.corrections} ${subjects.corrections === 1 ? "change" : "changes"} to the automatic choice` : "chosen automatically"}</small></span>
+            <span className="adv__actions">
+              <button type="button" className="link-btn" onClick={subjects.onSelect} aria-pressed={subjects.selecting}>{subjects.selecting ? "Done" : "Select subjects"}</button>
+              <button type="button" className="link-btn" onClick={subjects.onReset} disabled={!subjects.corrections}>Reset selection</button>
+            </span>
           </div>
         )}
         <p className="adv__hint">Strength 50 is the engine's own estimate for this clip; above it the correction is pushed harder (redder reds, whiter sand) at some cost to fidelity.</p>

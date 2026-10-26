@@ -120,5 +120,10 @@ const run = (px: Uint8ClampedArray) => { const { L, A, B } = lab(px); const out 
   assert.equal(out[20 * w + 110], 0, "faint group dropped");
   assert.equal(out[70 * w + 45], 0, "school dropped");
   assert.equal(out[70 * w + 130], 1, "a lone animal of the same size is kept");
+  // A user seed (tap) on the faint group makes it a subject anyway.
+  const seeded = new Float32Array(n);
+  growSubjects(obj, dev, 1, w, h, seeded, undefined, undefined, undefined, [{ u: 110.5 / w, v: 20.5 / h }]);
+  assert.equal(seeded[20 * w + 110], 1, "a seeded region is kept");
+  assert.equal(seeded[20 * w + 30], 1, "other subjects unchanged");
 }
 console.log("ok  backdrop / artifact guard / object neutral / warm clamp");

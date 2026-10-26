@@ -88,4 +88,30 @@ const at = (s: { width: number; data: Float32Array }, x: number, y: number) => s
   assert.equal(sel.animals.filter((a) => a.override).length, 2, "both corrections bound and followed");
   assert.deepEqual(tr.seeds(0.5), [{ u: 0.5, v: 0.05 }], "an include on water is a seed");
 }
+// Paused frame: a tap binds at once (no further analysis), a second tap reverses it, clearing restores the
+// automatic choice.
+{
+  const tr = new AnimalTracker();
+  const s = scene([[60, 50, 30, 12, 1, 1]]);
+  const am = labelAnimals(s.map, s.dev, W, H, MW, MH);
+  tr.update(am, 1.0);
+  tr.update(am, 1.07);
+  tr.snap();
+  const cx = Math.round((60 * MW) / W), cy = Math.round((50 * MH) / H);
+  const ease = () => { for (let i = 0; i < 150; i++) tr.step(1 / 30); };
+  ease();
+  assert.ok(at(tr.strength(1.07), cx, cy) > 0.9, "toned automatically");
+  const ex = { t: 1.2, u: 60 / W, v: 50 / H, action: "exclude" as const };
+  tr.setOverrides([ex]);
+  ease();
+  assert.ok(at(tr.strength(1.07), cx, cy) < 0.05, "a tap on the paused frame excludes at once");
+  tr.setOverrides([ex, { ...ex, action: "include" }]);
+  ease();
+  assert.ok(at(tr.strength(1.07), cx, cy) > 0.9, "the next tap includes it again (latest wins)");
+  tr.setOverrides([ex]);
+  ease();
+  tr.setOverrides([]);
+  ease();
+  assert.ok(at(tr.strength(1.07), cx, cy) > 0.9, "reset: back to the automatic choice");
+}
 console.log("ok  animals");

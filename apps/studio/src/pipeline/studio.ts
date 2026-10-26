@@ -19,6 +19,7 @@ import { bitrateFromSource, pickBitrate } from "@dive-tools/shared/recorder.ts";
 import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validate.ts";
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
 import type { SubjectOverride, SubjectSelection } from "../../../aqua-fix/src/engine/animals.ts";
+import { subjectAt } from "./subjects.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometrySource } from "./geometry.ts";
@@ -431,25 +432,57 @@ export class Studio {
 
   /**
    * A tap at upright frame position (u, v) (0..1) at the current time: toggles the animal there out of / into the
-   * Subject pop selection, or (on water) asks for a new subject seeded there. Follows the animal through the clip.
+   * Subject pop selection, or (on water / an animal not found yet) asks for a new subject seeded there. The
+   * correction follows the animal through the clip. Returns the tapped animal's id (0 = none, a seed).
    */
-  toggleSubjectAt(u: number, v: number): void {
+  toggleSubjectAt(u: number, v: number): number {
     const sel = this.subjectSelection();
     let action: SubjectOverride["action"] = "include";
-    if (sel) {
-      const x = Math.min(sel.width - 1, Math.max(0, Math.floor(u * sel.width)));
-      const y = Math.min(sel.height - 1, Math.max(0, Math.floor(v * sel.height)));
-      const a = sel.animals.find((an) => an.id === sel.ids[y * sel.width + x]);
-      if (a && (a.override === "include" || (a.override !== "exclude" && a.strength > 0.5))) action = "exclude";
-    }
+    const id = sel ? subjectAt(sel, u, v) : 0;
+    const a = id && sel ? sel.animals.find((an) => an.id === id) : undefined;
+    if (a && (a.override === "include" || (a.override !== "exclude" && a.strength > 0.5))) action = "exclude";
     const t = this.video?.currentTime ?? 0;
     this.setSubjectOverrides([...this.snap.subjectOverrides, { t, u, v, action }]);
+    // A seed needs an analysis of this frame to grow from (paused playback runs none of its own).
+    if (!a && this.engine && this.paused()) void this.engine.analyzeNow(false).catch(() => undefined).then(() => this.animateSubjects());
+    else this.animateSubjects();
+    return a ? id : 0;
   }
 
-  /** Replaces the clip's Subject pop corrections (undo / clear). */
+  /** Re-analyses the paused frame so the tracked animals (and their outlines) match what is on screen. */
+  refreshSubjects(): void {
+    const e = this.engine;
+    if (!e || !this.paused()) return;
+    this.repaint();
+    void e.analyzeNow(false).catch(() => undefined).then(() => this.animateSubjects());
+  }
+
+  /** Replaces the clip's Subject pop corrections (undo; [] = back to the automatic selection). */
   setSubjectOverrides(list: SubjectOverride[]): void {
     this.set({ subjectOverrides: list });
     this.engine?.setSubjectOverrides(list);
+    this.animateSubjects();
+  }
+
+  private paused(): boolean {
+    return this.snap.kind === "photo" || !this.video || this.video.paused;
+  }
+
+  private subjectAnim = 0;
+  /** A paused frame has no clip time to ease on: eases the animals' strengths on wall time and repaints. */
+  private animateSubjects(): void {
+    const e = this.engine;
+    if (!e || !this.paused()) return;
+    cancelAnimationFrame(this.subjectAnim);
+    const t0 = performance.now();
+    let last = t0;
+    const step = (now: number) => {
+      const easing = e.stepSubjects(Math.min(0.1, (now - last) / 1000));
+      last = now;
+      this.repaint();
+      if (easing && now - t0 < 2500 && this.paused()) this.subjectAnim = requestAnimationFrame(step);
+    };
+    this.subjectAnim = requestAnimationFrame(step);
   }
 
   /** Engine settings for the colour tool (debug `?pop=1` forces Subject pop on for headless checks). */
@@ -1977,3 +2010,4 @@ function calibKindOf(tags: ClipInfo["colorTags"]): CalibKind | null {
   if (tags.primaries === "bt2020") return "wide";
   return null;
 }
+

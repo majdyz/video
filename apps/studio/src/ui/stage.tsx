@@ -56,6 +56,8 @@ export function Stage({
   onSplit,
   onHold,
   onTap,
+  onTapAt,
+  overlay,
   onZoom,
   interactive,
   onFrameSize,
@@ -76,6 +78,10 @@ export function Stage({
   onSplit: (v: number) => void;
   onHold?: (on: boolean) => void;
   onTap?: () => void;
+  /** A tap at upright picture position (u, v), 0..1 (takes over from onTap; e.g. selecting subjects). */
+  onTapAt?: (u: number, v: number) => void;
+  /** Drawn over the picture inside the zoomed content (follows pinch and pan). */
+  overlay?: ReactNode;
   onZoom: (z: number) => void;
   interactive: boolean;
   onFrameSize: (w: number, h: number) => void;
@@ -259,7 +265,13 @@ export function Stage({
       return;
     }
     lastTap.current = { t: now, x, y };
-    if (onTap) {
+    if (onTapAt) {
+      // Picture coordinates under the finger (undo the zoom / pan).
+      const v = viewRef.current;
+      const u = (x - v.tx) / v.z / box.w, w = (y - v.ty) / v.z / box.h;
+      clearTimeout(tapTimer.current);
+      if (u >= 0 && u <= 1 && w >= 0 && w <= 1) tapTimer.current = window.setTimeout(() => onTapAt(u, w), DOUBLE_TAP_MS);
+    } else if (onTap) {
       clearTimeout(tapTimer.current);
       tapTimer.current = window.setTimeout(() => onTap(), DOUBLE_TAP_MS);
     }
@@ -297,7 +309,7 @@ export function Stage({
   const lineX = split !== null ? view.tx + split * box.w * view.z : 0;
   const lineVisible = split !== null && lineX >= 0 && lineX <= box.w;
   const label = !aspect ? undefined
-    : `Preview${zoomed ? `, zoomed ${view.z.toFixed(1)} times` : ""}. ${split !== null ? "Drag to move the before and after line. " : onHold ? "Press and hold to see the original. " : ""}Double-tap or pinch to zoom${onTap ? ", tap to play or pause" : ""}.`;
+    : `Preview${zoomed ? `, zoomed ${view.z.toFixed(1)} times` : ""}. ${split !== null ? "Drag to move the before and after line. " : onHold ? "Press and hold to see the original. " : ""}Double-tap or pinch to zoom${onTapAt ? ", tap an animal to include or exclude it" : onTap ? ", tap to play or pause" : ""}.`;
 
   return (
     <div className="stage" ref={areaRef}>
@@ -321,6 +333,7 @@ export function Stage({
         >
           <canvas ref={geoRef} className={`stage__canvas${visible === "geo" ? " is-visible" : ""}`} />
           <canvas ref={colourRef} className={`stage__canvas${visible === "colour" ? " is-visible" : ""}`} />
+          {overlay}
         </div>
         <canvas ref={liveRef} className={`stage__live${liveOn ? " is-on" : ""}`} aria-hidden="true" />
         {split !== null && aspect && (

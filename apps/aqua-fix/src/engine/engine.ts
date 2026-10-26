@@ -17,7 +17,6 @@ import { inCutWindow as lockInCutWindow, noteCut as lockNoteCut, segmentAt, type
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
 import { linearToOklab, oklabToLinear } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
-import { POP_GATE, gateTarget, subjectMask } from "./pop-gate.ts";
 import { AnimalTracker, type SubjectOverride, type SubjectSelection } from "./animals.ts";
 import {
   CLAHE_BINS,
@@ -117,10 +116,6 @@ export class GradeEngine {
   /** Temporal layer on/off (debug `?temporal=0`). */
   temporalEnabled = true;
   private lastRenderSec = -1;
-  /** Subject-pop stability gate (pop-gate.ts): eased value, target, last mask. */
-  private popGate = 0;
-  private popTarget = 0;
-  private popMask: ReturnType<typeof subjectMask> | null = null;
   /** Subject pop: per-animal tracking, strength and map lead (animals.ts). */
   private animals = new AnimalTracker();
   /** The latest analysis's subject map and guide (what the animal lead moves). */
@@ -491,7 +486,8 @@ export class GradeEngine {
       const detect = wantPerson && this.personPasses++ % PERSON_DETECT_EVERY === 0;
       const rect = detect ? FULL_RECT : PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
       const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.backend.analyze(ANALYSIS_W, ANALYSIS_H, rect);
-      const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H };
+      const seeds = this.settings.subjectPop ? this.animals.seeds(this.lastTickSec) : [];
+      const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, ...(seeds.length ? { seeds } : {}) };
       this.reqTimeSec = this.lastTickSec;
       this.ensureWorker().postMessage(req, [req.rgba]);
       if (px) {
@@ -521,18 +517,7 @@ export class GradeEngine {
     this.stats.analysisMs = packet.ms;
     const cut = this.lastMean !== null && meanDiff(this.lastMean, packet.mean) > SCENE_CUT_MEAN_DIFF;
     this.lastMean = packet.mean;
-    // Subject-pop gate: temporal stability of the subject map (only when the
-    // tone could apply at all; a cut restarts it from zero).
-    if (this.settings.subjectPop && (packet.params.backdrop ?? 0) > 0) {
-      const f = packet.fields;
-      const m = subjectMask(f.data, f.width, f.height);
-      this.popTarget = cut ? 0 : gateTarget(this.popMask, m);
-      this.popMask = m;
-    } else {
-      this.popTarget = 0;
-      this.popMask = null;
-    }
-    if (cut) this.popGate = 0;
+    // Subject pop: per-animal tracking, stability and fades (animals.ts); a cut starts over.
     if (cut) this.animals.reset();
     if (this.settings.subjectPop && (packet.params.backdrop ?? 0) > 0 && raw.animals) this.animals.update(raw.animals, this.reqTimeSec);
     else this.animals.reset();
@@ -575,10 +560,6 @@ export class GradeEngine {
 
   private smooth(dt: number): void {
     if (dt <= 0) return;
-    {
-      const tau = this.popTarget < this.popGate ? POP_GATE.tauDown : POP_GATE.tauUp;
-      this.popGate += (this.popTarget - this.popGate) * (1 - Math.exp(-dt / tau));
-    }
     if (this.target) {
       const a = 1 - Math.exp(-dt / TAU_PARAMS_S);
       const fit0 = this.current.backdropFit;
@@ -685,6 +666,16 @@ export class GradeEngine {
     this.dirtyData = true;
   }
 
+  /**
+   * Eases the animals' strengths by `dtSec` of wall time (a paused frame has no clip time to ease on, so the UI
+   * animates a correction with this) and marks the maps for upload. True while still easing.
+   */
+  stepSubjects(dtSec: number): boolean {
+    this.animals.step(dtSec);
+    this.dirtyData = true;
+    return this.animals.easing;
+  }
+
   /** The tracked animals now (ids per map texel + state), for drawing outlines and hit-testing taps. */
   subjectSelection(): SubjectSelection | null {
     return this.settings.subjectPop ? this.animals.selection(this.lastTickSec) : null;
@@ -731,12 +722,6 @@ export class GradeEngine {
     this.backend.resetTemporal?.();
     this.animals.reset();
     this.leadBase = null;
-    // An export of the clip just previewed keeps the gate (like the person verdict).
-    if (!opts.keepPerson) {
-      this.popGate = 0;
-      this.popTarget = 0;
-      this.popMask = null;
-    }
   }
 
   private pack(): Float32Array {
@@ -745,7 +730,6 @@ export class GradeEngine {
     const settings = this.hasAnalysis ? this.settings : { ...this.settings, intensity: 0 };
     const u = packUniforms(this.current, settings, depth, clahe, 0, this.split);
     u[93] = this.temporalEnabled ? 1 : 0;
-    u[90] *= this.popGate;
     // A seek (or a jump back) breaks the motion history.
     const t = this.lastTickSec;
     if (this.lastRenderSec >= 0 && (t < this.lastRenderSec - 1e-3 || t - this.lastRenderSec > 0.3)) {

@@ -157,7 +157,7 @@ function encodeLut(c: number): number {
   return ENC_LUT[i] + (ENC_LUT[i + 1] - ENC_LUT[i]) * t;
 }
 
-export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number): FrameAnalysis {
+export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, opts: { seeds?: readonly { u: number; v: number }[] } = {}): FrameAnalysis {
   const n = w * h;
   const lin = temp("lin", n * 3);
   const d = temp("d", n);
@@ -564,7 +564,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   let animals: AnimalMap | undefined;
   if (backdropValidity > 0) {
     const subj = temp("subjMap", n);
-    subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit, bdWater);
+    subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit, bdWater, opts.seeds);
     confMap = temp("confMap", n);
     for (let i = 0; i < n; i++) confMap[i] = conf[i] + (subj[i] - conf[i]) * backdropValidity;
     animals = labelAnimals(subj, bdDev, w, h, MAP_W, MAP_H);

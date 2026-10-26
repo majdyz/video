@@ -5,6 +5,7 @@ import { BRAND, SAMPLE } from "./brand.ts";
 import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
 import { AdvancedControls, TOOL_ICON, ToolPanel } from "./ui/panels";
+import { SubjectOutlines } from "./ui/subjects";
 import { ExportSheet } from "./ui/export-sheet";
 import { AdvancedDrawer } from "./ui/advanced";
 import { EmptyState } from "./ui/empty";
@@ -65,6 +66,13 @@ export default function App() {
   const [advOpen, setAdvOpen] = useState(false);
   const advRef = useRef(advOpen);
   advRef.current = advOpen;
+  /**
+   * Selecting subjects (Subject pop): outlines over the preview and taps toggle animals in / out. A mode rather
+   * than "whenever Colour is open": Colour is the default tab, so outlines would always be on, and a tap would
+   * mean three things (play, close Advanced, toggle a subject); in the mode it means one.
+   */
+  const [selecting, setSelecting] = useState(false);
+  const [tapPulse, setTapPulse] = useState<{ u: number; v: number; t: number } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   // Phone dock: collapsed for portrait clips (the picture gets the height), open for
@@ -216,6 +224,26 @@ export default function App() {
     : null);
 
   const closeAdv = useCallback(() => setAdvOpen(false), []);
+  const popOn = !!panelTools.colour.subjectPop || new URLSearchParams(location.search).get("pop") === "1";
+  const selectActive = selecting && popOn && ready && !exporting && tab === "colour" && tools.colour.enabled;
+  useEffect(() => {
+    if (selecting && !selectActive) setSelecting(false);
+  }, [selecting, selectActive]);
+  useEffect(() => {
+    if (!selectActive) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented && !document.querySelector(".sheet-layer")) { e.preventDefault(); setSelecting(false); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectActive]);
+  const getSelection = useCallback(() => studio.subjectSelection(), [studio]);
+  const startSelecting = () => {
+    studio.pause();
+    setSelecting(true);
+    // The outlines must match the paused frame, not the last analysis taken while playing.
+    studio.refreshSubjects();
+  };
   const openAdv = () => {
     setAdvOpen(true);
     setDockOpen(true);
@@ -288,17 +316,25 @@ export default function App() {
             holding={holding}
             onSplit={setSplit}
             onHold={ready && !exporting ? setHolding : undefined}
-            onTap={advOpen ? closeAdv : photo ? undefined : () => studio.togglePlay()}
+            onTap={selectActive ? undefined : advOpen ? closeAdv : photo ? undefined : () => studio.togglePlay()}
+            onTapAt={selectActive ? (u, v) => { studio.toggleSubjectAt(u, v); setTapPulse({ u, v, t: performance.now() }); } : undefined}
+            overlay={selectActive ? <SubjectOutlines getSelection={getSelection} pulse={tapPulse} /> : undefined}
             onZoom={onZoom}
             interactive={ready && !exporting}
             onFrameSize={onFrameSize}
             paused={!s.playing}
-            showPlayHint={ready && !photo && !s.busy && !exporting}
+            showPlayHint={ready && !photo && !s.busy && !exporting && !selectActive}
             resetKey={`${s.fileName}:${s.info?.displayW}x${s.info?.displayH}`}
           >
             {s.phase === "empty" && <EmptyState accept={ACCEPT} onFile={openFile} onPick={native ? pick : undefined} onSample={() => { setSplit(0.5); setSelLook(0); void studio.openUrl(`${import.meta.env.BASE_URL}samples/${SAMPLE.file}`, SAMPLE.file); }} busy={s.busy} />}
             {s.phase !== "empty" && pill && (
               <div className="pill" role="status"><span className="pill__dot" aria-hidden="true" />{pill}</div>
+            )}
+            {selectActive && (
+              <div className="select-bar" role="status">
+                <span>Tap an animal to include or exclude it</span>
+                <button type="button" className="link-btn" onClick={() => setSelecting(false)}>Done</button>
+              </div>
             )}
           </Stage>
           {wide && bar}
@@ -358,7 +394,8 @@ export default function App() {
                 advanced={
                   <AdvancedDrawer open={advOpen && (wide || dockOpen)} onToggle={() => (advOpen ? setAdvOpen(false) : openAdv())} onClose={closeAdv} disabled={exporting || !ready} id="adv-section"
                     label={`${TOOL_LABEL[tab]} advanced settings${tab === "colour" && segNum ? `, segment ${segNum.index} of ${segNum.count}` : ""}`}>
-                    <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined} />
+                    <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined}
+                      subjects={{ selecting: selectActive, corrections: s.subjectOverrides.length, onSelect: () => (selectActive ? setSelecting(false) : startSelecting()), onReset: () => studio.setSubjectOverrides([]) }} />
                     {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
                   </AdvancedDrawer>
                 } />

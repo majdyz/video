@@ -1962,3 +1962,48 @@ a {
     padding: var(--s-2) var(--s-6) var(--s-6);
   }
 }
+
+/* Subject pop: selecting subjects. Outlines are drawn on a canvas over the picture (inside the zoomed content);
+   the bar says what a tap does and how to leave. Neutral, no accent. */
+.subject-outlines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.select-bar {
+  position: absolute;
+  bottom: var(--s-3);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  max-width: calc(100% - 2 * var(--s-3));
+  padding: 6px 6px 6px 12px;
+  border-radius: var(--r-sm);
+  background: var(--overlay);
+  box-shadow: 0 0 0 1px var(--line-1);
+  color: var(--text-1);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+.select-bar span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.select-bar .link-btn {
+  min-height: 32px;
+  padding: 0 var(--s-2);
+}
+.adv__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-4);
+}
+.adv__actions .link-btn {
+  padding: 0;
+  min-height: 32px;
+}

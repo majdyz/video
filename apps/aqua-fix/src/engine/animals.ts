@@ -45,6 +45,8 @@ export const ANIMALS = {
   dilate: 2,
   /** A tap binds to an animal within this many map texels of the tapped point. */
   tapReach: 3,
+  /** A correction binds once the analyses reach its time, or are this close (s; a paused frame's last analysis). */
+  bindAhead: 0.3,
 };
 
 export type Animal = {
@@ -243,6 +245,8 @@ type Track = {
   target: number;
   /** Target from the latest analysis alone (before the stability check). */
   base: number;
+  /** Target before any user correction. */
+  auto: number;
   /** Has a velocity estimate (two analyses). */
   moved: boolean;
   /** A user correction bound to this animal. */
@@ -271,17 +275,28 @@ export class AnimalTracker {
     this.bound.clear();
   }
 
-  /** Replaces the user corrections (re-bound as the clip reaches each anchor). */
+  /** Replaces the user corrections (re-bound as the clip reaches each anchor; those already due bind at once). */
   setOverrides(list: readonly SubjectOverride[]): void {
     this.overrides = list.slice();
     this.bound.clear();
+    for (const tr of this.tracks) {
+      if (!tr.override) continue;
+      tr.override = undefined;
+      if (tr.t === this.lastT) tr.target = tr.auto;
+    }
+    if (this.lastT >= 0) this.applyOverrides(this.lastT);
+  }
+
+  /** True while any animal's strength is still easing toward its target. */
+  get easing(): boolean {
+    return this.tracks.some((tr) => Math.abs(tr.target - tr.s) > 0.01);
   }
 
   /** Binds the corrections whose anchor time has come to the animal under their point, then applies them. */
   private applyOverrides(t: number): void {
     for (let i = 0; i < this.overrides.length; i++) {
       const o = this.overrides[i];
-      if (this.bound.has(i) || o.t > t + 0.05) continue;
+      if (this.bound.has(i) || o.t > t + ANIMALS.bindAhead) continue;
       const x = Math.min(this.w - 1, Math.max(0, Math.floor(o.u * this.w))), y = Math.min(this.h - 1, Math.max(0, Math.floor(o.v * this.h)));
       let best: Track | null = null, bestD = ANIMALS.tapReach + 1;
       for (const tr of this.tracks) {
@@ -376,13 +391,14 @@ export class AnimalTracker {
       tr.t = t; tr.cx = a.cx; tr.cy = a.cy;
       tr.base = animalTarget(a);
       tr.target = tr.base * smoothstep(ANIMALS.stabLo, ANIMALS.stabHi, p.iou);
+      tr.auto = tr.target;
       next.push(tr);
     }
     // New animals: tracked, but toned only once a second analysis agrees.
     for (let i = 0; i < am.list.length; i++) {
       if (takenI.has(i)) continue;
       const a = am.list[i];
-      next.push({ id: this.nextId++, cells: Int32Array.from(cellsOf[i]), t, cx: a.cx, cy: a.cy, vx: 0, vy: 0, target: 0, base: animalTarget(a), moved: false, s: 0 });
+      next.push({ id: this.nextId++, cells: Int32Array.from(cellsOf[i]), t, cx: a.cx, cy: a.cy, vx: 0, vy: 0, target: 0, auto: 0, base: animalTarget(a), moved: false, s: 0 });
     }
     // Animals not found again fade out where they are heading.
     for (let k = 0; k < this.tracks.length; k++) {
