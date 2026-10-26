@@ -2,7 +2,7 @@ import { useRef, type ReactNode } from "react";
 import {
   COLOUR_PRESETS,
   DEFAULT_COLOUR,
-  SUBJECT_POP_UI,
+  subjectPopVisible,
   DEFAULT_STABILISE,
   cameraLabel,
   unrecognisedCameraHint,
@@ -19,7 +19,7 @@ import type { StabStatus } from "../pipeline/studio.ts";
 import type { ClipInfo } from "../pipeline/probe.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { Chips, Segmented, Slider, Switch } from "./controls";
-import { IconColour, IconDewarp, IconSliders, IconStabilise } from "./icons";
+import { IconColour, IconDewarp, IconStabilise } from "./icons";
 
 export const TOOL_ICON: Record<ToolId, (p: { size?: number }) => ReactNode> = {
   colour: IconColour,
@@ -43,13 +43,14 @@ type Props = {
   photo?: boolean;
   camera?: CameraInfo | null;
   disabled: boolean;
-  onAdvanced: () => void;
+  /** The inline Advanced section (AdvancedDrawer), under the main controls. */
+  advanced?: ReactNode;
   /** What the controls apply to when the clip is split, e.g. "Segment 2 of 3 · 0:03.0–0:06.5". */
   scope?: string | null;
 };
 
 /** The active tool's controls: header with on/off, preset chips, one Strength, Advanced. */
-export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, photo, camera, disabled, onAdvanced, scope }: Props) {
+export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, photo, camera, disabled, advanced, scope }: Props) {
   const enabled = tools[tool].enabled;
   const Icon = TOOL_ICON[tool];
   const setEnabled = (v: boolean) => setTools((t) => ({ ...t, [tool]: { ...t[tool], enabled: v } }));
@@ -120,11 +121,8 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
               onChange={(v) => setTools((t) => ({ ...t, dewarp: { ...t.dewarp, strength: v, enabled: true } }))} />
           </>
         )}
-        <button type="button" className="link-btn" onClick={onAdvanced} disabled={disabled}>
-          <IconSliders size={16} />
-          Advanced
-        </button>
       </div>
+      {advanced}
     </div>
   );
 }
@@ -160,9 +158,9 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog }: {
         <Slider label="Saturation" value={c.saturation * 100} min={0} max={200} defaultValue={100} format={(v) => `${Math.round(v)}%`} onChange={(v) => up({ saturation: v / 100 })} />
         <Slider label="Clarity" value={c.clarity * 100} min={0} max={100} defaultValue={DEFAULT_COLOUR.clarity * 100} onChange={(v) => up({ clarity: v / 100 })} />
         <Slider label="Haze removal" value={c.veil * 100} min={0} max={120} defaultValue={DEFAULT_COLOUR.veil * 100} onChange={(v) => up({ veil: v / 100 })} />
-        {SUBJECT_POP_UI && (
+        {subjectPopVisible() && (
           <div className="adv__field adv__field--row">
-            <span className="adv__label">Subject pop <small>Separates fish, divers and animals from open blue water</small></span>
+            <span className="adv__label">Subject pop<span className="adv__beta">Beta</span> <small>Separates fish, divers and animals from open blue water</small></span>
             <Switch checked={!!c.subjectPop} onChange={(v) => up({ subjectPop: v })} label="Subject pop" />
           </div>
         )}

@@ -6,6 +6,7 @@ import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
 import { AdvancedControls, TOOL_ICON, ToolPanel } from "./ui/panels";
 import { ExportSheet } from "./ui/export-sheet";
+import { AdvancedDrawer } from "./ui/advanced";
 import { EmptyState } from "./ui/empty";
 import { Sheet } from "./ui/sheet";
 import { IconButton, Segmented } from "./ui/controls";
@@ -60,7 +61,10 @@ export default function App() {
   /** Selected timeline segment (its region index, segments.ts): what the Colour panel edits once the clip is split. */
   const [selLook, setSelLook] = useState(0);
   const [holding, setHolding] = useState(false);
+  /** Advanced section, inline under the tool's main controls (the preview stays in view). */
   const [advOpen, setAdvOpen] = useState(false);
+  const advRef = useRef(advOpen);
+  advRef.current = advOpen;
   const [exportOpen, setExportOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   // Phone dock: collapsed for portrait clips (the picture gets the height), open for
@@ -211,9 +215,16 @@ export default function App() {
     ? (s.stab.state === "solving" ? "Planning a smooth path…" : `Analysing motion ${Math.round(s.stab.progress * 100)}%`)
     : null);
 
+  const closeAdv = useCallback(() => setAdvOpen(false), []);
+  const openAdv = () => {
+    setAdvOpen(true);
+    setDockOpen(true);
+  };
   const selectTab = (id: ToolId) => {
-    if (!wide && id === tab && dockOpen) setDockOpen(false);
-    else {
+    if (!wide && id === tab && dockOpen) {
+      setDockOpen(false);
+      setAdvOpen(false);
+    } else {
       setTab(id);
       setDockOpen(true);
     }
@@ -248,7 +259,7 @@ export default function App() {
   );
 
   return (
-    <div className={`app phase-${s.phase}${wide ? " is-wide" : " is-narrow"}${dockOpen ? " dock-open" : ""}`} data-stab={s.stab.state} data-export={s.exp.state} data-kind={s.kind ?? "none"}>
+    <div className={`app phase-${s.phase}${wide ? " is-wide" : " is-narrow"}${dockOpen ? " dock-open" : ""}${advOpen && (wide || dockOpen) ? " adv-open" : ""}`} style={aspect ? ({ ["--clip-ar" as string]: aspect.toFixed(4) }) : undefined} data-stab={s.stab.state} data-export={s.exp.state} data-kind={s.kind ?? "none"}>
       <header className="topbar">
         <h1 className="wordmark">{BRAND.name}</h1>
         <div className="topbar__actions">
@@ -264,7 +275,7 @@ export default function App() {
       </header>
 
       <main className="workspace">
-        <section className="viewer" aria-label="Preview">
+        <section className="viewer" aria-label="Preview" onClick={advOpen ? (e) => { if (!(e.target as HTMLElement).closest(".stage__frame, .viewer__bar")) closeAdv(); } : undefined}>
           <Stage
             aspect={s.phase === "empty" ? null : aspect}
             nativeWidth={s.info?.displayW ?? 0}
@@ -277,7 +288,7 @@ export default function App() {
             holding={holding}
             onSplit={setSplit}
             onHold={ready && !exporting ? setHolding : undefined}
-            onTap={photo ? undefined : () => studio.togglePlay()}
+            onTap={advOpen ? closeAdv : photo ? undefined : () => studio.togglePlay()}
             onZoom={onZoom}
             interactive={ready && !exporting}
             onFrameSize={onFrameSize}
@@ -305,7 +316,8 @@ export default function App() {
                 onClick={(e) => {
                   // A drag already set the state; the click that follows it must not undo it.
                   if (e.currentTarget.dataset.dragged) { delete e.currentTarget.dataset.dragged; return; }
-                  setDockOpen(!dockOpen);
+                  if (advOpen) setAdvOpen(false);
+                  else setDockOpen(!dockOpen);
                 }}
                 onPointerDown={(e) => {
                   const y0 = e.clientY;
@@ -315,7 +327,10 @@ export default function App() {
                     const dy = ev.clientY - y0;
                     if (Math.abs(dy) > 24) {
                       el.dataset.dragged = "1";
-                      setDockOpen(dy < 0);
+                      // Down closes Advanced first, then the dock.
+                      if (dy > 0 && advRef.current) setAdvOpen(false);
+                      else setDockOpen(dy < 0);
+                      up();
                     }
                   };
                   const up = () => {
@@ -336,10 +351,17 @@ export default function App() {
               {s.kind === "video" && s.footage.note && (
                 <p className="panel__note footage-note" role="note">
                   {s.footage.note}
-                  <button type="button" className="link-btn" onClick={() => { setTab("colour"); setAdvOpen(true); }} disabled={exporting}>Change</button>
+                  <button type="button" className="link-btn" onClick={() => { setTab("colour"); openAdv(); }} disabled={exporting}>Change</button>
                 </p>
               )}
-              <ToolPanel tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} scope={tab === "colour" ? segScope : null} stab={s.stab} info={s.info} colourProfiled={s.colourProfiled} photo={photo} camera={s.camera} disabled={exporting || !ready} onAdvanced={() => setAdvOpen(true)} />
+              <ToolPanel tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} scope={tab === "colour" ? segScope : null} stab={s.stab} info={s.info} colourProfiled={s.colourProfiled} photo={photo} camera={s.camera} disabled={exporting || !ready}
+                advanced={
+                  <AdvancedDrawer open={advOpen && (wide || dockOpen)} onToggle={() => (advOpen ? setAdvOpen(false) : openAdv())} onClose={closeAdv} disabled={exporting || !ready} id="adv-section"
+                    label={`${TOOL_LABEL[tab]} advanced settings${tab === "colour" && segNum ? `, segment ${segNum.index} of ${segNum.count}` : ""}`}>
+                    <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined} />
+                    {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
+                  </AdvancedDrawer>
+                } />
             </div>
             <div className="tabs" role="tablist" aria-label="Tool">
               {tabs.map((id) => {
@@ -395,11 +417,6 @@ export default function App() {
 
       <video ref={videoRef} className="source-video" muted playsInline aria-hidden="true" />
       <input ref={fileInputRef} type="file" accept={ACCEPT} hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) openFile(f); }} />
-
-      <Sheet open={advOpen} onClose={() => setAdvOpen(false)} title={`${TOOL_LABEL[tab]} · Advanced${tab === "colour" && segNum ? ` · Segment ${segNum.index} of ${segNum.count}` : ""}`}>
-        <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined} />
-        {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
-      </Sheet>
 
       <ExportSheet open={exportOpen} onClose={() => { setExportOpen(false); if (s.exp.state === "done" || s.exp.state === "error") studio.dismissExport(); }} studio={studio} snap={s} tools={tools} />
 

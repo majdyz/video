@@ -33,6 +33,11 @@ export type ColourState = {
 /** The "Subject pop" switch stays hidden until its mask tracking is clean (the engine path ships off; `?pop=1` forces it on for checks). */
 export const SUBJECT_POP_UI = false;
 
+/** Labs: `?labs=1` shows the hidden Subject pop switch (marked Beta) for people trying it out. */
+export function subjectPopVisible(search: string = typeof location === "undefined" ? "" : location.search): boolean {
+  return SUBJECT_POP_UI || new URLSearchParams(search).get("labs") === "1";
+}
+
 export const COLOUR_PRESETS: Chip<ScenePreset>[] = SCENE_PRESETS.map((p) => ({ id: p.id, label: p.id === "reef" ? "Reef" : p.label, hint: p.hint }));
 
 export const DEFAULT_COLOUR: ColourState = {

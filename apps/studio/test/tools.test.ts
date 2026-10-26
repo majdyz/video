@@ -13,6 +13,7 @@ import {
   stabiliseParams,
   solveParams,
   GYRO_DEFAULT_SMOOTHING,
+  subjectPopVisible,
 } from "../src/pipeline/tools.ts";
 import { DEFAULT_GYRO_PARAMS } from "../../motion-fix/src/lib/gyro/gyro-stabilize.ts";
 import { dewarpParams, dewarpUniforms } from "../src/pipeline/dewarp.ts";
@@ -97,5 +98,12 @@ assert.equal(solveParams({ ...DEFAULT_TOOLS.stabilise, bobbing: false }, "gyro",
   assert.match(bobbingNote(gyroPlan({ applied: false, reason: "scene too deep: x" }), "done", 1)!, /gyro only \(scene too deep/);
   assert.equal(bobbingNote(gyroPlan(undefined), "idle", 0), null);
 }
+
+// Subject pop: hidden unless the labs flag is on (`?pop=1` only forces the engine path).
+assert.equal(subjectPopVisible(""), false);
+assert.equal(subjectPopVisible("?pop=1"), false);
+assert.equal(subjectPopVisible("?labs=1"), true);
+assert.equal(subjectPopVisible("?tab=colour&labs=1"), true);
+assert.equal(subjectPopVisible("?labs=0"), false);
 
 console.log("tools: ok");

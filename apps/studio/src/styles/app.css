@@ -1301,6 +1301,74 @@ a {
   font-weight: 400;
   color: var(--text-3);
 }
+/* Plain-text "Beta" next to a labs-only label. */
+.adv__beta {
+  margin-left: var(--s-2);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+/*
+ * Advanced, inline under the tool's main controls (not a modal): the
+ * preview stays in view and shows every change live. The Advanced row is
+ * the toggle and, while open, the drag handle (down to close); on phones
+ * the body scrolls inside a capped dock, see the .is-narrow.adv-open rules.
+ */
+.adv-drawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  min-height: 32px;
+}
+.adv-drawer.is-open .adv-drawer__head {
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.adv-drawer.is-dragging .adv-drawer__head {
+  cursor: grabbing;
+}
+/* The close icon lines up with the switch's right edge above. */
+.adv-drawer__close {
+  width: 36px;
+  height: 32px;
+  margin-right: -9px;
+}
+.adv-toggle__chev {
+  display: inline-grid;
+  transform: rotate(90deg);
+  transition: transform var(--dur-2) var(--ease-out);
+}
+.adv-toggle[aria-expanded="true"] {
+  color: var(--text-1);
+}
+.adv-toggle[aria-expanded="true"] .adv-toggle__chev {
+  transform: rotate(-90deg);
+}
+.adv-drawer {
+  transition: transform 180ms var(--ease-out);
+}
+.adv-drawer.is-dragging,
+.adv-drawer.is-dragging .adv-drawer__body {
+  transition: none;
+}
+.adv-drawer__body {
+  margin-top: var(--s-2);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--line-1);
+  animation: adv-in var(--dur-3) var(--ease-out);
+  transition: opacity 180ms var(--ease-out);
+}
+.adv-drawer.is-leaving .adv-drawer__body {
+  opacity: 0 !important;
+  pointer-events: none;
+}
+@keyframes adv-in {
+  from { opacity: 0; transform: translateY(8px); }
+}
 
 /* Export */
 .export {
@@ -1646,6 +1714,65 @@ a {
   height: 46px;
 }
 
+/*
+ * Phone dock with Advanced open: the preview keeps at least --adv-preview
+ * of the height; the dock takes the rest and only the Advanced body
+ * scrolls, so the main controls, tabs and Export stay put.
+ */
+.is-narrow.adv-open {
+  /* The picture at full width (its aspect from App), between 160 px and 40 % of the screen. */
+  --adv-preview: clamp(160px, calc(100vw / var(--clip-ar, 1.7778)), 40dvh);
+}
+.is-narrow.adv-open .viewer {
+  flex: 1 0 var(--adv-preview);
+}
+/* The timeline steps aside while Advanced is open (a tap on the picture closes Advanced). */
+.is-narrow.adv-open .controls {
+  flex: 0 1 auto;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "grab grab"
+    "panel panel"
+    "tabs export";
+}
+.is-narrow.adv-open .controls > .viewer__bar {
+  display: none;
+}
+/* Short phones: the scene presets too, so Advanced keeps room for a couple of controls. */
+@media (max-height: 720px) {
+  .is-narrow.adv-open .panel__body > .chips {
+    display: none;
+  }
+}
+.is-narrow.adv-open .controls__panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.is-narrow.adv-open .panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.is-narrow .adv-drawer {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.is-narrow .adv-drawer__head {
+  flex: none;
+}
+.is-narrow .adv-drawer__body {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: var(--s-2) calc(-1 * var(--gutter)) 0;
+  padding: var(--s-4) var(--gutter) var(--s-3);
+}
+
 /* ------------------------------------------------------------ about */
 
 .about__credit h3 {
@@ -1744,9 +1871,19 @@ a {
     background: var(--surface-1);
     box-shadow: inset 0 0 0 1px var(--line-1);
   }
+  /* Side padding wide enough for a slider thumb at 0 or 100 (it overhangs the track by 12 px), pulled back by the margin so the content keeps its column. */
   .controls__panel {
     overflow-y: auto;
-    padding: var(--s-1) var(--s-1) 0;
+    margin: 0 calc(-1 * var(--s-3));
+    padding: var(--s-1) var(--s-4) 0;
+  }
+  /* Advanced open: the sidebar gives the processing order's room to the controls. */
+  .adv-open .chain {
+    display: none;
+  }
+  .adv-open .controls {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas: "tabs" "panel" "export";
   }
   .tab__icon {
     display: inline-grid;
