@@ -31,7 +31,7 @@ export type ColourState = {
 };
 
 /** The "Subject pop" switch stays hidden until its mask tracking is clean (the engine path ships off; `?pop=1` forces it on for checks). */
-export const SUBJECT_POP_UI = false;
+export const SUBJECT_POP_UI = true;
 
 /** Labs: `?labs=1` shows the hidden Subject pop switch (marked Beta) for people trying it out. */
 export function subjectPopVisible(search: string = typeof location === "undefined" ? "" : location.search): boolean {
