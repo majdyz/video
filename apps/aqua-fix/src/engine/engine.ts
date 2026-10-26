@@ -15,9 +15,10 @@ import type { PersonPacket, PersonRequest } from "./person-worker.ts";
 import { boxGate, PERSON_BOX_MIN_SCORE, type PersonBox } from "./person-gate.ts";
 import { inCutWindow as lockInCutWindow, noteCut as lockNoteCut, segmentAt, type LockSegment } from "./lock.ts";
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
-import { linearToOklab } from "./color.ts";
+import { linearToOklab, oklabToLinear } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
 import { POP_GATE, gateTarget, subjectMask } from "./pop-gate.ts";
+import { AnimalTracker, type SubjectOverride, type SubjectSelection } from "./animals.ts";
 import {
   CLAHE_BINS,
   CLAHE_TILES_X,
@@ -26,7 +27,6 @@ import {
   IDENTITY_PARAMS,
   lerpParams,
   packUniforms,
-  TEMPORAL,
   type ClaheLuts,
   type DepthMap,
   type GradeParams,
@@ -121,6 +121,13 @@ export class GradeEngine {
   private popGate = 0;
   private popTarget = 0;
   private popMask: ReturnType<typeof subjectMask> | null = null;
+  /** Subject pop: per-animal tracking, strength and map lead (animals.ts). */
+  private animals = new AnimalTracker();
+  /** The latest analysis's subject map and guide (what the animal lead moves). */
+  private leadBase: { fields: Packed; guide: Packed } | null = null;
+  /** Clip time of the frame the in-flight analysis was captured from. */
+  private reqTimeSec = 0;
+  private strengthOn = false;
   private personWorker: Worker | null = null;
   private personInflight = false;
   private personReqId = 0;
@@ -485,6 +492,7 @@ export class GradeEngine {
       const rect = detect ? FULL_RECT : PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
       const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.backend.analyze(ANALYSIS_W, ANALYSIS_H, rect);
       const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H };
+      this.reqTimeSec = this.lastTickSec;
       this.ensureWorker().postMessage(req, [req.rgba]);
       if (px) {
         if (!detect) this.personRectIdx++;
@@ -525,6 +533,10 @@ export class GradeEngine {
       this.popMask = null;
     }
     if (cut) this.popGate = 0;
+    if (cut) this.animals.reset();
+    if (this.settings.subjectPop && (packet.params.backdrop ?? 0) > 0 && raw.animals) this.animals.update(raw.animals, this.reqTimeSec);
+    else this.animals.reset();
+    this.leadBase = { fields: packet.fields, guide: packet.guide };
     if (!this.hasAnalysis || cut) {
       if (cut) {
         this.stats.sceneCuts++;
@@ -548,6 +560,7 @@ export class GradeEngine {
   }
 
   private snapTo(packet: GpuPacket): void {
+    this.animals.snap();
     this.current = this.applyLock(packet.params);
     this.target = this.current;
     this.fields = packet.fields;
@@ -592,6 +605,10 @@ export class GradeEngine {
     };
     const open = Math.min(1, Math.max(0, this.current.backdrop ?? 0));
     const aConf = am + (1 - Math.exp(-dt / TAU_CONF_OPEN_S) - am) * open;
+    if (this.settings.subjectPop) {
+      this.animals.step(dt);
+      this.leadAnimals();
+    }
     const f = ease(this.fields, this.fieldsTarget, am, aConf);
     // Subject pop: the guide that steers the subject map's joint-bilateral upsampling follows as fast as the map
     // itself, or a lagging guide steers the map onto the water where the animal (a fast tail) just was.
@@ -626,7 +643,51 @@ export class GradeEngine {
     } else {
       this.backend.setData(2, g);
     }
+    // Per-animal Subject pop strength (data texture 3); none without Subject pop.
+    if (this.settings.subjectPop) {
+      this.backend.setData(3, this.animals.strength(this.lastTickSec));
+      this.strengthOn = true;
+    } else if (this.strengthOn) {
+      this.backend.setData(3, { width: 1, height: 1, data: new Float32Array(4) });
+      this.strengthOn = false;
+    }
     this.dirtyData = false;
+  }
+
+  /**
+   * Moves each animal's part of the subject map (and the guide that steers it) along the animal's own motion
+   * since its analysis, so the map leads a fast animal; the texels it left take the water's colour.
+   */
+  private leadAnimals(): void {
+    const base = this.leadBase;
+    if (!base || !this.hasAnalysis) return;
+    const fit = this.current.backdropFit;
+    const w = base.fields.width, h = base.fields.height;
+    const water = (x: number, y: number): [number, number, number] => {
+      if (!fit || fit.length !== 18) return [0, 0, 0];
+      const u = (x + 0.5) / w - 0.5, v = (y + 0.5) / h - 0.5;
+      const at = (o: number) => fit[o] + fit[o + 1] * u + fit[o + 2] * v + fit[o + 3] * u * u + fit[o + 4] * u * v + fit[o + 5] * v * v;
+      return oklabToLinear(at(0), at(6), at(12));
+    };
+    const led = this.animals.lead(base.fields.data, base.guide.data, this.lastTickSec, water);
+    this.fieldsTarget = led ? { ...base.fields, data: led.fields } : base.fields;
+    this.guideTarget = led ? { ...base.guide, data: led.guide } : base.guide;
+    // The strength map follows the animals every frame.
+    if (this.animals.count) this.dirtyData = true;
+  }
+
+  /**
+   * Subject pop corrections for this clip (tap to include / exclude; see animals.ts SubjectOverride). Stored by the
+   * app with the clip state and set before preview and every export.
+   */
+  setSubjectOverrides(list: readonly SubjectOverride[]): void {
+    this.animals.setOverrides(list);
+    this.dirtyData = true;
+  }
+
+  /** The tracked animals now (ids per map texel + state), for drawing outlines and hit-testing taps. */
+  subjectSelection(): SubjectSelection | null {
+    return this.settings.subjectPop ? this.animals.selection(this.lastTickSec) : null;
   }
 
   /** Reset temporal state for a new file. */
@@ -668,6 +729,8 @@ export class GradeEngine {
     this.settlePerson();
     this.lastRenderSec = -1;
     this.backend.resetTemporal?.();
+    this.animals.reset();
+    this.leadBase = null;
     // An export of the clip just previewed keeps the gate (like the person verdict).
     if (!opts.keepPerson) {
       this.popGate = 0;
@@ -685,10 +748,10 @@ export class GradeEngine {
     u[90] *= this.popGate;
     // A seek (or a jump back) breaks the motion history.
     const t = this.lastTickSec;
-    if (this.lastRenderSec >= 0 && (t < this.lastRenderSec - 1e-3 || t - this.lastRenderSec > 0.3)) this.backend.resetTemporal?.();
-    // Per-frame easing of the whole-or-nothing subject factor (p23.z), from the clip time step.
-    const dt = this.lastRenderSec >= 0 && t > this.lastRenderSec && t - this.lastRenderSec <= 0.3 ? t - this.lastRenderSec : 1 / 30;
-    u[94] = 1 - Math.exp(-dt / TEMPORAL.covTau);
+    if (this.lastRenderSec >= 0 && (t < this.lastRenderSec - 1e-3 || t - this.lastRenderSec > 0.3)) {
+      this.backend.resetTemporal?.();
+      this.animals.reset();
+    }
     this.lastRenderSec = t;
     return u;
   }

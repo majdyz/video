@@ -63,7 +63,7 @@ export interface GpuBackend {
 
 /** Floats in the uniform block (multiple of 4). Layout lives in uniforms.ts. */
 export const UNIFORM_FLOATS = 96;
-export const DATA_SLOTS = 3;
+export const DATA_SLOTS = 4;
 
 export function uprightSize(width: number, height: number, rotation: Rotation): [number, number] {
   return rotation === 1 || rotation === 3 ? [height, width] : [width, height];

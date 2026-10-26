@@ -28,6 +28,10 @@ export const BACKDROP = {
   coreIn: 0.85,
   coreLo: 0.012,
   coreHi: 0.03,
+  /** Deep inside a tracked animal (animals.ts interior hold) only water the surface predicts (departure below
+   * holdLo..holdHi) is still left out: a stretch of body lit like the water is toned with the rest. */
+  holdLo: 0.004,
+  holdHi: 0.01,
   /** Chroma distance counts this much relative to lightness. */
   abWeight: 1.5,
   /** A pixel darker than the water counts this much of its lightness gap: a faint
@@ -66,6 +70,11 @@ export const BACKDROP = {
   relKeep: 0.3,
   solidLo: 0.2,
   solidHi: 0.26,
+  /** Share of the frame width (lo..hi) a region spans along the bottom edge at which it is the seabed, a reef or
+   * something held from below (a spear gun), never an animal: in open water a swimming animal does not rest its
+   * whole length on the bottom edge (its texture alone does not tell a coral from a shark at this resolution). */
+  bottomLo: 0.04,
+  bottomHi: 0.08,
   /** Margin (thumbnail pixels) around far-hue pixels that the whole-animal flood never enters. */
   farMargin: 2,
   /** Whole-animal growth (growSubjects): seed threshold (share of validity), the veto-ramped departure a
@@ -339,6 +348,11 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     // A region with no confident seed still counts when it has an outline
     // (a dim, far animal); a sun glow departs just as far but has none.
     let accept = seeded ? 1 : smoothstep(BACKDROP.growEdgeLo, BACKDROP.growEdgeHi, edge);
+    {
+      let bottom = 0;
+      for (let m = 0; m < cnt; m++) if (members[m] >= n - w) bottom++;
+      accept *= 1 - smoothstep(BACKDROP.bottomLo, BACKDROP.bottomHi, bottom / w);
+    }
     // A subject much of whose outline borders far-hue pixels is a colourful fish (a blue body with a yellow
     // tail): toned, it would turn half grey; it keeps its colour.
     if (block) {

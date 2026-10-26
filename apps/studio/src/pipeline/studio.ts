@@ -18,6 +18,7 @@ import { isRealtimeExportSupported, isWebCodecsSupported, isWebKit } from "./env
 import { bitrateFromSource, pickBitrate } from "@dive-tools/shared/recorder.ts";
 import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validate.ts";
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
+import type { SubjectOverride, SubjectSelection } from "../../../aqua-fix/src/engine/animals.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometrySource } from "./geometry.ts";
@@ -150,6 +151,11 @@ export type Snapshot = {
    * No cuts = one segment that uses tools.colour, exactly as before splits existed.
    */
   segments: Segments<ColourLook>;
+  /**
+   * Subject pop corrections for this clip (tap to include / exclude an animal; animals.ts SubjectOverride),
+   * kept with the clip like trim and splits and used in preview and every export.
+   */
+  subjectOverrides: SubjectOverride[];
 };
 
 const NO_SEGMENTS: Segments<ColourLook> = { cuts: [], looks: [] };
@@ -217,6 +223,7 @@ export class Studio {
     trim: null,
     thumbs: null,
     segments: NO_SEGMENTS,
+    subjectOverrides: [],
   };
   private listeners = new Set<() => void>();
   private frameListeners = new Set<(b: ImageBitmap) => void>();
@@ -348,6 +355,7 @@ export class Studio {
       this.colour = mod;
       const engine = await mod.GradeEngine.create(canvas, (e) => this.set({ error: e.message }), !q.has("webgl2"));
       engine.settings = this.colourFor(this.tools.colour);
+      engine.setSubjectOverrides(this.snap.subjectOverrides);
       engine.personEnabled = q.get("person") !== "0";
       engine.temporalEnabled = q.get("temporal") !== "0";
       this.engine = engine;
@@ -413,6 +421,36 @@ export class Studio {
   }
 
   // ------------------------------------------------------------ tools
+
+  // ------------------------------------------------------------ subject pop corrections
+
+  /** The tracked animals at the current frame (ids per map texel + state) for outlines and hit tests; null when off. */
+  subjectSelection(): SubjectSelection | null {
+    return this.engine?.subjectSelection() ?? null;
+  }
+
+  /**
+   * A tap at upright frame position (u, v) (0..1) at the current time: toggles the animal there out of / into the
+   * Subject pop selection, or (on water) asks for a new subject seeded there. Follows the animal through the clip.
+   */
+  toggleSubjectAt(u: number, v: number): void {
+    const sel = this.subjectSelection();
+    let action: SubjectOverride["action"] = "include";
+    if (sel) {
+      const x = Math.min(sel.width - 1, Math.max(0, Math.floor(u * sel.width)));
+      const y = Math.min(sel.height - 1, Math.max(0, Math.floor(v * sel.height)));
+      const a = sel.animals.find((an) => an.id === sel.ids[y * sel.width + x]);
+      if (a && (a.override === "include" || (a.override !== "exclude" && a.strength > 0.5))) action = "exclude";
+    }
+    const t = this.video?.currentTime ?? 0;
+    this.setSubjectOverrides([...this.snap.subjectOverrides, { t, u, v, action }]);
+  }
+
+  /** Replaces the clip's Subject pop corrections (undo / clear). */
+  setSubjectOverrides(list: SubjectOverride[]): void {
+    this.set({ subjectOverrides: list });
+    this.engine?.setSubjectOverrides(list);
+  }
 
   /** Engine settings for the colour tool (debug `?pop=1` forces Subject pop on for headless checks). */
   private colourFor(c: Parameters<typeof colourSettings>[0]) {
@@ -515,7 +553,7 @@ export class Studio {
     this.teardown();
     const gen = ++this.gen;
     this.file = file;
-    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS });
+    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [] });
     try {
       await touchFile(file);
       const media = await loadMedia();
@@ -683,7 +721,7 @@ export class Studio {
     const gen = ++this.gen;
     this.file = file;
     this.signal = null;
-    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS });
+    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [] });
     try {
       await touchFile(file);
       const { bitmap, original } = await decodePhoto(file, photoLimits(isWebKit(), e.backend.kind));
@@ -734,7 +772,7 @@ export class Studio {
   /** Back to the empty state. */
   close(): void {
     this.teardown();
-    this.set({ phase: "empty", kind: null, fileName: null, info: null, duration: 0, currentTime: 0, playing: false, busy: null, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, trim: null, thumbs: null, segments: NO_SEGMENTS });
+    this.set({ phase: "empty", kind: null, fileName: null, info: null, duration: 0, currentTime: 0, playing: false, busy: null, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [] });
   }
 
   private teardown(): void {

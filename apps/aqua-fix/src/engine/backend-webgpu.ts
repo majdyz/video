@@ -2,6 +2,7 @@ import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTexture
 import { WGSL_GRADE, WGSL_DOWNSCALE, WGSL_GRADE_EXT, WGSL_DOWNSCALE_EXT } from "./shaders.ts";
 import { WGSL_TP_FIELD, WGSL_TP_FLOW, WGSL_TP_LUM, tpExternal } from "./temporal.ts";
 import { TEMPORAL } from "./params.ts";
+import { WEBGPU_LAYOUTS, type BindingKind, type LayoutSpec } from "./webgpu-layouts.ts";
 
 /** Draws the frame small into a 2D canvas and looks for anything above black. */
 function frameIsLit(frame: VideoFrame): boolean {
@@ -72,7 +73,7 @@ export class WebGPUBackend implements GpuBackend {
   private tpLowH = 0;
   private tpOutW = 0;
   private tpOutH = 0;
-  private tpTex: { lum: GPUTexture[]; f0: GPUTexture[]; f1: GPUTexture[]; flow: GPUTexture; out: GPUTexture[] } | null = null;
+  private tpTex: { lum: GPUTexture[]; f0: GPUTexture[]; f1: GPUTexture; flow: GPUTexture; out: GPUTexture[] } | null = null;
   private readonly tpDummyHalf: GPUTexture;
   private readonly tpDummyOut: GPUTexture;
 
@@ -84,42 +85,23 @@ export class WebGPUBackend implements GpuBackend {
     this.ctx = ctx;
     this.format = navigator.gpu.getPreferredCanvasFormat();
     ctx.configure({ device, format: this.format, alphaMode: "opaque", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST });
-    // Explicit layouts: an "auto" layout drops bindings a shader variant
-    // doesn't read, and the bind group below always supplies all of them.
-    const tex = (binding: number, sampleType: GPUTextureSampleType = "float"): GPUBindGroupLayoutEntry => ({
-      binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType, viewDimension: "2d" },
-    });
-    const gradeLayout = device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
-        tex(2), tex(3, "unfilterable-float"), tex(4, "unfilterable-float"), tex(5, "unfilterable-float"),
-        tex(6), tex(7), tex(8), tex(9),
-      ],
-    });
-    const downLayout = device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
-        tex(2),
-      ],
-    });
-    const ext: GPUBindGroupLayoutEntry = { binding: 2, visibility: GPUShaderStage.FRAGMENT, externalTexture: {} };
-    const gradeLayoutExt = device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
-        ext, tex(3, "unfilterable-float"), tex(4, "unfilterable-float"), tex(5, "unfilterable-float"),
-        tex(6), tex(7), tex(8), tex(9),
-      ],
-    });
-    const downLayoutExt = device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
-        ext,
-      ],
-    });
+    // Explicit layouts (webgpu-layouts.ts): an "auto" layout drops bindings a shader variant
+    // doesn't read, and the bind groups below always supply all of them.
+    const entry = (binding: number, kind: BindingKind): GPUBindGroupLayoutEntry => {
+      const visibility = GPUShaderStage.FRAGMENT;
+      switch (kind) {
+        case "uniform": return { binding, visibility, buffer: { type: "uniform" } };
+        case "sampler": return { binding, visibility, sampler: { type: "filtering" } };
+        case "external": return { binding, visibility, externalTexture: {} };
+        case "unfilterable": return { binding, visibility, texture: { sampleType: "unfilterable-float", viewDimension: "2d" } };
+        default: return { binding, visibility, texture: { sampleType: "float", viewDimension: "2d" } };
+      }
+    };
+    const layout = (spec: LayoutSpec) => device.createBindGroupLayout({ entries: Object.entries(spec).map(([b, k]) => entry(Number(b), k)) });
+    const gradeLayout = layout(WEBGPU_LAYOUTS.grade);
+    const downLayout = layout(WEBGPU_LAYOUTS.down);
+    const gradeLayoutExt = layout(WEBGPU_LAYOUTS.gradeExt);
+    const downLayoutExt = layout(WEBGPU_LAYOUTS.downExt);
     const pipeline = (code: string, targetFormat: GPUTextureFormat, layout: GPUBindGroupLayout) =>
       device.createRenderPipeline({
         layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
@@ -134,15 +116,9 @@ export class WebGPUBackend implements GpuBackend {
     // Temporal passes (the lum pass reads the source like the downscale pass does).
     this.tpLumPipe = pipeline(WGSL_TP_LUM, "rgba16float", downLayout);
     this.tpLumPipeExt = pipeline(tpExternal(WGSL_TP_LUM), "rgba16float", downLayoutExt);
-    const flowLayout = device.createBindGroupLayout({ entries: [tex(0, "unfilterable-float"), tex(1, "unfilterable-float")] });
+    const flowLayout = layout(WEBGPU_LAYOUTS.flow);
     this.tpFlowPipe = pipeline(WGSL_TP_FLOW, "rgba16float", flowLayout);
-    const fieldLayout = device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-        tex(3, "unfilterable-float"), tex(4, "unfilterable-float"), tex(5, "unfilterable-float"),
-        tex(6, "unfilterable-float"), tex(7, "unfilterable-float"), tex(8, "unfilterable-float"), tex(9, "unfilterable-float"),
-      ],
-    });
+    const fieldLayout = layout(WEBGPU_LAYOUTS.field);
     const fieldModule = device.createShaderModule({ code: WGSL_TP_FIELD });
     this.tpFieldPipe = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [fieldLayout] }),
@@ -284,6 +260,7 @@ export class WebGPUBackend implements GpuBackend {
           { binding: 3, resource: this.data[0].createView() },
           { binding: 4, resource: this.data[1].createView() },
           { binding: 5, resource: this.data[2].createView() },
+          { binding: 10, resource: this.data[3].createView() },
           ...this.tpGradeEntries(),
         ],
       });
@@ -300,6 +277,7 @@ export class WebGPUBackend implements GpuBackend {
         { binding: 3, resource: this.data[0].createView() },
         { binding: 4, resource: this.data[1].createView() },
         { binding: 5, resource: this.data[2].createView() },
+        { binding: 10, resource: this.data[3].createView() },
         ...this.tpGradeEntries(),
       ],
     });
@@ -318,7 +296,7 @@ export class WebGPUBackend implements GpuBackend {
     const cur = this.tpIdx;
     return [
       { binding: 6, resource: t.f0[cur].createView() },
-      { binding: 7, resource: t.f1[cur].createView() },
+      { binding: 7, resource: t.f1.createView() },
       { binding: 8, resource: t.flow.createView() },
       { binding: 9, resource: t.out[1 - cur].createView() },
     ];
@@ -331,7 +309,7 @@ export class WebGPUBackend implements GpuBackend {
     const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
     const half = () => this.device.createTexture({ size: [lw, lh], format: "rgba16float", usage });
     const out = () => this.device.createTexture({ size: [outW, outH], format: this.format, usage: usage | GPUTextureUsage.COPY_SRC });
-    this.tpTex = { lum: [half(), half()], f0: [half(), half()], f1: [half(), half()], flow: half(), out: [out(), out()] };
+    this.tpTex = { lum: [half(), half()], f0: [half(), half()], f1: half(), flow: half(), out: [out(), out()] };
     this.tpLowW = lw; this.tpLowH = lh; this.tpOutW = outW; this.tpOutH = outH;
     this.tpValid = false;
     this.bindGroupDirty = true;
@@ -339,7 +317,7 @@ export class WebGPUBackend implements GpuBackend {
 
   private tpRelease(): void {
     const t = this.tpTex;
-    if (t) for (const x of [...t.lum, ...t.f0, ...t.f1, t.flow, ...t.out]) x.destroy();
+    if (t) for (const x of [...t.lum, ...t.f0, t.f1, t.flow, ...t.out]) x.destroy();
     this.tpTex = null;
   }
 
@@ -350,7 +328,7 @@ export class WebGPUBackend implements GpuBackend {
     const tp = this.outputWidth > 0 && this.uniforms[93] > 0.5;
     if (!tp) {
       this.tpValid = false;
-      if (this.uniforms[92] !== 0 || this.uniforms[95] !== 0) { this.uniforms[92] = 0; this.uniforms[95] = 0; this.device.queue.writeBuffer(this.uniformBuf, 92 * 4, this.uniforms, 92, 4); }
+      if (this.uniforms[92] !== 0) { this.uniforms[92] = 0; this.device.queue.writeBuffer(this.uniformBuf, 92 * 4, this.uniforms, 92, 1); }
     }
     // One external import per draw, shared by the lum pass and the grade.
     const ext = this.extSource ? this.device.importExternalTexture({ source: this.extSource }) : null;
@@ -358,8 +336,7 @@ export class WebGPUBackend implements GpuBackend {
       this.tpEnsure(target.width, target.height);
       const t = this.tpTex!, cur = this.tpIdx, prev = 1 - cur;
       this.uniforms[92] = this.tpValid ? 1 : 0;
-      this.uniforms[95] = 1; // p23.w: the temporal targets hold this frame's output
-      this.device.queue.writeBuffer(this.uniformBuf, 92 * 4, this.uniforms, 92, 4);
+      this.device.queue.writeBuffer(this.uniformBuf, 92 * 4, this.uniforms, 92, 1);
       const lowPass = (views: GPUTextureView[], pipe: GPURenderPipeline, group: GPUBindGroup) => {
         const pass = encoder.beginRenderPass({ colorAttachments: views.map((view) => ({ view, loadOp: "clear" as const, storeOp: "store" as const })) });
         pass.setPipeline(pipe);
@@ -376,7 +353,7 @@ export class WebGPUBackend implements GpuBackend {
         layout: this.tpFlowPipe.getBindGroupLayout(0),
         entries: [{ binding: 0, resource: t.lum[cur].createView() }, { binding: 1, resource: t.lum[prev].createView() }],
       }));
-      lowPass([t.f0[cur].createView(), t.f1[cur].createView()], this.tpFieldPipe, this.device.createBindGroup({
+      lowPass([t.f0[cur].createView(), t.f1.createView()], this.tpFieldPipe, this.device.createBindGroup({
         layout: this.tpFieldPipe.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: this.uniformBuf } },
@@ -386,7 +363,7 @@ export class WebGPUBackend implements GpuBackend {
           { binding: 6, resource: t.lum[cur].createView() },
           { binding: 7, resource: t.flow.createView() },
           { binding: 8, resource: t.f0[prev].createView() },
-          { binding: 9, resource: t.f1[prev].createView() },
+          { binding: 10, resource: this.data[3].createView() },
         ],
       }));
     }

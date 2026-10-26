@@ -15,6 +15,7 @@
 //   5. auto exposure / levels in linear luminance
 //   6. CLAHE tile LUTs on the encoded luminance for local contrast
 
+import { labelAnimals, type AnimalMap } from "./animals.ts";
 import { BACKDROP, backdropObjectness, growSubjects } from "./backdrop.ts";
 import { calmEvidence, calmScores } from "./calm.ts";
 import { RED, greenCastOf } from "./red.ts";
@@ -560,13 +561,16 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   // and only takes the subject tone.
   let confMap = conf;
   let subjectTone = 0;
+  let animals: AnimalMap | undefined;
   if (backdropValidity > 0) {
     const subj = temp("subjMap", n);
     subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit, bdWater);
     confMap = temp("confMap", n);
     for (let i = 0; i < n; i++) confMap[i] = conf[i] + (subj[i] - conf[i]) * backdropValidity;
+    animals = labelAnimals(subj, bdDev, w, h, MAP_W, MAP_H);
   }
   const depth = buildMaps(z, confMap, ds, veilScale, lin, w, h);
+  if (animals) depth.animals = animals;
   const haze = clamp01(black / HAZE_BLACK_REF);
   const evidence = calmEvidence(lin, n);
   const { calm, calmTone } = calmScores(evidence, haze);

@@ -2,6 +2,7 @@
 // The analysis pass produces a GradeParams for the current frame; the
 // temporal smoother blends them; packUniforms() serialises them.
 
+import type { AnimalMap } from "./animals.ts";
 import { UNIFORM_FLOATS } from "./backend.ts";
 import { linearToOklab } from "./color.ts";
 import { calmParams, calmSettings, type CalmEvidence } from "./calm.ts";
@@ -253,13 +254,6 @@ export const TEMPORAL = {
   supportR: 2,
   supportLo: 0.2,
   supportHi: 0.6,
-  /** Whole-or-nothing: the share of the pixels around a texel (within covR low-res texels) that clearly depart from
-   * the water which the tracked mask actually tones; below covLo..covHi the subject tone fades out there as a whole
-   * instead of toning part of the animal. The factor eases with time constant covTau (s). */
-  covR: 8,
-  covLo: 0.6,
-  covHi: 0.75,
-  covTau: 0.25,
   denoise: 0.5,
   tau: 5 / 255,
   flatLo: 3 / 255,
@@ -576,6 +570,8 @@ export type DepthMap = {
   guide: Float32Array;
   /** Optional person mask (0..1, one value per texel), rides in the guide's alpha. */
   person?: Float32Array;
+  /** Open water: the animals of the subject map (animals.ts), labelled on this grid. */
+  animals?: AnimalMap;
 };
 
 /**
