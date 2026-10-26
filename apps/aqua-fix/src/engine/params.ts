@@ -252,6 +252,13 @@ export const TEMPORAL = {
   supportR: 2,
   supportLo: 0.2,
   supportHi: 0.6,
+  /** Whole-or-nothing: the share of the subject map around a texel (within covR low-res texels; map pixels that
+   * depart from the water) that the tracked mask actually tones; below covLo..covHi the subject tone fades out
+   * there as a whole instead of toning part of the animal. The factor eases with time constant covTau (s). */
+  covR: 8,
+  covLo: 0.6,
+  covHi: 0.75,
+  covTau: 0.25,
   denoise: 0.5,
   tau: 5 / 255,
   flatLo: 3 / 255,

@@ -26,6 +26,7 @@ import {
   IDENTITY_PARAMS,
   lerpParams,
   packUniforms,
+  TEMPORAL,
   type ClaheLuts,
   type DepthMap,
   type GradeParams,
@@ -567,7 +568,15 @@ export class GradeEngine {
     }
     if (this.target) {
       const a = 1 - Math.exp(-dt / TAU_PARAMS_S);
+      const fit0 = this.current.backdropFit;
       this.current = lerpParams(this.current, this.target, a);
+      // Subject pop: the water surface the subject test measures against follows the frame as fast as the subject
+      // map does; a lagging surface makes the water beside a moving animal "depart" and tone as a grey patch.
+      const ft = this.target.backdropFit;
+      if (this.settings.subjectPop && fit0 && ft && fit0.length === ft.length) {
+        const af = 1 - Math.exp(-dt / TAU_CONF_OPEN_S);
+        this.current = { ...this.current, backdropFit: fit0.map((x, i) => x + (ft[i] - x) * af) };
+      }
     }
     const am = 1 - Math.exp(-dt / TAU_MAPS_S);
     const ac = 1 - Math.exp(-dt / TAU_CLAHE_S);
@@ -677,6 +686,9 @@ export class GradeEngine {
     // A seek (or a jump back) breaks the motion history.
     const t = this.lastTickSec;
     if (this.lastRenderSec >= 0 && (t < this.lastRenderSec - 1e-3 || t - this.lastRenderSec > 0.3)) this.backend.resetTemporal?.();
+    // Per-frame easing of the whole-or-nothing subject factor (p23.z), from the clip time step.
+    const dt = this.lastRenderSec >= 0 && t > this.lastRenderSec && t - this.lastRenderSec <= 0.3 ? t - this.lastRenderSec : 1 / 30;
+    u[94] = 1 - Math.exp(-dt / TEMPORAL.covTau);
     this.lastRenderSec = t;
     return u;
   }

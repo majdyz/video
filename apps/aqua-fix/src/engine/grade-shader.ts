@@ -89,6 +89,8 @@ const float BD_VETO_LO = ${BACKDROP.vetoLo.toFixed(4)};
 const float BD_VETO_HI = ${BACKDROP.vetoHi.toFixed(4)};
 const float BD_RING_R = ${BACKDROP.ringR.toFixed(1)};
 const float BD_CORE_IN = ${BACKDROP.coreIn.toFixed(4)};
+const float BD_CORE_LO = ${BACKDROP.coreLo.toFixed(4)};
+const float BD_CORE_HI = ${BACKDROP.coreHi.toFixed(4)};
 const float BD_SUBJ_LO = ${BACKDROP.subjLo.toFixed(4)};
 const float BD_SUBJ_HI = ${BACKDROP.subjHi.toFixed(4)};
 const float BD_DARK = ${BACKDROP.vetoDark.toFixed(4)};
@@ -340,7 +342,7 @@ float subjectWeight(vec2 uv, float coreJbu, float dev) {
   ring = max(ring, mapConf(uv + 0.7071 * vec2(r.x, -r.y)));
   ring = max(ring, mapConf(uv - 0.7071 * vec2(r.x, r.y)));
   float trim = smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, dev);
-  return max(core * mix(smoothstepf(BD_CORE_IN, 1.0, core), 1.0, trim), min(min(1.0, ring), trim));
+  return max(core * mix(smoothstepf(BD_CORE_IN, 1.0, core) * smoothstepf(BD_CORE_LO, BD_CORE_HI, dev), 1.0, trim), min(min(1.0, ring), trim));
 }
 // Object weight and warm clamp (see apply.ts objectWeight / warmClamp).
 float objectWeight(float conf) { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
@@ -364,6 +366,8 @@ float detailRatio(vec3 src, vec3 baseLin) {
 }
 // Temporal layer hooks (temporal.ts): subject prior in, raw subject mask out.
 float g_subjPrior = 0.0;
+// Whole-or-nothing factor of the subject tone (temporal layer; 1 without it).
+float g_subjFactor = 1.0;
 float g_subjOut = 0.0;
 vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   g_subjOut = 0.0;
@@ -434,7 +438,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // previous mask (g_subjPrior, kept near the map by the temporal layer) holds where the pixel departs like a subject.
   float subjRaw = p[16].w > 0.0 ? max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev)) : 0.0;
   g_subjOut = subjRaw;
-  float subj = subjRaw * p[16].w * p[22].z;
+  float subj = subjRaw * p[16].w * p[22].z * g_subjFactor;
   if (p[0].w > 0.5) return vec3(k, confPix, clamp(fld.y, 0.0, 1.0));
   vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   vec3 full = D * rangeGain * wb;
@@ -727,7 +731,7 @@ fn subjectWeight(uv: vec2<f32>, coreJbu: f32, dev: f32) -> f32 {
   ring = max(ring, mapConf(uv + 0.7071 * vec2<f32>(r.x, -r.y)));
   ring = max(ring, mapConf(uv - 0.7071 * vec2<f32>(r.x, r.y)));
   let trim = smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, dev);
-  return max(core * mix(smoothstepf(BD_CORE_IN, 1.0, core), 1.0, trim), min(min(1.0, ring), trim));
+  return max(core * mix(smoothstepf(BD_CORE_IN, 1.0, core) * smoothstepf(BD_CORE_LO, BD_CORE_HI, dev), 1.0, trim), min(min(1.0, ring), trim));
 }
 fn objectWeight(conf: f32) -> f32 { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
 fn warmClamp(ab: vec2<f32>, lin: vec3<f32>, srcFar: f32, person: f32, strength: f32) -> f32 {
@@ -748,6 +752,7 @@ fn detailRatio(src: vec3<f32>, baseLin: vec3<f32>) -> f32 {
 }
 fn grade(src: vec3<f32>, uv: vec2<f32>) -> vec3<f32> { return gradeD(src, src, uv); }
 var<private> g_subjPrior: f32 = 0.0;
+var<private> g_subjFactor: f32 = 1.0;
 var<private> g_subjOut: f32 = 0.0;
 fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   g_subjOut = 0.0;
@@ -804,7 +809,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
   let subjRaw = select(0.0, max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev)), p[16].w > 0.0);
   g_subjOut = subjRaw;
-  let subj = subjRaw * p[16].w * p[22].z;
+  let subj = subjRaw * p[16].w * p[22].z * g_subjFactor;
   if (p[0].w > 0.5) { return vec3(k, confPix, clamp(fld.y, 0.0, 1.0)); }
   let rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   let full = D * rangeGain * wb;

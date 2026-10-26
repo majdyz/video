@@ -23,8 +23,11 @@ export const BACKDROP = {
    * a little, yet must get the same tone as a near one (the dilated map already confines it to the animal). */
   subjLo: 0.02,
   subjHi: 0.05,
-  /** Map strength above which a pixel counts as inside the animal (no per-pixel trim). */
+  /** Map strength above which a pixel counts as inside the animal (only plain water, departure below coreLo..coreHi,
+   * is still cut there: a map that spilled onto the water around an animal leaves no grey patch). */
   coreIn: 0.85,
+  coreLo: 0.012,
+  coreHi: 0.03,
   /** Chroma distance counts this much relative to lightness. */
   abWeight: 1.5,
   /** A pixel darker than the water counts this much of its lightness gap: a faint

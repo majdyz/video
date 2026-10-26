@@ -53,7 +53,7 @@ export class WebGL2Backend implements GpuBackend {
   private tpOutW = 0;
   private tpOutH = 0;
   private tpIdx = 0;
-  private tpTex: { lum: WebGLTexture[]; f0: WebGLTexture[]; f1: WebGLTexture; flow: WebGLTexture; out: WebGLTexture[] } | null = null;
+  private tpTex: { lum: WebGLTexture[]; f0: WebGLTexture[]; f1: WebGLTexture[]; flow: WebGLTexture; out: WebGLTexture[] } | null = null;
   private tpFbo: { lum: WebGLFramebuffer[]; field: WebGLFramebuffer[]; flow: WebGLFramebuffer; out: WebGLFramebuffer[] } | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -92,7 +92,7 @@ export class WebGL2Backend implements GpuBackend {
       try {
         this.tpLum = this.link(VS, GLSL_TP_LUM, ["u_source"]);
         this.tpFlow = this.link(VS, GLSL_TP_FLOW, ["u_lum", "u_lumPrev"]);
-        this.tpField = this.link(VS, GLSL_TP_FIELD, ["u_data0", "u_data1", "u_data2", "u_lum", "u_flow", "u_histf"]);
+        this.tpField = this.link(VS, GLSL_TP_FIELD, ["u_data0", "u_data1", "u_data2", "u_lum", "u_flow", "u_histf", "u_histg"]);
         for (const p of [this.tpLum, this.tpField]) gl.uniformBlockBinding(p.prog, gl.getUniformBlockIndex(p.prog, "Params"), 0);
         this.tpOn = true;
       } catch (e) {
@@ -127,7 +127,7 @@ export class WebGL2Backend implements GpuBackend {
     const gl = this.gl;
     if (this.tpTex) {
       const t = this.tpTex;
-      for (const x of [...t.lum, ...t.f0, t.f1, t.flow, ...t.out]) gl.deleteTexture(x);
+      for (const x of [...t.lum, ...t.f0, ...t.f1, t.flow, ...t.out]) gl.deleteTexture(x);
     }
     if (this.tpFbo) {
       const f = this.tpFbo;
@@ -145,11 +145,11 @@ export class WebGL2Backend implements GpuBackend {
     if (this.tpTex && lw === this.tpLowW && lh === this.tpLowH && ow === this.tpOutW && oh === this.tpOutH) return true;
     this.tpRelease();
     const half = (w: number, h: number) => this.tpTarget(w, h, "half");
-    const tex = { lum: [half(lw, lh), half(lw, lh)], f0: [half(lw, lh), half(lw, lh)], f1: half(lw, lh), flow: half(lw, lh), out: [this.tpTarget(ow, oh, "rgba8"), this.tpTarget(ow, oh, "rgba8")] };
+    const tex = { lum: [half(lw, lh), half(lw, lh)], f0: [half(lw, lh), half(lw, lh)], f1: [half(lw, lh), half(lw, lh)], flow: half(lw, lh), out: [this.tpTarget(ow, oh, "rgba8"), this.tpTarget(ow, oh, "rgba8")] };
     this.tpTex = tex;
     this.tpFbo = {
       lum: tex.lum.map((t) => this.tpFramebuffer(t)),
-      field: tex.f0.map((t) => this.tpFramebuffer(t, tex.f1)),
+      field: tex.f0.map((t, i) => this.tpFramebuffer(t, tex.f1[i])),
       flow: this.tpFramebuffer(tex.flow),
       out: tex.out.map((t) => this.tpFramebuffer(t)),
     };
@@ -171,9 +171,11 @@ export class WebGL2Backend implements GpuBackend {
     const t = this.tpTex!, f = this.tpFbo!;
     const cur = this.tpIdx, prev = 1 - cur;
     // History flag for this frame (p23.x).
+    // p23.w: the temporal targets hold this frame's output (the grade may read them).
     this.uniforms[92] = this.tpValid ? 1 : 0;
+    this.uniforms[95] = 1;
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
-    gl.bufferSubData(gl.UNIFORM_BUFFER, 92 * 4, this.uniforms.subarray(92, 93));
+    gl.bufferSubData(gl.UNIFORM_BUFFER, 92 * 4, this.uniforms.subarray(92, 96));
     gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, this.uniformBuf);
     gl.bindVertexArray(this.vao);
     gl.viewport(0, 0, this.tpLowW, this.tpLowH);
@@ -196,6 +198,7 @@ export class WebGL2Backend implements GpuBackend {
     this.bindTex(4, t.lum[cur], this.tpField, "u_lum");
     this.bindTex(5, t.flow, this.tpField, "u_flow");
     this.bindTex(6, t.f0[prev], this.tpField, "u_histf");
+    this.bindTex(7, t.f1[prev], this.tpField, "u_histg");
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
   }
@@ -332,10 +335,11 @@ export class WebGL2Backend implements GpuBackend {
     const tp = this.uniforms[93] > 0.5 && this.tpEnsure();
     if (!tp) this.tpValid = false;
     if (tp) this.tpPasses();
-    else if (this.uniforms[92] !== 0) {
+    else if (this.uniforms[92] !== 0 || this.uniforms[95] !== 0) {
       this.uniforms[92] = 0;
+      this.uniforms[95] = 0;
       gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
-      gl.bufferSubData(gl.UNIFORM_BUFFER, 92 * 4, this.uniforms.subarray(92, 93));
+      gl.bufferSubData(gl.UNIFORM_BUFFER, 92 * 4, this.uniforms.subarray(92, 96));
     }
     const cur = this.tpIdx;
     gl.bindFramebuffer(gl.FRAMEBUFFER, tp ? this.tpFbo!.out[cur] : null);
@@ -349,7 +353,7 @@ export class WebGL2Backend implements GpuBackend {
     if (tp) {
       const t = this.tpTex!;
       this.bindTex(4, t.f0[cur], this.grade, "u_tpF0");
-      this.bindTex(5, t.f1, this.grade, "u_tpF1");
+      this.bindTex(5, t.f1[cur], this.grade, "u_tpF1");
       this.bindTex(6, t.flow, this.grade, "u_tpFlow");
       this.bindTex(7, t.out[1 - cur], this.grade, "u_tpPrev");
     } else {

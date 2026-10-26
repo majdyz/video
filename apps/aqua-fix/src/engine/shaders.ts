@@ -50,6 +50,7 @@ void main() {
   // anti-crawl correction and the dark-flat-water denoise.
   bool tp = p[23].x > 0.5 && p[23].y > 0.5;
   g_subjPrior = tp ? texture(u_tpF0, tpUV(v_uv)).a : 0.0;
+  g_subjFactor = p[23].w > 0.5 ? texture(u_tpF1, tpUV(v_uv)).a : 1.0;
   vec3 base = detailBase(suv, src);
   vec3 col = gradeD(src, base, v_uv);
   if (tp) col = temporalStage(col, src, base, v_uv);
@@ -121,6 +122,8 @@ ${TP_FINAL_WGSL}
   let tp = params.p[23].x > 0.5 && params.p[23].y > 0.5;
   let prior = textureSampleLevel(u_tpF0, samp, tpUV(in.uv), 0.0).a;
   g_subjPrior = select(0.0, prior, tp);
+  let fac = textureSampleLevel(u_tpF1, samp, tpUV(in.uv), 0.0).a;
+  g_subjFactor = select(1.0, fac, params.p[23].w > 0.5);
   let base = detailBase(suv, src);
   var col = gradeD(src, base, in.uv);
   let tcol = temporalStage(col, src, base, in.uv);

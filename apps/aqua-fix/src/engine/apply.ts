@@ -464,7 +464,7 @@ function subjectWeight(d: DepthMap, u: number, v: number, coreJbu: number, dev: 
   // eases this channel fast in open water, so the map does not leave a toned
   // ghost where the animal was.)
   const trim = smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, dev);
-  const inner = smoothstep(BACKDROP.coreIn, 1, core);
+  const inner = smoothstep(BACKDROP.coreIn, 1, core) * smoothstep(BACKDROP.coreLo, BACKDROP.coreHi, dev);
   return Math.max(core * (trim + (1 - trim) * inner), Math.min(Math.min(1, ring), trim));
 }
 
