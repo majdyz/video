@@ -8,7 +8,7 @@ import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, objectNeutral
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
-import { RED, chromaRebuild, greenNeutral, greenWeight, guideSmooth, greenSettings, redGainStrength, redGuard, waterRedGain } from "./red.ts";
+import { RED, chromaRebuild, greenNeutral, greenWeight, guideSmooth, greenSettings, redGainStrength, redGuard, waterRedGain, warmMaterial, murkHold } from "./red.ts";
 
 export type ApplyContext = {
   /** When set, gradePixel returns (k, confPix, confMap) instead of a colour. */
@@ -140,7 +140,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // proportionally instead.
   const lab0 = linearToOklab(r0, g0, b0);
   const pa = lab0[1], pb = lab0[2];
-  const wSub = smoothstep(p.subLo, p.subHi, sig) * (1 - hueFar(pa, pb, p));
+  // Green water (red.ts): part of the veil comes off hue-preserving, so near objects keep their own hue (olive seagrass).
+  const wSub = smoothstep(p.subLo, p.subHi, sig) * (1 - hueFar(pa, pb, p)) * (1 - RED.greenProp * greenWeight(p));
   const prop = Math.max(p.floorFrac, 1 - lumBs / lumI);
   // Red restoration (red.ts): channels the grade amplifies are rebuilt from
   // the smoothed, edge-aware chroma with the detail of the others; the red
@@ -238,6 +239,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
     const yo = luminance(out[0], out[1], out[2]);
     const yMin = shadowFloorAt(lumI, p.shadowFloor) * lumI * ew * hf;
     let yt = Math.max(yo, yMin);
+    // Green water (red.ts): murk (the water path) is never lifted above the source.
+    yt = murkHold(yt, lumI, greenWeight(p) * (1 - conf));
     if (yt > p.knee) yt = p.knee + (1 - p.knee) * (1 - Math.exp(-(yt - p.knee) / (1 - p.knee)));
     if (yo > 1e-6) {
       if (yt !== yo) {
@@ -289,7 +292,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // Water-likeness for the look comes from the pixel's own hue (the mask or
   // the water/object split would cut one garment into differently treated parts).
   const looked = deepBlueLook(Ls, skinned[0], skinned[1], s.look, 1 - hueConf(pa, pb, p), hazeWeight(p), deepHaze(p));
-  const guarded = redGuard(looked[0], looked[1], looked[2], a0, bb0, person, onFar);
+  const guarded0 = redGuard(looked[0], looked[1], looked[2], a0, bb0, person, onFar);
+  const guarded = warmMaterial(looked[0], guarded0[0], guarded0[1], greenWeight(p), onFar);
   const capped = capChroma(looked[0], guarded[0], guarded[1], cSrc);
   const [r1, g1, b1] = oklabToLinear(looked[0], capped[0], capped[1]);
   void C;

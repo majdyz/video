@@ -433,7 +433,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // A hue far from the veil's is a near object the global fit overstates:
   // proportional (hue-preserving) subtraction only (see apply.ts).
   vec3 lab0 = linearToOklab(lin);
-  float wSub = smoothstepf(subLo, subHi, sig) * (1.0 - hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma));
+  float wSub = smoothstepf(subLo, subHi, sig) * (1.0 - hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma)) * (1.0 - RED_GREEN_PROP * p[22].w);
   // Red restoration (red.ts): amplified channels rebuilt from the smoothed chroma; red gain by red SNR.
   vec3 rg3 = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   float snrR;
@@ -501,6 +501,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
     float yo = lum(o);
     float sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
     float yt = max(yo, sf * lumI * ew * hf);
+    yt = murkHold(yt, lumI, p[22].w * (1.0 - conf));
     if (yt > knee) yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee)));
     // A pixel levels clipped to nothing is rebuilt from the source at the floor (see apply.ts).
     if (yo > 1e-6) o *= yt / yo; else o = lin * (yt / lumI);
@@ -524,7 +525,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   vec2 nab = mix(lab.yz * scale, veilHue * ON_SILVER, tN);
   float Ls = lab.x + objectLift(lab.x, objectWeight(subj), p[16].w);
   vec3 lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y);
-  lk.yz = redGuard(lk.x, lk.yz, lab0.yz, person, onFar);
+  lk.yz = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
   vec3 o1 = oklabToLinear(capChroma(lk, cSrc));
   vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
   vec3 outS = linearToSrgb(o2);
@@ -835,7 +836,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let lumBs = lum(Bs);
   let sig = max(0.0, (lumI - lumB) / lumI);
   let lab0 = linearToOklab(lin);
-  let wSub = smoothstepf(subLo, subHi, sig) * (1.0 - hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma));
+  let wSub = smoothstepf(subLo, subHi, sig) * (1.0 - hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma)) * (1.0 - RED_GREEN_PROP * p[22].w);
   // Red restoration (red.ts): amplified channels rebuilt from the smoothed chroma; red gain by red SNR.
   let rg3 = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   let crb = chromaRebuild(lin, guideSmooth(uv, lin), max(rg3 * wb, waterWb), B);
@@ -889,6 +890,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     let yo = lum(o);
     let sf = 0.97 + (shadowFloor - 0.97) * smoothstepf(0.02, 0.15, lumI);
     var yt = max(yo, sf * lumI * ew * hf);
+    yt = murkHold(yt, lumI, p[22].w * (1.0 - conf));
     if (yt > knee) { yt = knee + (1.0 - knee) * (1.0 - exp(-(yt - knee) / (1.0 - knee))); }
     if (yo > 1e-6) { o *= yt / yo; } else { o = lin * (yt / lumI); }
   }
@@ -910,7 +912,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let nab = mix(lab.yz * scale, veilHue * ON_SILVER, tN);
   let Ls = lab.x + objectLift(lab.x, objectWeight(subj), p[16].w);
   var lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y);
-  let gab = redGuard(lk.x, lk.yz, lab0.yz, person, onFar);
+  let gab = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
   lk = vec3(lk.x, gab);
   let o1 = oklabToLinear(capChroma(lk, cSrc));
   let o2 = fitToGamut(o1 * detailRatio(src, lin));

@@ -297,7 +297,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   const veilScale = veilScaleMap(lin, objHue, bfArr, w, h, temp("veilScale", n));
   // Green water (red.ts): every object shares the green veil's hue, so the hue
   // test calls the whole scene water; there the signal test decides alone.
-  const greenObj = greenCastOf(binf) * RED.greenObj;
+  const greenObj = greenCastOf(binf, veilColor) * RED.greenObj;
   const J = temp("J", n * 3);
   const conf = temp("conf", n);
   const wbWeight = temp("wbWeight", n);
@@ -355,7 +355,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number):
   }
   const wb: Vec3 = [1, 1, 1];
   // Green water (red.ts): the balance limits open up under a green veil.
-  const green = greenCastOf(binf);
+  const green = greenCastOf(binf, veilColor);
   if (sw > 0) {
     const er = Math.pow(sr / sw, 1 / P) + 1e-5;
     const eg = Math.pow(sg / sw, 1 / P) + 1e-5;

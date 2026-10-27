@@ -35,7 +35,7 @@
 //     back) has its chroma moved toward a muted blue-grey (greenNeutral, a
 //     per-pixel Oklab operation on its own colour: no gain, no structure).
 
-import { linearToSrgb } from "./color.ts";
+import { linearToOklab, linearToSrgb } from "./color.ts";
 import type { DepthMap } from "./params.ts";
 
 const D2R = Math.PI / 180;
@@ -84,17 +84,24 @@ export const RED = {
   greenHi: 1.8,
   /** … where the balance limits open up to these (red, blue) … */
   greenRMax: 5,
-  greenBMax: 5,
+  greenBMax: 3,
   /** … and the water path takes this share of the full balance (instead of the toned-down one). */
   greenWater: 0.7,
   /** … the water path dehazes (gives up part of its veil) by at least this much, so murk clears instead of turning grey-white … */
-  greenDehaze: 0.5,
+  greenDehaze: 0.85,
   /** … and the hue test (useless when every object shares the veil's hue) is overruled by this much: the signal test decides. */
   greenObj: 0.9,
+  /** … and this share of the veil subtraction is hue-preserving (per channel, the big green veil strips green from near objects: olive seagrass turns red-brown). */
+  greenProp: 0.6,
   /** … and the gray-world vote aims at a warm average (R up, B down by these factors at full green). */
   greenWarmR: 1.1,
   greenWarmB: 0.9,
   /** A veil dimmer than this (B∞ green, linear) is too dark to call a cast (ROV lights, night): no green weight. */
+  /** Veil colour G/B over which the frame counts as (cyan-)green water too, with enough veil chroma to be a cast. */
+  veilGreenLo: 1.35,
+  veilGreenHi: 1.85,
+  veilChromaLo: 0.03,
+  veilChromaHi: 0.06,
   greenLevelLo: 0.03,
   greenLevelHi: 0.08,
   /** greenNeutral: output hue band (centre, full inside, none beyond) … */
@@ -107,6 +114,18 @@ export const RED = {
   gnObjKeep: 0.7,
   gnTargetHue: 240 * D2R,
   gnTargetC: 0.012,
+  /** Natural materials in green water (stone, sand, seagrass; source hue near the veil's): warm hues (band centre, full inside, none beyond) keep at most matC chroma, rolled off softly from matKnee x matC. */
+  matHue: 70 * D2R,
+  matIn: 40 * D2R,
+  matOut: 65 * D2R,
+  matC: 0.05,
+  matKnee: 0.6,
+  /** Murk is never lifted: in green water a water-path pixel ends at most at its source luminance. */
+  murkHold: 1,
+  /** … and dark murk (source linear luminance below murkLo, easing out by murkHi) ends darker still, at murkDark × its source: cleared, not greyed. */
+  murkDark: 0.75,
+  murkLo: 0.08,
+  murkHi: 0.25,
 };
 
 function clamp(x: number, lo: number, hi: number): number {
@@ -118,17 +137,28 @@ function smoothstep(e0: number, e1: number, x: number): number {
 }
 
 /** Green-water weight of a frame from its veiling light (0 blue/cyan … 1 green). */
-export function greenCastOf(binf: readonly number[]): number {
-  return smoothstep(RED.greenLo, RED.greenHi, binf[1] / Math.max(1e-4, binf[2])) * smoothstep(RED.greenLevelLo, RED.greenLevelHi, binf[1]);
+export function greenCastOf(binf: readonly number[], veil?: readonly number[]): number {
+  const fromBinf = smoothstep(RED.greenLo, RED.greenHi, binf[1] / Math.max(1e-4, binf[2]));
+  // The veil colour (the brightest far water) is the steadier witness of a
+  // cyan-green cast: tropical cyan reef water sits at G/B <= ~1.26, cyan-green
+  // coastal water well above.
+  const fromVeil = veil ? smoothstep(RED.veilGreenLo, RED.veilGreenHi, veil[1] / Math.max(1e-4, veil[2])) * smoothstep(RED.veilChromaLo, RED.veilChromaHi, veilChroma(veil)) : 0;
+  return Math.max(fromBinf, fromVeil) * smoothstep(RED.greenLevelLo, RED.greenLevelHi, binf[1]);
+}
+
+/** Oklab chroma of the veil colour (how strong a cast it is). */
+function veilChroma(v: readonly number[]): number {
+  const [, a, b] = linearToOklab(Math.max(0, v[0]), Math.max(0, v[1]), Math.max(0, v[2]));
+  return Math.hypot(a, b);
 }
 
 /** Green-water weight the shaders read (uniform p22.w): the veil's, backed off by the colour calm. */
-export function greenWeight(p: { binf: readonly number[]; calm?: number }): number {
-  return greenCastOf(p.binf) * (1 - Math.min(1, Math.max(0, p.calm ?? 0)));
+export function greenWeight(p: { binf: readonly number[]; veilColor?: readonly number[]; calm?: number }): number {
+  return greenCastOf(p.binf, p.veilColor) * (1 - Math.min(1, Math.max(0, p.calm ?? 0)));
 }
 
 /** Green water on the controls: the water-path dehaze is at least greenDehaze × the green weight. */
-export function greenSettings<T extends { dehaze: number }>(g: T, p: { binf: readonly number[]; calm?: number }): T {
+export function greenSettings<T extends { dehaze: number }>(g: T, p: { binf: readonly number[]; veilColor?: readonly number[]; calm?: number }): T {
   const d = RED.greenDehaze * greenWeight(p);
   return d > g.dehaze ? { ...g, dehaze: Math.min(1, d) } : g;
 }
@@ -218,6 +248,34 @@ export function waterRedGain(water: number, full: number, snrR: number): number 
   return water * Math.pow(Math.max(1, full / Math.max(1e-4, water)), t);
 }
 
+/**
+ * Natural-material ceiling on the graded Oklab chroma (a, b) at lightness L
+ * in green water (g = the frame's green weight): a big red/blue balance turns
+ * stone, sand and seagrass that shared the veil's hue orange or yellow; their
+ * chroma is rolled off toward matC on warm hues. srcFar (source hue far from
+ * the veil: a yellow fish that escaped the cast) is exempt.
+ */
+export function warmMaterial(L: number, a: number, b: number, g: number, srcFar: number): [number, number] {
+  if (g <= 0) return [a, b];
+  const C = Math.hypot(a, b);
+  const knee = RED.matKnee * RED.matC;
+  if (C <= knee) return [a, b];
+  const band = smoothstep(Math.cos(RED.matOut), Math.cos(RED.matIn), (a * Math.cos(RED.matHue) + b * Math.sin(RED.matHue)) / C);
+  const w = g * (1 - srcFar) * band * smoothstep(0.2, 0.3, L) * (1 - smoothstep(0.85, 0.95, L));
+  if (w <= 0) return [a, b];
+  const room = RED.matC - knee;
+  const rolled = knee + room * (1 - Math.exp(-(C - knee) / room));
+  const C2 = C + (rolled - C) * w;
+  return [(a * C2) / C, (b * C2) / C];
+}
+
+/** Murk hold: final luminance y of a water-path pixel, pulled down to (at most) the source luminance ySrc by weight g (green weight × water share). */
+export function murkHold(y: number, ySrc: number, g: number): number {
+  const cap = ySrc * (RED.murkDark + (1 - RED.murkDark) * smoothstep(RED.murkLo, RED.murkHi, ySrc));
+  if (g <= 0 || y <= cap) return y;
+  return y + (cap - y) * g * RED.murkHold;
+}
+
 /** Strength of the physics path's red gain for a red SNR (see RED.snrLo/snrHi). */
 export function redGainStrength(snrR: number): number {
   return RED.snrMin + (1 - RED.snrMin) * smoothstep(RED.snrLo, RED.snrHi, snrR);
@@ -297,7 +355,18 @@ const float RED_SKIN_HUE_MIN = ${RED.skinHueMin.toFixed(6)};
 const float RED_SKIN_C_MAX = ${RED.skinCMax.toFixed(4)};
 const float RED_SKIN_SRC_C_LO = ${RED.skinSrcCLo.toFixed(4)};
 const float RED_SKIN_SRC_C_HI = ${RED.skinSrcCHi.toFixed(4)};
+const float RED_GREEN_PROP = ${RED.greenProp.toFixed(4)};
 const float RED_GREEN_OBJ = ${RED.greenObj.toFixed(4)};
+const float RED_MAT_COS = ${Math.cos(RED.matHue).toFixed(6)};
+const float RED_MAT_SIN = ${Math.sin(RED.matHue).toFixed(6)};
+const float RED_MAT_COS_IN = ${Math.cos(RED.matIn).toFixed(6)};
+const float RED_MAT_COS_OUT = ${Math.cos(RED.matOut).toFixed(6)};
+const float RED_MAT_C = ${RED.matC.toFixed(4)};
+const float RED_MAT_KNEE = ${RED.matKnee.toFixed(4)};
+const float RED_MURK_HOLD = ${RED.murkHold.toFixed(4)};
+const float RED_MURK_DARK = ${RED.murkDark.toFixed(4)};
+const float RED_MURK_LO = ${RED.murkLo.toFixed(4)};
+const float RED_MURK_HI = ${RED.murkHi.toFixed(4)};
 const float RED_GN_COS = ${Math.cos(RED.gnHue).toFixed(6)};
 const float RED_GN_SIN = ${Math.sin(RED.gnHue).toFixed(6)};
 const float RED_GN_COS_IN = ${Math.cos(RED.gnIn).toFixed(6)};
@@ -356,6 +425,23 @@ vec2 greenNeutral(float L, vec2 ab, float g) {
 float waterRedGain(float water, float full, float snrR) {
   float t = RED_WATER_RED * smoothstepf(RED_WATER_SNR_LO, RED_WATER_SNR_HI, snrR);
   return water * pow(max(1.0, full / max(1e-4, water)), t);
+}
+vec2 warmMaterial(float L, vec2 ab, float g, float srcFar) {
+  if (g <= 0.0) return ab;
+  float C = length(ab);
+  float knee = RED_MAT_KNEE * RED_MAT_C;
+  if (C <= knee) return ab;
+  float band = smoothstepf(RED_MAT_COS_OUT, RED_MAT_COS_IN, dot(ab, vec2(RED_MAT_COS, RED_MAT_SIN)) / C);
+  float w = g * (1.0 - srcFar) * band * smoothstepf(0.2, 0.3, L) * (1.0 - smoothstepf(0.85, 0.95, L));
+  if (w <= 0.0) return ab;
+  float room = RED_MAT_C - knee;
+  float rolled = knee + room * (1.0 - exp(-(C - knee) / room));
+  return ab * ((C + (rolled - C) * w) / C);
+}
+float murkHold(float y, float ySrc, float g) {
+  float cap = ySrc * (RED_MURK_DARK + (1.0 - RED_MURK_DARK) * smoothstepf(RED_MURK_LO, RED_MURK_HI, ySrc));
+  if (g <= 0.0 || y <= cap) return y;
+  return y + (cap - y) * g * RED_MURK_HOLD;
 }
 float redGainStrength(float snrR) { return RED_SNR_MIN + (1.0 - RED_SNR_MIN) * smoothstepf(RED_SNR_LO, RED_SNR_HI, snrR); }
 vec2 redGuard(float L, vec2 ab, vec2 ab0, float person, float srcFar) {
@@ -437,6 +523,23 @@ fn greenNeutral(L: f32, ab: vec2<f32>, g: f32) -> vec2<f32> {
 fn waterRedGain(water: f32, full: f32, snrR: f32) -> f32 {
   let t = RED_WATER_RED * smoothstepf(RED_WATER_SNR_LO, RED_WATER_SNR_HI, snrR);
   return water * pow(max(1.0, full / max(1e-4, water)), t);
+}
+fn warmMaterial(L: f32, ab: vec2<f32>, g: f32, srcFar: f32) -> vec2<f32> {
+  if (g <= 0.0) { return ab; }
+  let C = length(ab);
+  let knee = RED_MAT_KNEE * RED_MAT_C;
+  if (C <= knee) { return ab; }
+  let band = smoothstepf(RED_MAT_COS_OUT, RED_MAT_COS_IN, dot(ab, vec2(RED_MAT_COS, RED_MAT_SIN)) / C);
+  let w = g * (1.0 - srcFar) * band * smoothstepf(0.2, 0.3, L) * (1.0 - smoothstepf(0.85, 0.95, L));
+  if (w <= 0.0) { return ab; }
+  let room = RED_MAT_C - knee;
+  let rolled = knee + room * (1.0 - exp(-(C - knee) / room));
+  return ab * ((C + (rolled - C) * w) / C);
+}
+fn murkHold(y: f32, ySrc: f32, g: f32) -> f32 {
+  let cap = ySrc * (RED_MURK_DARK + (1.0 - RED_MURK_DARK) * smoothstepf(RED_MURK_LO, RED_MURK_HI, ySrc));
+  if (g <= 0.0 || y <= cap) { return y; }
+  return y + (cap - y) * g * RED_MURK_HOLD;
 }
 fn redGainStrength(snrR: f32) -> f32 { return RED_SNR_MIN + (1.0 - RED_SNR_MIN) * smoothstepf(RED_SNR_LO, RED_SNR_HI, snrR); }
 fn redGuard(L: f32, ab: vec2<f32>, ab0: vec2<f32>, person: f32, srcFar: f32) -> vec2<f32> {
