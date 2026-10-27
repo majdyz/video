@@ -99,11 +99,9 @@ assert.equal(solveParams({ ...DEFAULT_TOOLS.stabilise, bobbing: false }, "gyro",
   assert.equal(bobbingNote(gyroPlan(undefined), "idle", 0), null);
 }
 
-// Subject pop: hidden unless the labs flag is on (`?pop=1` only forces the engine path).
-assert.equal(subjectPopVisible(""), false);
-assert.equal(subjectPopVisible("?pop=1"), false);
+// Subject pop (Beta) is visible to everyone; `?labs=1` keeps working.
+assert.equal(subjectPopVisible(""), true);
+assert.equal(subjectPopVisible("?pop=1"), true);
 assert.equal(subjectPopVisible("?labs=1"), true);
-assert.equal(subjectPopVisible("?tab=colour&labs=1"), true);
-assert.equal(subjectPopVisible("?labs=0"), false);
 
 console.log("tools: ok");
