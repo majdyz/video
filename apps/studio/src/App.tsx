@@ -51,6 +51,8 @@ function initialDock(): boolean | null {
 
 export default function App() {
   const studio = useMemo(() => new Studio(), []);
+  // Headless checks (`?debug=1`) drive the studio directly.
+  useEffect(() => { if (new URLSearchParams(location.search).has("debug")) (window as unknown as { studio?: Studio }).studio = studio; }, [studio]);
   const s = useSyncExternalStore(studio.subscribe, studio.getSnapshot);
   const colourRef = useRef<HTMLCanvasElement>(null);
   const geoRef = useRef<HTMLCanvasElement>(null);
@@ -66,12 +68,6 @@ export default function App() {
   const [advOpen, setAdvOpen] = useState(false);
   const advRef = useRef(advOpen);
   advRef.current = advOpen;
-  /**
-   * Selecting subjects (Subject pop): outlines over the preview and taps toggle animals in / out. A mode rather
-   * than "whenever Colour is open": Colour is the default tab, so outlines would always be on, and a tap would
-   * mean three things (play, close Advanced, toggle a subject); in the mode it means one.
-   */
-  const [selecting, setSelecting] = useState(false);
   const [tapPulse, setTapPulse] = useState<{ u: number; v: number; t: number } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -91,7 +87,6 @@ export default function App() {
   }, [studio]);
 
   useEffect(() => studio.setTools(tools), [studio, tools]);
-  useEffect(() => studio.setSplit(holding ? 1 : split), [studio, split, holding]);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     const meta = document.querySelector('meta[name="theme-color"]');
@@ -225,25 +220,18 @@ export default function App() {
 
   const closeAdv = useCallback(() => setAdvOpen(false), []);
   const popOn = !!panelTools.colour.subjectPop || new URLSearchParams(location.search).get("pop") === "1";
-  const selectActive = selecting && popOn && ready && !exporting && tab === "colour" && tools.colour.enabled;
+  /**
+   * Selecting subjects (Subject pop): while Colour's Advanced section is open with Subject pop on, the subjects it
+   * found are outlined over the preview and a tap on the picture includes / excludes the one under the finger
+   * (instead of closing Advanced); the before / after line steps aside so the whole picture is the result.
+   */
+  const selectActive = advOpen && (wide || dockOpen) && popOn && ready && !exporting && tab === "colour" && tools.colour.enabled;
   useEffect(() => {
-    if (selecting && !selectActive) setSelecting(false);
-  }, [selecting, selectActive]);
-  useEffect(() => {
-    if (!selectActive) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented && !document.querySelector(".sheet-layer")) { e.preventDefault(); setSelecting(false); }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [selectActive]);
-  const getSelection = useCallback(() => studio.subjectSelection(), [studio]);
-  const startSelecting = () => {
-    studio.pause();
-    setSelecting(true);
     // The outlines must match the paused frame, not the last analysis taken while playing.
-    studio.refreshSubjects();
-  };
+    if (selectActive) void studio.refreshSubjects();
+  }, [studio, selectActive]);
+  useEffect(() => studio.setSplit(holding ? 1 : selectActive ? null : split), [studio, split, holding, selectActive]);
+  const getSelection = useCallback(() => studio.subjectSelection(), [studio]);
   const openAdv = () => {
     setAdvOpen(true);
     setDockOpen(true);
@@ -312,12 +300,12 @@ export default function App() {
             liveRef={liveRef}
             liveOn={liveOn}
             visible={s.visible}
-            split={ready && !exporting ? split : null}
+            split={ready && !exporting && !selectActive ? split : null}
             holding={holding}
             onSplit={setSplit}
             onHold={ready && !exporting ? setHolding : undefined}
             onTap={selectActive ? undefined : advOpen ? closeAdv : photo ? undefined : () => studio.togglePlay()}
-            onTapAt={selectActive ? (u, v) => { studio.toggleSubjectAt(u, v); setTapPulse({ u, v, t: performance.now() }); } : undefined}
+            onTapAt={selectActive ? (u, v) => { void studio.toggleSubjectAt(u, v); setTapPulse({ u, v, t: performance.now() }); } : undefined}
             overlay={selectActive ? <SubjectOutlines getSelection={getSelection} pulse={tapPulse} /> : undefined}
             onZoom={onZoom}
             interactive={ready && !exporting}
@@ -332,8 +320,8 @@ export default function App() {
             )}
             {selectActive && (
               <div className="select-bar" role="status">
-                <span>Tap an animal to include or exclude it</span>
-                <button type="button" className="link-btn" onClick={() => setSelecting(false)}>Done</button>
+                <span>{s.subjectTracking !== null ? `Following it through the clip… ${Math.round(s.subjectTracking * 100)}%` : s.subjectNote ?? "Tap a subject to leave it out or add it"}</span>
+                <button type="button" className="link-btn" onClick={closeAdv}>Done</button>
               </div>
             )}
           </Stage>
@@ -395,7 +383,7 @@ export default function App() {
                   <AdvancedDrawer open={advOpen && (wide || dockOpen)} onToggle={() => (advOpen ? setAdvOpen(false) : openAdv())} onClose={closeAdv} disabled={exporting || !ready} id="adv-section"
                     label={`${TOOL_LABEL[tab]} advanced settings${tab === "colour" && segNum ? `, segment ${segNum.index} of ${segNum.count}` : ""}`}>
                     <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined}
-                      subjects={{ selecting: selectActive, corrections: s.subjectOverrides.length, onSelect: () => (selectActive ? setSelecting(false) : startSelecting()), onReset: () => studio.setSubjectOverrides([]) }} />
+                      subjects={{ corrections: s.subjectOverrides.length, onReset: () => studio.setSubjectOverrides([]) }} />
                     {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
                   </AdvancedDrawer>
                 } />

@@ -91,6 +91,16 @@ export const BACKDROP = {
   lightShareHi: 0.25,
   growEdgeLo: 0.08,
   growEdgeHi: 0.16,
+  /** Bubble columns (bubbleLike): interior texture (Oklab L per thumbnail pixel) below lo..hi, chroma kept (share of
+   * the water's, lo..hi), lighter than the water (Oklab L, lo..hi), taller than wide (height / width, lo..hi). */
+  bubbleTexLo: 0.015,
+  bubbleTexHi: 0.019,
+  bubbleCrLo: 0.84,
+  bubbleCrHi: 0.88,
+  bubbleDLLo: 0.025,
+  bubbleDLHi: 0.04,
+  bubbleTallLo: 0.9,
+  bubbleTallHi: 1.1,
   /** Veil B/G ratio over which a frame counts as clear blue water (the model runs only there; murk is left to the hue test). */
   blueLo: 1.3,
   blueHi: 1.7,
@@ -98,6 +108,10 @@ export const BACKDROP = {
   step: 4,
   iterations: 3,
 };
+
+/** Diagnostics of growSubjects' regions (harness only; null = off). */
+export let GROW_DEBUG: Record<string, number>[] | null = null;
+export function setGrowDebug(on: boolean): void { GROW_DEBUG = on ? [] : null; }
 
 const TERMS = 6; // 1, x, y, x², xy, y²
 
@@ -306,7 +320,7 @@ export function backdropDev(L: number, a: number, b: number, u: number, v: numbe
  * frame): small fish keep the normal grade and their own colour. `dev` is the
  * veto-ramped departure (backdropObjectness devOut). Output 0..1 in `out`.
  */
-export function growSubjects(objectness: Float32Array, dev: Float32Array, validity: number, w: number, h: number, out: Float32Array, L?: Float32Array, fit?: ArrayLike<number>, waterW?: Float32Array, seeds?: readonly { u: number; v: number }[]): number {
+export function growSubjects(objectness: Float32Array, dev: Float32Array, validity: number, w: number, h: number, out: Float32Array, L?: Float32Array, fit?: ArrayLike<number>, waterW?: Float32Array, seeds?: readonly { u: number; v: number }[], A?: Float32Array, B?: Float32Array, notAnimal?: Float32Array): number {
   const n = w * h;
   out.fill(0, 0, n);
   if (validity <= 0) return 0;
@@ -374,6 +388,13 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
       }
       accept *= 1 - smoothstep(BACKDROP.farShareLo, BACKDROP.farShareHi, bFar / Math.max(1, bTot));
     }
+    // A column of bubbles (a diver's exhaust rising to the surface) departs from the water like a subject but is
+    // no animal: Subject pop would turn it a beige-grey streak. Bubbles are lighter than the water, keep the water's
+    // hue and most of its chroma (translucent), have no texture of their own at this scale, and rise in tall columns;
+    // an animal is darker or carries its own markings, or is wider than tall. Reported per pixel in `notAnimal`
+    // (the animal labels drop it); the subject map itself, which the base grade reads too, is unchanged.
+    const st = L && fit && A && B ? regionStats(members, cnt, label, s, w, h, L, A, B, fit, dev) : null;
+    if (st && notAnimal) { const b = bubbleLike(st); if (b > 0) for (let m = 0; m < cnt; m++) notAnimal[members[m]] = b; }
     // Does the frame hold an animal with a lit side (a shark's flank and
     // belly)? Clip-locked, this decides whether subjects are toned at all: a
     // diver in a black suit or a dim far silhouette alone would read as a
@@ -381,6 +402,7 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     // frames (the same shark turning away) keep the same tone.
     const lit = L && fit ? smoothstep(BACKDROP.lightShareLo, BACKDROP.lightShareHi, light / cnt) : 1;
     litAny = Math.max(litAny, lit * accept * smoothstep(BACKDROP.minArea, 2 * BACKDROP.minArea, cnt / n));
+    if (GROW_DEBUG && cnt / n > 0.004 && st) GROW_DEBUG.push({ ...st, area: cnt / n, seeded: seeded ? 1 : 0, edge, accept, lit });
     // Steep size ramp: a subject is toned whole or not at all (the engine eases the change over time).
     const sizeW = user ? (cnt / n >= 0.25 * BACKDROP.minArea ? 1 : 0) : accept * smoothstep(1.5 * BACKDROP.minArea, 2 * BACKDROP.minArea, cnt / n);
     if (sizeW <= 0) continue;
@@ -430,4 +452,36 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     if (keep < 1) for (let m = 0; m < cnt; m++) out[members[m]] *= keep;
   }
   return litAny;
+}
+
+type RegionStats = { tex: number; dL: number; cr: number; aspect: number; sharp: number; cx: number; cy: number };
+
+/** Appearance of one flood region (members[0..cnt) labelled `id`) against the fitted water (see growSubjects). */
+function regionStats(members: Int32Array, cnt: number, label: Int32Array, id: number, w: number, h: number, L: Float32Array, A: Float32Array, B: Float32Array, fit: ArrayLike<number>, dev: Float32Array): RegionStats {
+  const n = w * h;
+  let tex = 0, tn = 0, dLs = 0, cr = 0, sharp = 0, per = 0, mx = 0, my = 0, x0 = w, x1 = 0, y0 = h, y1 = 0;
+  for (let m = 0; m < cnt; m++) {
+    const i = members[m], x = i % w, y = (i - x) / w;
+    mx += x; my += y; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+    const fx = (x + 0.5) / w - 0.5, fy = (y + 0.5) / h - 0.5;
+    const wa = fit[6] + fit[7] * fx + fit[8] * fy + fit[9] * fx * fx + fit[10] * fx * fy + fit[11] * fy * fy;
+    const wb = fit[12] + fit[13] * fx + fit[14] * fy + fit[15] * fx * fx + fit[16] * fx * fy + fit[17] * fy * fy;
+    dLs += L[i] - evalAt3(fit, fx, fy);
+    cr += Math.hypot(A[i], B[i]) / Math.max(1e-3, Math.hypot(wa, wb));
+    const inner = x > 0 && y > 0 && x < w - 1 && y < h - 1;
+    if (inner && label[i - 1] === id && label[i + 1] === id && label[i - w] === id && label[i + w] === id) {
+      tex += Math.hypot(L[i + 1] - L[i - 1], L[i + w] - L[i - w]) * 0.5; tn++;
+    } else if (inner) {
+      let g = 0;
+      for (let d = 1; d <= 2; d++) for (const j of [i - d, i + d, i - d * w, i + d * w]) if (j >= 0 && j < n) g = Math.max(g, Math.abs(dev[i] - dev[j]) / d);
+      sharp += g; per++;
+    }
+  }
+  return { tex: tn ? tex / tn : 0, dL: dLs / cnt, cr: cr / cnt, aspect: (y1 - y0 + 1) / (x1 - x0 + 1), sharp: per ? sharp / per : 0, cx: mx / cnt, cy: my / cnt };
+}
+
+/** How much a region looks like a bubble column rather than an animal (0..1; see growSubjects). */
+export function bubbleLike(st: { tex: number; dL: number; cr: number; aspect: number }): number {
+  return (1 - smoothstep(BACKDROP.bubbleTexLo, BACKDROP.bubbleTexHi, st.tex)) * smoothstep(BACKDROP.bubbleCrLo, BACKDROP.bubbleCrHi, st.cr)
+    * smoothstep(BACKDROP.bubbleDLLo, BACKDROP.bubbleDLHi, st.dL) * smoothstep(BACKDROP.bubbleTallLo, BACKDROP.bubbleTallHi, st.aspect);
 }

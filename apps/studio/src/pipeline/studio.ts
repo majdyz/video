@@ -18,8 +18,8 @@ import { isRealtimeExportSupported, isWebCodecsSupported, isWebKit } from "./env
 import { bitrateFromSource, pickBitrate } from "@dive-tools/shared/recorder.ts";
 import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validate.ts";
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
-import type { SubjectOverride, SubjectSelection } from "../../../aqua-fix/src/engine/animals.ts";
-import { subjectAt } from "./subjects.ts";
+import { pickAnimal, type SubjectOverride, type SubjectPathPoint, type SubjectSelection } from "../../../aqua-fix/src/engine/animals.ts";
+import { toggleOverride } from "./subjects.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometrySource } from "./geometry.ts";
@@ -66,6 +66,11 @@ const FILMSTRIP_COUNT = 10;
 const FILMSTRIP_PX = 80;
 /** A committed trim change waits this long before analysis re-runs (another drag may follow). */
 const TRIM_SETTLE_MS = 500;
+/** Subject pop track pass: one analysis every this many clip seconds, at most this far either side of the tap. */
+const SUBJECT_STEP_S = 0.25;
+const SUBJECT_REACH_S = 20;
+/** A paused seek re-analyses its frame once the seeking settles (ms). */
+const PAUSED_ANALYSIS_MS = 120;
 
 export type MediaKind = "video" | "photo";
 /**
@@ -157,6 +162,10 @@ export type Snapshot = {
    * kept with the clip like trim and splits and used in preview and every export.
    */
   subjectOverrides: SubjectOverride[];
+  /** Subject pop track pass in progress (a tapped subject followed through the clip), 0..1; null when idle. */
+  subjectTracking: number | null;
+  /** A short note about the latest tap (e.g. nothing to follow there); null when none. */
+  subjectNote: string | null;
 };
 
 const NO_SEGMENTS: Segments<ColourLook> = { cuts: [], looks: [] };
@@ -225,6 +234,8 @@ export class Studio {
     thumbs: null,
     segments: NO_SEGMENTS,
     subjectOverrides: [],
+    subjectTracking: null,
+    subjectNote: null,
   };
   private listeners = new Set<() => void>();
   private frameListeners = new Set<(b: ImageBitmap) => void>();
@@ -342,7 +353,10 @@ export class Studio {
       if (!this.exporting && this.snap.phase === "ready") {
         this.dropStill();
         this.drawLive(video.currentTime, false);
-        if (video.paused) void this.captureStill();
+        if (video.paused) {
+          void this.captureStill();
+          this.schedulePausedAnalysis();
+        }
       }
     });
     this.enginePromise = this.startEngine(colourCanvas);
@@ -431,30 +445,141 @@ export class Studio {
   }
 
   /**
-   * A tap at upright frame position (u, v) (0..1) at the current time: toggles the animal there out of / into the
-   * Subject pop selection, or (on water / an animal not found yet) asks for a new subject seeded there. The
-   * correction follows the animal through the clip. Returns the tapped animal's id (0 = none, a seed).
+   * A tap at upright frame position (u, v) (0..1): toggles the animal there out of / into the Subject pop selection,
+   * or (on anything the engine did not pick out) asks for a new subject grown from the tap. Playback pauses first
+   * and the frame is re-analysed, so the tap acts on what is on screen. A new correction is then followed through
+   * the clip (track pass) so it holds wherever the clip is played or exported from. Resolves to the tapped animal's
+   * id (0 = none: a seed).
    */
-  toggleSubjectAt(u: number, v: number): number {
-    const sel = this.subjectSelection();
-    let action: SubjectOverride["action"] = "include";
-    const id = sel ? subjectAt(sel, u, v) : 0;
-    const a = id && sel ? sel.animals.find((an) => an.id === id) : undefined;
-    if (a && (a.override === "include" || (a.override !== "exclude" && a.strength > 0.5))) action = "exclude";
-    const t = this.video?.currentTime ?? 0;
-    this.setSubjectOverrides([...this.snap.subjectOverrides, { t, u, v, action }]);
-    // A seed needs an analysis of this frame to grow from (paused playback runs none of its own).
-    if (!a && this.engine && this.paused()) void this.engine.analyzeNow(false).catch(() => undefined).then(() => this.animateSubjects());
-    else this.animateSubjects();
-    return a ? id : 0;
+  async toggleSubjectAt(u: number, v: number): Promise<number> {
+    if (this.snap.subjectTracking !== null || this.exporting) return 0;
+    if (!this.paused()) {
+      this.pause();
+      await this.refreshSubjects();
+    }
+    const t = this.snap.kind === "video" ? this.video?.currentTime ?? 0 : 0;
+    const { list, follow, id } = toggleOverride(this.snap.subjectOverrides, this.subjectSelection(), u, v, t);
+    this.set({ subjectNote: null });
+    this.setSubjectOverrides(list);
+    if (follow >= 0) {
+      if (this.snap.kind === "video") {
+        const run = this.followSubject(follow).finally(() => { if (this.tracking === run) this.tracking = null; });
+        this.tracking = run;
+      }
+      else if (!id) {
+        // A photo: the seed grows (or not) in this one analysis.
+        await this.refreshSubjects();
+        if (!this.subjectSelection()?.animals.some((a) => a.overrideIndex === follow)) {
+          this.setSubjectOverrides(this.snap.subjectOverrides.filter((_, i) => i !== follow));
+          this.set({ subjectNote: this.openWater ? "Nothing to follow there" : "Subject pop works in open blue water" });
+        }
+      }
+    }
+    return id;
   }
 
-  /** Re-analyses the paused frame so the tracked animals (and their outlines) match what is on screen. */
-  refreshSubjects(): void {
+  /**
+   * Track pass: follows correction `index` through the clip (inside the trim) forward and back from its tap, one
+   * analysis every SUBJECT_STEP_S, and stores the path with it (animals.ts SubjectOverride). An include on nothing
+   * the analysis can grow is dropped with a note.
+   */
+  private async followSubject(index: number): Promise<void> {
+    const v = this.video, e = this.engine, o0 = this.snap.subjectOverrides[index];
+    if (!v || !e || !o0 || this.snap.kind !== "video") return;
+    const gen = this.gen;
+    const span = this.trim ?? { start: 0, end: v.duration || 0 };
+    const include = o0.action === "include";
+    const wasPreview = this.previewOn;
+    this.previewOn = false;
+    const sample = async (t: number, seed: { u: number; v: number }) => {
+      await seekVideo(v, t);
+      this.uploadToEngine(v, t, false);
+      const r = await e.analyzeRaw(10_000, include ? [seed] : []);
+      if (t === o0.t) this.openWater = (r.params.backdrop ?? 0) > 0;
+      return (r.params.backdrop ?? 0) > 0 ? r.animals ?? null : null;
+    };
+    const total = Math.max(1, Math.ceil((span.end - span.start) / SUBJECT_STEP_S));
+    let done = 0;
+    this.set({ subjectTracking: 0 });
+    let path: SubjectPathPoint[] = [];
+    try {
+      const am0 = await sample(o0.t, { u: o0.u, v: o0.v }).catch(() => null);
+      const start = am0 ? pickAnimal(am0, o0.u, o0.v) : null;
+      if (start) {
+        path.push({ ...start, t: o0.t });
+        for (const dir of [1, -1]) {
+          let prev = path[0], vu = 0, vv = 0, misses = 0;
+          for (let t = o0.t + dir * SUBJECT_STEP_S; t >= span.start - 1e-3 && t <= span.end + 1e-3 && Math.abs(t - o0.t) <= SUBJECT_REACH_S; t += dir * SUBJECT_STEP_S) {
+            if (gen !== this.gen || this.exporting) return;
+            this.set({ subjectTracking: Math.min(0.99, ++done / total) });
+            const pu = Math.min(1, Math.max(0, prev.u + vu)), pv = Math.min(1, Math.max(0, prev.v + vv));
+            const am = await sample(Math.min(span.end, Math.max(span.start, t)), { u: pu, v: pv }).catch(() => null);
+            const reach = Math.max(4, Math.round(0.5 * Math.sqrt(prev.a * (am?.width ?? 0) * (am?.height ?? 0))));
+            const p = am ? pickAnimal(am, pu, pv, reach, prev.a) : null;
+            if (!p) {
+              if (++misses >= 2) break;
+              continue;
+            }
+            misses = 0;
+            vu = 0.5 * vu + 0.5 * (p.u - prev.u);
+            vv = 0.5 * vv + 0.5 * (p.v - prev.v);
+            prev = { ...p, t };
+            path.push(prev);
+          }
+        }
+        path = path.sort((a, b) => a.t - b.t);
+      }
+    } finally {
+      if (gen === this.gen) {
+        const list = this.snap.subjectOverrides.slice();
+        const i = list.indexOf(o0);
+        if (i >= 0) {
+          if (path.length) list[i] = { ...o0, path };
+          else if (include) list.splice(i, 1);
+        }
+        this.set({ subjectTracking: null, subjectNote: !path.length && include ? (this.openWater ? "Nothing to follow there" : "Subject pop works in open blue water") : null });
+        console.info(`[subjects] ${o0.action} at ${o0.t.toFixed(2)} s: followed ${path.length ? `${path[0].t.toFixed(2)}–${path[path.length - 1].t.toFixed(2)} s (${path.length} samples)` : "nothing"}`);
+        this.engine?.setSubjectOverrides(list);
+        this.set({ subjectOverrides: list });
+        if (!this.exporting) {
+          await seekVideo(v, o0.t).catch(() => undefined);
+          if (wasPreview) this.startPreview();
+          await this.refreshSubjects();
+        }
+      }
+    }
+  }
+
+  /**
+   * Re-analyses the paused frame and snaps the maps and the animals to it (a paused frame has nothing to ease
+   * from), so the picture, the outlines and the next tap all match what is on screen.
+   */
+  async refreshSubjects(): Promise<void> {
     const e = this.engine;
-    if (!e || !this.paused()) return;
+    if (!e || !this.paused() || this.exporting || this.snap.phase !== "ready" || !this.tools.colour.enabled) return;
+    const t = this.snap.kind === "video" ? this.video?.currentTime ?? 0 : 0;
+    e.setTime(t);
+    if (this.snap.kind === "video" && this.video) this.uploadToEngine(this.still ?? this.video, t, true);
+    await e.analyzeNow(true).catch(() => undefined);
+    this.openWater = e.openWater();
     this.repaint();
-    void e.analyzeNow(false).catch(() => undefined).then(() => this.animateSubjects());
+  }
+
+  private pausedTimer = 0;
+  /** The latest Subject pop analysis of a tapped frame found open blue water (for the tap's note). */
+  private openWater = true;
+  /** The running Subject pop track pass (an export waits for it). */
+  private tracking: Promise<void> | null = null;
+  /**
+   * A seek while paused shows a frame the maps were not made for (the last analysis is of another frame: a stale
+   * subject map draws a ghost shape): once the seeking settles, the frame is analysed and snapped to.
+   */
+  private schedulePausedAnalysis(): void {
+    clearTimeout(this.pausedTimer);
+    this.pausedTimer = window.setTimeout(() => {
+      if (this.profiling || this.snap.subjectTracking !== null || this.exporting || !this.paused()) return;
+      void this.refreshSubjects();
+    }, PAUSED_ANALYSIS_MS);
   }
 
   /** Replaces the clip's Subject pop corrections (undo; [] = back to the automatic selection). */
@@ -524,7 +649,9 @@ export class Studio {
     }
     this.set({ visible: next.colour.enabled ? "colour" : "geo" });
     // A photo has no frame loop: a framing change needs a fresh analysis.
-    if (this.snap.kind === "photo" && (next.dewarp !== prev.dewarp || next.colour.enabled !== prev.colour.enabled)) this.schedulePhotoAnalysis();
+    if (this.snap.kind === "photo" && (next.dewarp !== prev.dewarp || next.colour.enabled !== prev.colour.enabled || !!next.colour.subjectPop !== !!prev.colour.subjectPop)) this.schedulePhotoAnalysis();
+    // Subject pop switched on a paused frame: its animals are found now (the frame loop is not running).
+    else if (this.snap.kind === "video" && !!next.colour.subjectPop !== !!prev.colour.subjectPop) this.schedulePausedAnalysis();
     this.repaint();
   }
 
@@ -925,6 +1052,7 @@ export class Studio {
       // Crossing into another segment while playing: analyse this frame now (the lock snaps in tick).
       const changed = this.applyLook(t);
       if (advance) this.engine.tick(t, changed);
+      else this.engine.setTime(t);
       this.engine.render();
     } else if (this.geo) {
       const [w, h] = this.previewSize();
@@ -1477,6 +1605,8 @@ export class Studio {
     if (this.snap.kind === "photo") return this.exportPhoto();
     const e = this.engine, file = this.file, v = this.video, info = this.snap.info;
     if (!file || !v || !info || this.exporting) return;
+    // A tapped subject still being followed: the export waits for its path (it seeks the same video element).
+    if (this.tracking) await this.tracking.catch(() => undefined);
     if (!this.snap.canExport) {
       this.setExp({ state: "error", message: "Saving video isn't supported in this browser: update to the latest Safari or Chrome." });
       return;

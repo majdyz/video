@@ -564,10 +564,12 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
   let animals: AnimalMap | undefined;
   if (backdropValidity > 0) {
     const subj = temp("subjMap", n);
-    subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit, bdWater, opts.seeds);
+    const notAnimal = temp("notAnimal", n);
+    notAnimal.fill(0, 0, n);
+    subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit, bdWater, opts.seeds, okA, okB, notAnimal);
     confMap = temp("confMap", n);
     for (let i = 0; i < n; i++) confMap[i] = conf[i] + (subj[i] - conf[i]) * backdropValidity;
-    animals = labelAnimals(subj, bdDev, w, h, MAP_W, MAP_H);
+    animals = labelAnimals(subj, bdDev, w, h, MAP_W, MAP_H, notAnimal);
   }
   const depth = buildMaps(z, confMap, ds, veilScale, lin, w, h);
   if (animals) depth.animals = animals;

@@ -17,7 +17,7 @@ import { inCutWindow as lockInCutWindow, noteCut as lockNoteCut, segmentAt, type
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
 import { linearToOklab, oklabToLinear } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
-import { AnimalTracker, type SubjectOverride, type SubjectSelection } from "./animals.ts";
+import { AnimalTracker, type AnimalMap, type SubjectOverride, type SubjectSelection } from "./animals.ts";
 import {
   CLAHE_BINS,
   CLAHE_TILES_X,
@@ -116,6 +116,8 @@ export class GradeEngine {
   /** Temporal layer on/off (debug `?temporal=0`). */
   temporalEnabled = true;
   private lastRenderSec = -1;
+  /** The in-flight analysis is a raw sample (startAnalysis). */
+  private rawReq = false;
   /** Subject pop: per-animal tracking, strength and map lead (animals.ts). */
   private animals = new AnimalTracker();
   /** The latest analysis's subject map and guide (what the animal lead moves). */
@@ -256,7 +258,7 @@ export class GradeEngine {
   }
 
   /** Runs one analysis of the current source and returns its raw parameters and mean colour (clip profiling). */
-  async analyzeRaw(timeoutMs = 10_000): Promise<{ params: GradeParams; mean: Vec3 }> {
+  async analyzeRaw(timeoutMs = 10_000, seeds?: { u: number; v: number }[]): Promise<{ params: GradeParams; mean: Vec3; animals?: AnimalMap }> {
     const p = new Promise<AnalysisPacket>((resolve, reject) => {
       this.resolveWaiters.push(resolve);
       this.rejectWaiters.push(reject);
@@ -266,12 +268,12 @@ export class GradeEngine {
       this.resolveWaiters.push(resolve);
       this.rejectWaiters.push(reject);
     });
-    await this.startAnalysis();
+    await this.startAnalysis({ raw: true, seeds });
     const packet = await new Promise<AnalysisPacket>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error("Frame analysis timed out")), timeoutMs);
       q.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
     });
-    return { params: packet.params, mean: packet.mean };
+    return { params: packet.params, mean: packet.mean, animals: packet.animals };
   }
 
   /** Current (eased) person map at the fields' resolution — diagnostics. */
@@ -471,7 +473,11 @@ export class GradeEngine {
     else if (error) for (const r of rej) r(error);
   }
 
-  private async startAnalysis(): Promise<void> {
+  /**
+   * `raw`: a sample taken out of playback order (clip profile, Subject pop track pass) — it does not feed the
+   * animal tracker; `seeds` replaces the corrections' own seeds.
+   */
+  private async startAnalysis(opts: { raw?: boolean; seeds?: { u: number; v: number }[] } = {}): Promise<void> {
     if (this.inflight) return;
     this.inflight = true;
     this.lastAnalysisAt = performance.now();
@@ -486,7 +492,8 @@ export class GradeEngine {
       const detect = wantPerson && this.personPasses++ % PERSON_DETECT_EVERY === 0;
       const rect = detect ? FULL_RECT : PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
       const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.backend.analyze(ANALYSIS_W, ANALYSIS_H, rect);
-      const seeds = this.settings.subjectPop ? this.animals.seeds(this.lastTickSec) : [];
+      const seeds = opts.seeds ?? (this.settings.subjectPop && !opts.raw ? this.animals.seeds(this.lastTickSec) : []);
+      this.rawReq = !!opts.raw;
       const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, ...(seeds.length ? { seeds } : {}) };
       this.reqTimeSec = this.lastTickSec;
       this.ensureWorker().postMessage(req, [req.rgba]);
@@ -518,9 +525,13 @@ export class GradeEngine {
     const cut = this.lastMean !== null && meanDiff(this.lastMean, packet.mean) > SCENE_CUT_MEAN_DIFF;
     this.lastMean = packet.mean;
     // Subject pop: per-animal tracking, stability and fades (animals.ts); a cut starts over.
-    if (cut) this.animals.reset();
-    if (this.settings.subjectPop && (packet.params.backdrop ?? 0) > 0 && raw.animals) this.animals.update(raw.animals, this.reqTimeSec);
-    else this.animals.reset();
+    // A sample out of playback order (profile, track pass) says nothing about the animals on screen.
+    if (!this.rawReq) {
+      if (cut) this.animals.reset();
+      if (this.settings.subjectPop && (packet.params.backdrop ?? 0) > 0 && raw.animals) this.animals.update(raw.animals, this.reqTimeSec, packet.fields.data, packet.guide.data);
+      // No longer open water (or Subject pop off): the animals fade out where they are, never snap.
+      else this.animals.fadeAll();
+    }
     this.leadBase = { fields: packet.fields, guide: packet.guide };
     if (!this.hasAnalysis || cut) {
       if (cut) {
@@ -676,6 +687,30 @@ export class GradeEngine {
     return this.animals.easing;
   }
 
+  /**
+   * A paused frame at clip time `timeSec` (a seek while paused): the clock moves without easing anything, so the
+   * next analysis is stamped with this frame's time (corrections bind by time) and a jump drops stale tracks.
+   */
+  setTime(timeSec: number): void {
+    this.lastTickSec = timeSec;
+    this.checkJump();
+  }
+
+  /** A seek (or a jump back) breaks the motion history: the temporal layer and the animal tracks start over. */
+  private checkJump(): void {
+    const t = this.lastTickSec;
+    if (this.lastRenderSec >= 0 && (t < this.lastRenderSec - 1e-3 || t - this.lastRenderSec > 0.3)) {
+      this.backend.resetTemporal?.();
+      this.animals.reset();
+    }
+    this.lastRenderSec = t;
+  }
+
+  /** The latest analysis found open blue water (Subject pop has something to work on). */
+  openWater(): boolean {
+    return (this.target?.backdrop ?? this.current.backdrop ?? 0) > 0;
+  }
+
   /** The tracked animals now (ids per map texel + state), for drawing outlines and hit-testing taps. */
   subjectSelection(): SubjectSelection | null {
     return this.settings.subjectPop ? this.animals.selection(this.lastTickSec) : null;
@@ -730,13 +765,7 @@ export class GradeEngine {
     const settings = this.hasAnalysis ? this.settings : { ...this.settings, intensity: 0 };
     const u = packUniforms(this.current, settings, depth, clahe, 0, this.split);
     u[93] = this.temporalEnabled ? 1 : 0;
-    // A seek (or a jump back) breaks the motion history.
-    const t = this.lastTickSec;
-    if (this.lastRenderSec >= 0 && (t < this.lastRenderSec - 1e-3 || t - this.lastRenderSec > 0.3)) {
-      this.backend.resetTemporal?.();
-      this.animals.reset();
-    }
-    this.lastRenderSec = t;
+    this.checkJump();
     return u;
   }
 

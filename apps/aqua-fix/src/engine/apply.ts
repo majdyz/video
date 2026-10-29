@@ -304,7 +304,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const rs = linearToSrgb(r2), gs = linearToSrgb(g2), bs = linearToSrgb(b2);
   if (ctx.trace) {
     const f3 = (v: number[]) => v.map((x) => +x.toFixed(3));
-    Object.assign(ctx.trace, { srcC: f3(srcC), redS: +redS.toFixed(2), lin: f3([r0, g0, b0]), z: +z.toFixed(2), k: +k.toFixed(2), conf: +conf.toFixed(2), veilScale: +veilScale.toFixed(2), B: f3(Bv), sig: +sig.toFixed(2), wSub: +wSub.toFixed(2), full: f3(full), outPreLevels: f3(out.map((v) => v)), Y: +Y.toFixed(3), C: +C.toFixed(3), cMax: +cMax.toFixed(3), scale: +scale.toFixed(2), o1: f3([r1, g1, b1]), o2: f3([r2, g2, b2]) });
+    Object.assign(ctx.trace, { subj, srcC: f3(srcC), redS: +redS.toFixed(2), lin: f3([r0, g0, b0]), z: +z.toFixed(2), k: +k.toFixed(2), conf: +conf.toFixed(2), veilScale: +veilScale.toFixed(2), B: f3(Bv), sig: +sig.toFixed(2), wSub: +wSub.toFixed(2), full: f3(full), outPreLevels: f3(out.map((v) => v)), Y: +Y.toFixed(3), C: +C.toFixed(3), cMax: +cMax.toFixed(3), scale: +scale.toFixed(2), o1: f3([r1, g1, b1]), o2: f3([r2, g2, b2]) });
   }
   return [
     sr + (rs - sr) * s.strength,
@@ -553,7 +553,7 @@ const STILL_STRENGTH = new WeakMap<AnimalMap, Float32Array>();
 function animalStrengthAt(d: DepthMap, u: number, v: number): [number, number] {
   const am = d.animals;
   if (!am) return [0, 0];
-  let s = STILL_STRENGTH.get(am);
+  let s = d.strength ?? STILL_STRENGTH.get(am);
   if (!s) { s = stillStrength(am).data; STILL_STRENGTH.set(am, s); }
   const W = am.width, H = am.height;
   const x = Math.min(W - 1, Math.max(0, Math.floor(u * W)));

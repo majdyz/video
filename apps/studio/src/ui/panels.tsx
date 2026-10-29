@@ -148,7 +148,7 @@ function MotionLogField({ name, onChange }: { name: string | null; onChange: (fi
 
 /** Everything that isn't the main Strength. */
 /** Subject pop selection controls (App owns the select mode; the studio keeps the corrections). */
-export type SubjectControls = { selecting: boolean; corrections: number; onSelect: () => void; onReset: () => void };
+export type SubjectControls = { corrections: number; onReset: () => void };
 
 export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, subjects }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus; onMotionLog?: (file: File | null) => void; subjects?: SubjectControls }) {
   if (tool === "colour") {
@@ -169,9 +169,8 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, sub
         )}
         {subjectPopVisible() && c.subjectPop && subjects && (
           <div className="adv__field">
-            <span className="adv__label">Subjects <small>{subjects.corrections ? `${subjects.corrections} ${subjects.corrections === 1 ? "change" : "changes"} to the automatic choice` : "chosen automatically"}</small></span>
+            <span className="adv__label">Subjects <small>{subjects.corrections ? `${subjects.corrections} ${subjects.corrections === 1 ? "change" : "changes"} to the automatic choice` : "chosen automatically; tap one in the picture to leave it out, or tap anything else to add it"}</small></span>
             <span className="adv__actions">
-              <button type="button" className="link-btn" onClick={subjects.onSelect} aria-pressed={subjects.selecting}>{subjects.selecting ? "Done" : "Select subjects"}</button>
               <button type="button" className="link-btn" onClick={subjects.onReset} disabled={!subjects.corrections}>Reset selection</button>
             </span>
           </div>

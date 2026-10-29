@@ -572,6 +572,8 @@ export type DepthMap = {
   person?: Float32Array;
   /** Open water: the animals of the subject map (animals.ts), labelled on this grid. */
   animals?: AnimalMap;
+  /** Per-animal strength texture (animals.ts AnimalTracker.strength, RGBA at the animals' grid) in place of the still targets (harness / CPU reference). */
+  strength?: Float32Array;
 };
 
 /**
