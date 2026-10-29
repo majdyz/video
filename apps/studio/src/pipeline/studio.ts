@@ -39,6 +39,7 @@ import { releaseExportBlob } from "@dive-tools/shared/output-sink.ts";
 import { exportSettingsKey } from "./export-key.ts";
 import { ExportProfile } from "@dive-tools/shared/export-profile.ts";
 import { AnalysisLookahead } from "./lookahead.ts";
+import { PROFILE_SAMPLE_BUDGETS_MS, withRetries } from "./profile-retry.ts";
 import { detectFootage, FOOTAGE_LABEL, FOOTAGE_MODE, isHdrProfile, parseCodec, resolveFootage, type FootageChoice, type FootageInfo, type FootageProfile } from "./footage.ts";
 import type { CalibKind, SignalCalibration } from "./signal-probe.ts";
 import { isNativeShell, nativeFileOf, type NativeFileRef } from "../native/registry.ts";
@@ -1647,14 +1648,14 @@ export class Studio {
         for (const t of needed) {
           // An export started meanwhile waits for this profile (exportVideo): stopping here would export without the lock.
           if (gen !== this.gen) return;
-          await seekVideo(v, t);
-          this.uploadToEngine(v, t, false);
-          try {
-            const r = await e.analyzeRaw(10_000, t);
-            this.sampleCache.push({ t, params: r.params, mean: r.mean });
-          } catch {
-            // a failed sample just doesn't vote
-          }
+          // A sample that fails or runs out of time (a loaded device) is retried with a longer budget
+          // (profile-retry.ts): dropping it could leave the clip without a scene lock.
+          const r = await withRetries(async (budget) => {
+            await seekVideo(v, t);
+            this.uploadToEngine(v, t, false);
+            return e.analyzeRaw(budget, t);
+          }, PROFILE_SAMPLE_BUDGETS_MS, () => gen === this.gen, (n, err) => console.info(`[profile] sample at ${t.toFixed(2)} s: retry ${n} (${err instanceof Error ? err.message : err})`));
+          if (r) this.sampleCache.push({ t, params: r.params, mean: r.mean });
         }
         if (gen !== this.gen) return;
         const samples = times.map((t) => this.cachedSample(t)).filter((x) => x !== null);
