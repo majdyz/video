@@ -178,7 +178,8 @@ const img = (dx: number, dy: number): Gray => {
 {
   const w = 64, h = 32, rgba = new Uint8ClampedArray(w * h * 4), inc = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const i = y * w + x, subject = x >= 24 && x < 40;
+    const hole = x >= 30 && x < 34 && y >= 12 && y < 20; // a blue highlight on the subject's flank
+    const i = y * w + x, subject = x >= 24 && x < 40 && !hole;
     rgba.set(subject ? [150, 150, 145, 255] : [20, 90, 170, 255], i * 4); // grey subject, blue water
     if (x >= 20 && x < 44) inc[i] = 255; // the mask leaks 4 px onto the water either side
   }
@@ -187,6 +188,7 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(at(4, 16) < 0.1, "open water: 0");
   assert.ok(at(30, 16) > 0.9, "the grey subject: 1");
   assert.ok(at(21, 16) < 0.2, "the leak onto water reads as water");
+  assert.ok(at(31, 16) > 0.8, `a small water-coloured spot inside the subject is the subject (${at(31, 16)})`);
   const ov = { width: 2, height: 1, alpha: Float32Array.from([1, 1]), exclude: null, near: Float32Array.from([1, 1]), depart: Float32Array.from([0, 1]) };
   const st = { width: 1, height: 1, data: new Float32Array(4) };
   const c = composeSegStrength(st, ov, true).data;

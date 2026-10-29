@@ -221,5 +221,13 @@ export function departMap(rgba: Uint8ClampedArray | Uint8Array, inc: Uint8Array,
     const el = k ? bl[q] * k : gl / tw, ea = k ? ba[q] * k : ga / tw, eb = k ? bb[q] * k : gb / tw;
     out[q] = Math.round(255 * smoothstep(lo, hi, Math.hypot(L[q] - el, A[q] - ea, B[q] - eb)));
   }
+  // Small water-like spots inside the subject (a blue highlight on a flank) are the subject: a closing of radius
+  // CLOSE_R fills holes up to ~2 CLOSE_R cells inside the mask; a leak onto the water is far larger and stays water.
+  const CLOSE_R = 2;
+  const f = Float32Array.from(out, (x) => x / 255);
+  const dil = dilate(f, qw, qh, CLOSE_R);
+  const inv = Float32Array.from(dil, (x) => 1 - x);
+  const closed = dilate(inv, qw, qh, CLOSE_R);
+  for (let q = 0; q < n; q++) if (wt[q] === 0 && (1 - closed[q]) * 255 > out[q]) out[q] = Math.round((1 - closed[q]) * 255);
   return { width: qw, height: qh, data: out };
 }
