@@ -850,6 +850,21 @@ export class GradeEngine {
     this.backend.render();
   }
 
+  /**
+   * Moves the compare split without grading again: redraws the canvas from
+   * the last rendered frame (the temporal history is left alone). False when
+   * the backend has no reusable frame; call render() then.
+   */
+  recomposite(split: number): boolean {
+    this.split = split;
+    return this.backend.recomposite?.(split) ?? false;
+  }
+
+  /** The picture shown left of the compare split when the source is not the original (see GpuBackend.setBefore). */
+  setBefore(src: SourceInput | null, width: number, height: number): void {
+    this.backend.setBefore?.(src, width, height);
+  }
+
   /** Renders and wraps the result as a VideoFrame for the exporter. */
   async renderToFrame(rotation: Rotation, timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
     if (this.dirtyData) this.pushData();

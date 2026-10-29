@@ -387,9 +387,11 @@ float g_subjPrior = 0.0;
 float g_subjOut = 0.0;
 vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   g_subjOut = 0.0;
-  float split = p[0].y;
+  // The compare wipe (p0.y) is not applied here: the temporal layer grades
+  // through this function and its history must never see the wipe. The
+  // backends composite it over the finished frame (shaders.ts COMPOSITE).
   float strength = p[0].z;
-  if (uv.x < split || strength <= 0.0) return src;
+  if (strength <= 0.0) return src;
   vec3 binf = p[1].xyz; float veil = p[1].w;
   vec3 betaB = p[2].xyz; float look = p[2].w;
   vec3 cB = p[3].xyz; float dehaze = p[3].w;
@@ -796,9 +798,9 @@ var<private> g_subjOut: f32 = 0.0;
 fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   g_subjOut = 0.0;
   let p = params.p;
-  let split = p[0].y;
+  // No compare wipe here (see gradeD in GLSL): the backends composite it.
   let strength = p[0].z;
-  if (uv.x < split || strength <= 0.0) { return src; }
+  if (strength <= 0.0) { return src; }
   let binf = p[1].xyz; let veil = p[1].w;
   let betaB = p[2].xyz; let look = p[2].w;
   let cB = p[3].xyz; let dehaze = p[3].w;

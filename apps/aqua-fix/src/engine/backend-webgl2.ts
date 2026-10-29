@@ -1,5 +1,5 @@
 import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput, FULL_RECT, type Rect } from "./backend.ts";
-import { GLSL_FRAGMENT, GLSL_DOWNSCALE_FRAGMENT } from "./shaders.ts";
+import { GLSL_FRAGMENT, GLSL_DOWNSCALE_FRAGMENT, GLSL_COMPOSITE } from "./shaders.ts";
 import { GLSL_TP_FIELD, GLSL_TP_FLOW, GLSL_TP_LUM } from "./temporal.ts";
 import { TEMPORAL } from "./params.ts";
 
@@ -23,6 +23,7 @@ export class WebGL2Backend implements GpuBackend {
   private readonly gl: WebGL2RenderingContext;
   private readonly grade: Program;
   private readonly down: Program;
+  private readonly comp: Program;
   private readonly vao: WebGLVertexArrayObject;
   private readonly source: WebGLTexture;
   private readonly data: WebGLTexture[] = [];
@@ -55,6 +56,13 @@ export class WebGL2Backend implements GpuBackend {
   private tpIdx = 0;
   private tpTex: { lum: WebGLTexture[]; f0: WebGLTexture[]; f1: WebGLTexture; flow: WebGLTexture; out: WebGLTexture[] } | null = null;
   private tpFbo: { lum: WebGLFramebuffer[]; field: WebGLFramebuffer[]; flow: WebGLFramebuffer; out: WebGLFramebuffer[] } | null = null;
+  // Compare wipe (GLSL_COMPOSITE): the "before" picture when it is not the
+  // source, the graded target used while the wipe is on without the temporal
+  // layer, and the last graded frame recomposite() can reuse (null once the
+  // source, uniforms, data or canvas size change).
+  private beforeTex: WebGLTexture | null = null;
+  private wipe: { tex: WebGLTexture; fbo: WebGLFramebuffer; w: number; h: number } | null = null;
+  private lastGraded: WebGLTexture | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -72,6 +80,7 @@ export class WebGL2Backend implements GpuBackend {
     const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
     this.grade = this.link(VS, GLSL_FRAGMENT, ["u_source", "u_data0", "u_data1", "u_data2", "u_data3", "u_tpF0", "u_tpF1", "u_tpFlow", "u_tpPrev"]);
     this.down = this.link(VS, GLSL_DOWNSCALE_FRAGMENT, ["u_source", "u_rotation", "u_srcSize", "u_outSize", "u_rect"]);
+    this.comp = this.link(VS, GLSL_COMPOSITE, ["u_before", "u_graded", "u_split", "u_rot"]);
     this.vao = gl.createVertexArray()!;
     this.source = this.makeTexture(gl.LINEAR);
     for (let i = 0; i < DATA_SLOTS; i++) {
@@ -125,6 +134,7 @@ export class WebGL2Backend implements GpuBackend {
 
   private tpRelease(): void {
     const gl = this.gl;
+    this.lastGraded = null;
     if (this.tpTex) {
       const t = this.tpTex;
       for (const x of [...t.lum, ...t.f0, t.f1, t.flow, ...t.out]) gl.deleteTexture(x);
@@ -240,6 +250,7 @@ export class WebGL2Backend implements GpuBackend {
 
   upload(src: SourceInput, width: number, height: number, rotation: Rotation): void {
     const gl = this.gl;
+    this.lastGraded = null;
     this.rotation = rotation;
     const [ow, oh] = uprightSize(width, height, rotation);
     this.outputWidth = ow;
@@ -295,6 +306,7 @@ export class WebGL2Backend implements GpuBackend {
     const w = Math.max(1, Math.round(this.outputWidth * scale));
     const h = Math.max(1, Math.round(this.outputHeight * scale));
     if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.lastGraded = null;
       this.canvas.width = w;
       this.canvas.height = h;
     }
@@ -303,6 +315,7 @@ export class WebGL2Backend implements GpuBackend {
   setUniforms(block: Float32Array): void {
     if (block.length !== UNIFORM_FLOATS) throw new Error(`uniform block must have ${UNIFORM_FLOATS} floats`);
     this.uniforms.set(block);
+    this.lastGraded = null;
     const gl = this.gl;
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
     gl.bufferSubData(gl.UNIFORM_BUFFER, 0, this.uniforms);
@@ -311,6 +324,7 @@ export class WebGL2Backend implements GpuBackend {
   setData(slot: number, spec: DataTextureSpec): void {
     const gl = this.gl;
     if (spec.data.length !== spec.width * spec.height * 4) throw new Error("data texture size mismatch");
+    this.lastGraded = null;
     gl.activeTexture(gl.TEXTURE0 + dataUnit(slot));
     gl.bindTexture(gl.TEXTURE_2D, this.data[slot]);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
@@ -338,7 +352,19 @@ export class WebGL2Backend implements GpuBackend {
       gl.bufferSubData(gl.UNIFORM_BUFFER, 92 * 4, this.uniforms.subarray(92, 93));
     }
     const cur = this.tpIdx;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, tp ? this.tpFbo!.out[cur] : null);
+    // The grade never applies the compare wipe (p0.y): with the wipe on it
+    // renders into a texture (the temporal output, which is also the next
+    // frame's history) and the composite pass draws the screen from it.
+    const split = this.uniforms[1];
+    let graded: WebGLTexture | null = null;
+    if (tp) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.tpFbo!.out[cur]);
+      graded = this.tpTex!.out[cur];
+    } else if (split > 0) {
+      const w = this.wipeTarget();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, w.fbo);
+      graded = w.tex;
+    } else gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     this.bindCommon(this.grade);
     for (let i = 0; i < DATA_SLOTS; i++) this.bindTex(dataUnit(i), this.data[i], this.grade, `u_data${i}`);
@@ -354,14 +380,75 @@ export class WebGL2Backend implements GpuBackend {
     }
     gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, this.uniformBuf);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    if (tp) {
+    if (split > 0) this.composite(graded!, split);
+    else if (tp) {
       const w = this.canvas.width, h = this.canvas.height;
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.tpFbo!.out[cur]);
       gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
       gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    if (tp) {
       this.tpIdx = 1 - cur;
       this.tpValid = true;
+    }
+    this.lastGraded = graded;
+  }
+
+  /** Graded target for the compare wipe when the temporal layer is off (canvas size, RGBA8). */
+  private wipeTarget(): { tex: WebGLTexture; fbo: WebGLFramebuffer } {
+    const gl = this.gl;
+    const w = this.canvas.width, h = this.canvas.height;
+    if (this.wipe && this.wipe.w === w && this.wipe.h === h) return this.wipe;
+    if (this.wipe) {
+      gl.deleteTexture(this.wipe.tex);
+      gl.deleteFramebuffer(this.wipe.fbo);
+    }
+    const tex = this.tpTarget(w, h, "rgba8");
+    this.wipe = { tex, fbo: this.tpFramebuffer(tex), w, h };
+    return this.wipe;
+  }
+
+  /** Draws the canvas: the "before" picture left of `split`, the graded frame right of it. */
+  private composite(graded: WebGLTexture, split: number): void {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.useProgram(this.comp.prog);
+    gl.bindVertexArray(this.vao);
+    this.bindTex(0, this.beforeTex ?? this.source, this.comp, "u_before");
+    this.bindTex(4, graded, this.comp, "u_graded");
+    gl.uniform1f(this.comp.loc.get("u_split")!, split);
+    gl.uniform1i(this.comp.loc.get("u_rot")!, this.beforeTex ? 0 : this.rotation);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  recomposite(split: number): boolean {
+    if (!this.lastGraded) return false;
+    this.uniforms[1] = split;
+    this.composite(this.lastGraded, split);
+    return true;
+  }
+
+  setBefore(src: SourceInput | null, width: number, height: number): void {
+    const gl = this.gl;
+    this.lastGraded = null;
+    if (!src) {
+      if (this.beforeTex) gl.deleteTexture(this.beforeTex);
+      this.beforeTex = null;
+      return;
+    }
+    if (!this.beforeTex) this.beforeTex = this.makeTexture(gl.LINEAR);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.beforeTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    // Unsized upload: the picture keeps its own size (it is sampled by uv), so
+    // an anamorphic <video> cannot fail the way a sized upload does (upload()).
+    try {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, src as TexImageSource);
+    } catch {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, this.throughCanvas(src, width, height));
     }
   }
 
@@ -447,6 +534,12 @@ export class WebGL2Backend implements GpuBackend {
     const gl = this.gl;
     gl.deleteProgram(this.grade.prog);
     gl.deleteProgram(this.down.prog);
+    gl.deleteProgram(this.comp.prog);
+    if (this.beforeTex) gl.deleteTexture(this.beforeTex);
+    if (this.wipe) {
+      gl.deleteTexture(this.wipe.tex);
+      gl.deleteFramebuffer(this.wipe.fbo);
+    }
     this.tpRelease();
     gl.deleteTexture(this.source);
     for (const t of this.data) gl.deleteTexture(t);

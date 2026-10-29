@@ -31,6 +31,8 @@ import { seekVideo, waitForEvent, waitForFirstFrame, type VideoWithRVFC } from "
 import { decodePhoto, encodeJpeg, isPhotoFile, photoLimits } from "./photo.ts";
 import { readExif, withExif } from "./photo-exif.ts";
 import { canvasFrameFix } from "@dive-tools/shared/frame-orientation.ts";
+import { releaseExportBlob } from "@dive-tools/shared/output-sink.ts";
+import { exportSettingsKey } from "./export-key.ts";
 import { detectFootage, FOOTAGE_LABEL, FOOTAGE_MODE, isHdrProfile, parseCodec, resolveFootage, type FootageChoice, type FootageInfo, type FootageProfile } from "./footage.ts";
 import type { CalibKind, SignalCalibration } from "./signal-probe.ts";
 import { isNativeShell, nativeFileOf, type NativeFileRef } from "../native/registry.ts";
@@ -98,7 +100,14 @@ export type ExportStatus = {
   detail: string;
   message: string | null;
   result: ExportResult | null;
+  /** Why the output differs from the source (downscaled for this device's encoder), or that it resumed. */
+  note: string | null;
+  /** Held while the page is in the background (resumes when it is back). */
+  paused: boolean;
 };
+
+/** Export options from the sheet's fallbacks. */
+export type ExportRequest = { maxLongEdge?: number };
 
 export type ExportResult = {
   /** The file in page memory (web exports); null when the native encoder wrote it. */
@@ -188,7 +197,7 @@ export function codecHelp(codecString: string | null | undefined): string | null
   return null;
 }
 
-const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null };
+const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null, note: null, paused: false };
 const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null, refine: "idle", refineProgress: 0, bobbing: null, motionLog: null };
 
 /** Real-time recorder default: WebKit (offline capture is ~10 fps there); `?rt=1` / `?rt=0` force it. */
@@ -246,6 +255,9 @@ export class Studio {
   private tools: ToolsState = DEFAULT_TOOLS;
   private dewarpU: WarpUniforms | null = null;
   private split: number | null = null;
+  /** Pending split repaint (one per frame) and whether the engine holds the raw frame as its "before" picture. */
+  private splitRaf = 0;
+  private beforeSet = false;
   private file: File | null = null;
   /** Sidecar motion log for the open clip (Stabilise › Advanced), used instead of the clip's own telemetry. */
   private motionLog: File | null = null;
@@ -514,7 +526,23 @@ export class Studio {
 
   setSplit(split: number | null): void {
     this.split = split;
-    this.repaint();
+    // One paint per frame however fast the pointer moves. A paused frame only
+    // re-composites the wipe over the last graded frame: no upload, geometry,
+    // temporal pass or grade.
+    if (this.splitRaf) return;
+    this.splitRaf = requestAnimationFrame(() => {
+      this.splitRaf = 0;
+      if (!this.recompositeSplit()) this.repaint();
+    });
+  }
+
+  private recompositeSplit(): boolean {
+    const e = this.engine;
+    if (!e || !this.tools.colour.enabled || this.exporting || this.snap.phase !== "ready") return false;
+    if (this.snap.kind === "video" && !this.video?.paused) return false;
+    // Behind a geometry pass the raw frame is handed to the engine only while the wipe is on.
+    if (this.geometryActive() && this.split !== null && !this.beforeSet) return false;
+    return e.recomposite(this.split ?? 0);
   }
 
   // ------------------------------------------------------------ open
@@ -871,15 +899,23 @@ export class Studio {
     if (!e || !info) return;
     const split = withSplit ? this.split : null;
     e.split = split ?? 0;
+    const sw = (src as HTMLVideoElement).videoWidth || (src as ImageBitmap).width || info.displayW;
+    const sh = (src as HTMLVideoElement).videoHeight || (src as ImageBitmap).height || info.displayH;
+    this.beforeSet = false;
     if (this.geometryActive() && this.geo) {
       const [w, h] = size ?? this.previewSize();
       this.geo.resize(w, h);
-      this.geo.render(src, this.geoParams(t, info.rot), this.uprightOpts(split));
+      // The engine draws the compare wipe itself (its temporal history must
+      // never see it): the geometry renders the whole frame and the raw frame
+      // goes along as the "before" picture.
+      this.geo.render(src, this.geoParams(t, info.rot), this.uprightOpts(null));
       e.upload(this.geo.canvas, w, h, 0);
+      e.setBefore(split !== null ? src : null, sw, sh);
+      this.beforeSet = split !== null;
       e.setPreviewScale(1);
     } else {
-      const w = (src as HTMLVideoElement).videoWidth || (src as ImageBitmap).width || info.displayW;
-      const h = (src as HTMLVideoElement).videoHeight || (src as ImageBitmap).height || info.displayH;
+      const w = sw, h = sh;
+      e.setBefore(null, 0, 0);
       e.upload(src, w, h, 0);
       if (size) e.setPreviewScale(Math.min(1, size[0] / w));
       else e.setPreviewScale(Math.min(1, this.previewSize()[0] / w));
@@ -1420,7 +1456,10 @@ export class Studio {
 
   private beginExport(): AbortController {
     const old = this.snap.exp.result;
-    if (old?.blob) URL.revokeObjectURL(old.url);
+    if (old?.blob) {
+      URL.revokeObjectURL(old.url);
+      void releaseExportBlob(old.blob);
+    }
     this.exporting = true;
     this.previewOn = false;
     this.video?.pause();
@@ -1443,7 +1482,17 @@ export class Studio {
     this.wakeLock = null;
   }
 
-  async exportVideo(): Promise<void> {
+  /** The open clip (the export sheet looks up a resumable export of it). */
+  get clipFile(): File | null {
+    return this.file;
+  }
+
+  /** Settings key of the next export (export journal: same clip + same key = resumable). */
+  exportKey(): string {
+    return exportSettingsKey(this.tools, this.snap);
+  }
+
+  async exportVideo(req: ExportRequest = {}): Promise<void> {
     if (this.snap.kind === "photo") return this.exportPhoto();
     const e = this.engine, file = this.file, v = this.video, info = this.snap.info;
     if (!file || !v || !info || this.exporting) return;
@@ -1486,7 +1535,7 @@ export class Studio {
       } else {
         const res = mode === "realtime"
           ? await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl, trim)
-          : await this.runOffline(media, file, bitrate, total, colourOn, ctrl, trim);
+          : await this.runOffline(media, file, bitrate, total, colourOn, ctrl, trim, req);
         console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (${mode}), ${res.blob.type}, audio ${res.audioIncluded ? "kept" : "dropped"}`);
         this.setExp({
           state: "done",
@@ -1494,7 +1543,7 @@ export class Studio {
           etaSec: 0,
           frames: res.frames,
           detail: "",
-          result: { ...res, native: null, bytes: res.blob.size, mime: res.blob.type, name: this.outName(res.blob.type === "video/webm" ? "webm" : "mp4"), url: URL.createObjectURL(res.blob), width: info.displayW, height: info.displayH },
+          result: { ...res, native: null, bytes: res.blob.size, mime: res.blob.type, name: this.outName(res.blob.type === "video/webm" ? "webm" : "mp4"), url: URL.createObjectURL(res.blob), width: "width" in res ? (res.width as number) : info.displayW, height: "height" in res ? (res.height as number) : info.displayH },
         });
       }
     } catch (err) {
@@ -1541,7 +1590,7 @@ export class Studio {
    * The stage shows bitmaps of the encoded frames (never the full-size
    * render canvas, see ARCHITECTURE.md).
    */
-  private async runOffline(media: MediaMod, file: File, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null) {
+  private async runOffline(media: MediaMod, file: File, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null, req: ExportRequest = {}) {
     const e = this.engine, geo = this.geo;
     const geoOn = this.geometryActive();
     const footage = this.footageMode("frame");
@@ -1556,6 +1605,8 @@ export class Studio {
     const started = performance.now();
     let frames = 0;
     let lastUi = 0, lastLive = 0;
+    // ETA from the work done in this run: a resumed export starts part-way, and paused time doesn't count.
+    let startProgress = 0, pausedMs = 0, pausedAt = 0;
     // One frame at a time whenever a canvas is shared between stages (the
     // geometry canvas, or the engine's canvas/bitmap capture paths); the
     // engine's readback path keeps several in flight.
@@ -1617,12 +1668,13 @@ export class Studio {
               lastLive = now;
               await this.emitFrame(out);
             }
-            if (now - lastUi > 250) {
+            if (now - lastUi > 250 && !fi.prime) {
               lastUi = now;
-              const secs = (now - started) / 1000;
+              const secs = Math.max(1e-3, (now - started - pausedMs) / 1000);
               const fps = frames / secs;
               const progress = total > 0 ? Math.min(1, fi.outTimeSec / total) : 0;
-              const eta = progress > 0.02 ? (secs / progress) * (1 - progress) : null;
+              const done = progress - startProgress;
+              const eta = done > 0.02 ? (secs / done) * (1 - progress) : null;
               this.setExp({ frames, fps, progress, etaSec: eta, detail: `${fi.displayWidth}×${fi.displayHeight} · ${fps.toFixed(1)} fps` });
             }
             return out;
@@ -1641,9 +1693,22 @@ export class Studio {
         log: (line) => console.info("[export]", line),
         onProgress: (p) => this.setExp({ progress: p }),
         range: trim,
+        resumeKey: this.exportKey(),
+        maxLongEdge: req.maxLongEdge,
+        onPlan: (plan, resume) => {
+          startProgress = resume?.progress ?? 0;
+          const notes = [plan.note, resume ? `Resumed at ${Math.round(resume.progress * 100)}%.` : null].filter(Boolean);
+          this.setExp({ note: notes.length ? notes.join(" ") : null, progress: startProgress });
+        },
+        onPause: (paused) => {
+          const now = performance.now();
+          if (paused) pausedAt = now;
+          else if (pausedAt) pausedMs += now - pausedAt;
+          this.setExp({ paused });
+        },
       },
     );
-    return { blob: result.blob, frames: result.frames, elapsedMs: performance.now() - started, audioIncluded: result.audioIncluded };
+    return { blob: result.blob, frames: result.frames, elapsedMs: performance.now() - started, audioIncluded: result.audioIncluded, width: result.width, height: result.height };
   }
 
   /**
@@ -1956,7 +2021,11 @@ export class Studio {
   dismissExport(): void {
     if (this.exporting) return;
     const r = this.snap.exp.result;
-    if (r?.blob) URL.revokeObjectURL(r.url);
+    if (r?.blob) {
+      URL.revokeObjectURL(r.url);
+      // The file behind the Blob lives in private storage until released (a 4K export can be gigabytes).
+      void releaseExportBlob(r.blob);
+    }
     this.set({ exp: IDLE_EXPORT });
   }
 }

@@ -17,10 +17,14 @@
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@webgpu/types": "0.1.72"
+    "@webgpu/types": "0.1.72",
+    "vitest": "5.0.1"
   },
   "dependencies": {
     "mediabunny": "^1.46.0",
     "mp4-muxer": "^5.2.2"
+  },
+  "scripts": {
+    "test": "vitest run"
   }
 }

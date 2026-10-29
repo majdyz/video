@@ -2,13 +2,14 @@ import { FOOTAGE_LABEL, type FootageChoice, type FootageProfile } from "../pipel
 import type { FootageStatus } from "../pipeline/studio.ts";
 import { Chips } from "./controls";
 
-const ORDER: FootageProfile[] = ["standard", "dlogm", "hlg", "pq", "applelog", "wide"];
+const ORDER: FootageProfile[] = ["standard", "dlogm", "gplog", "hlg", "pq", "applelog", "wide"];
 const SHORT: Record<FootageProfile, string> = {
   standard: "Standard",
   dlogm: "D-Log M",
   hlg: "HDR HLG",
   pq: "HDR PQ",
   applelog: "Apple Log",
+  gplog: "GP-Log",
   wide: "BT.2020",
 };
 const HINT: Record<FootageProfile, string> = {
@@ -17,6 +18,7 @@ const HINT: Record<FootageProfile, string> = {
   hlg: "HDR from iPhone, GoPro HDR, Osmo HLG",
   pq: "HDR10 / Dolby Vision base layer",
   applelog: "iPhone 15 Pro and later, log mode",
+  gplog: "GoPro HERO11–13 Log (GP-Log), 10-bit",
   wide: "Wide-gamut SDR",
 };
 

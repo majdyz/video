@@ -17,11 +17,10 @@ import { isNativeShell } from "./native/registry.ts";
 import { formatTimecode, trimAt } from "./pipeline/trim.ts";
 import { lookAfterRemove, removeCut, segmentAtTime, segmentNumber, splitAt, visibleSegments } from "./pipeline/segments.ts";
 
-type Theme = "abyss" | "coral" | "depth";
+type Theme = "abyss" | "light";
 const THEMES: { id: Theme; label: string }[] = [
-  { id: "abyss", label: "Abyss" },
-  { id: "coral", label: "Coral" },
-  { id: "depth", label: "Depth" },
+  { id: "abyss", label: "Dark" },
+  { id: "light", label: "Light" },
 ];
 
 /** Same breakpoint as the CSS: wide screens and phones in landscape get the sidebar layout. */
@@ -71,7 +70,7 @@ export default function App() {
   // landscape ones (the space is there anyway) until the user toggles it.
   const [dockPref, setDockOpen] = useState<boolean | null>(initialDock);
   const [hasLive, setHasLive] = useState(false);
-  const [theme, setTheme] = useState<Theme>(() => (document.documentElement.dataset.theme as Theme) || "abyss");
+  const [theme, setTheme] = useState<Theme>(() => (document.documentElement.dataset.theme === "light" ? "light" : "abyss"));
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wide = useMedia(WIDE_QUERY);
 

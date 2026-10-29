@@ -3,9 +3,9 @@
  * elevation and motion are defined. Components (styles/app.css) read these
  * variables and nothing else, so a new look is a new [data-theme] block.
  *
- *   abyss  (default, "A"): near-black neutral greys, one cyan accent
- *   coral  ("B"): warm light theme, coral accent
- *   depth  ("C"): deep navy, muted gold accent, serif wordmark
+ *   abyss  (default, "Dark"): near-black neutral greys, one cyan accent
+ *   light  ("Light"): the same layout in neutral light greys, darker cyan accent;
+ *          the stage stays dark so the picture is judged against black
  *
  * Restraint rules (user feedback, 25 Oct 2026):
  *   - the wordmark is one plain colour (--wordmark-ink), never split or gradient
@@ -13,7 +13,7 @@
  *     fill and focus rings; selection, switches, values and icons are neutral
  *   - no glows, no glass blur, no gradients, no all-caps tracked micro labels
  *
- * Switch at runtime with <html data-theme="…"> (About sheet → Appearance).
+ * Switch at runtime with <html data-theme="…"> (About sheet → Appearance: Dark / Light).
  * Fonts are self-hosted (fontsource, bundled by Vite): no network font fetches.
  */
 
@@ -166,97 +166,53 @@
   --topbar-h: 52px;
 }
 
-[data-theme="coral"] {
+[data-theme="light"] {
   color-scheme: light;
-  --font-display: "Manrope Variable", "Manrope", ui-sans-serif, system-ui, sans-serif;
-  --wordmark-weight: 700;
-  --wordmark-tracking: -0.03em;
-  --wordmark-ink: #1d1b19;
+  --wordmark-ink: #18181b;
 
-  --app-bg: #faf7f4;
-  --bg: #faf7f4;
-  --surface-1: #f4efea;
-  --surface-2: #ece5de;
-  --surface-3: #e3dbd3;
+  --app-bg: #f5f5f6;
+  --bg: #f5f5f6;
+  --surface-1: #ececee;
+  --surface-2: #e3e3e6;
+  --surface-3: #d9d9dd;
   --surface-4: #ffffff;
-  --stage-bg: #1d1b19;
-  --sheet-bg: #fffdfb;
-  --scrim: rgba(29, 27, 25, 0.32);
-  --overlay: rgba(250, 247, 244, 0.92);
+  --stage-bg: #111113;
+  --sheet-bg: #fbfbfc;
+  --scrim: rgba(24, 24, 27, 0.32);
+  --overlay: rgba(245, 245, 246, 0.92);
 
-  --line-1: rgba(29, 27, 25, 0.07);
-  --line-2: rgba(29, 27, 25, 0.12);
-  --line-3: rgba(29, 27, 25, 0.22);
+  --line-1: rgba(24, 24, 27, 0.07);
+  --line-2: rgba(24, 24, 27, 0.12);
+  --line-3: rgba(24, 24, 27, 0.22);
 
-  --text-1: #1d1b19;
-  --text-2: #504943;
-  --text-3: #6f655d;
-  --text-4: #b3a9a0;
+  --text-1: #18181b;
+  --text-2: #4a4a52;
+  --text-3: #66666f;
+  --text-4: #a9a9b1;
 
-  --accent: #f0623f;
+  --accent: #067f93;
   --warning: #8a5a00;
   --danger: #c22a3a;
   --accent-ink: #ffffff;
-  --primary-bg-hover: #f4764f;
-  --strong-bg: #1d1b19;
-  --strong-bg-hover: #2c2926;
+  --primary-bg-hover: #0890a6;
+  --strong-bg: #18181b;
+  --strong-bg-hover: #2a2a2f;
   --strong-ink: #ffffff;
 
-  --track: #e3dad1;
-  --track-fill-quiet: #9b9087;
+  --track: #d6d6db;
+  --track-fill-quiet: #8b8b94;
   --thumb: #ffffff;
   --thumb-shadow: 0 1px 4px rgba(0, 0, 0, 0.2), 0 0 0 0.5px rgba(0, 0, 0, 0.12);
   --chip-on-bg: #ffffff;
-  --chip-on-ink: #1d1b19;
+  --chip-on-ink: #18181b;
   --tab-on-bg: #ffffff;
   --tab-on-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-  --switch-off: #d9cfc5;
-  --switch-on: #1d1b19;
+  --switch-off: #cfcfd4;
+  --switch-on: #18181b;
   --switch-knob: #ffffff;
   --switch-knob-on: #ffffff;
-  --shadow-2: 0 6px 20px rgba(60, 40, 20, 0.1);
-  --shadow-sheet: 0 -8px 32px rgba(60, 40, 20, 0.12);
-
-  --r-stage: 16px;
-  --r-button: 999px;
-  --r-chip: 999px;
-}
-
-[data-theme="depth"] {
-  --font-display: "Fraunces Variable", "Fraunces", ui-serif, Georgia, serif;
-  --wordmark-size: 21px;
-  --wordmark-weight: 500;
-  --wordmark-tracking: -0.01em;
-  --wordmark-ink: #e7edf3;
-
-  --app-bg: #07121d;
-  --bg: #07121d;
-  --surface-1: #0b1825;
-  --surface-2: #10202f;
-  --surface-3: #162839;
-  --surface-4: #1d3246;
-  --sheet-bg: #0d1b29;
-  --overlay: rgba(7, 18, 29, 0.88);
-
-  --line-1: rgba(255, 255, 255, 0.07);
-  --line-2: rgba(255, 255, 255, 0.11);
-  --line-3: rgba(255, 255, 255, 0.18);
-
-  --text-1: #e7edf3;
-  --text-2: #a7b6c4;
-  --text-3: #8799ab;
-  --text-4: #4c6074;
-
-  --accent: #d9b56e;
-  --accent-ink: #1a1205;
-  --primary-bg-hover: #e3c385;
-
-  --track: rgba(255, 255, 255, 0.12);
-  --switch-off: rgba(255, 255, 255, 0.16);
-  --switch-on: #e7edf3;
-  --switch-knob-on: #07121d;
-
-  --r-stage: 14px;
+  --shadow-2: 0 6px 20px rgba(0, 0, 0, 0.08);
+  --shadow-sheet: 0 -8px 32px rgba(0, 0, 0, 0.1);
 }
 
 @media (prefers-reduced-motion: reduce) {
