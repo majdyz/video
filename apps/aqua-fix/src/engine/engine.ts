@@ -597,9 +597,9 @@ export class GradeEngine {
       // upload of the same frame, and its analysis is running or done in the pool.
       let cached = opts.dueSec !== undefined && !opts.raw ? this.takePrecomputed(opts.dueSec) : undefined;
       const tr = performance.now();
-      let rgba = cached?.rgba ?? await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
+      let rgba = cached?.rgba ?? await this.readback(ANALYSIS_W, ANALYSIS_H);
       if (cached && this.verifyPrecomputed) {
-        const live = await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
+        const live = await this.readback(ANALYSIS_W, ANALYSIS_H);
         if (!sameBytes(live, cached.rgba)) {
           this.precomputeStats.mismatches++;
           console.warn(`[engine] precomputed thumbnail differs at t=${opts.dueSec!.toFixed(3)}s: using the live one`);
@@ -620,7 +620,7 @@ export class GradeEngine {
       // The first pass (and every PERSON_DETECT_EVERY-th) is a detection on the full frame.
       const detect = wantPerson && this.personPasses++ % PERSON_DETECT_EVERY === 0;
       const rect = detect ? FULL_RECT : PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
-      const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.backend.analyze(ANALYSIS_W, ANALYSIS_H, rect);
+      const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.readback(ANALYSIS_W, ANALYSIS_H, rect);
       // The anchor (follow.ts) needs the lock in force and its shot's target.
       const { lock, target } = this.anchorAt(this.lastTickSec);
       this.reqLock = lock;
@@ -880,15 +880,18 @@ export class GradeEngine {
 
   /** The current source, upright, resized to w×h (RGBA8): the frame the ML segmenter sees is the frame graded. */
   async readUpright(w: number, h: number): Promise<Uint8ClampedArray> {
-    for (let i = 0; ; i++) {
-      try {
-        return await this.backend.analyze(w, h);
-      } catch (e) {
-        // An analysis readback still in flight: wait for it.
-        if (i > 1500 || !/in flight/.test(String(e))) throw e;
-        await new Promise((r) => setTimeout(r, 20));
-      }
-    }
+    return this.readback(w, h);
+  }
+
+  private readbackChain: Promise<unknown> = Promise.resolve();
+  /**
+   * Every analysis readback goes through here, one at a time: the backends allow one in flight, and the analysis
+   * loop, the person detector, the export lookahead and the AI subject detection pass all read back.
+   */
+  private readback(w: number, h: number, rect?: Rect): Promise<Uint8ClampedArray> {
+    const run = this.readbackChain.then(() => this.backend.analyze(w, h, rect));
+    this.readbackChain = run.catch(() => undefined);
+    return run;
   }
 
   /** The person detector's current boxes (upright 0..1), for prompting the ML segmenter with a diver's box. */
@@ -1012,7 +1015,7 @@ export class GradeEngine {
   async precompute(timeSec: number, prevSec: number): Promise<void> {
     if (this.pre.has(timeSec)) return;
     const tr = performance.now();
-    const rgba = await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
+    const rgba = await this.readback(ANALYSIS_W, ANALYSIS_H);
     this.workerMs.readback += performance.now() - tr;
     const { lock, target } = this.anchorAt(prevSec);
     const w = this.poolWorker();

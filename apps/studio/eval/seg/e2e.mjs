@@ -1,7 +1,7 @@
 // Studio AI subject detection e2e (headless, against a preview build): toggle in the UI (remembered per device) →
 // model download with inline progress → ML pass on the engine's own subjects → tap a subject (exclude / include) →
 // ML pass again → overlay in preview → export completes.
-// Usage: node apps/studio/eval/seg/e2e.mjs <base url> <outdir> <clip.mp4> [u v t]     (env EXTRA: more query)
+// Usage: node apps/studio/eval/seg/e2e.mjs <base url> <outdir> <clip.mp4> [u v t]     (env EXTRA: more query, VIVID=1, NOAI=1)
 import fs from "node:fs";
 import path from "node:path";
 const { chromium } = await import(path.join(process.env.HOME, "browser/node_modules/playwright/index.mjs"));
@@ -32,6 +32,7 @@ await p.getByRole("button", { name: /Advanced/ }).first().click(); await p.waitF
 await p.evaluate((t) => { window.studio.pause(); window.studio.seek(t); }, T); await p.waitForTimeout(2000);
 const pop = p.getByRole("switch", { name: /Subject pop/ });
 if ((await pop.getAttribute("aria-checked")) !== "true") { await pop.click(); await p.waitForTimeout(3000); }
+if (process.env.VIVID === "1") { const vv = p.getByRole("switch", { name: /^Vivid/ }); if ((await vv.getAttribute("aria-checked")) !== "true") await vv.click(); await p.waitForTimeout(1500); console.log(ts(), "Vivid on:", await vv.getAttribute("aria-checked")); }
 const ai = p.getByRole("switch", { name: /AI subject detection/ });
 console.log(ts(), "AI toggle visible:", await ai.isVisible(), "checked:", await ai.getAttribute("aria-checked"));
 await p.screenshot({ path: `${out}/0-panel.png` });

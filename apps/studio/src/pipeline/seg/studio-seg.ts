@@ -109,6 +109,30 @@ export function outlineSelection(o: SegOverlay | null, engine: SubjectSelection 
   return { width: w, height: h, ids, animals };
 }
 
+/**
+ * The box (upright uv) of the region the ML overlay pops around (u, v): a tap that takes a popped subject out is
+ * prompted with it, so the whole animal is excluded, not just the part a single point would select.
+ */
+export function popComponentBox(o: SegOverlay | null, u: number, v: number): PersonBox | null {
+  if (!o) return null;
+  const { width: w, height: h } = o, on = (i: number) => o.alpha[i] > 0.5 && o.near[i] > 0.3;
+  const x0 = Math.min(w - 1, Math.max(0, Math.floor(u * w))), y0 = Math.min(h - 1, Math.max(0, Math.floor(v * h)));
+  if (!on(y0 * w + x0)) return null;
+  const seen = new Uint8Array(w * h), stack = [y0 * w + x0];
+  seen[stack[0]] = 1;
+  let minx = x0, maxx = x0, miny = y0, maxy = y0;
+  while (stack.length) {
+    const i = stack.pop()!, x = i % w, y = (i / w) | 0;
+    minx = Math.min(minx, x); maxx = Math.max(maxx, x); miny = Math.min(miny, y); maxy = Math.max(maxy, y);
+    for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1]) {
+      if (j >= 0 && !seen[j] && on(j)) { seen[j] = 1; stack.push(j); }
+    }
+  }
+  const px = 0.04 * (maxx - minx) + 1, py = 0.04 * (maxy - miny) + 1;
+  const x = Math.max(0, (minx - px) / w), y = Math.max(0, (miny - py) / h);
+  return { x, y, w: Math.min(1, (maxx + 1 + px) / w) - x, h: Math.min(1, (maxy + 1 + py) / h) - y, score: 1 };
+}
+
 /** True when the ML overlay pops the picture at upright (u, v): a tap there means "take it out". */
 export function segPopsAt(o: SegOverlay | null, u: number, v: number): boolean {
   if (!o) return false;

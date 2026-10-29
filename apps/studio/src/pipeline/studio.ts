@@ -20,7 +20,7 @@ import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validat
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
 import { pickAnimal, type SubjectOverride, type SubjectPathPoint, type SubjectSelection } from "../../../aqua-fix/src/engine/animals.ts";
 import { toggleOverride } from "./subjects.ts";
-import { autoObjects, outlineSelection, segPopsAt, SubjectSeg, type SegStatus } from "./seg/studio-seg.ts";
+import { autoObjects, outlineSelection, popComponentBox, segPopsAt, SubjectSeg, type SegStatus } from "./seg/studio-seg.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometrySource } from "./geometry.ts";
@@ -490,7 +490,9 @@ export class Studio {
     const { list, follow, id } = toggleOverride(this.snap.subjectOverrides, this.subjectSelection(), u, v, t);
     // AI on: a tap on what the ML mask pops (whatever the engine's own map says there) takes it out.
     if (follow >= 0 && list[follow].action === "include" && segPopsAt(this.segOverlay(t), u, v)) list[follow] = { ...list[follow], action: "exclude" };
-    if (follow >= 0) this.seg.noteTap(list[follow], this.engine?.personBoxesNow() ?? []);
+    // Taking out what the ML pops: the exclude is prompted with the popped region's box (the whole animal).
+    const popBox = follow >= 0 && list[follow].action === "exclude" ? popComponentBox(this.segOverlay(t), u, v) : null;
+    if (follow >= 0) this.seg.noteTap(list[follow], [...(this.engine?.personBoxesNow() ?? []), ...(popBox ? [popBox] : [])]);
     this.set({ subjectNote: null });
     this.setSubjectOverrides(list);
     if (follow >= 0) {

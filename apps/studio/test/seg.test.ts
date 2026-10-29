@@ -7,7 +7,7 @@ import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, guidedFilt
 import { composeSegStrength } from "../../aqua-fix/src/engine/seg-overlay.ts";
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { fillInterval, keyTimes, sampleRange, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
-import { autoObjects, ML_OUTLINE_ID, outlineSelection, promptFor, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
+import { autoObjects, ML_OUTLINE_ID, outlineSelection, popComponentBox, promptFor, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
 
 const entry = (v: number): MemEntry => ({ mem: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), pos: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), ptr: new Float32Array(256).fill(v), score: 1 });
 const tpos = Float32Array.from({ length: 7 * 64 }, (_, i) => Math.floor(i / 64) * 100);
@@ -165,6 +165,12 @@ const img = (dx: number, dy: number): Gray => {
   assert.equal(os.ids[15], 7, "the engine's animal elsewhere, resampled");
   assert.deepEqual(os.animals.map((a) => a.id).sort(), [7, ML_OUTLINE_ID].sort());
   assert.equal(outlineSelection(null, eng), eng, "AI off: the engine's selection");
+  // Taking out a popped subject: the exclude gets the popped region's box.
+  const ba = new Float32Array(100), bn = new Float32Array(100).fill(1);
+  for (let y = 2; y < 6; y++) for (let x = 3; x < 9; x++) ba[y * 10 + x] = 1;
+  const pb = popComponentBox({ width: 10, height: 10, alpha: ba, exclude: null, near: bn }, 0.45, 0.35)!;
+  assert.ok(pb.x <= 0.3 && pb.x + pb.w >= 0.9 && pb.y <= 0.2 && pb.y + pb.h >= 0.6, JSON.stringify(pb));
+  assert.equal(popComponentBox({ width: 10, height: 10, alpha: ba, exclude: null, near: bn }, 0.05, 0.95), null);
 }
 
 // Close-ups: the water-departure map tells water (even where the mask leaked onto it) from the subject, and the
