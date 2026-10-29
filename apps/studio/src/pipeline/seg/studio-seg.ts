@@ -87,6 +87,14 @@ export function autoObjects(sel: SubjectSelection | null, t: number, boxes: read
   return out;
 }
 
+/** True when the ML overlay pops the picture at upright (u, v): a tap there means "take it out". */
+export function segPopsAt(o: SegOverlay | null, u: number, v: number): boolean {
+  if (!o) return false;
+  const x = Math.min(o.width - 1, Math.max(0, Math.floor(u * o.width))), y = Math.min(o.height - 1, Math.max(0, Math.floor(v * o.height)));
+  const i = y * o.width + x;
+  return o.alpha[i] > 0.5 && o.near[i] > 0.3;
+}
+
 /** The tapped subject's prompt: the tap, plus the person detector's box when the tap is on a diver. */
 export function promptFor(o: Pick<SubjectOverride, "u" | "v">, boxes: readonly PersonBox[]): SegObject["prompt"] {
   const hit = boxes.filter((b) => o.u >= b.x && o.u <= b.x + b.w && o.v >= b.y && o.v <= b.y + b.h && b.w * b.h < 0.9)

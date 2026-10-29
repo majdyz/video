@@ -5,7 +5,7 @@ import { assembleMemory, frameIndex, isEmpty, MEM_DIM, MEM_TOKENS, newBank, prun
 import { denseFlow, warp, type Gray } from "../src/pipeline/seg/flow.ts";
 import { boxMean, distanceTransform, feather, guidedFilter, iou, promptFromMask } from "../src/pipeline/seg/mask.ts";
 import { fillInterval, keyTimes, sampleRange, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
-import { autoObjects, promptFor } from "../src/pipeline/seg/studio-seg.ts";
+import { autoObjects, promptFor, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
 
 const entry = (v: number): MemEntry => ({ mem: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), pos: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), ptr: new Float32Array(256).fill(v), score: 1 });
 const tpos = Float32Array.from({ length: 7 * 64 }, (_, i) => Math.floor(i / 64) * 100);
@@ -149,6 +149,13 @@ const img = (dx: number, dy: number): Gray => {
   const diver = promptFor({ u: 0.5, v: 0.5 }, [{ x: 0.4, y: 0.3, w: 0.2, h: 0.5, score: 0.9 }]);
   assert.deepEqual(diver.box, { x0: 0.4, y0: 0.3, x1: 0.6000000000000001, y1: 0.8 });
   assert.equal(promptFor({ u: 0.1, v: 0.1 }, [{ x: 0.4, y: 0.3, w: 0.2, h: 0.5, score: 0.9 }]).box, undefined);
+  // A tap on what the ML pops (at full weight) is an exclude; elsewhere, or with the ML eased out, it is not.
+  const alpha = new Float32Array(16), near = new Float32Array(16).fill(1);
+  alpha[5] = 1;
+  assert.equal(segPopsAt({ width: 4, height: 4, alpha, exclude: null, near }, 1.5 / 4, 1.5 / 4), true);
+  assert.equal(segPopsAt({ width: 4, height: 4, alpha, exclude: null, near }, 3.5 / 4, 3.5 / 4), false);
+  assert.equal(segPopsAt({ width: 4, height: 4, alpha, exclude: null, near: new Float32Array(16) }, 1.5 / 4, 1.5 / 4), false);
+  assert.equal(segPopsAt(null, 0.5, 0.5), false);
 }
 
 console.log("seg tests passed");
