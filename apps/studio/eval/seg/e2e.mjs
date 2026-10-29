@@ -32,7 +32,8 @@ if ((await pop.getAttribute("aria-checked")) !== "true") { await pop.click(); aw
 const ai = p.getByRole("switch", { name: /AI subject detection/ });
 console.log(ts(), "AI toggle visible:", await ai.isVisible(), "checked:", await ai.getAttribute("aria-checked"));
 await p.screenshot({ path: `${out}/0-panel.png` });
-if ((await ai.getAttribute("aria-checked")) !== "true") await ai.click();
+const NOAI = process.env.NOAI === "1"; // engine-only run (the toggle stays off): the before export
+if (!NOAI && (await ai.getAttribute("aria-checked")) !== "true") await ai.click();
 const seen = new Set();
 for (let i = 0; i < 1200; i++) {
   const s = await snap();
@@ -58,12 +59,12 @@ const waitPass = async (label) => {
   console.log(ts(), label, "done", JSON.stringify(await snap()), "overlay", JSON.stringify(await overlay()));
 };
 // Turning AI on follows the subjects the engine chose by itself.
-await waitPass("auto");
+if (!NOAI) await waitPass("auto");
 await shot("1-ai-auto");
 const bb = await stage();
-await p.mouse.click(bb.x + U * bb.width, bb.y + V * bb.height);
+if (!NOAI) await p.mouse.click(bb.x + U * bb.width, bb.y + V * bb.height);
 console.log(ts(), "tapped", U, V, JSON.stringify((await p.evaluate(() => window.studio.getSnapshot().subjectOverrides)).map((o) => ({ t: o.t, action: o.action }))));
-await waitPass("tap");
+if (!NOAI) await waitPass("tap");
 await shot("2-after-tap");
 const dl = p.waitForEvent("download", { timeout: 1800000 }).catch(() => null);
 await p.getByRole("button", { name: /^Export$/ }).first().click(); await p.waitForTimeout(1500);
