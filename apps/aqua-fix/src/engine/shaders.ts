@@ -23,6 +23,15 @@ fn rotateUV(uv: vec2<f32>, r: u32) -> vec2<f32> {
   return uv;
 }`;
 
+// Full-screen triangle for every WebGL2 pass (backend-webgl2.ts).
+export const GLSL_VERTEX = `#version 300 es
+out vec2 v_uv;
+void main() {
+  vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
+  gl_Position = vec4(p, 0.0, 1.0);
+  v_uv = vec2(p.x * 0.5 + 0.5, 1.0 - (p.y * 0.5 + 0.5));
+}`;
+
 export const GLSL_FRAGMENT = `#version 300 es
 precision highp float;
 precision highp int;

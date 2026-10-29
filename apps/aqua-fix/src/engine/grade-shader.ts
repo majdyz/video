@@ -932,7 +932,7 @@ fn toneWeight(subj: f32, an: vec4<f32>, depart: f32) -> f32 {
   if (an.w <= 0.0) { return ow; }
   let sure = segSure(an);
   let floorW = mix(SEG_WATER_FLOOR, 1.0, sure * smoothstepf(SEG_IN_LO, SEG_IN_HI, an.z) * smoothstepf(SEG_DEP_LO, SEG_DEP_HI, depart));
-  let ml = smoothstepf(SEG_A_LO, SEG_A_HI, an.z) * mix(floorW, 1.0, depart) * max(p[22].z, sure);
+  let ml = smoothstepf(SEG_A_LO, SEG_A_HI, an.z) * mix(floorW, 1.0, depart) * max(params.p[22].z, sure);
   return mix(ow, ml, clamp(an.w, 0.0, 1.0));
 }
 fn warmClamp(ab: vec2<f32>, lin: vec3<f32>, srcFar: f32, person: f32, strength: f32) -> f32 {

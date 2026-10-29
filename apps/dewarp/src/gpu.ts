@@ -1,5 +1,5 @@
 import { packUniforms, UNIFORM_FLOATS, type WarpUniforms } from "./fisheye";
-import { WARP_WGSL } from "./warp-shader";
+import { WARP_WGSL, warpCopyVariant } from "./warp-shader";
 import { GlWarper } from "./webgl";
 
 export type WarpSource = HTMLVideoElement | VideoFrame;
@@ -117,12 +117,7 @@ export class Warper {
         primitive: { topology: "triangle-list" },
       });
     const external = pipeline(WARP_WGSL);
-    const copy = pipeline(
-      WARP_WGSL.replace("var src: texture_external;", "var src: texture_2d<f32>;").replaceAll(
-        /textureSampleBaseClampToEdge\(src, samp, ([^)]*)\)/g,
-        "textureSampleLevel(src, samp, $1, 0.0)"
-      )
-    );
+    const copy = pipeline(warpCopyVariant(WARP_WGSL));
     const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     const uniforms = device.createBuffer({ size: UNIFORM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     return new Warper(device, external, copy, sampler, uniforms);
