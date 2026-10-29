@@ -919,7 +919,7 @@ fn animalStrength(uv: vec2<f32>) -> vec4<f32> {
 }
 fn objectWeight(conf: f32) -> f32 { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
 fn segSure(an: vec4<f32>) -> f32 { return select(0.0, smoothstepf(SEG_CONF_LO, SEG_CONF_HI, an.w), an.w > 0.0); }
-fn popStrength(an: vec4<f32>) -> f32 { return max(p[16].w, segSure(an)); }
+fn popStrength(an: vec4<f32>) -> f32 { return max(params.p[16].w, segSure(an)); }
 fn clearCast(ab: vec2<f32>, vh: vec2<f32>, g: f32) -> vec2<f32> {
   let C = length(ab);
   if (g <= 0.0 || C < 1e-6) { return ab; }
