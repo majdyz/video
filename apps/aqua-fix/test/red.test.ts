@@ -10,7 +10,7 @@ import { applyGrade } from "../src/engine/apply.ts";
 import { calmEvidence, calmScores } from "../src/engine/calm.ts";
 import { linearToOklab, srgbToLinear } from "../src/engine/color.ts";
 import { DEFAULT_SETTINGS, type DepthMap, type UserSettings } from "../src/engine/params.ts";
-import { RED, chromaRebuild, greenCastOf, greenNeutral, redGuard } from "../src/engine/red.ts";
+import { RED, chromaRebuild, greenCastOf, greenNeutral, murkHold, redGuard, warmMaterial } from "../src/engine/red.ts";
 
 const W = ANALYSIS_W, H = ANALYSIS_H;
 function noise(seed: number): number { const s = Math.sin(seed * 12.9898) * 43758.5453; return s - Math.floor(s); }
@@ -192,4 +192,45 @@ const inRect = (x: number, y: number, x0: number, y0: number, x1: number, y1: nu
   const g4 = redGuard(0.6, 0.06, 0.005, -0.01, -0.01, 1, 0);
   assert.ok(hueDeg(g4[0], g4[1]) >= 14.9, "skin hue floor");
   console.log("ok  chromaRebuild / greenCastOf / greenNeutral / redGuard");
+}
+
+// 7. Green water, second round.
+{
+  // Cyan-green water is detected from the veil colour (diver_green: B∞ G/B 1.05,
+  // veil G/B 1.90); tropical cyan reef water is not (vs09 / vs18: veil G/B ≤ 1.26).
+  assert.ok(greenCastOf([0.03, 0.27, 0.257], [0.04, 0.38, 0.2]) > 0.95, "cyan-green coastal water is green water");
+  assert.equal(greenCastOf([0.002, 0.24, 0.267], [0.02, 0.3, 0.238]), 0, "tropical cyan reef water (veil G/B 1.26) is not");
+  assert.equal(greenCastOf([0.03, 0.128, 0.127], [0.02, 0.29, 0.293]), 0, "cyan reef (veil G/B 0.99) is not");
+  // Stone / sand mid-tones in green water: an orange overshoot is rolled off to natural-material chroma; a vivid source (far from the veil) is not.
+  const h = (70 * Math.PI) / 180, Co = 0.1;
+  const m = warmMaterial(0.6, Co * Math.cos(h), Co * Math.sin(h), 1, 0);
+  assert.ok(Math.hypot(m[0], m[1]) <= RED.matC + 1e-9, `material chroma ${Math.hypot(m[0], m[1]).toFixed(3)}`);
+  assert.deepEqual(warmMaterial(0.6, Co * Math.cos(h), Co * Math.sin(h), 1, 1), [Co * Math.cos(h), Co * Math.sin(h)], "a yellow fish that escaped the cast keeps its colour");
+  assert.deepEqual(warmMaterial(0.6, Co * Math.cos(h), Co * Math.sin(h), 0, 0), [Co * Math.cos(h), Co * Math.sin(h)], "off outside green water");
+  // Murk is never lifted: a water-path pixel ends at or below its source (dark murk below).
+  assert.ok(murkHold(0.2, 0.09, 1) <= 0.09 * RED.murkDark + 1e-6 + (1 - RED.murkDark) * 0.09 * 0.01, "dark murk ends darker than its source");
+  assert.ok(Math.abs(murkHold(0.5, 0.4, 1) - 0.4) < 1e-9, "light water ends at its source luminance");
+  assert.equal(murkHold(0.2, 0.09, 0), 0.2, "off outside green water");
+  console.log("ok  cyan-green detection / natural-material ceiling / murk hold");
+}
+
+// 8. Green water end to end: murky cyan-green frame — the murk ends no lighter than the source; seagrass-like olive stays on the yellow side (no lavender).
+{
+  const px = frame((x, y, i) => {
+    const n = (noise(i * 3.7) - 0.5) * 8;
+    if (y > 0.55 * H && x < 0.5 * W) return [96 + n, 118 + n, 52 + n]; // olive seagrass
+    return [14 + n * 0.3, 96 + n, 70 + n]; // dark cyan-green murk
+  });
+  const { a, out } = grade(px, DEFAULT_SETTINGS);
+  let ls = 0, lo = 0, k = 0, sa = 0, sb = 0, kg = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    if (y < 0.4 * H) { ls += lab(px, i)[0]; lo += lab(out, i)[0]; k++; }
+    if (y > 0.65 * H && x < 0.4 * W) { const [, aa, bb] = lab(out, i); sa += aa; sb += bb; kg++; }
+  }
+  const hue = hueDeg(sa / kg, sb / kg);
+  assert.ok(a.params.binf[1] > 0, "veil fitted");
+  assert.ok(lo / k <= ls / k + 0.005, `murk L ${(lo / k).toFixed(3)} vs source ${(ls / k).toFixed(3)}`);
+  assert.ok(hue > 30 && hue < 140, `seagrass hue ${hue.toFixed(0)}° stays olive/brown, not lavender`);
+  console.log(`ok  murk not lifted (L ${(ls / k).toFixed(3)} → ${(lo / k).toFixed(3)}), seagrass hue ${hue.toFixed(0)}°`);
 }
