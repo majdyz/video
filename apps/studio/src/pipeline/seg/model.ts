@@ -2,7 +2,17 @@
 // progress), the worker that runs them, and the SegModel the track pass talks to. Nothing here runs until the
 // user turns "AI subject detection" on.
 import type { GraphName } from "./edgetam.ts";
-import type { SegModel, StepResult } from "./track.ts";
+import type { SegModel, SegObject, StepResult } from "./track.ts";
+import type { SessionFrameOut } from "./session.ts";
+
+/** Background-session events from the worker (session.ts). */
+export type SessionEvent =
+  | { ev: "frames"; items: SessionFrameOut[] }
+  | { ev: "keys"; conf: { t: number; conf: number }[] }
+  | { ev: "progress"; done: number; total: number }
+  | { ev: "idle" }
+  | { ev: "rejected"; id: number };
+export type SessionInfo = { width: number; height: number; mw: number; mh: number; i0: number; n: number };
 
 export type SegManifest = { model: string; source: string; files: Record<string, { bytes: number; sha256: string }> };
 export type SegLoadInfo = { ep: string; f16: boolean; threads: number; loadMs: number; bytes: number };
@@ -72,10 +82,13 @@ export class WorkerSegModel implements SegModel {
   private seq = 0;
   private waiting = new Map<number, { res: (v: Record<string, unknown>) => void; rej: (e: Error) => void }>();
   info: SegLoadInfo | null = null;
+  /** Background-session events (frames, keyframe confidences, progress, idle). */
+  onEvent: ((e: SessionEvent) => void) | null = null;
 
   constructor() {
     this.w = new Worker(new URL("./seg-worker.ts", import.meta.url), { type: "module" });
     this.w.onmessage = (ev: MessageEvent<Record<string, unknown> & { id: number; error?: string }>) => {
+      if (ev.data.type === "ev") { this.onEvent?.(ev.data as unknown as SessionEvent); return; }
       const p = this.waiting.get(ev.data.id);
       if (!p) return;
       this.waiting.delete(ev.data.id);
@@ -135,6 +148,32 @@ export class WorkerSegModel implements SegModel {
 
   async drop(key: string): Promise<void> {
     await this.call({ type: "drop", key });
+  }
+
+  // ------------------------------------------------------------------ background session (session.ts)
+
+  async sessionOpen(file: File, start: number, end: number): Promise<SessionInfo> {
+    return (await this.call({ type: "session-open", file, start, end })) as unknown as SessionInfo;
+  }
+
+  async sessionAdd(object: SegObject & { id: number }): Promise<number> {
+    return Number((await this.call({ type: "session-add", object })).t);
+  }
+
+  async sessionRemove(object: number): Promise<void> {
+    await this.call({ type: "session-remove", object });
+  }
+
+  async sessionRestore(object: number): Promise<void> {
+    await this.call({ type: "session-restore", object });
+  }
+
+  async sessionExclude(object: number, t: number, u: number, v: number): Promise<{ action: "removed"; removed: number } | { action: "part" | "exclude" }> {
+    return (await this.call({ type: "session-exclude", object, t, u, v })) as unknown as { action: "removed"; removed: number } | { action: "part" | "exclude" };
+  }
+
+  async sessionClose(): Promise<void> {
+    await this.call({ type: "session-close" });
   }
 
   dispose(): void {

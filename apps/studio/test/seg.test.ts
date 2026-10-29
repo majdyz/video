@@ -3,13 +3,13 @@
 import assert from "node:assert/strict";
 import { assembleMemory, frameIndex, isEmpty, MEM_DIM, MEM_TOKENS, newBank, pruneBank, storeMemory, type MemEntry } from "../src/pipeline/seg/bank.ts";
 import { denseFlow, warp, type Gray } from "../src/pipeline/seg/flow.ts";
-import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, guidedFilter, iou, promptFromMask } from "../src/pipeline/seg/mask.ts";
+import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, guidedFilter, iou, nearMap, promptFromMask, sdfFeather } from "../src/pipeline/seg/mask.ts";
 import { composeSegStrength } from "../../aqua-fix/src/engine/seg-overlay.ts";
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
 import { SUBJECT_CLEAR } from "../../aqua-fix/src/engine/params.ts";
 import { fillInterval, keyTimes, sampleRange, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
-import { autoObjects, ML_OUTLINE_ID, outlineSelection, popComponentBox, promptFor, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
+import { autoObjects, ML_OUTLINE_ID, outlineSelection, popComponentBox, promptFor, SegLive, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
 
 const entry = (v: number): MemEntry => ({ mem: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), pos: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), ptr: new Float32Array(256).fill(v), score: 1 });
 const tpos = Float32Array.from({ length: 7 * 64 }, (_, i) => Math.floor(i / 64) * 100);
@@ -162,9 +162,11 @@ const img = (dx: number, dy: number): Gray => {
   assert.equal(segPopsAt(null, 0.5, 0.5), false);
   // Outlines with AI on: the ML subject (solid) over the engine's other animals, on the overlay grid.
   const eng = { width: 2, height: 2, ids: Uint16Array.from([0, 0, 0, 7]), animals: [{ id: 7, strength: 0.1 }] };
-  const os = outlineSelection({ width: 4, height: 4, alpha, exclude: null, near }, eng)!;
+  const nearPart = near.slice(); nearPart[15] = 0; // the ML is trusted everywhere but the far corner
+  const os = outlineSelection({ width: 4, height: 4, alpha, exclude: null, near: nearPart }, eng)!;
   assert.equal(os.ids[5], ML_OUTLINE_ID);
-  assert.equal(os.ids[15], 7, "the engine's animal elsewhere, resampled");
+  assert.equal(os.ids[15], 7, "the engine's animal where the ML is not trusted, resampled");
+  assert.equal(os.ids[10], 0, "where the ML is trusted, its 'not the subject' wins over the engine's animal");
   assert.deepEqual(os.animals.map((a) => a.id).sort(), [7, ML_OUTLINE_ID].sort());
   assert.equal(outlineSelection(null, eng), eng, "AI off: the engine's selection");
   // Taking out a popped subject: the exclude gets the popped region's box.
@@ -211,6 +213,41 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(Math.hypot(ba - oa, bb - ob) > 0.35 * Math.hypot(blue[0] - other[0], blue[1] - other[1]), "two subject colours stay apart, about in proportion to the chroma (no single pasted colour)");
   const [wa, wb] = clearCast(warm[0], warm[1], vh[0], vh[1], 1);
   assert.ok(Math.hypot(wa, wb) >= (1 - SUBJECT_CLEAR.desat) * Math.hypot(...warm) - 1e-9, "a colour away from the water's hue keeps (almost) all of its chroma");
+}
+
+// The feather keeps thin parts: a 3 px fin stays above 0.5 along its middle (a blur of the same width erases it),
+// and the edge is a ramp (no hard step).
+{
+  const w = 80, h = 40, m = new Float32Array(w * h);
+  for (let y = 10; y < 30; y++) for (let x = 10; x < 40; x++) m[y * w + x] = 1; // body
+  for (let y = 19; y < 22; y++) for (let x = 40; x < 75; x++) m[y * w + x] = 1; // fin, 3 px
+  const s = sdfFeather(m, w, h, 6), b = feather(m, w, h, 6);
+  assert.ok(s[20 * w + 65] > 0.5, `fin kept (${s[20 * w + 65].toFixed(2)})`);
+  assert.ok(b[20 * w + 65] < 0.5, "a blur would have erased it");
+  let step = 0;
+  for (let x = 1; x < w; x++) step = Math.max(step, Math.abs(s[15 * w + x] - s[15 * w + x - 1]));
+  assert.ok(step <= 0.1, `soft edge (${step.toFixed(2)} per px)`);
+  // ML trust (near): full on the fin, as on the body, and nothing far out.
+  const n = nearMap(m, w, h, 4);
+  assert.ok(n[20 * w + 65] > 0.95 && n[20 * w + 20] > 0.95, `fin trusted (${n[20 * w + 65].toFixed(2)})`);
+  assert.ok(n[2 * w + 78] < 0.01, "far water not");
+}
+
+// Live masks hand over smoothly: full ML weight inside a filled run, easing to nothing toward unfilled frames,
+// null on unfilled frames (the engine's own mask there).
+{
+  const mw = 16, mh = 9, qw = 4, qh = 3, n = 60;
+  const live = new SegLive({ mw, mh, i0: 0, n });
+  const frame = (i: number) => ({ i, alpha: new Uint8Array(mw * mh).fill(255), nearQ: new Uint8Array(qw * qh).fill(255), excQ: null, depQ: new Uint8Array(qw * qh) });
+  live.put(Array.from({ length: 30 }, (_, i) => frame(i))); // frames 0..29 filled
+  live.setConf(keyTimes(0, 2).map((t) => ({ t, conf: 1 })));
+  const near = (t: number) => live.at(t)?.near[0] ?? null;
+  assert.ok(Math.abs((near(0.3) ?? 0) - 1) < 1e-3, "full weight inside a filled run");
+  assert.equal(near(1.2), null, "unfilled frame: the engine's mask");
+  const ws = [20, 22, 24, 26, 28, 29].map((i) => near(i / 30) ?? -1);
+  for (let k = 1; k < ws.length; k++) assert.ok(ws[k] <= ws[k - 1] + 1e-6, `eases out toward the gap (${ws.map((w) => w.toFixed(2))})`);
+  assert.ok(ws[ws.length - 1] < 0.05 && ws[0] > 0.95, "reaches nothing at the edge");
+  assert.equal(live.coverage, 0.5);
 }
 
 console.log("seg tests passed");

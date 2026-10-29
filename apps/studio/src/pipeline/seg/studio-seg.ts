@@ -1,21 +1,17 @@
-// AI subject detection (beta) for Subject pop: the per-device toggle, the lazy model, the track pass over the clip
-// and the overlay the colour engine reads per frame. The engine's own subject masks stay the default and the
+// AI subject detection (beta) for Subject pop: the per-device toggle, the lazy model, the clip's background session
+// (session.ts in the worker: its own decoder, so it runs while the clip plays) and the overlay the colour engine reads
+// per frame. The engine's own subject masks stay the default and the
 // fallback: with the toggle off, before a pass, outside it, while unsure, or when the model can't load or runs
 // too slowly, the overlay is null (or eases to nothing) and the grade is exactly the engine's.
 import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts";
 import type { SubjectOverride, SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
-import { segDebug, segLog, WorkerSegModel } from "./model.ts";
-import { bbox, promptFromMask } from "./mask.ts";
-import { maskSize, runPass, type FrameSource, type SegModel, type SegObject, type SegTrack } from "./track.ts";
+import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
+import { bbox, promptFromMask, resize, smoothstep } from "./mask.ts";
+import { maskSize, SEG, type SegObject } from "./track.ts";
+import type { SessionFrameOut } from "./session.ts";
 
 const PREF_KEY = "deepfix.subjectPop.ai";
-/**
- * A pass projected to take longer than this (ms; median step time × the pass's steps, after the first few) is "too
- * slow": it stops and the engine's masks stay. `?segslow=<ms>` overrides it (tests on slow machines).
- */
-const SLOW_MS = 15 * 60_000;
-
 export type SegPhase = "off" | "download" | "starting" | "ready" | "tracking" | "unavailable";
 export type SegStatus = { on: boolean; phase: SegPhase; progress: number | null; note: string | null };
 
@@ -34,14 +30,6 @@ function writePref(on: boolean): void {
   } catch { /* private mode: this session only */ }
 }
 
-function slowLimit(): number {
-  try {
-    const q = Number(new URLSearchParams(location.search).get("segslow"));
-    return q > 0 ? q : SLOW_MS;
-  } catch {
-    return SLOW_MS;
-  }
-}
 
 /** The inline status under the toggle (null: the default hint). */
 export function segStatusText(s: SegStatus): string | null {
@@ -50,7 +38,7 @@ export function segStatusText(s: SegStatus): string | null {
   switch (s.phase) {
     case "download": return `Downloading the model…${pc}`;
     case "starting": return "Starting the model…";
-    case "tracking": return `AI: following the subjects you tapped…${pc}`;
+    case "tracking": return `AI subjects${pc}`;
     case "unavailable": return s.note ?? "Not available here; using standard detection";
     default: return "On: tap a subject to follow it with AI";
   }
@@ -101,7 +89,11 @@ export function outlineSelection(o: SegOverlay | null, engine: SubjectSelection 
   let ml = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const i = y * w + x;
-    if (o.alpha[i] > 0.5 && o.near[i] > 0.3) { ids[i] = ML_OUTLINE_ID; ml++; continue; }
+    if (o.near[i] > 0.3) {
+      // Where the ML is trusted its answer is the outline, "not the subject" included (an excluded fin).
+      if (o.alpha[i] > 0.5) { ids[i] = ML_OUTLINE_ID; ml++; }
+      continue;
+    }
     if (engine) ids[i] = engine.ids[Math.min(engine.height - 1, Math.floor(((y + 0.5) / h) * engine.height)) * engine.width + Math.min(engine.width - 1, Math.floor(((x + 0.5) / w) * engine.width))];
   }
   const animals = (engine?.animals ?? []).filter((a) => ids.includes(a.id));
@@ -151,21 +143,103 @@ export function promptFor(o: Pick<SubjectOverride, "u" | "v">, boxes: readonly P
   return prompt;
 }
 
+/**
+ * The masks the background session has posted (session.ts), on the 30 Hz grid: per frame the feathered alpha (mask
+ * grid) and quarter-size near / exclude / water-departure maps, plus the keyframe confidences. `at(t)` is the
+ * engine overlay; frames not filled yet are null, and the ML weight eases to nothing over ~0.3 s toward them, so the
+ * preview hands over to the engine's mask smoothly.
+ */
+export class SegLive {
+  readonly mw: number;
+  readonly mh: number;
+  readonly i0: number;
+  readonly n: number;
+  private frames: (SessionFrameOut | undefined)[];
+  private conf: { t: number; conf: number }[] = [];
+  filled = 0;
+  constructor(info: { mw: number; mh: number; i0: number; n: number }) {
+    this.mw = info.mw;
+    this.mh = info.mh;
+    this.i0 = info.i0;
+    this.n = info.n;
+    this.frames = new Array(info.n);
+  }
+
+  put(items: SessionFrameOut[]): void {
+    for (const f of items) {
+      if (f.i < 0 || f.i >= this.n) continue;
+      if (!this.frames[f.i]) this.filled++;
+      this.frames[f.i] = f;
+    }
+  }
+
+  setConf(c: { t: number; conf: number }[]): void {
+    this.conf = c;
+  }
+
+  /** Bytes held (memory note). */
+  get bytes(): number {
+    return this.frames.reduce((s, f) => s + (f ? f.alpha.byteLength + f.nearQ.byteLength + f.depQ.byteLength + (f.excQ?.byteLength ?? 0) : 0), 0);
+  }
+
+  /** Keyframe confidences eased over time (as track.ts SegTrack.weightAt). */
+  private weightAt(t: number): number {
+    let num = 0, den = 0;
+    const K = this.conf;
+    for (let i = 0; i < K.length; i++) {
+      const d = Math.abs(K[i].t - t);
+      if (d > SEG.easeS) continue;
+      let c = K[i].conf;
+      for (let j = i - 1; j >= 0 && K[i].t - K[j].t <= SEG.erodeS + 1e-6; j--) c = Math.min(c, K[j].conf);
+      for (let j = i + 1; j < K.length && K[j].t - K[i].t <= SEG.erodeS + 1e-6; j++) c = Math.min(c, K[j].conf);
+      const wk = 0.5 + 0.5 * Math.cos((Math.PI * d) / SEG.easeS);
+      num += wk * c; den += wk;
+    }
+    return den > 0 ? num / den : 0;
+  }
+
+  /** The overlay at clip time t, or null where nothing is filled near t. */
+  at(t: number): SegOverlay | null {
+    const i = Math.round(t * SEG.sampleHz) - this.i0;
+    const f = i >= 0 && i < this.n ? this.frames[i] : undefined;
+    if (!f) return null;
+    // Hand-over: the weight eases out over HAND frames toward unfilled frames.
+    const HAND = Math.round(0.3 * SEG.sampleHz);
+    let gap = HAND;
+    for (let d = 1; d <= HAND; d++) {
+      const a = i - d, b = i + d;
+      if ((a >= 0 && !this.frames[a]) || (b < this.n && !this.frames[b])) { gap = d - 1; break; }
+    }
+    const w = this.weightAt(t) * smoothstep(0, HAND, gap);
+    const { mw, mh } = this, qw = Math.ceil(mw / 4), qh = Math.ceil(mh / 4);
+    const up = (q: Uint8Array) => resize(Float32Array.from(q, (x) => x / 255), qw, qh, mw, mh);
+    const near = up(f.nearQ);
+    for (let k = 0; k < near.length; k++) near[k] *= w;
+    return { width: mw, height: mh, alpha: Float32Array.from(f.alpha, (x) => x / 255), exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ) };
+  }
+
+  /** Share of the grid filled (0..1). */
+  get coverage(): number {
+    return this.n ? this.filled / this.n : 0;
+  }
+}
+
+type UndoOp = { kind: "added"; id: number } | { kind: "removed"; id: number };
+
 export class SubjectSeg {
   status: SegStatus;
   private model: WorkerSegModel | null = null;
   private loading: Promise<WorkerSegModel | null> | null = null;
-  private track: SegTrack | null = null;
-  private trackKey = "";
-  private gen = 0;
-  private running: Promise<void> | null = null;
-  private runningKey = "";
-  private stoppedGen = -1;
+  live: SegLive | null = null;
+  private opening: Promise<SegLive | null> | null = null;
+  private file: File | null = null;
+  private nextId = 1;
+  private undoOps: UndoOp[] = [];
+  private idleWaiters: (() => void)[] = [];
+  private busy = false;
   private cache: { t: number; o: SegOverlay | null } | null = null;
-  /** The engine's automatic subjects as ML prompts, seeded once per clip (see autoObjects); null = not yet. */
+  /** The engine's automatic subjects, seeded once per clip (autoObjects); null = not yet. */
   autos: SegObject[] | null = null;
-  /** Person boxes at each tap (key: t:u:v), captured when the tap happened. */
-  private boxes = new Map<string, PersonBox[]>();
   private onChange: () => void;
 
   constructor(onChange: () => void) {
@@ -188,8 +262,7 @@ export class SubjectSeg {
   setOn(on: boolean): void {
     writePref(on);
     this.set({ on, phase: on ? (this.model ? "ready" : "download") : "off", progress: null, note: null });
-    if (!on) this.cancel();
-    else void this.ensureModel();
+    if (on) void this.ensureModel();
   }
 
   ensureModel(): Promise<WorkerSegModel | null> {
@@ -200,6 +273,7 @@ export class SubjectSeg {
       const m = new WorkerSegModel();
       try {
         await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }));
+        m.onEvent = (e) => this.onEvent(e);
         this.model = m;
         this.set({ phase: "ready", progress: null });
         return m;
@@ -215,153 +289,143 @@ export class SubjectSeg {
     return this.loading;
   }
 
-  /** Remembers the person boxes at a tap (they prompt the segmenter with the diver's box). */
-  noteTap(o: Pick<SubjectOverride, "t" | "u" | "v">, boxes: readonly PersonBox[]): void {
-    this.boxes.set(`${o.t}:${o.u}:${o.v}`, boxes.slice());
+  private onEvent(e: SessionEvent): void {
+    const live = this.live;
+    if (!live) return;
+    if (e.ev === "frames") {
+      live.put(e.items);
+      this.cache = null;
+      this.onFrames?.();
+    } else if (e.ev === "keys") {
+      live.setConf(e.conf);
+      this.cache = null;
+    } else if (e.ev === "progress") {
+      this.busy = e.done < e.total;
+      this.set({ phase: "tracking", progress: e.total ? e.done / e.total : null });
+    } else if (e.ev === "rejected") {
+      segLog(`tap ${e.id} came out as the background; dropped`);
+      this.onRejected?.();
+    } else if (e.ev === "idle") {
+      this.busy = false;
+      segLog(`session idle: ${live.filled}/${live.n} frames filled, ${(live.bytes / 1e6).toFixed(1)} MB`);
+      this.set({ phase: "ready", progress: null });
+      const w = this.idleWaiters;
+      this.idleWaiters = [];
+      for (const r of w) r();
+    }
   }
 
-  objectsFor(list: readonly SubjectOverride[]): SegObject[] {
-    return list.map((o) => ({ kind: o.action, t: o.t, prompt: promptFor(o, this.boxes.get(`${o.t}:${o.u}:${o.v}`) ?? []) }));
-  }
+  /** Called when a tapped include was dropped (the tap was on the water). */
+  onRejected: (() => void) | null = null;
 
-  /** A new clip (or no clip): forget the pass and the taps. */
-  reset(): void {
-    this.cancel();
-    this.track = null;
-    this.trackKey = "";
-    this.cache = null;
-    this.boxes.clear();
-    this.autos = null;
-  }
-
-  private cancel(): void {
-    this.gen++;
-    this.runningKey = "";
-  }
-
-  /** Stops a running pass (playback took the video); the next run() starts it again. */
-  stopPass(): void {
-    if (!this.running) return;
-    this.stoppedGen = this.gen;
-    this.cancel();
-    this.set({ phase: this.model ? "ready" : this.status.phase, progress: null });
-  }
-
-  /** The running pass (an export waits for it). */
-  get pending(): Promise<void> | null {
-    return this.running;
-  }
+  /** Called when new frames arrive (the studio repaints a paused frame). */
+  onFrames: (() => void) | null = null;
 
   /**
-   * Follows the corrections' subjects through the clip with the ML tracker (a no-op when the toggle is off, nothing
-   * to follow, or the same prompts were already followed). `source(t)` seeks and returns the frame as the engine
-   * sees it.
+   * Opens the clip's background session (once per clip): the worker decodes the file itself, so the pass runs while
+   * the clip plays. Resolves to the live masks, or null (AI off, no model).
    */
-  run(o: { list: readonly SubjectOverride[]; autos?: readonly SegObject[]; start: number; end: number; width: number; height: number; source: FrameSource; done?: () => void }): Promise<void> {
-    if (!this.on) return Promise.resolve();
-    const objects = [...(o.autos ?? []), ...this.objectsFor(o.list)];
-    const key = JSON.stringify({ objects, s: o.start, e: o.end, w: o.width, h: o.height });
-    if (!objects.length) {
-      this.track = null;
-      this.trackKey = key;
-      this.cache = null;
-      return Promise.resolve();
-    }
-    if (key === this.trackKey && this.track) return Promise.resolve();
-    if (key === this.runningKey && this.running) return this.running;
-    const gen = ++this.gen;
-    this.runningKey = key;
-    const run = (async () => {
+  start(file: File, duration: number): Promise<SegLive | null> {
+    if (!this.on) return Promise.resolve(null);
+    if (this.file === file && (this.live || this.opening)) return this.opening ?? Promise.resolve(this.live);
+    this.file = file;
+    this.opening = (async () => {
       const model = await this.ensureModel();
-      if (!model || gen !== this.gen) return;
-      this.set({ phase: "tracking", progress: 0 });
-      const times: number[] = [];
-      let slow = false, steps = 0;
-      const t0 = performance.now();
+      if (!model || this.file !== file) return null;
       try {
-        const track = await runPass({
-          objects, start: o.start, end: o.end, width: o.width, height: o.height, source: traced(o.source), model: segDebug() ? tracedModel(model) : model,
-          cancelled: () => gen !== this.gen || slow,
-          onProgress: (d, n) => { steps = n; if (gen === this.gen) this.set({ progress: d / n }); },
-          onTiming: (s) => {
-            times.push(s.encodeMs + s.stepMs);
-            const med = [...times].sort((a, b) => a - b)[times.length >> 1];
-            if (times.length >= 3 && med * steps > slowLimit()) slow = true;
-          },
-        });
-        if (slow) {
-          segLog(`too slow (median ${times.sort((a, b) => a - b)[times.length >> 1].toFixed(0)} ms per step, ${steps.toFixed(0)} steps); using the engine's masks`);
-          this.set({ phase: "unavailable", progress: null, note: "Too slow on this device; using standard detection" });
-          return;
-        }
-        if (!track || gen !== this.gen) return;
-        this.track = track;
-        this.trackKey = key;
-        this.cache = null;
-        segLog(`pass: ${track.keys.length} keyframes, ${(performance.now() - t0).toFixed(0)} ms, median ${[...times].sort((a, b) => a - b)[times.length >> 1]?.toFixed(0)} ms/keyframe, ${track.keys.reduce((s, k) => s + k.reprompts, 0)} re-prompts`);
-        this.set({ phase: "ready", progress: null });
+        const info = await model.sessionOpen(file, 0, Math.max(0, duration));
+        if (this.file !== file) return null;
+        this.live = new SegLive(info);
+        segLog(`session open: ${info.width}×${info.height}, masks ${info.mw}×${info.mh}, ${info.n} frames`);
+        return this.live;
       } catch (e) {
-        segLog("pass failed; using the engine's masks", e);
-        if (gen === this.gen) this.set({ phase: "ready", progress: null });
+        segLog("session failed to open; using the engine's masks", e);
+        this.set({ phase: "unavailable", note: "This clip can't be decoded for AI detection; using standard detection" });
+        return null;
       } finally {
-        // A pass replaced by a newer one leaves the video to it; a finished or play-stopped pass hands it back.
-        if (gen === this.gen || gen === this.stoppedGen) o.done?.();
+        this.opening = null;
       }
     })();
-    const p = run.finally(() => { if (this.running === p) this.running = null; });
-    this.running = p;
-    return p;
+    return this.opening;
   }
 
-  /** The overlay for the frame at clip time t (pure function of the pass: preview and export agree). */
+  /** Seeds the engine's own subjects (once per clip). */
+  async seedAutos(objs: SegObject[]): Promise<void> {
+    if (this.autos || !objs.length || !this.live || !this.model) return;
+    this.autos = objs;
+    for (const o of objs) await this.model.sessionAdd({ ...o, id: this.nextId++ });
+    segLog(`seeded ${objs.length} automatic subject(s)`);
+  }
+
+  /** A tap that adds what is missing: a new include object at (t, u, v), followed both ways from the tap. */
+  async include(t: number, u: number, v: number, boxes: readonly PersonBox[]): Promise<void> {
+    if (!this.live || !this.model) return;
+    const id = this.nextId++;
+    await this.model.sessionAdd({ id, kind: "include", t, prompt: promptFor({ u, v }, boxes) });
+    this.undoOps.push({ kind: "added", id });
+    this.onChange();
+  }
+
+  /** A tap on what the ML pops: removes that subject (most of it under the tap) or just the tapped part. */
+  async exclude(t: number, u: number, v: number): Promise<"removed" | "part" | "exclude" | null> {
+    if (!this.live || !this.model) return null;
+    const id = this.nextId++;
+    const r = await this.model.sessionExclude(id, t, u, v);
+    this.undoOps.push(r.action === "removed" ? { kind: "removed", id: r.removed } : { kind: "added", id });
+    segLog(`exclude tap at ${t.toFixed(2)} s: ${r.action}`);
+    this.onChange();
+    return r.action;
+  }
+
+  get canUndo(): boolean {
+    return this.undoOps.length > 0;
+  }
+
+  /** Undoes the last AI tap (an added object goes, a removed one comes back). */
+  async undo(): Promise<boolean> {
+    const op = this.undoOps.pop();
+    if (!op || !this.model) return false;
+    if (op.kind === "added") await this.model.sessionRemove(op.id);
+    else await this.model.sessionRestore(op.id);
+    this.onChange();
+    return true;
+  }
+
+  /** A new clip (or no clip): the session closes. */
+  reset(): void {
+    this.file = null;
+    this.live = null;
+    this.opening = null;
+    this.cache = null;
+    this.autos = null;
+    this.undoOps = [];
+    this.busy = false;
+    void this.model?.sessionClose().catch(() => undefined);
+    for (const r of this.idleWaiters) r();
+    this.idleWaiters = [];
+  }
+
+  /** Resolves when the session has nothing left to do (an export waits for it: the same masks as the preview). */
+  get pending(): Promise<void> | null {
+    if (!this.live || !this.busy) return null;
+    return new Promise((r) => this.idleWaiters.push(r));
+  }
+
+  /** The overlay for the frame at clip time t (null: the engine's own masks). */
   overlayAt(t: number): SegOverlay | null {
-    if (!this.on || !this.track) return null;
+    if (!this.on || !this.live) return null;
     if (this.cache && Math.abs(this.cache.t - t) < 1e-6) return this.cache.o;
-    const m = this.track.at(t);
-    const o = m && (m.weight > 0 || m.exclude) ? { width: m.width, height: m.height, alpha: m.alpha, exclude: m.exclude, near: m.near, depart: m.depart } : null;
+    const o = this.live.at(t);
     this.cache = { t, o };
     return o;
   }
 
   /** Part of the export key: the ML masks change the output. */
   exportKey(): string {
-    return this.on && this.track ? `seg:${this.trackKey.length}:${hash(this.trackKey)}` : "";
+    return this.on && this.live ? `seg:${this.nextId}:${this.undoOps.length}:${this.live.filled}` : "";
   }
 
   maskSize(width: number, height: number): [number, number] {
     return maskSize(width, height);
   }
-}
-
-function hash(s: string): string {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
-  return (h >>> 0).toString(36);
-}
-
-/** `?debug=1`: every frame read and model call of a pass, with its time (a stuck pass shows where). */
-function traced(src: FrameSource): FrameSource {
-  if (!segDebug()) return src;
-  return async (t, lumaOnly) => {
-    const t0 = performance.now();
-    segLog(`frame ${t.toFixed(3)}${lumaOnly ? " (luma)" : ""}…`);
-    const f = await src(t, lumaOnly);
-    segLog(`frame ${t.toFixed(3)} ${(performance.now() - t0).toFixed(0)} ms`);
-    return f;
-  };
-}
-
-function tracedModel(m: SegModel): SegModel {
-  const time = async <T>(what: string, p: () => Promise<T>): Promise<T> => {
-    const t0 = performance.now();
-    segLog(`${what}…`);
-    const r = await p();
-    segLog(`${what} ${(performance.now() - t0).toFixed(0)} ms`);
-    return r;
-  };
-  return {
-    encode: (rgba) => time("encode", () => m.encode(rgba)),
-    step: (key, frame, points, labels, reverse) => time(`step ${key}@${frame}`, () => m.step(key, frame, points, labels, reverse)),
-    drop: (key) => m.drop(key),
-  };
 }

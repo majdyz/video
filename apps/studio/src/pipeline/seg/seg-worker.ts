@@ -2,14 +2,27 @@
 // Requests carry an id; every reply echoes it ({ id, ok, ... } or { id, error }).
 import * as ort from "onnxruntime-web/webgpu";
 import { EdgeTam, type BankParams, type GraphName } from "./edgetam.ts";
+import { SegSession } from "./session.ts";
+import { openSessionFrames } from "./frames.ts";
+import type { SegObject } from "./track.ts";
 
 type Req =
   | { id: number; type: "init"; models: Record<GraphName, ArrayBuffer>; bank: BankParams; threads: number; prefer: "auto" | "wasm" }
   | { id: number; type: "encode"; rgba: ArrayBuffer }
   | { id: number; type: "step"; key: string; frame: number; points: [number, number][] | null; labels: number[] | null; reverse: boolean }
-  | { id: number; type: "drop"; key: string };
+  | { id: number; type: "drop"; key: string }
+  // The background session (session.ts): the clip's own decoder, objects, per-frame masks posted as events.
+  | { id: number; type: "session-open"; file: File; start: number; end: number }
+  | { id: number; type: "session-add"; object: SegObject & { id: number } }
+  | { id: number; type: "session-remove"; object: number }
+  | { id: number; type: "session-restore"; object: number }
+  | { id: number; type: "session-exclude"; object: number; t: number; u: number; v: number }
+  | { id: number; type: "session-close" };
 
 let model: EdgeTam | null = null;
+let session: SegSession | null = null;
+/** Session events (no request id): frames, keyframe confidences, progress, idle. */
+const emit = (m: object, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage({ type: "ev", ...m }, transfer);
 
 async function webgpuInfo(): Promise<{ ok: boolean; f16: boolean }> {
   const gpu = (navigator as unknown as { gpu?: { requestAdapter(): Promise<{ features: Set<string> } | null> } }).gpu;
@@ -51,6 +64,35 @@ if (!isPthread) self.onmessage = async (ev: MessageEvent<Req>) => {
     } else if (r.type === "drop") {
       model.drop(r.key);
       post({ ok: true });
+    } else if (r.type === "session-open") {
+      session?.close();
+      const frames = await openSessionFrames(r.file);
+      const s = new SegSession(model, frames, { start: r.start, end: r.end }, {
+        frames: (items) => emit({ ev: "frames", items }, items.flatMap((x) => [x.alpha.buffer, x.nearQ.buffer, x.depQ.buffer, ...(x.excQ ? [x.excQ.buffer] : [])])),
+        keys: (conf) => emit({ ev: "keys", conf }),
+        progress: (done, total) => emit({ ev: "progress", done, total }),
+        idle: () => emit({ ev: "idle" }),
+        rejected: (id) => emit({ ev: "rejected", id }),
+      });
+      session = s;
+      post({ ok: true, width: frames.width, height: frames.height, mw: s.mw, mh: s.mh, i0: s.grid.i0, n: s.grid.n });
+    } else if (r.type === "session-close") {
+      session?.close();
+      session = null;
+      post({ ok: true });
+    } else if (!session) {
+      throw new Error("no session");
+    } else if (r.type === "session-add") {
+      session.add(r.object);
+      post({ ok: true, t: session.snap(r.object.t) });
+    } else if (r.type === "session-remove") {
+      session.remove(r.object);
+      post({ ok: true });
+    } else if (r.type === "session-restore") {
+      session.restore(r.object);
+      post({ ok: true });
+    } else if (r.type === "session-exclude") {
+      post({ ok: true, ...(await session.excludeAt(r.object, r.t, r.u, r.v)) });
     }
   } catch (e) {
     post({ error: e instanceof Error ? e.message : String(e) });
