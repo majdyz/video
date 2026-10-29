@@ -1,0 +1,6 @@
+Studio AI subject detection uses EdgeTAM (Meta Platforms, Inc.), https://github.com/facebookresearch/EdgeTAM
+Copyright (c) Meta Platforms, Inc. and affiliates. Licensed under the Apache License, Version 2.0.
+ONNX graphs: jax-image-tools/edgetam-video-onnx (Apache-2.0); weights converted to fp16 storage by deepfix
+(apps/studio/scripts/seg-models.py), no other changes.
+Runtime: ONNX Runtime Web 1.20.1, Copyright (c) Microsoft Corporation, MIT License.
+A copy of the Apache License is at http://www.apache.org/licenses/LICENSE-2.0

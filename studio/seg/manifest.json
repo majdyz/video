@@ -1,0 +1,30 @@
+{
+ "model": "edgetam-video",
+ "source": "jax-image-tools/edgetam-video-onnx@8ca3d3e4169938e65b552cdf14542fde25e8badb",
+ "files": {
+  "NOTICE": {
+   "bytes": 532,
+   "sha256": "31f5590870b0c6f1fc5292401cb45945b653c3a545399c1b8028b9edb6947ae9"
+  },
+  "bank.json": {
+   "bytes": 16128,
+   "sha256": "2b9bf92f7a9adb9bb1686403813e8c322ab6560b590c4d5db1c4e9d3a5c0bd28"
+  },
+  "mask_decoder.onnx": {
+   "bytes": 9026366,
+   "sha256": "1234643d4202c9ce513f5c727bbf6a90f9e6784bfed16bf9bb1ec74a2f50d321"
+  },
+  "memory_attention.onnx": {
+   "bytes": 10543972,
+   "sha256": "74611894ceee4287f83e341eb9f69941e31f4dec808cebe0e3c94fe84f7f8307"
+  },
+  "memory_encoder.onnx": {
+   "bytes": 3442661,
+   "sha256": "5baf96f839a386b94b3e83941ca6845df218ef3189b434b64975bb2caf82bc61"
+  },
+  "vision_encoder.onnx": {
+   "bytes": 10052627,
+   "sha256": "bc93c159afc061be18cef400b6cec5aa2cd6cf0b3bcc68f0070ce428bf626332"
+  }
+ }
+}
