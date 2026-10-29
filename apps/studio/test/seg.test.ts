@@ -6,6 +6,8 @@ import { denseFlow, warp, type Gray } from "../src/pipeline/seg/flow.ts";
 import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, guidedFilter, iou, promptFromMask } from "../src/pipeline/seg/mask.ts";
 import { composeSegStrength } from "../../aqua-fix/src/engine/seg-overlay.ts";
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
+import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
+import { SUBJECT_CLEAR } from "../../aqua-fix/src/engine/params.ts";
 import { fillInterval, keyTimes, sampleRange, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
 import { autoObjects, ML_OUTLINE_ID, outlineSelection, popComponentBox, promptFor, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
 
@@ -195,6 +197,20 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(c[2] <= SEG_TONE.waterFloor + 1e-6, `a sure leak on water keeps the cap (${c[2]})`);
   assert.equal(c[6], 1, "the subject keeps the full alpha");
   assert.equal(composeSegStrength(st, ov, false).data[2], 1, "open water: the shader caps it instead");
+}
+
+// The pop tone (subject clearing): shrinks the water cast along the pixel's own hue, bounded, never a fixed target.
+{
+  const vh: [number, number] = [-0.6, -0.8]; // the water's hue (unit)
+  const blue: [number, number] = [-0.06, -0.08], other: [number, number] = [-0.02, -0.11], warm: [number, number] = [0.05, 0.03];
+  const [ba, bb] = clearCast(blue[0], blue[1], vh[0], vh[1], 1);
+  assert.ok(Math.abs(Math.atan2(bb, ba) - Math.atan2(blue[1], blue[0])) < 1e-9, "the hue never turns");
+  assert.ok(Math.hypot(ba, bb) < Math.hypot(...blue) && Math.hypot(...blue) - Math.hypot(ba, bb) <= SUBJECT_CLEAR.cMax + SUBJECT_CLEAR.desat * 0.1 + 1e-9, "a bounded step toward neutral");
+  assert.deepEqual(clearCast(blue[0], blue[1], vh[0], vh[1], 0), blue, "no weight: untouched");
+  const [oa, ob] = clearCast(other[0], other[1], vh[0], vh[1], 1);
+  assert.ok(Math.hypot(ba - oa, bb - ob) > 0.35 * Math.hypot(blue[0] - other[0], blue[1] - other[1]), "two subject colours stay apart, about in proportion to the chroma (no single pasted colour)");
+  const [wa, wb] = clearCast(warm[0], warm[1], vh[0], vh[1], 1);
+  assert.ok(Math.hypot(wa, wb) >= (1 - SUBJECT_CLEAR.desat) * Math.hypot(...warm) - 1e-9, "a colour away from the water's hue keeps (almost) all of its chroma");
 }
 
 console.log("seg tests passed");

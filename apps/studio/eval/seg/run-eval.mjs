@@ -29,8 +29,12 @@ const TAPS = {
   dolphins: [[0, [[400, 85]]], [0, [[250, 60]]], [0, [[280, 125]]]],
   whitetip: [[0, [[300, 120]]], [40, [[120, 150]]]],
   reefdiver: [[0, [[350, 170]]]],
+  // The app's sample clip (public/samples/thresher.mp4; cache it with ffmpeg/cv2 as cache/thresher_640.npy): no
+  // pseudo-GT, renders only. Board frames 0.5 / 2 / 3 / 4 / 5.5 s.
+  thresher: [[15, [[300, 185]]]],
 };
-const clips = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(TAPS);
+const BOARD_FRAMES = { thresher: [15, 60, 90, 120, 165] };
+const clips = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(TAPS).filter((c) => c !== "thresher");
 
 function npy(file) {
   const fd = fs.openSync(file, "r");
@@ -94,7 +98,7 @@ try {
     const page = await browser.newPage();
     page.on("console", (m) => { const t = m.text(); if (/pass|PASS|ROBUST|DONE|ERROR|model|engine/.test(t)) console.log(`[${clip}] ${t}`); });
     page.on("pageerror", (e) => console.log(`[${clip}] PAGEERROR ${e.message}`));
-    const url = `${base}?clip=${clip}&w=${W}&h=${H}&frames=${T}&objects=${encodeURIComponent(JSON.stringify(objects))}&prefer=${process.env.PREFER ?? "auto"}&robust=${process.env.ROBUST === "1" ? 1 : 0}`;
+    const url = `${base}?clip=${clip}&w=${W}&h=${H}&frames=${T}&objects=${encodeURIComponent(JSON.stringify(objects))}&prefer=${process.env.PREFER ?? "auto"}&robust=${process.env.ROBUST === "1" ? 1 : 0}&boardf=${(BOARD_FRAMES[clip] ?? [6, 90, 165]).join(",")}`;
     await page.goto(url);
     await page.waitForFunction(() => /DONE|ERROR/.test(document.getElementById("log").textContent), null, { timeout: 3 * 3600_000, polling: 2000 });
     await page.close();

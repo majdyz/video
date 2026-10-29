@@ -65,6 +65,33 @@ function stats(d: Float32Array, w: number, h: number) {
   return { mean: sum / d.length, p99: s[Math.floor(0.99 * (s.length - 1))], max: s[s.length - 1], stepP999: steps[Math.floor(0.999 * (steps.length - 1))], stepMax: step };
 }
 
+/**
+ * "Fake look" guard on the subject region (mask > 0.6): a render's L standard deviation, high-pass energy (mean
+ * |L - 3×3 mean|) and chroma spread (std of a, b) as ratios to the source's. Flattening shows as L / high-pass ratios
+ * below 1, a pasted single colour as a chroma ratio near 0.
+ */
+function guard(src: Uint8ClampedArray, px: Uint8ClampedArray, mask: Float32Array, W: number, H: number) {
+  const stats1 = (p: Uint8ClampedArray) => {
+    const L = new Float32Array(W * H), A = new Float32Array(W * H), B = new Float32Array(W * H);
+    for (let i = 0; i < W * H; i++) { const l = lab(p[i * 4], p[i * 4 + 1], p[i * 4 + 2]); L[i] = l[0]; A[i] = l[1]; B[i] = l[2]; }
+    let n = 0, sl = 0, sll = 0, sa = 0, saa = 0, sb = 0, sbb = 0, hp = 0;
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      if (mask[i] <= 0.6) continue;
+      let m = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) m += L[i + dy * W + dx];
+      hp += Math.abs(L[i] - m / 9);
+      n++; sl += L[i]; sll += L[i] * L[i]; sa += A[i]; saa += A[i] * A[i]; sb += B[i]; sbb += B[i] * B[i];
+    }
+    if (n < 50) return null;
+    const v = (s1: number, s2: number) => Math.sqrt(Math.max(0, s2 / n - (s1 / n) ** 2));
+    return { lStd: v(sl, sll), hp: hp / n, cStd: Math.hypot(v(sa, saa), v(sb, sbb)), n };
+  };
+  const a = stats1(src), b = stats1(px);
+  if (!a || !b) return null;
+  return { lStdRatio: b.lStd / a.lStd, hpRatio: b.hp / a.hp, cStdRatio: b.cStd / Math.max(1e-6, a.cStd) };
+}
+
 export async function robustness(o: {
   clip: string; W: number; H: number; T: number; mw: number; mh: number; K: Keyframe[]; clean: SegTrack; source: FrameSource;
   frame: (i: number) => Promise<HTMLCanvasElement>; post: (name: string, body: Blob | Uint8Array) => Promise<void>; log: (s: string) => void;
@@ -101,8 +128,10 @@ export async function robustness(o: {
       return m;
     } finally { SEG.featherShare = fs; SEG.featherMinPx = fm; }
   };
-  const frames = [...Array.from({ length: 30 }, (_, j) => 60 + j), 6, 90, 165].filter((f, i, a) => f < o.T && a.indexOf(f) === i);
+  const board = (new URLSearchParams(location.search).get("boardf") ?? "6,90,165").split(",").map(Number);
+  const frames = [...Array.from({ length: 30 }, (_, j) => 60 + j), ...board].filter((f, i, a) => f < o.T && a.indexOf(f) === i);
   const acc: Record<string, ReturnType<typeof stats>[]> = {};
+  const guards: Record<string, ({ f: number } & NonNullable<ReturnType<typeof guard>>)[]> = {};
   const boardFrame = 75;
   for (const f of frames) {
     const t = f / 30;
@@ -112,7 +141,7 @@ export async function robustness(o: {
     await engine.analyzeNow(true);
     const base = await render(t, null);
     const clean = await render(t, o.clean.at(t));
-    const save = f === boardFrame || f === 6 || f === 90 || f === 165;
+    const save = f === boardFrame || board.includes(f);
     const png = async (name: string, px: Uint8ClampedArray) => {
       const c = document.createElement("canvas"); c.width = W; c.height = H;
       c.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(px), W, H), 0, 0);
@@ -121,6 +150,20 @@ export async function robustness(o: {
     if (save) {
       const sc = src.getContext("2d")!.getImageData(0, 0, W, H).data;
       await png("src", sc); await png("engine", base); await png("ml", clean);
+      // The same grade with Subject pop off: what the pop itself changes.
+      engine.settings = { ...DEFAULT_SETTINGS, subjectPop: false };
+      await png("nopop", await render(t, null));
+      engine.settings = { ...DEFAULT_SETTINGS, subjectPop: true };
+      const m = o.clean.at(t);
+      if (m) {
+        // The subject region on the frame grid (the mask, nearest).
+        const mk = new Float32Array(W * H);
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) mk[y * W + x] = m.alpha[Math.min(m.height - 1, Math.floor((y / H) * m.height)) * m.width + Math.min(m.width - 1, Math.floor((x / W) * m.width))];
+        for (const [name, px] of [["engine", base], ["ml", clean]] as const) {
+          const g = guard(sc, px, mk, W, H);
+          if (g) (guards[name] ??= []).push({ f, ...g });
+        }
+      }
     }
     (acc["ml-vs-engine"] ??= []).push(stats(deltaE(clean, base, W * H), W, H));
     for (const v of variants.slice(1)) {
@@ -139,6 +182,10 @@ export async function robustness(o: {
   for (const [k, list] of Object.entries(acc)) {
     const m = (f: (s: ReturnType<typeof stats>) => number) => list.reduce((s, x) => s + f(x), 0) / list.length;
     out[k] = { meanDE: m((s) => s.mean), p99DE: m((s) => s.p99), maxDE: Math.max(...list.map((s) => s.max)), stepP999: m((s) => s.stepP999), stepMax: Math.max(...list.map((s) => s.stepMax)) };
+  }
+  for (const [k, list] of Object.entries(guards)) {
+    const m = (f: (g: (typeof list)[number]) => number) => list.reduce((s, x) => s + f(x), 0) / list.length;
+    out[`guard-${k}`] = { lStdRatio: m((g) => g.lStdRatio), hpRatio: m((g) => g.hpRatio), cStdRatio: m((g) => g.cStdRatio), minLStdRatio: Math.min(...list.map((g) => g.lStdRatio)), minHpRatio: Math.min(...list.map((g) => g.hpRatio)), minCStdRatio: Math.min(...list.map((g) => g.cStdRatio)), frames: list.length };
   }
   engine.dispose();
   return out;

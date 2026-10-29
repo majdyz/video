@@ -43,6 +43,8 @@ def main():
     proto = json.load(open(SAM + "out/eval_video.json"))
     rows, res = [], {}
     for c in clips:
+        if f"{c}_{GT_IDX[0]}" not in gt.files or not os.path.exists(SAM + f"cache/flowb_{c}.npy"):
+            print(f"{c}: no pseudo-GT / flow cache, renders only"); continue
         meta = json.load(open(os.path.join(out, f"{c}.meta.json")))
         T, mh, mw = meta["T"], meta["mh"], meta["mw"]
         r = {}
@@ -58,6 +60,7 @@ def main():
         f = lambda d: f"{np.mean(d['iou']):.2f} / {100 * d['tc_mean']:.1f}%" if d else "  -  "
         rows.append(f"{c:11s} app(feathered) {f(r.get('alpha'))}   app(raw) {f(r.get('raw'))}   prototype {f(r['proto'])}   engine {f(r['engine'])}   "
                     f"kf {meta['keyframes']} reprompts {meta['reprompts']} enc {meta['encodeMedMs']:.0f} ms step {meta['stepMedMs']:.0f} ms")
+    clips = [c for c in clips if c in res]
     mean = lambda k: (np.mean([np.mean(res[c][k]["iou"]) for c in clips if res[c].get(k)]), np.mean([res[c][k]["tc_mean"] for c in clips if res[c].get(k)]))
     print("IoU / flicker per clip")
     print("\n".join(rows))
