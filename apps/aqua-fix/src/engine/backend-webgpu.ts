@@ -634,6 +634,15 @@ export class WebGPUBackend implements GpuBackend {
     if (ext) this.extSource = ext;
   }
 
+  /**
+   * Resolves once a readback slot is free, so the next renderToFrame draws
+   * synchronously (an export that keeps several frames in flight calls this
+   * before uploading a frame: no other frame's upload can slip in before its draw).
+   */
+  async readbackSlotFree(): Promise<void> {
+    while (this.readbackRing.length > 0 && !this.readbackRing.some((r) => !r.busy)) await new Promise<void>((r) => setTimeout(r, 1));
+  }
+
   private async captureAs(mode: "canvas" | "bitmap" | "readback", timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
     const w = this.outputWidth;
     const h = this.outputHeight;

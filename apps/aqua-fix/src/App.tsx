@@ -698,7 +698,12 @@ export default function App() {
           e.setPreviewScale(Math.min(1, Math.min(PREVIEW_MAX_WIDTH, stage.clientWidth * dpr) / sw, (stage.clientHeight * dpr) / sh));
         }
       }
-      let lastShownAt = 0;
+      // Live view: every LIVE_EVERY-th frame (by frame count, inside the engine gate: a draw advances
+      // the temporal layer's history, so a wall-clock cadence made the export depend on timing).
+      const LIVE_EVERY = 6;
+      // The engine's part of each frame (upload → analysis → tick → render submit) runs in frame
+      // order, one frame at a time, even while readbacks overlap: the grade must not depend on timing.
+      let engineGate: Promise<unknown> = Promise.resolve();
       const result = await exportWithCodec(
         file,
         async (sample, info) => {
@@ -708,7 +713,15 @@ export default function App() {
           const frame = squarePixels(sample.toVideoFrame());
           try {
             const rot = (info.rotation / 90) as Rotation;
-            const t0 = performance.now();
+            const prevEngine = engineGate;
+            let release!: () => void;
+            engineGate = new Promise<void>((r) => (release = r));
+            let pending: Promise<VideoFrame>;
+            let t0 = 0, t1 = 0;
+            try {
+            await prevEngine;
+            await e.exportReady();
+            t0 = performance.now();
             e.upload(frame, frame.displayWidth, frame.displayHeight, rot);
             // The first frame waits for its analysis (and person mask) and
             // snaps; after that one analysis per clip-time slot (0.1 s), awaited
@@ -724,15 +737,16 @@ export default function App() {
             }
             e.tick(info.timeSec);
             frames++;
-            const t1 = performance.now();
+            t1 = performance.now();
             // Stamp with the shifted presentation time, never the decoder's raw
             // timestamp (WebKit emits negative ones; the muxer rejects those).
-            const out = await e.renderToFrame(rot, Math.round(info.timeSec * 1e6), frame.duration ?? undefined);
-            const t2 = performance.now();
-            if (t2 - lastShownAt > 80) {
-              lastShownAt = t2;
-              e.render(rot);
+            pending = e.renderToFrame(rot, Math.round(info.timeSec * 1e6), frame.duration ?? undefined);
+            if (frames % LIVE_EVERY === 0) e.render(rot);
+            } finally {
+              release();
             }
+            const out = await pending;
+            const t2 = performance.now();
             stage.upload += t1 - t0;
             stage.render += t2 - t1;
             stage.draw += e.backend.lastDrawMs;

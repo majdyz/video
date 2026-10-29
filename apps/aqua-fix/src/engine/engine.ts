@@ -895,6 +895,11 @@ export class GradeEngine {
     this.backend.setBefore?.(src, width, height);
   }
 
+  /** Export with frames in flight: resolves when the next renderToFrame will draw without waiting (see backend-webgpu readbackSlotFree). */
+  async exportReady(): Promise<void> {
+    await (this.backend as unknown as { readbackSlotFree?: () => Promise<void> }).readbackSlotFree?.();
+  }
+
   /** Renders and wraps the result as a VideoFrame for the exporter. */
   async renderToFrame(rotation: Rotation, timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
     if (this.dirtyData) this.pushData();

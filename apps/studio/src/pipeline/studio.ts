@@ -1611,6 +1611,11 @@ export class Studio {
     // geometry canvas, or the engine's canvas/bitmap capture paths); the
     // engine's readback path keeps several in flight.
     let gate: Promise<unknown> = Promise.resolve();
+    // The engine's part of a frame (upload → analysis → tick → render submit) runs one frame at a
+    // time in frame order even when readbacks overlap: an upload of the next frame landing while
+    // this frame's analysis reads back would grade from the wrong frame (and timing-dependent).
+    let engineGate: Promise<unknown> = Promise.resolve();
+    let engineFrames = 0;
     const result = await media.exportWithCodec(
       file,
       async (sample, fi) => {
@@ -1641,22 +1646,33 @@ export class Studio {
               out = new VideoFrame(geo!.canvas, { timestamp: ts, duration: dur });
             } else {
               const eng = e!;
-              let rotE: Rotation = rot;
-              if (geoOn) {
-                eng.upload(geo!.canvas, fi.displayWidth, fi.displayHeight, 0);
-                rotE = 0;
-              } else {
-                eng.upload(frame, frame.displayWidth, frame.displayHeight, rot);
+              const prevEngine = engineGate;
+              let release!: () => void;
+              engineGate = new Promise<void>((r) => (release = r));
+              let pending: Promise<VideoFrame>;
+              try {
+                await prevEngine;
+                await eng.exportReady();
+                let rotE: Rotation = rot;
+                if (geoOn) {
+                  eng.upload(geo!.canvas, fi.displayWidth, fi.displayHeight, 0);
+                  rotE = 0;
+                } else {
+                  eng.upload(frame, frame.displayWidth, frame.displayHeight, rot);
+                }
+                // First frame waits for its analysis and snaps; near a profiled
+                // cut the exact frame matters, and the first frame of a split
+                // segment starts its lock fresh. Analyses run on clip time and are
+                // awaited: the grade of a frame depends on the clip alone.
+                const segStart = this.applyLook(fi.timeSec);
+                await eng.analyzeDue(fi.timeSec, engineFrames++ === 0 || segStart || eng.inCutWindow(fi.timeSec)).catch(() => undefined);
+                eng.settings = this.settingsAt(fi.timeSec);
+                eng.tick(fi.timeSec);
+                pending = eng.renderToFrame(rotE, ts, dur);
+              } finally {
+                release();
               }
-              // First frame waits for its analysis and snaps; near a profiled
-              // cut the exact frame matters, and the first frame of a split
-              // segment starts its lock fresh; otherwise analysis runs alongside.
-              const segStart = this.applyLook(fi.timeSec);
-              // Analyses on clip time, awaited: the grade of a frame depends on the clip alone.
-              await eng.analyzeDue(fi.timeSec, frames === 0 || segStart || eng.inCutWindow(fi.timeSec)).catch(() => undefined);
-              eng.settings = this.settingsAt(fi.timeSec);
-              eng.tick(fi.timeSec);
-              out = await eng.renderToFrame(rotE, ts, dur);
+              out = await pending;
             }
             // Frames wrapped from a canvas (not the WebGPU backend's buffer readback).
             if (fixFrame && (!colourOn || e?.backend.kind === "webgl2" || (e?.backend as unknown as { capture?: string | null }).capture !== "readback")) out = await fixFrame(out);
