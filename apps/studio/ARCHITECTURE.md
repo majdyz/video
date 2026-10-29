@@ -107,6 +107,24 @@ Two paths, picked per browser when a clip opens (`Studio.pickExportMode`):
   the *encoded* frames (`Studio.onExportFrame`, ~4 per second at the
   stage's pixel size), the same bitmaps the export sheet shows, so the
   live view is exactly the output, on every backend.
+  Robustness (packages/shared): `encoder-plan.ts` probes
+  `VideoEncoder.isConfigSupported` at the source size and frame rate (HEVC
+  first above 1080p, then H.264 High, level from size × fps × bitrate) and
+  only steps down to 1440p/1080p/720p, with a note, when nothing can encode
+  the source size. `storage.ts` checks `navigator.storage.estimate()` before
+  starting and asks for persistent storage. The encoder output goes into
+  ~10 s chunks with a key frame at each start (`export-journal.ts`, OPFS
+  `export-journal/<key>/`, keyed by clip fingerprint + `exportSettingsKey`);
+  the chunks and the source audio are muxed at the end. A reload, crash or
+  codec lost in the background costs one chunk: the sheet offers "Resume
+  (62%)" and the export re-renders ~1 s before the resume point without
+  encoding to re-prime the colour engine's temporal state. Work in flight is
+  capped (`frame-pipeline.ts`: renders, `encodeQueueSize` ≤ 3, bytes waiting
+  for storage ≤ 48 MB; mediabunny caps decoded frames at 8). OPFS write
+  failures are retried in the worker, then a small output carries on in
+  memory (`FallbackSink`), a large one fails with a plain storage message.
+  On phones the export pauses while the page is hidden. Temporary files are
+  released when the result is dismissed and swept on the next export.
 * **Real-time recorder** (WebKit: Safari and every iOS browser, where each
   canvas → VideoFrame copy costs 60–80 ms): the clip plays through once,
   every presented frame is rendered at full size into the visible canvas

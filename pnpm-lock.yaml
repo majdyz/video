@@ -227,6 +227,9 @@ importers:
       '@webgpu/types':
         specifier: 0.1.72
         version: 0.1.72
+      vitest:
+        specifier: 5.0.1
+        version: 5.0.1(@types/node@24.12.2)(vite@8.0.10(@types/node@24.12.2))
 
 packages:
 
