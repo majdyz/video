@@ -57,6 +57,7 @@ import {
   type StoredDecoderConfig,
 } from "./export-journal";
 import { PauseGate, runFramePipeline } from "./frame-pipeline";
+import type { ExportProfile } from "./export-profile";
 
 export function isWebCodecsSupported(): boolean {
   return typeof VideoDecoder !== "undefined" && typeof VideoEncoder !== "undefined" && typeof VideoFrame !== "undefined";
@@ -179,6 +180,8 @@ export type CodecExportOptions = {
   /** Chunk length (s, default 10) and the frames re-rendered before a resumed chunk (s, default 1). */
   chunkSec?: number;
   primeSec?: number;
+  /** Per-stage timings (decode, encode, storage, mux); the renderer adds its own stages. */
+  profile?: ExportProfile;
 };
 
 /** A time range in clip seconds (0 = the first video frame). */
@@ -323,7 +326,7 @@ export async function exportWithCodec(
   render: FrameRenderer,
   opts: CodecExportOptions,
 ): Promise<CodecExportResult> {
-  const { signal, onProgress, log = () => undefined } = opts;
+  const { signal, onProgress, log = () => undefined, profile: prof } = opts;
   throwIfAborted(signal);
   const started = performance.now();
   const chunkSec = opts.chunkSec ?? 10;
@@ -457,14 +460,18 @@ export async function exportWithCodec(
       encoder.configure(encoderConfig(plan));
       let lastKeyUs = -Infinity;
       const finishChunk = async (w: ChunkWriter) => {
+        let t = performance.now();
         await encoder.flush();
+        prof?.add("encode", performance.now() - t);
         if (encError) throw encError;
+        t = performance.now();
         const blob = await w.close();
         if (st.manifest.decoderConfig && !sameDecoderConfig(st.manifest.decoderConfig, sessionConfig)) {
           // A resumed encoder produced different parameter sets: the chunks can't share one track.
           throw new ParamSetChanged("encoder parameter sets changed");
         }
         await st.commit(w, blob, sessionConfig);
+        prof?.add("storage", performance.now() - t);
       };
       const waitForEncoder = async () => {
         while (encoder.encodeQueueSize >= MAX_ENCODE_QUEUE && !encError) {
@@ -481,11 +488,22 @@ export async function exportWithCodec(
 
       type Job = { sample: VideoSample; timeSec: number; outTimeSec: number; tsUs: number; prime: boolean };
       const jobs = async function* (): AsyncGenerator<Job> {
-        for await (const sample of sampleSink.samples(t0 + startClip, endClip === Infinity ? undefined : t0 + endClip)) {
-          const timeSec = Math.max(0, sample.timestamp - t0);
+        // The wait for each decoded frame is the decode stage (mediabunny decodes ahead on its own).
+        const it = sampleSink.samples(t0 + startClip, endClip === Infinity ? undefined : t0 + endClip)[Symbol.asyncIterator]();
+        try {
+          for (;;) {
+            const td = performance.now();
+            const next = await it.next();
+            prof?.add("decode", performance.now() - td);
+            if (next.done) return;
+            const sample = next.value;
+            const timeSec = Math.max(0, sample.timestamp - t0);
           const outTimeSec = Math.max(0, timeSec - offset);
           const tsUs = Math.round(outTimeSec * 1e6);
-          yield { sample, timeSec, outTimeSec, tsUs, prime: tsUs <= lastUs };
+            yield { sample, timeSec, outTimeSec, tsUs, prime: tsUs <= lastUs };
+          }
+        } finally {
+          await it.return?.();
         }
       };
       try {
@@ -514,14 +532,21 @@ export async function exportWithCodec(
               keyFrame = true;
             }
             if (j.tsUs - lastKeyUs >= KEY_INTERVAL_SEC * 1e6) keyFrame = true;
+            let te = performance.now();
             await waitForEncoder();
+            const ts = performance.now();
+            prof?.add("encode", ts - te);
             await writer.drainTo(MAX_STORAGE_BACKLOG);
+            te = performance.now();
+            prof?.add("storage", te - ts);
             const frame = adapter.toFrame(rendered, j.tsUs, j.sample.duration ? Math.round(j.sample.duration * 1e6) : frameDurUs);
             try {
               encoder.encode(frame, { keyFrame });
             } finally {
               frame.close();
             }
+            prof?.add("encode", performance.now() - te);
+            if (prof) prof.frames++;
             if (keyFrame) lastKeyUs = j.tsUs;
             writer.noteFrame(j.tsUs);
             const now = performance.now();
@@ -575,6 +600,7 @@ export async function exportWithCodec(
     if (!st.manifest.decoderConfig) throw new Error("Encoder produced no decoder configuration");
 
     // 4. Mux: the chunks' packets + the source audio.
+    const muxStarted = performance.now();
     keepJournal = resumable && keepChunks;
     sink = memoryOnly ? new FallbackSink(null) : await openOutputSink(opts.opfsPrefix, { expectedBytes: expected, log });
     log(`output → ${sink.kind === "file" ? "private on-device storage" : "memory"}`);
@@ -661,6 +687,7 @@ export async function exportWithCodec(
     await output.finalize();
     const blob = await sink.finish("video/mp4");
     await st.destroy();
+    prof?.add("mux", performance.now() - muxStarted);
     store = null;
     onProgress(1);
     return {
@@ -748,5 +775,51 @@ export async function* decodeFrames(
     }
   } finally {
     input.dispose();
+  }
+}
+
+/**
+ * A second, independent decoder over a file for passes that run ahead of an
+ * export (the analyse-first lookahead): clip times (`timeSec`) follow
+ * exportWithCodec's clock exactly (sample timestamp minus the first video
+ * timestamp), so a frame here and the same frame in the export carry the
+ * same time.
+ */
+export type SampleReader = {
+  rotation: Rotation;
+  displayWidth: number;
+  displayHeight: number;
+  /** The first video timestamp (container seconds): clip time = timestamp − t0. */
+  t0: number;
+  /** Frames from clip time `fromSec` (the frame covering it) up to `toSec`, in presentation order; `timestamp` is the container's. */
+  samples(fromSec: number, toSec?: number): AsyncGenerator<{ sample: VideoSample; timeSec: number; timestamp: number }, void, unknown>;
+  dispose(): void;
+};
+
+export async function openSampleReader(file: File): Promise<SampleReader> {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  try {
+    const track = await input.getPrimaryVideoTrack();
+    if (!track) throw new Error("No video track in file");
+    const rotation = await track.getRotation();
+    const displayWidth = await track.getDisplayWidth();
+    const displayHeight = await track.getDisplayHeight();
+    const t0 = await track.getFirstTimestamp();
+    const sink = new VideoSampleSink(track);
+    return {
+      rotation,
+      displayWidth,
+      displayHeight,
+      t0,
+      async *samples(fromSec: number, toSec?: number) {
+        for await (const sample of sink.samples(t0 + fromSec, toSec === undefined || toSec === Infinity ? undefined : t0 + toSec)) {
+          yield { sample, timeSec: Math.max(0, sample.timestamp - t0), timestamp: sample.timestamp };
+        }
+      },
+      dispose: () => input.dispose(),
+    };
+  } catch (e) {
+    input.dispose();
+    throw e;
   }
 }
