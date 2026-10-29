@@ -35,6 +35,39 @@ function sharedMediapipe(): Plugin {
 }
 
 /**
+ * AI subject detection (EdgeTAM, Apache-2.0): the model files are built outside the repo by
+ * scripts/seg-models.py (~33 MB of fp16 weights; SEG_MODELS_DIR overrides the folder) and served from
+ * `${BASE_URL}seg/` in dev and copied into the build output (onnxruntime-web's WASM runtime is a regular bundler
+ * asset of the segmentation worker). Each file is far below GitHub Pages' 100 MB limit. Without the folder the
+ * build still succeeds and the app falls back to the engine's own subject masks.
+ */
+function studioSegModels(): Plugin {
+  const dir = process.env.SEG_MODELS_DIR ?? join(process.env.HOME ?? "", "video-data/models/edgetam-web");
+  const fileFor = (name: string): string | null => (/^[\w.-]+$/.test(name) ? join(dir, name) : null);
+  return {
+    name: "studio-seg-models",
+    configureServer(server) {
+      server.middlewares.use(`${base}seg/`, (req, res, next) => {
+        const name = decodeURIComponent((req.url ?? "").split("?")[0]).replace(/^\/+/, "");
+        const file = fileFor(name);
+        if (!file || !existsSync(file) || !statSync(file).isFile()) return next();
+        res.setHeader("content-type", file.endsWith(".wasm") ? "application/wasm" : file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".json") ? "application/json" : "application/octet-stream");
+        createReadStream(file).pipe(res);
+      });
+    },
+    writeBundle(opts) {
+      if (!opts.dir) return;
+      const out = join(opts.dir, "seg");
+      if (!existsSync(join(dir, "manifest.json"))) {
+        this.warn(`AI subject detection models not found in ${dir} (run scripts/seg-models.py); the build ships without them`);
+        return;
+      }
+      cpSync(dir, out, { recursive: true });
+    },
+  };
+}
+
+/**
  * Versions the service worker: after the bundle is written, sw.js gets a hash
  * of every built asset as its cache name and the shell + all JS/CSS chunks
  * (lazy tool chunks and workers included) as its precache list. Fonts, the
@@ -66,7 +99,9 @@ function studioServiceWorker(): Plugin {
 
 export default defineConfig({
   base,
-  plugins: [react(), sharedMediapipe(), studioServiceWorker()],
+  plugins: [react(), sharedMediapipe(), studioSegModels(), studioServiceWorker()],
   server: { fs: { allow: [resolve(here, "../.."), "/home/majdyz/video/node_modules"] } },
   worker: { format: "es" },
+  // onnxruntime-web finds its WASM next to its own module (new URL(..., import.meta.url)): no dev pre-bundling.
+  optimizeDeps: { exclude: ["onnxruntime-web"] },
 });

@@ -5,10 +5,33 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, VIVID, VIVID_LOOK } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, VIVID, VIVID_LOOK } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 import { BACKDROP } from "./backdrop.ts";
 import { RED_GLSL, RED_WGSL } from "./red.ts";
+
+/**
+ * AI subject detection (studio seg/, data texture 3 B/A): where a pixel matches the water (backdrop departure below
+ * the subject trim) the ML alpha tones at most this share, so a mask that leaks onto the water only tints it.
+ */
+export const SEG_TONE = {
+  waterFloor: 0.25,
+  /** ML weight (A: confidence × nearness, eased over time) for the ML's own pop strength, lo..hi: a confident, stable
+   * ML subject is popped even where the engine sees no open water (a close-up), and its water cap relaxes. */
+  confLo: 0.5,
+  confHi: 0.9,
+  /** ...only well inside the ML mask (alpha lo..hi): the feathered edge and stray low-alpha pixels keep the cap. */
+  insideLo: 0.7,
+  insideHi: 0.98,
+  /** ...and only on pixels that depart at least a little from the water (depart lo..hi): a leak onto pure water keeps
+   * the cap however sure the mask is; a blue-grey dolphin against blue water is toned near fully. */
+  departLo: 0.02,
+  departHi: 0.25,
+  /** The tone follows the feathered alpha over lo..hi (soft, but the feather's outer half past the subject's edge,
+   * which lies on water, stays nearly untoned: no grey halo where the water test is weak, e.g. a close-up). */
+  alphaLo: 0.3,
+  alphaHi: 0.8,
+};
 
 // Look constants shared by both shaders, emitted as literals.
 const LOOK_CONSTS_GLSL = `
@@ -86,6 +109,10 @@ const float ON_FAR_LO = ${OBJECT_NEUTRAL.farLo.toFixed(6)};
 const float ON_FAR_HI = ${OBJECT_NEUTRAL.farHi.toFixed(6)};
 const float ON_LIFT = ${OBJECT_NEUTRAL.lift.toFixed(4)};
 const float ON_SILVER = ${OBJECT_NEUTRAL.silver.toFixed(4)};
+const float SC_K = ${SUBJECT_CLEAR.k.toFixed(4)};
+const float SC_CMAX = ${SUBJECT_CLEAR.cMax.toFixed(4)};
+const float SC_DESAT = ${SUBJECT_CLEAR.desat.toFixed(4)};
+const float SC_EDGE = ${SUBJECT_CLEAR.edgeFloor.toFixed(4)};
 const float BD_VETO_LO = ${BACKDROP.vetoLo.toFixed(4)};
 const float BD_VETO_HI = ${BACKDROP.vetoHi.toFixed(4)};
 const float BD_RING_R = ${BACKDROP.ringR.toFixed(1)};
@@ -100,6 +127,15 @@ const float BD_DARK = ${BACKDROP.vetoDark.toFixed(4)};
 const float BD_AB2 = ${(BACKDROP.abWeight * BACKDROP.abWeight).toFixed(4)};
 const float ON_CONF_LO = ${OBJECT_NEUTRAL.confLo.toFixed(4)};
 const float ON_CONF_HI = ${OBJECT_NEUTRAL.confHi.toFixed(4)};
+const float SEG_WATER_FLOOR = ${SEG_TONE.waterFloor.toFixed(4)};
+const float SEG_CONF_LO = ${SEG_TONE.confLo.toFixed(4)};
+const float SEG_CONF_HI = ${SEG_TONE.confHi.toFixed(4)};
+const float SEG_IN_LO = ${SEG_TONE.insideLo.toFixed(4)};
+const float SEG_IN_HI = ${SEG_TONE.insideHi.toFixed(4)};
+const float SEG_DEP_LO = ${SEG_TONE.departLo.toFixed(4)};
+const float SEG_DEP_HI = ${SEG_TONE.departHi.toFixed(4)};
+const float SEG_A_LO = ${SEG_TONE.alphaLo.toFixed(4)};
+const float SEG_A_HI = ${SEG_TONE.alphaHi.toFixed(4)};
 const float ON_WARM_COS = ${Math.cos(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_SIN = ${Math.sin(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_LO = ${OBJECT_NEUTRAL.warmLo.toFixed(4)};
@@ -346,6 +382,15 @@ float objectNeutral(float L, vec2 ab, vec3 lin, float srcFar, float conf, float 
   float light = smoothstepf(ON_L_LO, ON_L_HI, L);
   return strength * ON_MIX * conf * (band + (1.0 - band) * redDef) * redDef * light * (1.0 - srcFar);
 }
+// Subject clearing (SUBJECT_CLEAR; mirrors apply.ts clearCast): part of the water's cast out of the subject's chroma.
+vec2 clearCast(vec2 ab, vec2 vh, float g) {
+  float C = length(ab);
+  if (g <= 0.0 || C < 1e-6) return ab;
+  // The cast is the chroma along the water's hue: shrink the chroma by that share, bounded, without turning the hue.
+  float pc = max(0.0, dot(ab, vh));
+  float c1 = (C - g * min(SC_K * pc, SC_CMAX)) * (1.0 - g * SC_DESAT);
+  return ab * (max(0.0, c1) / C);
+}
 // Per-pixel departure from the backdrop surface in p18–p22 (backdrop.ts backdropSubject before its ramp).
 float backdropDev(vec3 lab, vec2 uv) {
   float x = uv.x - 0.5, y = uv.y - 0.5;
@@ -387,20 +432,37 @@ float subjectWeight(vec2 uv, float coreJbu, float dev) {
 }
 // Per-animal tone strength (animals.ts: whole-or-nothing, decided per tracked animal on the CPU; one value per
 // map texel, dilated past the animal so the outline comes from the per-pixel test above). Mirrors apply.ts.
-vec2 animalStrength(vec2 uv) {
+// B, A: AI subject detection (studio seg/): the ML alpha and where / how much it replaces the engine's subject
+// weight (0 without it, so the grade is unchanged).
+vec4 animalStrength(vec2 uv) {
   ivec2 size = textureSize(u_data3, 0);
   ivec2 i = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
-  // The interior hold (G) is read bilinearly so its edge is soft.
+  // The interior hold (G) and the ML channels are read bilinearly so their edges are soft.
   vec2 f = clamp(uv * vec2(size) - 0.5, vec2(0.0), vec2(size) - 1.0);
   ivec2 i0 = ivec2(floor(f));
   ivec2 i1 = min(i0 + 1, size - 1);
   vec2 t = f - vec2(i0);
-  float c = mix(mix(texelFetch(u_data3, i0, 0).g, texelFetch(u_data3, ivec2(i1.x, i0.y), 0).g, t.x),
-                mix(texelFetch(u_data3, ivec2(i0.x, i1.y), 0).g, texelFetch(u_data3, i1, 0).g, t.x), t.y);
-  return vec2(texelFetch(u_data3, i, 0).r, c);
+  vec4 c = mix(mix(texelFetch(u_data3, i0, 0), texelFetch(u_data3, ivec2(i1.x, i0.y), 0), t.x),
+               mix(texelFetch(u_data3, ivec2(i0.x, i1.y), 0), texelFetch(u_data3, i1, 0), t.x), t.y);
+  return vec4(texelFetch(u_data3, i, 0).r, c.g, c.b, c.a);
 }
 // Object weight and warm clamp (see apply.ts objectWeight / warmClamp).
 float objectWeight(float conf) { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
+// AI subject detection (SEG_TONE): how sure the ML is here (confident, stable over time); 0 without it.
+float segSure(vec4 an) { return an.w > 0.0 ? smoothstepf(SEG_CONF_LO, SEG_CONF_HI, an.w) : 0.0; }
+// The pop strength: the engine's open-water amount, or a sure ML subject's own (a close-up has no open water).
+float popStrength(vec4 an) { return max(p[16].w, segSure(an)); }
+// The subject weight the tone uses: the engine's, or the ML alpha. depart (0..1) is how far the pixel departs from
+// the water; where it matches the water the ML tones at most SEG_TONE.waterFloor, so a leak only tints, unless the
+// ML is sure and the pixel well inside its mask (a blue dolphin), where the cap relaxes toward full.
+float toneWeight(float subj, vec4 an, float depart) {
+  float ow = objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
+  if (an.w <= 0.0) return ow;
+  float sure = segSure(an);
+  float floorW = mix(SEG_WATER_FLOOR, 1.0, sure * smoothstepf(SEG_IN_LO, SEG_IN_HI, an.z) * smoothstepf(SEG_DEP_LO, SEG_DEP_HI, depart));
+  float ml = smoothstepf(SEG_A_LO, SEG_A_HI, an.z) * mix(floorW, 1.0, depart) * max(p[22].z, sure);
+  return mix(ow, ml, clamp(an.w, 0.0, 1.0));
+}
 float warmClamp(vec2 ab, vec3 lin, float srcFar, float person, float strength) {
   if (strength <= 0.0) return 1.0;
   float C = length(ab);
@@ -499,7 +561,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // previous mask (g_subjPrior, kept near the map by the temporal layer) holds where the pixel departs like a subject.
   float subjRaw = p[16].w > 0.0 ? max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev)) : 0.0;
   g_subjOut = subjRaw;
-  vec2 an = animalStrength(uv);
+  vec4 an = animalStrength(uv);
   float subj = max(subjRaw, p[16].w > 0.0 ? an.y * smoothstepf(BD_HOLD_LO, BD_HOLD_HI, bdev) : 0.0) * p[16].w * p[22].z * an.x;
   if (p[0].w > 0.5) return vec3(k, confPix, clamp(fld.y, 0.0, 1.0));
   vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
@@ -559,11 +621,16 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   scale *= saturation;
   float onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
   lab.yz = greenNeutral(lab.x, lab.yz, p[22].w * (1.0 - RED_GN_OBJ_KEEP * conf));
-  float tN = objectNeutral(lab.x, lab.yz, lin, onFar, objectWeight(subj), p[16].w);
+  // Departure from the water: the backdrop test in open water; in a close-up (no backdrop) the ML alpha already
+  // carries its water cap (seg-overlay.ts composeSegStrength, from the overlay's own water-departure map).
+  float depart = p[16].w > 0.0 ? smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev) : 1.0;
+  float ow = toneWeight(subj, an, depart);
+  float popS = popStrength(an);
+  float tN = objectNeutral(lab.x, lab.yz, lin, onFar, ow, popS);
   float personS = person * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
-  scale *= warmClamp(lab.yz, lin, onFar, personS, p[16].w);
-  vec2 nab = mix(lab.yz * scale, veilHue * ON_SILVER, tN);
-  float Ls = lab.x + objectLift(lab.x, objectWeight(subj), p[16].w);
+  scale *= warmClamp(lab.yz, lin, onFar, personS, popS);
+  vec2 nab = clearCast(lab.yz * scale, veilHue, tN / ON_MIX);
+  float Ls = lab.x;
   vec3 lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y);
   lk.yz = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
   // Vivid look (opt-in, p23.z), then the near-white pink guard (always).
@@ -839,18 +906,35 @@ fn subjectWeight(uv: vec2<f32>, coreJbu: f32, dev: f32) -> f32 {
   let trim = smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, dev);
   return max(core * mix(smoothstepf(BD_CORE_IN, 1.0, core) * smoothstepf(BD_CORE_LO, BD_CORE_HI, dev), 1.0, trim), min(min(1.0, ring), trim));
 }
-fn animalStrength(uv: vec2<f32>) -> vec2<f32> {
+fn animalStrength(uv: vec2<f32>) -> vec4<f32> {
   let size = vec2<i32>(textureDimensions(u_data3, 0));
   let i = clamp(vec2<i32>(uv * vec2<f32>(size)), vec2<i32>(0), size - 1);
   let f = clamp(uv * vec2<f32>(size) - 0.5, vec2<f32>(0.0), vec2<f32>(size) - 1.0);
   let i0 = vec2<i32>(floor(f));
   let i1 = min(i0 + 1, size - 1);
   let t = f - vec2<f32>(i0);
-  let c = mix(mix(textureLoad(u_data3, i0, 0).g, textureLoad(u_data3, vec2<i32>(i1.x, i0.y), 0).g, t.x),
-              mix(textureLoad(u_data3, vec2<i32>(i0.x, i1.y), 0).g, textureLoad(u_data3, i1, 0).g, t.x), t.y);
-  return vec2<f32>(textureLoad(u_data3, i, 0).r, c);
+  let c = mix(mix(textureLoad(u_data3, i0, 0), textureLoad(u_data3, vec2<i32>(i1.x, i0.y), 0), t.x),
+              mix(textureLoad(u_data3, vec2<i32>(i0.x, i1.y), 0), textureLoad(u_data3, i1, 0), t.x), t.y);
+  return vec4<f32>(textureLoad(u_data3, i, 0).r, c.g, c.b, c.a);
 }
 fn objectWeight(conf: f32) -> f32 { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
+fn segSure(an: vec4<f32>) -> f32 { return select(0.0, smoothstepf(SEG_CONF_LO, SEG_CONF_HI, an.w), an.w > 0.0); }
+fn popStrength(an: vec4<f32>) -> f32 { return max(p[16].w, segSure(an)); }
+fn clearCast(ab: vec2<f32>, vh: vec2<f32>, g: f32) -> vec2<f32> {
+  let C = length(ab);
+  if (g <= 0.0 || C < 1e-6) { return ab; }
+  let pc = max(0.0, dot(ab, vh));
+  let c1 = (C - g * min(SC_K * pc, SC_CMAX)) * (1.0 - g * SC_DESAT);
+  return ab * (max(0.0, c1) / C);
+}
+fn toneWeight(subj: f32, an: vec4<f32>, depart: f32) -> f32 {
+  let ow = objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
+  if (an.w <= 0.0) { return ow; }
+  let sure = segSure(an);
+  let floorW = mix(SEG_WATER_FLOOR, 1.0, sure * smoothstepf(SEG_IN_LO, SEG_IN_HI, an.z) * smoothstepf(SEG_DEP_LO, SEG_DEP_HI, depart));
+  let ml = smoothstepf(SEG_A_LO, SEG_A_HI, an.z) * mix(floorW, 1.0, depart) * max(p[22].z, sure);
+  return mix(ow, ml, clamp(an.w, 0.0, 1.0));
+}
 fn warmClamp(ab: vec2<f32>, lin: vec3<f32>, srcFar: f32, person: f32, strength: f32) -> f32 {
   if (strength <= 0.0) { return 1.0; }
   let C = length(ab);
@@ -984,11 +1068,14 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
   let gnab = greenNeutral(lab.x, lab.yz, p[22].w * (1.0 - RED_GN_OBJ_KEEP * conf));
   lab = vec3(lab.x, gnab);
-  let tN = objectNeutral(lab.x, lab.yz, lin, onFar, objectWeight(subj), p[16].w);
+  let depart = select(1.0, smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev), p[16].w > 0.0);
+  let ow = toneWeight(subj, an, depart);
+  let popS = popStrength(an);
+  let tN = objectNeutral(lab.x, lab.yz, lin, onFar, ow, popS);
   let personS = person * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
-  scale *= warmClamp(lab.yz, lin, onFar, personS, p[16].w);
-  let nab = mix(lab.yz * scale, veilHue * ON_SILVER, tN);
-  let Ls = lab.x + objectLift(lab.x, objectWeight(subj), p[16].w);
+  scale *= warmClamp(lab.yz, lin, onFar, personS, popS);
+  let nab = clearCast(lab.yz * scale, veilHue, tN / ON_MIX);
+  let Ls = lab.x;
   var lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y);
   let gab = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
   lk = vec3(lk.x, gab);

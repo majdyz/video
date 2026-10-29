@@ -208,6 +208,18 @@ export const DETAIL_TAPS: readonly (readonly [number, number, number])[] = [
  * frames object mid-tones gain up to `lift` Oklab lightness (fading out
  * toward black and white), so the subject steps forward from the water.
  */
+/**
+ * Subject pop tone ("subject clearing"): the subject is shown as if in clearer water, never painted. Per pixel, on
+ * the graded colour: its chroma shrinks by the share k of the part that points along the water's own hue (the
+ * cast), at most cMax (Oklab units, so a strongly cast pixel moves by a bounded step and keeps its variation), then
+ * by desat toward neutral; the hue never turns (a deep blue does not go purple), texture and the animal's own
+ * colours survive.
+ * Lightness is left as graded (no lift: shading, counter-shading, highlights stay). The gate is OBJECT_NEUTRAL's
+ * (red-starved, lit pixels of the subject). The engine-mask weight softens where the subject's colour fades into
+ * the water's (edgeFloor at no departure).
+ */
+export const SUBJECT_CLEAR = { k: 0.6, cMax: 0.05, desat: 0.15, edgeFloor: 0.3 };
+
 export const OBJECT_NEUTRAL = { hue: (195 * Math.PI) / 180, bandIn: (45 * Math.PI) / 180, bandOut: (85 * Math.PI) / 180, rLo: 0.08, rHi: 0.3, mix: 0.92, silver: 0.022, lLo: 0.12, lHi: 0.32, farLo: (30 * Math.PI) / 180, farHi: (60 * Math.PI) / 180, lift: 0.05, confLo: 0.05, confHi: 0.5, warmHue: (50 * Math.PI) / 180, warmLo: 0.1, warmHi: 0.5 };
 /**
  * Object-neutral strength for a frame (uniform p16.w): only frames that are
