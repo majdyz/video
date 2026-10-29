@@ -9,7 +9,7 @@
 // bytes), cNNNNN.json (packet table). The manifest only lists a chunk once
 // its bytes and table are on disk, so a crash mid-chunk redoes that chunk.
 
-import { FallbackSink, FileSink, MemorySink, opfsAvailable, opfsDir, readOpfsFile, type OutputSink } from "./output-sink";
+import { FallbackSink, FileSink, MemorySink, isStorageLost, opfsAvailable, opfsDir, readOpfsFile, type OutputSink } from "./output-sink";
 
 export const JOURNAL_DIR = "export-journal";
 /** Journals kept at most (each holds up to a full export's bytes on the phone). */
@@ -261,6 +261,12 @@ export interface ChunkStore {
   dropChunk(index: number): Promise<void>;
   /** Forgets every chunk (settings or parameter sets changed). */
   reset(plan: JournalPlan): Promise<void>;
+  /**
+   * After a storage loss (isStorageLost): keeps the committed chunks up to the
+   * first one whose bytes can no longer be read, forgets that one and every
+   * later one, and returns how many are kept (the next pass encodes the rest).
+   */
+  recover(): Promise<number>;
   /** Deletes the journal (export finished or cancelled). */
   destroy(): Promise<void>;
 }
@@ -305,6 +311,14 @@ export class MemoryChunkStore implements ChunkStore {
   async reset(plan: JournalPlan): Promise<void> {
     this.blobs.clear();
     this.manifest = { ...this.manifest, plan, chunks: [], decoderConfig: null };
+  }
+
+  async recover(): Promise<number> {
+    const keep = await readableChunks(this.manifest.chunks, (i) => this.readChunk(i));
+    for (const c of this.manifest.chunks.slice(keep)) this.blobs.delete(c.index);
+    this.manifest.chunks = this.manifest.chunks.slice(0, keep);
+    if (!keep) this.manifest.decoderConfig = null;
+    return keep;
   }
 
   async destroy(): Promise<void> {
@@ -429,6 +443,35 @@ export class OpfsChunkStore implements ChunkStore {
     this.sessionBlobs.clear();
     await removeJournal(this.manifest.key);
   }
+
+  async recover(): Promise<number> {
+    const keep = await readableChunks(this.manifest.chunks, (i) => this.readChunk(i));
+    for (const c of this.manifest.chunks.slice(keep)) this.sessionBlobs.delete(c.index);
+    this.manifest.chunks = this.manifest.chunks.slice(0, keep);
+    if (!keep) this.manifest.decoderConfig = null;
+    // What is on disk no longer matches this session (the journal may be gone with the rest): stop
+    // recording it, and drop it so a later "Resume" can't pick up a half-deleted export.
+    this.persisting = false;
+    await removeJournal(this.manifest.key).catch(() => undefined);
+    return keep;
+  }
+}
+
+/**
+ * How many of `chunks` (in order) can still be read: each one's table and
+ * first byte. Stops at the first loss; other errors are not a loss and throw.
+ */
+export async function readableChunks(chunks: readonly ChunkRecord[], read: (index: number) => Promise<{ packets: PacketEntry[]; data: Blob }>): Promise<number> {
+  for (let i = 0; i < chunks.length; i++) {
+    try {
+      const c = await read(chunks[i].index);
+      if (c.data.size > 0) await c.data.slice(0, 1).arrayBuffer();
+    } catch (e) {
+      if (isStorageLost(e) || /missing/.test((e as Error)?.message ?? "")) return i;
+      throw e;
+    }
+  }
+  return chunks.length;
 }
 
 async function journalsDir(create = false): Promise<FileSystemDirectoryHandle | null> {
