@@ -85,7 +85,8 @@ const server = await createServer({
 await server.listen();
 const base = `http://127.0.0.1:${PORT}/video/studio/eval/seg/index.html`;
 // WebGL2 through SwiftShader for the colour engine (ROBUST=1 renders); the segmenter itself is WASM.
-const browser = await chromium.launch({ headless: true, args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+const gpuArgs = process.env.GPU === "1" ? ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"] : []; // GPU=1: WebGPU (SwiftShader) for the ORT WebGPU EP
+const browser = await chromium.launch({ headless: true, args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist", ...gpuArgs] });
 try {
   for (const clip of clips) {
     const [T0, H, W] = arr(clip).shape, T = Math.min(T0, +(process.env.MAXF ?? T0)); // MAXF: a short smoke run
