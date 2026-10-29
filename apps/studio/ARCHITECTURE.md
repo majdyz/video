@@ -51,10 +51,26 @@ imports it too).
   at the edges of very wide lenses the residual is a fraction of the crop
   budget. The correct fix is tracking on dewarped frames (see below).
 
-Cost of the current design: with colour + geometry on, every frame is
-drawn twice and copied once (geo canvas → engine texture: a
-`texImage2D`/`copyExternalImageToTexture` of a canvas). On a phone at 4K
-that copy is the main overhead, roughly the cost of one upload.
+With colour on, the geometry pass no longer goes through the geo canvas:
+
+* WebGL2 engine: a second `GeometryRenderer` lives in the engine's own GL
+  context (`GeometryRenderer.inContext`) and draws into a framebuffer of
+  the engine (`beginSourceDraw`), which `endSourceDraw` blits (rows
+  flipped, as a canvas upload stores them) into the engine's source
+  texture. Same shader, same rasterisation, same bytes as uploading the geo
+  canvas; no copy between contexts. The pass sets its own unpack state
+  (the engine uploads with colour-space conversion off).
+* WebGPU engine: the pass in WGSL (`geometry-gpu.ts`) on the engine's
+  device renders straight into its source texture; decoded frames and the
+  `<video>` element are imported (`importExternalTexture`), stills copied.
+  Not bit-identical to the WebGL pass (the browser converts and filters an
+  imported frame its own way). Log / HDR footage, the half-float upload and
+  any source this device can't import fall back to the WebGL pass + copy.
+* `?geoshare=0` restores the old canvas copy (A/B), `?geoshare=gl` keeps the
+  WebGL pass on a WebGPU engine. With `?profile=sync` the geometry canvas
+  also waits for its GPU, so "geometry" is the pass and "upload" the copy:
+  measured that way, the old "upload 17 %" was mostly the geometry pass
+  itself (its frame upload and draw), the canvas copy a few percent.
 
 ## Target: single geometry-warp → colour pass
 
@@ -123,6 +139,15 @@ Two paths, picked per browser when a clip opens (`Studio.pickExportMode`):
   for storage ≤ 48 MB; mediabunny caps decoded frames at 8). OPFS write
   failures are retried in the worker, then a small output carries on in
   memory (`FallbackSink`), a large one fails with a plain storage message.
+  The browser may also clear or evict the origin's storage under a running
+  export (storage pressure, a private window's in-memory store, "clear site
+  data"): the open handle's writes then return "not found" (-4) and every
+  chunk file reads back as NotFoundError ("A requested file or directory
+  could not be found…", which used to end the export, at the mux after a
+  long render). Such a loss (`isStorageLost`) keeps the chunks still
+  readable (`ChunkStore.recover`), encodes the rest again and muxes again,
+  up to 3 times; `apps/studio/scripts/opfs-wipe-e2e.mjs` wipes the storage
+  mid-encode / mid-mux in Chrome and checks the frames.
   On phones the export pauses while the page is hidden. Temporary files are
   released when the result is dismissed and swept on the next export.
 * **Real-time recorder** (WebKit: Safari and every iOS browser, where each

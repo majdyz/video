@@ -22,7 +22,8 @@ import { pickAnimal, type SubjectOverride, type SubjectPathPoint, type SubjectSe
 import { toggleOverride } from "./subjects.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
-import { GeometryRenderer, type GeometrySource } from "./geometry.ts";
+import { GeometryRenderer, type GeometryRenderOptions, type GeometrySource } from "./geometry.ts";
+import { GpuGeometryRenderer } from "./geometry-gpu.ts";
 import type { GeometryParams, QuarterTurns } from "./geometry-math.ts";
 import type { ClipInfo } from "./probe.ts";
 import { colourSettings, DEFAULT_TOOLS, exportSuffix, solveParams, type ColourLook, type ToolsState } from "./tools.ts";
@@ -259,6 +260,10 @@ export class Studio {
   private engine: Engine | null = null;
   private enginePromise: Promise<Engine | null> | null = null;
   private geo: GeometryRenderer | null = null;
+  /** The geometry pass in the colour engine's own GL context (WebGL2 backend): draws straight into its source. */
+  private geoShared: { geo: GeometryRenderer; gl: WebGL2RenderingContext } | null = null;
+  /** The geometry pass on the colour engine's WebGPU device (geometry-gpu.ts): renders into its source. */
+  private geoGpu: { geo: GpuGeometryRenderer; device: GPUDevice } | null = null;
   private video: HTMLVideoElement | null = null;
   private stabClient: AnalysisClient | null = null;
   private analysis: AnalysisResult | null = null;
@@ -405,6 +410,10 @@ export class Studio {
   dispose(): void {
     this.teardown();
     this.stabClient?.dispose();
+    this.geoShared?.geo.dispose();
+    this.geoShared = null;
+    this.geoGpu?.geo.dispose();
+    this.geoGpu = null;
     this.engine?.dispose();
     this.geo?.dispose();
   }
@@ -1082,12 +1091,10 @@ export class Studio {
     this.beforeSet = false;
     if (this.geometryActive() && this.geo) {
       const [w, h] = size ?? this.previewSize();
-      this.geo.resize(w, h);
       // The engine draws the compare wipe itself (its temporal history must
       // never see it): the geometry renders the whole frame and the raw frame
       // goes along as the "before" picture.
-      this.geo.render(src, this.geoParams(t, info.rot), this.uprightOpts(null));
-      e.upload(this.geo.canvas, w, h, 0);
+      this.geometryToEngine(e, src, this.geoParams(t, info.rot), this.uprightOpts(null), w, h);
       e.setBefore(split !== null ? src : null, sw, sh);
       this.beforeSet = split !== null;
       e.setPreviewScale(1);
@@ -1098,6 +1105,87 @@ export class Studio {
       if (size) e.setPreviewScale(Math.min(1, size[0] / w));
       else e.setPreviewScale(Math.min(1, this.previewSize()[0] / w));
     }
+  }
+
+  /**
+   * The geometry pass that renders straight into the colour engine's source
+   * (no geometry canvas, no copy into the engine): in the engine's own GL
+   * context on WebGL2 (bit-identical to the canvas route), in WGSL on its
+   * device on WebGPU (opt-in, `?geoshare=gpu`). Null otherwise, or with
+   * `?geoshare=0` (A/B: the geometry canvas uploaded into the engine).
+   */
+  private sharedGeometry(e: Engine): SharedGeometry | null {
+    const flag = new URLSearchParams(location.search).get("geoshare");
+    if (flag === "0") return null;
+    const gl = e.backend as unknown as Partial<SourceDrawBackend>;
+    if (typeof gl.beginSourceDraw === "function" && gl.context) {
+      if (this.geoShared?.gl !== gl.context) {
+        this.geoShared?.geo.dispose();
+        this.geoShared = null;
+        try {
+          this.geoShared = { geo: GeometryRenderer.inContext(gl.context), gl: gl.context };
+        } catch (err) {
+          console.warn("geometry: can't share the colour engine's context:", err instanceof Error ? err.message : err);
+          return null;
+        }
+      }
+      return { kind: "gl", geo: this.geoShared.geo, b: gl as SourceDrawBackend };
+    }
+    // WebGPU: the pass in WGSL on the engine's device (not bit-identical to the WebGL pass; ?geoshare=gl keeps that one).
+    const gpu = e.backend as unknown as Partial<GpuSourceDrawBackend>;
+    if ((flag === "gpu" || (GPU_GEOMETRY_DEFAULT && flag !== "gl")) && typeof gpu.beginSourceDraw === "function" && gpu.gpuDevice) {
+      if (this.geoGpu?.device !== gpu.gpuDevice) {
+        this.geoGpu?.geo.dispose();
+        this.geoGpu = null;
+        try {
+          this.geoGpu = { geo: new GpuGeometryRenderer(gpu.gpuDevice), device: gpu.gpuDevice };
+        } catch (err) {
+          console.warn("geometry: no WebGPU geometry pass:", err instanceof Error ? err.message : err);
+          return null;
+        }
+      }
+      return { kind: "gpu", geo: this.geoGpu.geo, b: gpu as GpuSourceDrawBackend };
+    }
+    return null;
+  }
+
+  /**
+   * The geometry pass of `src` at w×h as the colour engine's (upright)
+   * source: drawn in the engine's context when it can share it, else drawn
+   * into the geometry canvas and uploaded. `prof` times the two halves.
+   */
+  private geometryToEngine(e: Engine, src: GeometrySource, p: GeometryParams, opts: GeometryRenderOptions, w: number, h: number, prof?: ExportProfile, shared = this.sharedGeometry(e)): void {
+    let tp = prof ? performance.now() : 0;
+    if (shared?.kind === "gpu" && GpuGeometryRenderer.supports(opts) && shared.geo.render(shared.b.beginSourceDraw(w, h), src, p, opts)) {
+      if (prof) {
+        const now = performance.now();
+        prof.add("geometry", now - tp);
+        tp = now;
+      }
+      shared.b.endSourceDraw(w, h, 0);
+    } else if (shared?.kind === "gl") {
+      shared.b.beginSourceDraw(w, h);
+      shared.geo.resize(w, h);
+      shared.geo.render(src, p, opts);
+      shared.b.syncIfProfiling();
+      if (prof) {
+        const now = performance.now();
+        prof.add("geometry", now - tp);
+        tp = now;
+      }
+      shared.b.endSourceDraw(w, h, 0);
+    } else {
+      const geo = this.geo!;
+      geo.resize(w, h);
+      geo.render(src, p, opts);
+      if (prof) {
+        const now = performance.now();
+        prof.add("geometry", now - tp);
+        tp = now;
+      }
+      e.upload(geo.canvas, w, h, 0);
+    }
+    prof?.add("upload", performance.now() - tp);
   }
 
   /** Draws `src` at media time `t` into the visible canvas. */
@@ -1750,6 +1838,7 @@ export class Studio {
         e.clearPrecomputed(true);
         const clocks = this.backendClocks();
         if (clocks) clocks.syncProfile = false;
+        if (this.geo) this.geo.syncProfile = false;
         e.analysisIntervalMs = this.colour.ANALYSIS_INTERVAL_MS;
         e.personEvery = 2;
         e.reset();
@@ -1799,13 +1888,36 @@ export class Studio {
     const pool = Number(q.get("pool"));
     e.analysisPoolSize = Number.isFinite(pool) && pool >= 1 ? Math.min(4, Math.floor(pool)) : 2;
     e.verifyPrecomputed = q.get("precheck") === "1";
-    Object.assign(e.precomputeStats, { hits: 0, misses: 0, mismatches: 0 });
+    Object.assign(e.precomputeStats, { hits: 0, misses: 0, mismatches: 0, personHits: 0, personMisses: 0 });
     const fps = this.snap.info?.fps || 30;
     const lookAt = (t: number) => (this.segs.cuts.length ? lookIndexAt(this.segs.cuts, t, this.trim, this.snap.duration, fps) : 0);
     // Superset of the frames analyzeDue analyses: the first, each slot's first, every frame in a profiled cut
     // window, a segment's first, and the frame after any of those snap frames (a snap re-arms the slot).
     let prevSnap = false;
+    // Person passes ride along (?personahead=0 turns them off): which person pass an analysis runs depends on
+    // how many analyses came before it, so the frames analyzeDue analyses are replayed exactly (its rule:
+    // a snap always analyses and re-arms the slot of the frame before; otherwise a new slot does). A profiled
+    // cut window makes that depend on what the analysis sees: from there on the render runs its passes live.
+    const personAhead = q.get("personahead") !== "0" && e.personEnabled;
+    let simSlot = Number.NaN, simFirst = true, simPrev = 0, simCount = 0, simKnown = personAhead;
+    const ordinals = new Map<number, number>();
+    const replay = (t: number, prev: number | null): void => {
+      if (!simKnown) return;
+      if (e.inAnyCutWindow(t)) {
+        simKnown = false;
+        return;
+      }
+      const snap = simFirst || (prev !== null && lookAt(t) !== lookAt(prev));
+      const slot = e.analysisSlotAt(t);
+      if (snap || slot !== simSlot) {
+        ordinals.set(t, simCount++);
+        simSlot = snap ? e.analysisSlotAt(simFirst ? 0 : simPrev) : slot;
+      }
+      simFirst = false;
+      simPrev = t;
+    };
     const want = (t: number, prev: number | null): boolean => {
+      replay(t, prev);
       const snap = prev === null || e.inAnyCutWindow(t) || lookAt(t) !== lookAt(prev);
       const r = snap || prevSnap || e.analysisSlotAt(t) !== e.analysisSlotAt(prev!);
       prevSnap = snap;
@@ -1831,13 +1943,15 @@ export class Studio {
         const frame = media.squarePixels(decoded);
         try {
           if (o.geoOn) {
-            geo!.resize(dw, dh);
-            geo!.render(frame, this.geoParams(t, rot as QuarterTurns), { texCoded: true, split: null, footage: o.footage as never, highPrecision: o.hp });
-            e.upload(geo!.canvas, dw, dh, 0);
+            const shared = this.sharedGeometry(e);
+            if (shared?.kind === "gpu") await shared.geo.probe(frame);
+            this.geometryToEngine(e, frame, this.geoParams(t, rot as QuarterTurns), { texCoded: true, split: null, footage: o.footage as never, highPrecision: o.hp }, dw, dh, undefined, shared);
           } else {
             e.upload(frame, frame.displayWidth, frame.displayHeight, rot);
           }
-          await e.precompute(t, prev ?? 0);
+          const ordinal = ordinals.get(t);
+          ordinals.delete(t);
+          await e.precompute(t, prev ?? 0, ordinal);
         } finally {
           frame.close();
         }
@@ -1854,6 +1968,8 @@ export class Studio {
   private async runOffline(media: MediaMod, file: File, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null, req: ExportRequest = {}) {
     const e = this.engine, geo = this.geo;
     const geoOn = this.geometryActive();
+    // Geometry drawn in the colour engine's context (no canvas copy), when it can share it.
+    const shared = colourOn && geoOn && e ? this.sharedGeometry(e) : null;
     const footage = this.footageMode("frame");
     const hp = this.highPrecision(footage);
     // The browser converts (and clips) HDR frames on upload but passes a re-tagged copy through raw (signal-probe.ts).
@@ -1916,10 +2032,11 @@ export class Studio {
             const ts = Math.round(fi.outTimeSec * 1e6);
             const dur = frame.duration ?? undefined;
             let out: VideoFrame;
-            if (geoOn || !colourOn) {
+            const geoOpts: GeometryRenderOptions = { texCoded: true, split: null, footage, highPrecision: hp };
+            if (!colourOn || (geoOn && !shared)) {
               tp = performance.now();
               geo!.resize(fi.displayWidth, fi.displayHeight);
-              geo!.render(frame, this.geoParams(fi.timeSec, rot as QuarterTurns), { texCoded: true, split: null, footage, highPrecision: hp });
+              geo!.render(frame, this.geoParams(fi.timeSec, rot as QuarterTurns), geoOpts);
               prof.add("geometry", performance.now() - tp);
             }
             if (!colourOn) {
@@ -1937,9 +2054,18 @@ export class Studio {
                 await eng.exportReady();
                 // Frames in flight are past their upload: the lookahead may use the engine's source now.
                 if (look && !serial) await prof.time("prepass", () => look.ensure(fi.timeSec));
-                tp = performance.now();
                 let rotE: Rotation = rot;
-                if (geoOn) {
+                // A WebGPU pass proves it can import this kind of frame before the first one (else the WebGL pass runs).
+                if (shared?.kind === "gpu") await shared.geo.probe(frame);
+                if (shared) {
+                  // Geometry and "upload" (the copy into the engine's source) are timed inside.
+                  this.geometryToEngine(eng, frame, this.geoParams(fi.timeSec, rot as QuarterTurns), geoOpts, fi.displayWidth, fi.displayHeight, prof, shared);
+                  rotE = 0;
+                }
+                tp = performance.now();
+                if (shared) {
+                  // Drawn into the engine's source above.
+                } else if (geoOn) {
                   eng.upload(geo!.canvas, fi.displayWidth, fi.displayHeight, 0);
                   rotE = 0;
                 } else {
@@ -2043,10 +2169,13 @@ export class Studio {
   /** A new export profile; `?profile=sync` also has the backend finish the GPU per stage (exact, a little slower). */
   private startProfile(): ExportProfile {
     const c = this.backendClocks();
+    const sync = new URLSearchParams(location.search).get("profile") === "sync";
     if (c) {
-      c.syncProfile = new URLSearchParams(location.search).get("profile") === "sync";
+      c.syncProfile = sync;
       this.clocks0 = { ...c.stageMs };
     }
+    // The geometry canvas too, so its GPU time is the geometry stage's, not the upload's that reads it.
+    if (this.geo) this.geo.syncProfile = sync;
     return new ExportProfile();
   }
 
@@ -2065,7 +2194,7 @@ export class Studio {
     }
     const line = prof.summary();
     const ps = e?.precomputeStats;
-    const ahead = look ? ` · analyse-first ${look.analysed} thumbnails, ${ps?.hits ?? 0} used, ${ps?.misses ?? 0} live${ps?.mismatches ? `, ${ps.mismatches} mismatched` : ""}` : "";
+    const ahead = look ? ` · analyse-first ${look.analysed} thumbnails, ${ps?.hits ?? 0} used, ${ps?.misses ?? 0} live${ps?.mismatches ? `, ${ps.mismatches} mismatched` : ""}${ps && ps.personHits + ps.personMisses ? `; person ${ps.personHits} ahead, ${ps.personMisses} live` : ""}` : "";
     console.info(`[export] profile: ${line}${ahead}`);
     console.info(`[export] profile ms: ${JSON.stringify(prof.table())}`);
     this.setExp({ profile: line + ahead });
@@ -2088,6 +2217,7 @@ export class Studio {
     const nat = await loadNative();
     const caps = await nat.nativeInfo();
     const geoOn = this.geometryActive();
+    const shared = colourOn && geoOn && e ? this.sharedGeometry(e) : null;
     // Footage profile, as on the offline path (decoded frames re-tagged when the browser would convert them).
     const footage = this.footageMode("frame");
     const hp = this.highPrecision(footage);
@@ -2176,19 +2306,24 @@ export class Studio {
           const ts = Math.round(timeSec * 1e6);
           const dur = frame.duration ?? undefined;
           let out: VideoFrame;
-          if (geoOn || !colourOn) {
+          const geoOpts: GeometryRenderOptions = { texCoded: true, split: null, footage, highPrecision: hp };
+          if (!colourOn || (geoOn && !shared)) {
             tp = performance.now();
             geo!.resize(fi.displayWidth, fi.displayHeight);
-            geo!.render(frame, this.geoParams(fi.timeSec, rot as QuarterTurns), { texCoded: true, split: null, footage, highPrecision: hp });
+            geo!.render(frame, this.geoParams(fi.timeSec, rot as QuarterTurns), geoOpts);
             prof.add("geometry", performance.now() - tp);
           }
+          if (shared?.kind === "gpu") await shared.geo.probe(frame);
+          if (shared) this.geometryToEngine(e!, frame, this.geoParams(fi.timeSec, rot as QuarterTurns), geoOpts, fi.displayWidth, fi.displayHeight, prof, shared);
           tp = performance.now();
           if (!colourOn) {
             out = new VideoFrame(geo!.canvas, { timestamp: ts, duration: dur });
           } else {
             const eng = e!;
             let rotE: Rotation = rot;
-            if (geoOn) {
+            if (shared) {
+              rotE = 0;
+            } else if (geoOn) {
               eng.upload(geo!.canvas, fi.displayWidth, fi.displayHeight, 0);
               rotE = 0;
             } else {
@@ -2462,6 +2597,26 @@ async function frameHash(f: VideoFrame): Promise<string> {
 }
 
 type BackendClocks = { stageMs: { upload: number; temporal: number; grade: number; capture: number }; syncProfile: boolean };
+/** A WebGPU colour backend another stage can render the source into (backend-webgpu.ts). */
+type GpuSourceDrawBackend = {
+  readonly gpuDevice: GPUDevice;
+  beginSourceDraw(width: number, height: number): GPUTexture;
+  endSourceDraw(width: number, height: number, rotation: Rotation): void;
+};
+type SharedGeometry = { kind: "gl"; geo: GeometryRenderer; b: SourceDrawBackend } | { kind: "gpu"; geo: GpuGeometryRenderer; b: GpuSourceDrawBackend };
+/**
+ * The WebGPU geometry pass is opt-in (?geoshare=gpu): it is not bit-identical to the WebGL pass and has not been
+ * measured on a device with a real GPU yet (headless SwiftShader can't import video frames). ?geoshare=0 turns
+ * both shared passes off.
+ */
+const GPU_GEOMETRY_DEFAULT = false;
+/** A colour backend another stage can draw the source in (backend-webgl2.ts). */
+type SourceDrawBackend = {
+  readonly context: WebGL2RenderingContext;
+  beginSourceDraw(width: number, height: number): void;
+  endSourceDraw(width: number, height: number, rotation: Rotation): void;
+  syncIfProfiling(): void;
+};
 
 function playerHelp(info: ClipInfo | null): string | null {
   if (!info) return null;

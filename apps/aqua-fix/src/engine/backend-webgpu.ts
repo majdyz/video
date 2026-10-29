@@ -235,6 +235,43 @@ export class WebGPUBackend implements GpuBackend {
     if (this.outputWidth) this.sizeCanvas(this.previewScale);
   }
 
+  /** This backend's device: a stage drawing the source itself (the studio's geometry pass) renders with it. */
+  get gpuDevice(): GPUDevice {
+    return this.device;
+  }
+
+  /**
+   * The width×height rgba8unorm source texture, for another stage to render
+   * the next source frame into on this device (row 0 at the top, as a copy
+   * of a canvas would land); endSourceDraw then makes it the source.
+   */
+  beginSourceDraw(width: number, height: number): GPUTexture {
+    if (!this.source || this.srcW !== width || this.srcH !== height) {
+      this.source?.destroy();
+      this.source = this.device.createTexture({
+        size: [width, height],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      this.srcW = width;
+      this.srcH = height;
+      this.bindGroupDirty = true;
+    }
+    return this.source;
+  }
+
+  /** The texture from beginSourceDraw is the source now: the same bookkeeping as upload(). */
+  endSourceDraw(width: number, height: number, rotation: Rotation): void {
+    this.lastGraded = null;
+    this.rotation = rotation;
+    const [ow, oh] = uprightSize(width, height, rotation);
+    this.outputWidth = ow;
+    this.outputHeight = oh;
+    this.sizeCanvas(this.previewScale);
+    if (this.extSource) this.bindGroupDirty = true;
+    this.extSource = null;
+  }
+
   private sizeCanvas(scale: number): void {
     const w = Math.max(1, Math.round(this.outputWidth * scale));
     const h = Math.max(1, Math.round(this.outputHeight * scale));

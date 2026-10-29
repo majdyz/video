@@ -1,6 +1,9 @@
 // Geometry stage: stabilise (mesh UVs) and dewarp (per fragment) in ONE
 // WebGL2 pass, drawn into a canvas that is either shown directly (colour
-// off) or handed to the colour engine as its source (colour on).
+// off) or handed to the colour engine as its source (colour on). With the
+// colour engine on WebGL2 a second renderer lives in the engine's own GL
+// context and draws straight into its source (GeometryRenderer.inContext):
+// no canvas, no copy between contexts.
 // The maths is geometry-math.ts; keep the two in step.
 
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
@@ -96,8 +99,15 @@ export type GeometryRenderOptions = {
 type Loc = Record<string, WebGLUniformLocation | null>;
 
 export class GeometryRenderer {
+  /** The canvas drawn into; null for a renderer in another stage's context (inContext), which draws into the bound framebuffer. */
   readonly canvas: HTMLCanvasElement;
   private readonly gl: WebGL2RenderingContext;
+  private readonly shared: boolean;
+  private w = 2;
+  private h = 2;
+  /** Export profiling (?profile=sync): wait for the GPU after each render so its time is the geometry stage's. */
+  syncProfile = false;
+  private syncPx = new Uint8Array(4);
   private readonly prog: WebGLProgram;
   private readonly tex: WebGLTexture;
   private readonly midBuf: WebGLBuffer;
@@ -107,9 +117,25 @@ export class GeometryRenderer {
   /** Half-float uploads failed once on this device: stay on 8-bit. */
   private floatBroken = false;
 
-  constructor(canvas: HTMLCanvasElement) {
-    this.canvas = canvas;
-    const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: true });
+  /**
+   * A renderer in an existing WebGL2 context (the colour engine's): it draws
+   * into whatever framebuffer is bound and leaves the context's canvas alone.
+   */
+  static inContext(gl: WebGL2RenderingContext): GeometryRenderer {
+    return new GeometryRenderer(gl);
+  }
+
+  constructor(target: HTMLCanvasElement | WebGL2RenderingContext) {
+    let gl: WebGL2RenderingContext | null;
+    if (target instanceof HTMLCanvasElement) {
+      this.canvas = target;
+      this.shared = false;
+      gl = target.getContext("webgl2", { alpha: false, antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: true });
+    } else {
+      gl = target;
+      this.canvas = target.canvas as HTMLCanvasElement;
+      this.shared = true;
+    }
     if (!gl) throw new Error("WebGL2 is not available on this device");
     this.gl = gl;
     const compile = (type: number, src: string) => {
@@ -174,10 +200,22 @@ export class GeometryRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   }
 
+  /** Output size; a renderer in another context draws that size into the bound framebuffer (its canvas is not touched). */
   resize(width: number, height: number): void {
     const w = Math.max(2, Math.round(width)), h = Math.max(2, Math.round(height));
+    this.w = w;
+    this.h = h;
+    if (this.shared) return;
     if (this.canvas.width !== w) this.canvas.width = w;
     if (this.canvas.height !== h) this.canvas.height = h;
+  }
+
+  /** Output size in pixels (the last resize). */
+  get width(): number {
+    return this.shared ? this.w : this.canvas.width;
+  }
+  get height(): number {
+    return this.shared ? this.h : this.canvas.height;
   }
 
   /**
@@ -194,8 +232,13 @@ export class GeometryRenderer {
         this.mid[i + 1] = my;
       }
     }
+    // Unit 0 explicitly: in a shared context another stage may have left a different unit active.
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    // This context's own defaults, whatever the stage sharing it set (the colour engine uploads with NONE).
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     if (opts.highPrecision && !this.floatBroken) {
       while (gl.getError() !== gl.NO_ERROR) { /* drain */ }
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, src as TexImageSource);
@@ -208,7 +251,8 @@ export class GeometryRenderer {
     } else {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src as TexImageSource);
     }
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    if (this.shared) gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    gl.viewport(0, 0, this.width, this.height);
     gl.useProgram(this.prog);
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.midBuf);
@@ -233,9 +277,9 @@ export class GeometryRenderer {
       gl.uniform2f(L.center, d.center[0], d.center[1]);
       gl.uniform1f(L.thetaMax, d.thetaMax);
     }
-    gl.activeTexture(gl.TEXTURE0);
     gl.drawElements(gl.TRIANGLES, GRID_W * GRID_H * 6, gl.UNSIGNED_SHORT, 0);
     gl.bindVertexArray(null);
+    if (this.syncProfile && !this.shared) gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.syncPx);
   }
 
   /**
@@ -246,6 +290,7 @@ export class GeometryRenderer {
    */
   sample(src: GeometrySource, w: number, h: number, texCoded: boolean, points: [number, number][]): number[][] {
     const gl = this.gl;
+    if (this.shared) throw new Error("geometry: sample() needs the renderer's own canvas");
     this.resize(w, h);
     const identity: GeometryParams = { rot: 0, displayW: w, displayH: h, stab: null, dewarp: null };
     this.render(src, identity, { texCoded, split: null, footage: 0, highPrecision: true });

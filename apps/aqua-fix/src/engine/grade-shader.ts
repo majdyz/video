@@ -187,8 +187,10 @@ vec3 fitToGamut(vec3 c) {
 }
 // Joint bilateral upsample of (z, conf, d, veilScale) guided by the pixel's
 // linear colour. kOut is the guide-match weight: 0 when no neighbour
-// resembles the pixel (content moved since the map was made).
-vec4 sampleFields(vec2 uv, vec3 c, out float kOut, out float personOut) {
+// resembles the pixel (content moved since the map was made). gsOut is
+// guideSmooth(uv, c) (red.ts): the same four guide texels with the same
+// weights, so it comes out of this loop instead of fetching them again.
+vec4 sampleFields(vec2 uv, vec3 c, out float kOut, out float personOut, out vec3 gsOut) {
   ivec2 size = textureSize(u_data0, 0);
   vec2 f = clamp(uv * vec2(size) - 0.5, vec2(0.0), vec2(size) - 1.0);
   ivec2 i0 = ivec2(floor(f));
@@ -196,6 +198,7 @@ vec4 sampleFields(vec2 uv, vec3 c, out float kOut, out float personOut) {
   vec2 t = f - vec2(i0);
   float cn = length(c) + 0.02;
   vec4 sum = vec4(0.0), bil = vec4(0.0);
+  vec3 sg = vec3(0.0);
   float sw = 0.0, sp = 0.0, bp = 0.0;
   for (int k = 0; k < 4; k++) {
     ivec2 ij = ivec2(k == 1 || k == 3 ? i1.x : i0.x, k >= 2 ? i1.y : i0.y);
@@ -205,13 +208,16 @@ vec4 sampleFields(vec2 uv, vec3 c, out float kOut, out float personOut) {
     vec3 g = gd.xyz;
     float diff = length(c - g) / (cn + length(g));
     float wr = exp(-(diff * diff) / (2.0 * JBU_SIGMA * JBU_SIGMA));
-    sum += ws * wr * fld;
-    sw += ws * wr;
+    float wsr = ws * wr;
+    sum += wsr * fld;
+    sg += wsr * g;
+    sw += wsr;
     bil += ws * fld;
     sp += ws * wr * gd.w;
     bp += ws * gd.w;
   }
   kOut = min(1.0, sw / 0.08);
+  gsOut = sw < 1e-6 ? c : mix(c, sg / sw, min(1.0, sw / 0.08));
   if (sw < 1e-6) { kOut = 0.0; personOut = bp; return bil; }
   personOut = sp / sw;
   return sum / sw;
@@ -449,7 +455,8 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // pixel, the per-pixel prior where it doesn't.
   float dPix = mu.x + mu.y * max(base.g, base.b) + mu.z * base.r;
   float k, personMap;
-  vec4 fld = sampleFields(uv, lin, k, personMap);
+  vec3 guideS;
+  vec4 fld = sampleFields(uv, lin, k, personMap, guideS);
   float person = clamp(personMap, 0.0, 1.0);
   float zRange = max(0.02, zHi - zLo);
   float zPix = clamp((dPix - zLo) / zRange, 0.0, 1.15);
@@ -469,11 +476,15 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // A hue far from the veil's is a near object the global fit overstates:
   // proportional (hue-preserving) subtraction only (see apply.ts).
   vec3 lab0 = linearToOklab(lin);
-  float wSub = smoothstepf(subLo, subHi, sig) * (1.0 - hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma)) * (1.0 - RED_GREEN_PROP * p[22].w);
+  // Used more than once below: computed once.
+  float veilFar = hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma);
+  float veilConf = hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma);
+  float redKeep = smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)));
+  float wSub = smoothstepf(subLo, subHi, sig) * (1.0 - veilFar) * (1.0 - RED_GREEN_PROP * p[22].w);
   // Red restoration (red.ts): amplified channels rebuilt from the smoothed chroma; red gain by red SNR.
   vec3 rg3 = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
   float snrR;
-  vec3 linC = chromaRebuild(lin, guideSmooth(uv, lin), max(rg3 * wb, waterWb), B, snrR);
+  vec3 linC = chromaRebuild(lin, guideS, max(rg3 * wb, waterWb), B, snrR);
   float redS = redGainStrength(snrR);
   vec3 per = max(linC - Bs, linC * floorFrac);
   vec3 D = mix(linC * max(floorFrac, 1.0 - lumBs / lumI), per, wSub);
@@ -485,21 +496,21 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   float bdev = p[16].w > 0.0 ? backdropDev(lab0, uv) : 1.0;
   float bsub = smoothstepf(BD_VETO_LO, BD_VETO_HI, bdev);
   float veto = mix(1.0, bsub, p[16].w);
-  float confPix = min(confSignal, max(max(hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma) * veto, confBright), p[22].w * RED_GREEN_OBJ));
+  float confPix = min(confSignal, max(max(veilConf * veto, confBright), p[22].w * RED_GREEN_OBJ));
   // Whatever the map says, a pixel the veil model would nearly erase
   // (tiny D) must take the water path — the physics path would crush it
   // to black, which is the dark ghost on moving content.
   // Open blue water: no source red → the water path's colour (see apply.ts).
-  float conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  float conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal * (1.0 - p[16].w * (1.0 - redKeep));
   // Raw subject mask (before the tone gate) is also the temporal tracker's output; the warped
   // previous mask (g_subjPrior, kept near the map by the temporal layer) holds where the pixel departs like a subject.
   float subjRaw = p[16].w > 0.0 ? max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev)) : 0.0;
   g_subjOut = subjRaw;
-  vec2 an = animalStrength(uv);
+  // Per-animal strength: only read with Subject pop on in open water (subj is 0 otherwise either way).
+  vec2 an = p[16].w != 0.0 && p[22].z != 0.0 ? animalStrength(uv) : vec2(0.0);
   float subj = max(subjRaw, p[16].w > 0.0 ? an.y * smoothstepf(BD_HOLD_LO, BD_HOLD_HI, bdev) : 0.0) * p[16].w * p[22].z * an.x;
   if (p[0].w > 0.5) return vec3(k, confPix, clamp(fld.y, 0.0, 1.0));
-  vec3 rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
-  vec3 gainV = rangeGain * wb;
+  vec3 gainV = rg3 * wb;
   gainV.r = 1.0 + (gainV.r - 1.0) * redS;
   vec3 full = D * gainV;
   float ew = pow(exposure, waterExposure);
@@ -512,7 +523,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
     float y0 = lum(o);
     // Far-hue pixels take the hue-preserving luminance ratio (see apply.ts).
     vec3 rc = vec3(hazeLiftRatio(o.r, tc.r), hazeLiftRatio(o.g, tc.g), hazeLiftRatio(o.b, tc.b));
-    o *= mix(rc, vec3(hazeLiftRatio(y0, p[17].w * (1.0 - HAZE_LIFT_FAR_KEEP))), hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma));
+    o *= mix(rc, vec3(hazeLiftRatio(y0, p[17].w * (1.0 - HAZE_LIFT_FAR_KEEP))), veilFar);
     hf = y0 > 1e-6 ? lum(o) / y0 : 1.0;
   }
   // Levels on luminance, ratio-preserving.
@@ -549,18 +560,19 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   float C = length(lab.yz);
   float cMax = chromaK * cSrc + chromaC0;
   float scale = (C > cMax ? cMax / C : 1.0);
-  float vividW = smoothstepf(VIVID_C_LO, VIVID_C_HI, cSrc) * hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma);
+  float vividW = smoothstepf(VIVID_C_LO, VIVID_C_HI, cSrc) * veilFar;
   float cMin = VIVID_KEEP * cSrc * vividW;
   if (C > 1e-6 && C * scale < cMin) scale = cMin / C;
   scale *= saturation;
   float onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
   lab.yz = greenNeutral(lab.x, lab.yz, p[22].w * (1.0 - RED_GN_OBJ_KEEP * conf));
-  float tN = objectNeutral(lab.x, lab.yz, lin, onFar, objectWeight(subj), p[16].w);
-  float personS = person * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  float objW = objectWeight(subj);
+  float tN = objectNeutral(lab.x, lab.yz, lin, onFar, objW, p[16].w);
+  float personS = person * (1.0 - p[16].w * (1.0 - redKeep));
   scale *= warmClamp(lab.yz, lin, onFar, personS, p[16].w);
   vec2 nab = mix(lab.yz * scale, veilHue * ON_SILVER, tN);
-  float Ls = lab.x + objectLift(lab.x, objectWeight(subj), p[16].w);
-  vec3 lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y);
+  float Ls = lab.x + objectLift(lab.x, objW, p[16].w);
+  vec3 lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - veilConf, p[16].x, p[16].y);
   lk.yz = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
   // Vivid look (opt-in, p23.z), then the near-white pink guard (always).
   lk = vividLook(lk, p[23].z, p[22].w);
@@ -646,15 +658,16 @@ fn fitToGamut(cIn: vec3<f32>) -> vec3<f32> {
   if (m > 1.0) { c *= max(GAMUT_SCALE_MIN, 1.0 / m); }
   return compressToGamut(c);
 }
-// Returns (z, conf, d, veilScale) and the guide-match weight k in .w of the second value.
-fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> array<vec4<f32>, 2> {
+// Returns (z, conf, d, veilScale), the guide-match weight k in .w of the second value, and
+// guideSmooth(uv, c) (red.ts: the same four guide texels with the same weights) in the third.
+fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> array<vec4<f32>, 3> {
   let size = vec2<i32>(textureDimensions(u_data0, 0));
   let f = clamp(uv * vec2<f32>(size) - 0.5, vec2(0.0), vec2<f32>(size) - 1.0);
   let i0 = vec2<i32>(floor(f));
   let i1 = min(i0 + 1, size - 1);
   let t = f - vec2<f32>(i0);
   let cn = length(c) + 0.02;
-  var sum = vec4(0.0); var bil = vec4(0.0); var sw = 0.0; var sp = 0.0; var bp = 0.0;
+  var sum = vec4(0.0); var bil = vec4(0.0); var sg = vec3(0.0); var sw = 0.0; var sp = 0.0; var bp = 0.0;
   for (var k = 0; k < 4; k++) {
     let right = (k == 1 || k == 3);
     let bottom = (k >= 2);
@@ -665,15 +678,17 @@ fn sampleFields(uv: vec2<f32>, c: vec3<f32>) -> array<vec4<f32>, 2> {
     let g = gd.xyz;
     let diff = length(c - g) / (cn + length(g));
     let wr = exp(-(diff * diff) / (2.0 * JBU_SIGMA * JBU_SIGMA));
-    sum += ws * wr * fld;
-    sw += ws * wr;
+    let wsr = ws * wr;
+    sum += wsr * fld;
+    sg += wsr * g;
+    sw += wsr;
     bil += ws * fld;
     sp += ws * wr * gd.w;
     bp += ws * gd.w;
   }
   // second vector: (person, 0, 0, k)
-  if (sw < 1e-6) { return array<vec4<f32>, 2>(bil, vec4(bp, 0.0, 0.0, 0.0)); }
-  return array<vec4<f32>, 2>(sum / sw, vec4(sp / sw, 0.0, 0.0, min(1.0, sw / 0.08)));
+  if (sw < 1e-6) { return array<vec4<f32>, 3>(bil, vec4(bp, 0.0, 0.0, 0.0), vec4(c, 0.0)); }
+  return array<vec4<f32>, 3>(sum / sw, vec4(sp / sw, 0.0, 0.0, min(1.0, sw / 0.08)), vec4(mix(c, sg / sw, min(1.0, sw / 0.08)), 0.0));
 }
 fn smoothstepf(e0: f32, e1: f32, x: f32) -> f32 { let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
 fn hazeLiftRatio(y: f32, t: f32) -> f32 {
@@ -906,10 +921,14 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let lumBs = lum(Bs);
   let sig = max(0.0, (lumI - lumB) / lumI);
   let lab0 = linearToOklab(lin);
-  let wSub = smoothstepf(subLo, subHi, sig) * (1.0 - hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma)) * (1.0 - RED_GREEN_PROP * p[22].w);
+  // Used more than once below: computed once.
+  let veilFar = hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma);
+  let veilConf = hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma);
+  let redKeep = smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)));
+  let wSub = smoothstepf(subLo, subHi, sig) * (1.0 - veilFar) * (1.0 - RED_GREEN_PROP * p[22].w);
   // Red restoration (red.ts): amplified channels rebuilt from the smoothed chroma; red gain by red SNR.
   let rg3 = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
-  let crb = chromaRebuild(lin, guideSmooth(uv, lin), max(rg3 * wb, waterWb), B);
+  let crb = chromaRebuild(lin, sf[2].xyz, max(rg3 * wb, waterWb), B);
   let linC = crb.xyz;
   let redS = redGainStrength(crb.w);
   let per = max(linC - Bs, linC * floorFrac);
@@ -919,15 +938,16 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let bdev = select(1.0, backdropDev(lab0, uv), p[16].w > 0.0);
   let bsub = smoothstepf(BD_VETO_LO, BD_VETO_HI, bdev);
   let veto = mix(1.0, bsub, p[16].w);
-  let confPix = min(confSignal, max(max(hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma) * veto, confBright), p[22].w * RED_GREEN_OBJ));
-  let conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  let confPix = min(confSignal, max(max(veilConf * veto, confBright), p[22].w * RED_GREEN_OBJ));
+  let conf = max(mix(confPix, min(clamp(fld.y, 0.0, 1.0), veto), k), person * smoothstepf(PERSON_LUM_LO, PERSON_LUM_HI, lumI)) * confSignal * (1.0 - p[16].w * (1.0 - redKeep));
   let subjRaw = select(0.0, max(subjectWeight(uv, clamp(fld.y, 0.0, 1.0) * k, bdev), g_subjPrior * smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev)), p[16].w > 0.0);
   g_subjOut = subjRaw;
-  let an = animalStrength(uv);
+  // Per-animal strength: only read with Subject pop on in open water (subj is 0 otherwise either way).
+  var an = vec2<f32>(0.0);
+  if (p[16].w != 0.0 && p[22].z != 0.0) { an = animalStrength(uv); }
   let subj = max(subjRaw, select(0.0, an.y * smoothstepf(BD_HOLD_LO, BD_HOLD_HI, bdev), p[16].w > 0.0)) * p[16].w * p[22].z * an.x;
   if (p[0].w > 0.5) { return vec3(k, confPix, clamp(fld.y, 0.0, 1.0)); }
-  let rangeGain = clamp(exp(attn * (z - zMean)), vec3(1.0 / gainCap), vec3(gainCap));
-  var gainV = rangeGain * wb;
+  var gainV = rg3 * wb;
   gainV.r = 1.0 + (gainV.r - 1.0) * redS;
   let full = D * gainV;
   let ew = pow(exposure, waterExposure);
@@ -938,7 +958,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   if (tc.r + tc.g + tc.b > 0.0) {
     let y0 = lum(o);
     let rc = vec3(hazeLiftRatio(o.r, tc.r), hazeLiftRatio(o.g, tc.g), hazeLiftRatio(o.b, tc.b));
-    o *= mix(rc, vec3(hazeLiftRatio(y0, p[17].w * (1.0 - HAZE_LIFT_FAR_KEEP))), hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma));
+    o *= mix(rc, vec3(hazeLiftRatio(y0, p[17].w * (1.0 - HAZE_LIFT_FAR_KEEP))), veilFar);
     hf = select(1.0, lum(o) / y0, y0 > 1e-6);
   }
   var Y = lum(o);
@@ -969,19 +989,20 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let C = length(lab.yz);
   let cMax = chromaK * cSrc + chromaC0;
   var scale = select(1.0, cMax / C, C > cMax);
-  let vividW = smoothstepf(VIVID_C_LO, VIVID_C_HI, cSrc) * hueFar(lab0.yz, veilHue, hueFarLo, hueFarHi, achroma);
+  let vividW = smoothstepf(VIVID_C_LO, VIVID_C_HI, cSrc) * veilFar;
   let cMin = VIVID_KEEP * cSrc * vividW;
   if (C > 1e-6 && C * scale < cMin) { scale = cMin / C; }
   scale *= saturation;
   let onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
   let gnab = greenNeutral(lab.x, lab.yz, p[22].w * (1.0 - RED_GN_OBJ_KEEP * conf));
   lab = vec3(lab.x, gnab);
-  let tN = objectNeutral(lab.x, lab.yz, lin, onFar, objectWeight(subj), p[16].w);
-  let personS = person * (1.0 - p[16].w * (1.0 - smoothstepf(ON_R_LO, ON_R_HI, lin.r / max(1e-4, max(lin.g, lin.b)))));
+  let objW = objectWeight(subj);
+  let tN = objectNeutral(lab.x, lab.yz, lin, onFar, objW, p[16].w);
+  let personS = person * (1.0 - p[16].w * (1.0 - redKeep));
   scale *= warmClamp(lab.yz, lin, onFar, personS, p[16].w);
   let nab = mix(lab.yz * scale, veilHue * ON_SILVER, tN);
-  let Ls = lab.x + objectLift(lab.x, objectWeight(subj), p[16].w);
-  var lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y);
+  let Ls = lab.x + objectLift(lab.x, objW, p[16].w);
+  var lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - veilConf, p[16].x, p[16].y);
   let gab = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
   lk = vec3(lk.x, gab);
   lk = vividLook(lk, p[23].z, p[22].w);

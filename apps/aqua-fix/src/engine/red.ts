@@ -379,27 +379,7 @@ const float RED_GN_TB = ${(RED.gnTargetC * Math.sin(RED.gnTargetHue)).toFixed(6)
 const RED_CONSTS_WGSL = RED_CONSTS_GLSL.replace(/const float (\w+) = ([^;]+);/g, "const $1: f32 = $2;");
 
 export const RED_GLSL = `${RED_CONSTS_GLSL}
-vec3 guideSmooth(vec2 uv, vec3 c) {
-  ivec2 size = textureSize(u_data0, 0);
-  vec2 f = clamp(uv * vec2(size) - 0.5, vec2(0.0), vec2(size) - 1.0);
-  ivec2 i0 = ivec2(floor(f));
-  ivec2 i1 = min(i0 + 1, size - 1);
-  vec2 t = f - vec2(i0);
-  float cn = length(c) + 0.02;
-  vec3 sum = vec3(0.0);
-  float sw = 0.0;
-  for (int k = 0; k < 4; k++) {
-    ivec2 ij = ivec2(k == 1 || k == 3 ? i1.x : i0.x, k >= 2 ? i1.y : i0.y);
-    float ws = (k == 1 || k == 3 ? t.x : 1.0 - t.x) * (k >= 2 ? t.y : 1.0 - t.y);
-    vec3 g = texelFetch(u_data2, ij, 0).xyz;
-    float diff = length(c - g) / (cn + length(g));
-    float wgt = ws * exp(-(diff * diff) / (2.0 * 0.12 * 0.12));
-    sum += wgt * g;
-    sw += wgt;
-  }
-  if (sw < 1e-6) return c;
-  return mix(c, sum / sw, min(1.0, sw / 0.08));
-}
+// guideSmooth's GPU twin is computed inside sampleFields (grade-shader.ts): the same texels and weights.
 vec3 chromaRebuild(vec3 lin, vec3 s, vec3 gain, vec3 bs, out float snrR) {
   vec3 snr = 255.0 * max(linearToSrgb(max(s, vec3(0.0))) - linearToSrgb(max(min(s, bs), vec3(0.0))), vec3(0.0)) / RED_SIGMA;
   snrR = snr.r;
@@ -475,29 +455,7 @@ vec2 redGuard(float L, vec2 ab, vec2 ab0, float person, float srcFar) {
 }`;
 
 export const RED_WGSL = `${RED_CONSTS_WGSL}
-fn guideSmooth(uv: vec2<f32>, c: vec3<f32>) -> vec3<f32> {
-  let size = vec2<i32>(textureDimensions(u_data0, 0));
-  let f = clamp(uv * vec2<f32>(size) - 0.5, vec2(0.0), vec2<f32>(size) - 1.0);
-  let i0 = vec2<i32>(floor(f));
-  let i1 = min(i0 + 1, size - 1);
-  let t = f - vec2<f32>(i0);
-  let cn = length(c) + 0.02;
-  var sum = vec3(0.0);
-  var sw = 0.0;
-  for (var k = 0; k < 4; k++) {
-    let right = (k == 1 || k == 3);
-    let bottom = (k >= 2);
-    let ij = vec2<i32>(select(i0.x, i1.x, right), select(i0.y, i1.y, bottom));
-    let ws = select(1.0 - t.x, t.x, right) * select(1.0 - t.y, t.y, bottom);
-    let g = textureLoad(u_data2, ij, 0).xyz;
-    let diff = length(c - g) / (cn + length(g));
-    let wgt = ws * exp(-(diff * diff) / (2.0 * 0.12 * 0.12));
-    sum += wgt * g;
-    sw += wgt;
-  }
-  if (sw < 1e-6) { return c; }
-  return mix(c, sum / sw, min(1.0, sw / 0.08));
-}
+// guideSmooth: see sampleFields in grade-shader.ts.
 // Rebuilt colour in .xyz, red SNR in .w.
 fn chromaRebuild(lin: vec3<f32>, s: vec3<f32>, gain: vec3<f32>, bs: vec3<f32>) -> vec4<f32> {
   let snr = 255.0 * max(linearToSrgb(max(s, vec3(0.0))) - linearToSrgb(max(min(s, bs), vec3(0.0))), vec3(0.0)) / RED_SIGMA;
