@@ -11,10 +11,11 @@ Three on-device PWAs for diver-shot footage, in one monorepo.
   global correction is locked to the median over ~12 frames of the clip
   (a subject passing through can't swing it); the per-pixel water/object
   maps still follow the content. Within a locked shot the balance eases
-  toward what holds the near sand / white rubble at neutral (a closed loop
-  through the CPU reference of the shader), which cancels the camera's own
-  auto white balance hunting as it tilts between seabed and open water
-  (open water and red subjects are not evidence). An on-device person model (MediaPipe)
+  toward what holds the near sand / white rubble at the colour the lock gives
+  it over the shot (a closed loop through the CPU reference of the shader),
+  which cancels the camera's own auto white balance hunting as it tilts
+  between seabed and open water (open water, green water and red subjects
+  are not evidence). An on-device person model (MediaPipe)
   keeps skin on the restoration path and pulls it toward a skin tone.
   Controls: Intensity (50 % = the estimate), scene presets (Auto / Green
   water / Deep blue / Shallow reef) as priors, a Deep-blue look fitted to

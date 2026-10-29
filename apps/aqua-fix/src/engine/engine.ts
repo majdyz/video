@@ -10,7 +10,7 @@
 import { WebGL2Backend } from "./backend-webgl2.ts";
 import { WebGPUBackend } from "./backend-webgpu.ts";
 import { ANALYSIS_H, ANALYSIS_W } from "./analyze.ts";
-import type { AnalysisPacket, AnalysisRequest } from "./analysis-worker.ts";
+import type { AnalysisPacket, AnalysisRequest, TargetsReply, TargetsRequest } from "./analysis-worker.ts";
 import type { PersonPacket, PersonRequest } from "./person-worker.ts";
 import { boxGate, PERSON_BOX_MIN_SCORE, type PersonBox } from "./person-gate.ts";
 import { inCutWindow as lockInCutWindow, lockParams, noteCut as lockNoteCut, segmentAt, type LockSegment } from "./lock.ts";
@@ -126,6 +126,12 @@ export class GradeEngine {
   private lastPacketSec = 0;
   /** The lock sent with the analysis in flight (its anchor is relative to it). */
   private reqLock: GradeParams | null = null;
+  /** Profile thumbnails by clip time (analyzeRaw with a time): the anchor targets are measured on them. */
+  private profileThumbs = new Map<number, Uint8ClampedArray>();
+  private keepThumbAt: number | null = null;
+  /** Anchor target per locked segment (null: none measurable, that shot keeps the plain lock); request id. */
+  private anchorTargets: ([number, number] | null)[] = [];
+  private targetsReq = 0;
   private lastRenderSec = -1;
   /** Subject-pop stability gate (pop-gate.ts): eased value, target, last mask. */
   private popGate = 0;
@@ -225,10 +231,37 @@ export class GradeEngine {
     this.locked = segments && segments.length > 0 ? [...segments].sort((a, b) => a.from - b.from) : null;
     this.cutSeen.clear();
     this.follow.reset();
+    this.anchorTargets = [];
+    this.targetsReq++;
     if (this.locked) {
       this.current = this.applyLock(this.current);
       if (this.target) this.target = this.applyLock(this.target);
+      this.requestTargets();
     }
+  }
+
+  /** Forgets the profile thumbnails (a new clip, or a new colour input for the same clip). */
+  forgetProfile(): void {
+    this.profileThumbs.clear();
+  }
+
+  /** Asks the worker for each locked segment's anchor target, measured on the profile thumbnails inside it. */
+  private requestTargets(): void {
+    const segs = this.locked;
+    if (!segs || !this.followEnabled || this.profileThumbs.size === 0) return;
+    const shots = segs.map((s, i) => {
+      const lo = i === 0 ? -Infinity : s.from, hi = i + 1 < segs.length ? segs[i + 1].from : Infinity;
+      const thumbs = [...this.profileThumbs].filter(([t]) => t >= lo && t < hi).map(([, px]) => px.slice().buffer as ArrayBuffer);
+      return { lock: s.params, thumbs };
+    });
+    const req: TargetsRequest = { kind: "targets", id: this.targetsReq, width: ANALYSIS_W, height: ANALYSIS_H, shots };
+    this.ensureWorker().postMessage(req, shots.flatMap((s) => s.thumbs));
+  }
+
+  private onTargets(r: TargetsReply): void {
+    if (r.id !== this.targetsReq) return;
+    this.anchorTargets = r.targets;
+    console.info(`[anchor] targets for ${r.targets.length} segment(s): ${r.targets.map((t) => (t ? `${t[0].toFixed(3)},${t[1].toFixed(3)}` : "none")).join(" | ")}`);
   }
 
   get isLocked(): boolean {
@@ -274,7 +307,7 @@ export class GradeEngine {
   }
 
   /** Runs one analysis of the current source and returns its raw parameters and mean colour (clip profiling). */
-  async analyzeRaw(timeoutMs = 10_000): Promise<{ params: GradeParams; mean: Vec3 }> {
+  async analyzeRaw(timeoutMs = 10_000, timeSec?: number): Promise<{ params: GradeParams; mean: Vec3 }> {
     const p = new Promise<AnalysisPacket>((resolve, reject) => {
       this.resolveWaiters.push(resolve);
       this.rejectWaiters.push(reject);
@@ -284,6 +317,8 @@ export class GradeEngine {
       this.resolveWaiters.push(resolve);
       this.rejectWaiters.push(reject);
     });
+    // With a clip time the thumbnail is kept for the anchor targets (see requestTargets).
+    this.keepThumbAt = timeSec ?? null;
     await this.startAnalysis();
     const packet = await new Promise<AnalysisPacket>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error("Frame analysis timed out")), timeoutMs);
@@ -301,7 +336,10 @@ export class GradeEngine {
   private ensureWorker(): Worker {
     if (this.worker) return this.worker;
     const w = new Worker(new URL("./analysis-worker.ts", import.meta.url), { type: "module" });
-    w.onmessage = (e: MessageEvent<AnalysisPacket>) => this.onPacket(e.data);
+    w.onmessage = (e: MessageEvent<AnalysisPacket | TargetsReply>) => {
+      if (e.data.kind === "targets") this.onTargets(e.data);
+      else this.onPacket(e.data);
+    };
     w.onerror = (e) => {
       this.inflight = false;
       const err = new Error("Analysis worker failed: " + e.message);
@@ -505,6 +543,10 @@ export class GradeEngine {
     this.lastAnalysisAt = performance.now();
     try {
       const rgba = await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
+      if (this.keepThumbAt !== null) {
+        this.profileThumbs.set(this.keepThumbAt, rgba.slice());
+        this.keepThumbAt = null;
+      }
       // Person segmentation: a copy of this thumbnail (full frame) or a
       // quadrant at 2× detail, cycling through PERSON_RECTS. Both readbacks
       // finish before anything is posted: once the analysis reply lands,
@@ -514,9 +556,12 @@ export class GradeEngine {
       const detect = wantPerson && this.personPasses++ % PERSON_DETECT_EVERY === 0;
       const rect = detect ? FULL_RECT : PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
       const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.backend.analyze(ANALYSIS_W, ANALYSIS_H, rect);
-      const lock = this.followEnabled ? this.lockedAt(this.lastTickSec) : null;
+      // The anchor (follow.ts) needs the lock in force and its shot's target.
+      const seg = this.followEnabled && this.locked ? segmentAt(this.locked, this.cutSeen, this.lastTickSec) : null;
+      const target = seg ? this.anchorTargets[this.locked!.indexOf(seg)] ?? null : null;
+      const lock = seg && target ? seg.params : null;
       this.reqLock = lock;
-      const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, ...(lock ? { lock } : {}) };
+      const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, ...(lock && target ? { lock, target } : {}) };
       this.reqTimeSec = this.lastTickSec;
       this.ensureWorker().postMessage(req, [req.rgba]);
       if (px) {

@@ -466,7 +466,7 @@ export class Studio {
     const e = this.engine;
     if (e) e.settings = this.settingsAt(this.video?.currentTime ?? 0);
     // The profile samples what the colour engine is fed: a new framing makes them stale for later top-ups.
-    if (next.dewarp !== prev.dewarp || next.stabilise.enabled !== prev.stabilise.enabled) this.sampleCache = [];
+    if (next.dewarp !== prev.dewarp || next.stabilise.enabled !== prev.stabilise.enabled) { this.sampleCache = []; this.engine?.forgetProfile(); }
     const info = this.snap.info;
     if (info && (next.dewarp !== prev.dewarp || !this.dewarpU)) void this.updateDewarp();
     const video = this.snap.kind === "video";
@@ -642,6 +642,7 @@ export class Studio {
     if (this.snap.kind !== "video" || this.snap.phase !== "ready") return;
     this.dropStill();
     this.sampleCache = [];
+    this.engine?.forgetProfile();
     if (this.tools.colour.enabled && this.engine && !this.exporting) {
       this.engine.lockGlobals(null);
       this.set({ colourProfiled: false });
@@ -793,6 +794,7 @@ export class Studio {
     this.trim = null;
     this.segs = NO_SEGMENTS;
     this.sampleCache = [];
+    this.engine?.forgetProfile();
     this.autoLock = null;
     this.lastLook = -1;
     this.analysedSpan = null;
@@ -1195,7 +1197,7 @@ export class Studio {
           await seekVideo(v, t);
           this.uploadToEngine(v, t, false);
           try {
-            const r = await e.analyzeRaw();
+            const r = await e.analyzeRaw(10_000, t);
             this.sampleCache.push({ t, params: r.params, mean: r.mean });
           } catch {
             // a failed sample just doesn't vote

@@ -5,7 +5,7 @@
 import { analyzeThumbnail, ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.ts";
 import { inCutWindow, noteCut, segmentAt, type LockSegment } from "../src/engine/lock.ts";
 import { lockParams } from "../src/engine/lock.ts";
-import { BalanceFollow, FOLLOW } from "../src/engine/follow.ts";
+import { BalanceFollow, FOLLOW, sceneTrust, shotTarget } from "../src/engine/follow.ts";
 // Tuning experiments: SIM_TAU / SIM_WINDOW override the follow's ease and median span.
 if (process.env.SIM_TAU) FOLLOW.tau = parseFloat(process.env.SIM_TAU);
 if (process.env.SIM_WINDOW) FOLLOW.window = parseInt(process.env.SIM_WINDOW);
@@ -44,6 +44,8 @@ export class ClipSim {
   pending: { at: number; lands: number; a: Analysed }[] = [];
   cuts: number[] = [];
   follow = new BalanceFollow();
+  /** Anchor target per locked segment (follow.ts shotTarget). */
+  targets: ([number, number] | null)[] = [];
   lastPacketTick = 0;
   /** Ablations (options, else env): SIM_NOFOLLOW=1 drops the balance follow, SIM_SNAPSEG=1 snaps every segment switch (the old engine). */
   private noFollow: boolean;
@@ -82,7 +84,15 @@ export class ClipSim {
       samples.push({ t, params: a.params, mean: a.mean });
     }
     this.locked = segmentProfile(samples, SCENE_CUT_MEAN_DIFF);
-    return `${samples.length} samples → ${this.locked ? `${this.locked.length} segment(s) at ${this.locked.map((s) => s.from.toFixed(2)).join(", ")}` : "no lock"}; sample wb_r ${samples.map((s) => s.params.wb[0].toFixed(2)).join(" ")}`;
+    // Anchor targets per segment from the profile's own thumbnails (engine.requestTargets → worker shotTarget).
+    const segs = this.locked;
+    this.targets = !segs || this.noFollow ? [] : segs.map((s, i) => {
+      const lo = i === 0 ? -Infinity : s.from, hi = i + 1 < segs.length ? segs[i + 1].from : Infinity;
+      const px = samples.filter((x) => x.t >= lo && x.t < hi).map((x) => thumbs[Math.min(thumbs.length - 1, Math.round(x.t * this.fps))]);
+      return shotTarget(px, ANALYSIS_W, ANALYSIS_H, s.params);
+    });
+    const tg = this.targets.map((t) => (t ? `${t[0].toFixed(3)},${t[1].toFixed(3)}` : "none")).join(" | ");
+    return `${samples.length} samples → ${this.locked ? `${this.locked.length} segment(s) at ${this.locked.map((s) => s.from.toFixed(2)).join(", ")}` : "no lock"}; sample wb_r ${samples.map((s) => s.params.wb[0].toFixed(2)).join(" ")}; anchor targets ${tg || "-"}`;
   }
 
   private lockedAt(t: number): GradeParams | null {
@@ -110,8 +120,10 @@ export class ClipSim {
   private analyse(f: number, thumbs: Uint8ClampedArray[]): Analysed {
     const a0 = this.analyzeFrame(f, thumbs);
     // The engine sends the lock in force with the request; the worker solves the anchor under it.
-    const l = this.lockedAt(f / this.fps);
-    const a: Analysed = { ...a0, sentLock: l, anchor: l && !this.noFollow ? anchorCorrection(thumbs[f], ANALYSIS_W, ANALYSIS_H, lockParams(l, a0.params), a0.depth, a0.clahe) : null };
+    const seg = this.locked ? segmentAt(this.locked, this.cutSeen, f / this.fps) : null;
+    const target = seg ? this.targets[this.locked!.indexOf(seg)] ?? null : null;
+    const l = seg && target ? seg.params : null;
+    const a: Analysed = { ...a0, sentLock: l, anchor: l && target && !this.noFollow && sceneTrust(a0.params) > 0 ? anchorCorrection(thumbs[f], ANALYSIS_W, ANALYSIS_H, lockParams(l, a0.params), a0.depth, a0.clahe, target) : null };
     const p = a.params;
     this.paramLog.push([f, (f / this.fps).toFixed(3), "analysis", p.wb[0], p.wb[2], p.exposure, p.black, p.white, p.zLo, p.zHi, p.zMean, ...p.binf, p.calm ?? 0, p.calmTone ?? 0, p.haze, p.backdrop ?? 0].map((x) => (typeof x === "number" ? +x.toFixed(4) : x)).join(",") + "," + (this.current ? [this.current.wb[0], this.current.wb[2], this.current.exposure, this.current.zLo, this.current.zHi].map((x) => x.toFixed(4)).join(",") : ",,,,"));
     this.paramLog[this.paramLog.length - 1] += "," + (a.anchor ? [a.anchor.frac, ...a.anchor.log, ...a.anchor.before, ...a.anchor.after].map((x) => x.toFixed(4)).join(",") : ",,,,,,") + "," + this.follow.log.map((x) => x.toFixed(4)).join(",");

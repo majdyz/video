@@ -365,6 +365,7 @@ export default function App() {
     setCompareActive(false);
     setBusy(isVideo ? "Loading video…" : "Loading photo…");
     engineRef.current?.lockGlobals(null);
+    engineRef.current?.forgetProfile();
     try {
       await touchFile(file);
       if (isVideo) await loadVideo(file);
@@ -465,7 +466,7 @@ export default function App() {
         await seekVideoTo(video, t);
         e.upload(video, video.videoWidth, video.videoHeight, 0);
         try {
-          const r = await e.analyzeRaw();
+          const r = await e.analyzeRaw(10_000, t);
           samples.push({ t, params: r.params, mean: r.mean });
         } catch {
           // a failed sample just doesn't vote

@@ -17,13 +17,19 @@
 // underwater, tracked content changes distance as the diver swims and the
 // red ratio measured red attenuation (×2.2 in 2 s), not the camera.
 import type { AnchorResult } from "./anchor.ts";
-import { ANCHOR, balanceOffset } from "./anchor.ts";
+import { ANCHOR, anchorColour, balanceOffset } from "./anchor.ts";
+import { analyzeThumbnail } from "./analyze.ts";
+import { lockParams } from "./lock.ts";
 import type { GradeParams } from "./params.ts";
+import { greenWeight } from "./red.ts";
 
 export const FOLLOW = {
   /** Healthy-red / no-cast scores (calm.ts) above which a frame's anchor is not trusted. */
   calmLo: 0.1,
   calmHi: 0.4,
+  /** Open-water validity (GradeParams.backdrop) over which the anchor is not trusted. */
+  openLo: 0.05,
+  openHi: 0.3,
   /** Running median span (trusted analyses) and the ease time constant (s). */
   window: 3,
   tau: 0.15,
@@ -79,10 +85,41 @@ export class BalanceFollow {
   }
 }
 
+/**
+ * The colour the shot's anchor should keep (Oklab a, b): what the locked
+ * estimate makes of it on the profile's own frames of that shot (median over
+ * the frames that hold enough anchor and pass the scene gates). The lock's
+ * look is kept; only the drift around it is taken out. The target is never
+ * pinker than ANCHOR.pinkMax past neutral (sand never pink). Null with fewer
+ * than two usable frames: the shot then keeps the plain lock.
+ */
+export function shotTarget(thumbs: readonly Uint8ClampedArray[], w: number, h: number, lock: GradeParams): [number, number] | null {
+  const as: number[] = [], bs: number[] = [];
+  for (const px of thumbs) {
+    const a = analyzeThumbnail(px, w, h);
+    if (sceneTrust(a.params) < 0.5) continue;
+    const c = anchorColour(px, w, h, lockParams(lock, a.params), a.depth, a.clahe);
+    if (!c || c.frac < ANCHOR.fracHi) continue;
+    as.push(c.ab[0]);
+    bs.push(c.ab[1]);
+  }
+  if (as.length < 2) return null;
+  return [Math.min(median(as), ANCHOR.neutral[0] + ANCHOR.pinkMax), median(bs)];
+}
+
 /** How far a frame's anchor can be trusted (0..1). */
 export function trust(a: AnchorResult, frame: GradeParams): number {
+  return smoothstep(ANCHOR.fracLo, ANCHOR.fracHi, a.frac) * sceneTrust(frame);
+}
+
+/** The scene gates of `trust` (no anchor needed): 0 = this frame's anchor would not count, so the worker skips it. */
+export function sceneTrust(frame: GradeParams): number {
   const calm = Math.max(frame.calm ?? 0, frame.calmTone ?? 0);
-  return smoothstep(ANCHOR.fracLo, ANCHOR.fracHi, a.frac) * (1 - smoothstep(FOLLOW.calmLo, FOLLOW.calmHi, calm));
+  // Open water (backdrop.ts) is the subjects' scene: grey sharks and dolphins pass the anchor's tests and
+  // their own tone (object neutral) is not the balance's to set; seabed under open water has the whole
+  // open-water treatment to itself. Green water has its own neutral (red.ts greenNeutral, murk hold).
+  const open = smoothstep(FOLLOW.openLo, FOLLOW.openHi, frame.backdrop ?? 0);
+  return (1 - smoothstep(FOLLOW.calmLo, FOLLOW.calmHi, calm)) * (1 - open) * (1 - greenWeight(frame));
 }
 
 function smoothstep(e0: number, e1: number, x: number): number {

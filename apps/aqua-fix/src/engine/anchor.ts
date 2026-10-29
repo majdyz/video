@@ -4,7 +4,7 @@
 // Why (user report 27 Oct, ~/video-data/drift/user-drift.mov, a 12 s tilt
 // from an all-sand frame to one half open blue water): the clip lock holds the
 // grade still, yet the same sand went cyan → neutral → cream in one shot
-// (tracked sand up to 18 ΔE00 in colour alone). The source moved under the
+// (tracked near sand up to 19 ΔE00 in colour alone). The source moved under the
 // lock — the camera's auto white balance re-balances as the blue water fills
 // the frame, and near sand under the sun carries less cast than the median
 // the lock was fitted to — and a strong balance (red ×2.8) amplifies every
@@ -13,8 +13,11 @@
 // frame (the weed coming into view asked for yellower sand).
 //
 // What: a closed loop on one material. Sand (and white rubble) is the
-// material a reef shot reliably holds and whose right colour is known:
-// neutral, a touch warm (the analysis' sand reference uses the same target).
+// material a seabed shot reliably holds. Its target colour is what the lock
+// itself makes of it, measured once per locked shot on the profile's own
+// frames (follow.ts shotTarget: the median over the shot, never pinker than
+// ANCHOR.pinkMax past neutral), so the look the lock chose is kept and only
+// the drift around it is taken out.
 // On each analysis thumbnail the bright, grainy, low-chroma pixels on the
 // cast side of the veil are found (texture keeps smooth open water out, the
 // hue test keeps pink coral out), preferring the bottom 30 % of the frame (the
@@ -27,8 +30,10 @@
 // without enough sand hold the last correction, a cut resets it.
 //
 // Not covered: one balance cannot hold near and far sand at once, so as the
-// framing changes their mix the near sand still moves a little (≈3 ΔE00 on
+// framing changes their mix the near sand still moves a little (≈3.7 ΔE00 on
 // the synthetic tilt in test/drift.test.ts, vs ≈11 with the lock alone).
+// Open water, green water, red subjects and topside frames are not anchored
+// (follow.ts sceneTrust).
 import { gradePixel, resolveContext } from "./apply.ts";
 import { SRGB_TO_LINEAR_LUT, linearToOklab, srgbToLinear } from "./color.ts";
 import { DEFAULT_SETTINGS, type ClaheLuts, type DepthMap, type GradeParams } from "./params.ts";
@@ -50,13 +55,14 @@ export const ANCHOR = {
    *  tilt while the far field comes and goes, and the far sand's colour differs from the near sand's. */
   near: 0.3,
   /** Candidate share of the frame where the anchor starts to count, and counts fully. */
-  fracLo: 0.03,
-  fracHi: 0.1,
+  fracLo: 0.06,
+  fracHi: 0.15,
   /** Pixels graded per evaluation (a strided subset of the anchor). */
   samples: 64,
-  /** Target output colour (Oklab a, b): near neutral, B = 0.94·G as the analysis' sand reference (SAND_BLUE_TARGET), and R a touch
-   *  under G: the sand varies across the frame around the target, and its warm side must stay off pink. */
-  target: (() => { const [, a, b] = linearToOklab(0.97, 1, 0.94); return [a, b] as [number, number]; })(),
+  /** Neutral sand (Oklab a, b): B = 0.94·G as the analysis' sand reference (SAND_BLUE_TARGET) … */
+  neutral: (() => { const [, a, b] = linearToOklab(1, 1, 0.94); return [a, b] as [number, number]; })(),
+  /** … and how far toward red (Oklab a) a shot's target may sit from it (follow.ts shotTarget). */
+  pinkMax: 0.006,
   /** Correction clamp (log gain per channel) and the finite-difference step. */
   maxLog: Math.log(1.6),
   eps: 0.04,
@@ -119,18 +125,9 @@ export function anchorPixels(rgba: Uint8ClampedArray, w: number, h: number, veil
   return { idx: pool.slice(0, Math.ceil(pool.length * ANCHOR.top)), frac };
 }
 
-/**
- * The balance correction that puts this frame's anchor at ANCHOR.target
- * under `params` (the locked estimate with this frame's range), graded with
- * this frame's own maps. Null when the frame holds too little anchor.
- */
-export function anchorCorrection(rgba: Uint8ClampedArray, w: number, h: number, params: GradeParams, depth: DepthMap, clahe: ClaheLuts): AnchorResult | null {
-  const { idx, frac } = anchorPixels(rgba, w, h, params.veilColor);
-  if (frac < ANCHOR.fracLo || idx.length < 12) return null;
-  const stride = Math.max(1, Math.floor(idx.length / ANCHOR.samples));
-  const pick: number[] = [];
-  for (let k = 0; k < idx.length; k += stride) pick.push(idx[k]);
-  const meanAb = (x: [number, number]): [number, number] => {
+/** The anchor's graded mean colour (Oklab a, b) under `params` with a balance offset `x`, for a fixed pixel pick. */
+function anchorMean(rgba: Uint8ClampedArray, w: number, h: number, pick: number[], params: GradeParams, depth: DepthMap, clahe: ClaheLuts) {
+  return (x: [number, number]): [number, number] => {
     const ctx = resolveContext({ params: balanceOffset(params, x), settings: DEFAULT_SETTINGS, depth, clahe });
     let r = 0, g = 0, b = 0;
     for (const i of pick) {
@@ -141,8 +138,36 @@ export function anchorCorrection(rgba: Uint8ClampedArray, w: number, h: number, 
     const [, a, bb] = linearToOklab(r / pick.length, g / pick.length, b / pick.length);
     return [a, bb];
   };
+}
+
+/** The anchor pixels to grade (a strided subset), or null when the frame holds too little anchor. */
+function anchorPick(rgba: Uint8ClampedArray, w: number, h: number, params: GradeParams): { pick: number[]; frac: number } | null {
+  const { idx, frac } = anchorPixels(rgba, w, h, params.veilColor);
+  if (frac < ANCHOR.fracLo || idx.length < 12) return null;
+  const stride = Math.max(1, Math.floor(idx.length / ANCHOR.samples));
+  const pick: number[] = [];
+  for (let k = 0; k < idx.length; k += stride) pick.push(idx[k]);
+  return { pick, frac };
+}
+
+/** The anchor's graded colour (Oklab a, b) in this frame under `params`, as the grade stands. */
+export function anchorColour(rgba: Uint8ClampedArray, w: number, h: number, params: GradeParams, depth: DepthMap, clahe: ClaheLuts): { ab: [number, number]; frac: number } | null {
+  const p = anchorPick(rgba, w, h, params);
+  return p ? { ab: anchorMean(rgba, w, h, p.pick, params, depth, clahe)([0, 0]), frac: p.frac } : null;
+}
+
+/**
+ * The balance correction that puts this frame's anchor at `target` (Oklab
+ * a, b) under `params` (the locked estimate with this frame's range), graded
+ * with this frame's own maps. Null when the frame holds too little anchor.
+ */
+export function anchorCorrection(rgba: Uint8ClampedArray, w: number, h: number, params: GradeParams, depth: DepthMap, clahe: ClaheLuts, target: readonly [number, number]): AnchorResult | null {
+  const p = anchorPick(rgba, w, h, params);
+  if (!p) return null;
+  const { frac } = p;
+  const meanAb = anchorMean(rgba, w, h, p.pick, params, depth, clahe);
   const cl = (v: number) => Math.max(-ANCHOR.maxLog, Math.min(ANCHOR.maxLog, v));
-  const err = (v: [number, number]) => Math.hypot(v[0] - ANCHOR.target[0], v[1] - ANCHOR.target[1]);
+  const err = (v: [number, number]) => Math.hypot(v[0] - target[0], v[1] - target[1]);
   let x: [number, number] = [0, 0];
   let f = meanAb(x);
   const before = f;
@@ -157,7 +182,7 @@ export function anchorCorrection(rgba: Uint8ClampedArray, w: number, h: number, 
     const j01 = (fb[0] - f[0]) / ANCHOR.eps, j11 = (fb[1] - f[1]) / ANCHOR.eps;
     const det = j00 * j11 - j01 * j10;
     if (!Number.isFinite(det) || Math.abs(det) < 1e-6) break;
-    const ea = ANCHOR.target[0] - f[0], eb = ANCHOR.target[1] - f[1];
+    const ea = target[0] - f[0], eb = target[1] - f[1];
     let d0 = (j11 * ea - j01 * eb) / det, d1 = (-j10 * ea + j00 * eb) / det;
     const len = Math.hypot(d0, d1);
     if (len > ANCHOR.maxStep) { d0 *= ANCHOR.maxStep / len; d1 *= ANCHOR.maxStep / len; }
