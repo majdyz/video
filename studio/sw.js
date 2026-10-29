@@ -8,8 +8,8 @@
 // network-first so a deploy never serves an index pointing at deleted
 // bundles. Each deploy gets a new cache and the old one is deleted on
 // activate.
-const VERSION = "studio-68d57e0eb833";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker--wK0gl3y.js","./assets/analysis-worker-DbtqEL7Z.js","./assets/bridge-niSn9qHX.js","./assets/colour-2erLy9te.js","./assets/dewarp-CpMHrfHW.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-CxLu0sqT.js","./assets/fisheye-D0_b3mZj.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-B1RBnSmo.js","./assets/index-BMr-hGeF.css","./assets/media-Cpz6ZKDW.js","./assets/motion-D0n6QsFt.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/seg-worker-DeMH3Gcr.js","./assets/videoframe-colorspace-zfqeaqOD.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-D4TrakeJ.js"];
+const VERSION = "studio-315826985dec";
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker--wK0gl3y.js","./assets/analysis-worker-DbtqEL7Z.js","./assets/bridge-DEzh20dy.js","./assets/colour-DkMNy9Uw.js","./assets/dewarp-CoSDw-AB.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-Bb2hZhso.js","./assets/fisheye-D0_b3mZj.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-B-f-uGJB.js","./assets/index-BMr-hGeF.css","./assets/media-CDZNy6uR.js","./assets/motion-D0n6QsFt.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/seg-worker-DeMH3Gcr.js","./assets/videoframe-colorspace-zfqeaqOD.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-D4TrakeJ.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
