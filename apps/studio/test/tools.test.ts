@@ -30,6 +30,9 @@ assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 100 }).intensit
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 0 }).intensity, 0);
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 140 }).intensity, 2, "clamped");
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, preset: "murky" }).preset, "murky");
+// Vivid is opt-in: off by default, a full-strength look when switched on.
+assert.equal(DEFAULT_TOOLS.colour.vivid, false);
+assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, vivid: true }).vivid, 1);
 
 // Stabilise: defaults are Motion Fix's; presets set both knobs.
 assert.deepEqual(stabiliseParams(DEFAULT_TOOLS.stabilise), DEFAULT_PARAMS);
