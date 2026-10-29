@@ -114,3 +114,11 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   return bicubic(s);
 }
 `;
+
+/** WARP_WGSL reading a plain 2D texture instead of an external one (the copy pipeline in gpu.ts). */
+export function warpCopyVariant(code: string): string {
+  return code.replace("var src: texture_external;", "var src: texture_2d<f32>;").replaceAll(
+    /textureSampleBaseClampToEdge\(src, samp, ([^)]*)\)/g,
+    "textureSampleLevel(src, samp, $1, 0.0)"
+  );
+}

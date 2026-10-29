@@ -1,15 +1,8 @@
 import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput, FULL_RECT, type Rect } from "./backend.ts";
-import { GLSL_FRAGMENT, GLSL_DOWNSCALE_FRAGMENT, GLSL_COMPOSITE } from "./shaders.ts";
+import { GLSL_FRAGMENT, GLSL_DOWNSCALE_FRAGMENT, GLSL_COMPOSITE, GLSL_VERTEX as VS } from "./shaders.ts";
 import { GLSL_TP_FIELD, GLSL_TP_FLOW, GLSL_TP_LUM } from "./temporal.ts";
 import { TEMPORAL } from "./params.ts";
 
-const VS = `#version 300 es
-out vec2 v_uv;
-void main() {
-  vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
-  gl_Position = vec4(p, 0.0, 1.0);
-  v_uv = vec2(p.x * 0.5 + 0.5, 1.0 - (p.y * 0.5 + 0.5));
-}`;
 
 type Program = { prog: WebGLProgram; loc: Map<string, WebGLUniformLocation | null> };
 
