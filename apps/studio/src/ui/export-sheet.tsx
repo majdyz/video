@@ -10,6 +10,24 @@ import { BRAND } from "../brand.ts";
 import { isNativeShell } from "../native/registry.ts";
 
 const loadNative = () => import("../native/bridge.ts");
+const loadJournal = () => import("@dive-tools/shared/export-journal.ts");
+
+/** What a failed export tells the user: plain words, and whether a 1080p export may get past it. */
+export function friendlyExportError(message: string | null): { text: string; suggestSmaller: boolean } {
+  const m = message ?? "";
+  if (/^(Not enough free space|Couldn't save the video)/.test(m)) return { text: m, suggestSmaller: true };
+  if (/storage write failed|QuotaExceeded|out of space|storage wrote/i.test(m)) {
+    return { text: "Your device ran out of storage space while saving the video. Free up some space and try again; what's already done is kept.", suggestSmaller: true };
+  }
+  if (/can't encode|EncodingError|encoder|reclaim|codec/i.test(m) && !/decodable|isn't supported/i.test(m)) {
+    return { text: "The phone's video encoder stopped (this can happen when the app goes to the background, or with very large videos). Try again: the export picks up where it stopped.", suggestSmaller: true };
+  }
+  if (/WebGL|WebGPU|GPU|context lost|device lost/i.test(m)) {
+    return { text: "The graphics processor was reset while rendering. Try again: the export picks up where it stopped.", suggestSmaller: true };
+  }
+  if (/memory|allocation/i.test(m)) return { text: "The device ran low on memory while rendering. Close other apps and try again, or export at 1080p.", suggestSmaller: true };
+  return { text: m ? `The export stopped: ${m}` : "The export stopped.", suggestSmaller: false };
+}
 
 function fmtBytes(n: number): string {
   return n > 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(1)} MB`;
@@ -50,6 +68,34 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
     if (exp.state === "idle") setHasThumb(false);
     if (exp.state !== "done") setSaveNote(null);
   }, [exp.state]);
+
+  // An interrupted export of this clip with these settings (crash, reload, failure): offer to resume it.
+  const [resumable, setResumable] = useState<{ progress: number; key: string } | null>(null);
+  const settingsKey = !photo && exportMode === "offline" && open && (exp.state === "idle" || exp.state === "error") ? studio.exportKey() : null;
+  const clip = studio.clipFile;
+  useEffect(() => {
+    if (!settingsKey || !clip) {
+      setResumable(null);
+      return;
+    }
+    let live = true;
+    void loadJournal()
+      .then((j) => j.findResumable(clip, settingsKey, snap.trim))
+      .then((r) => {
+        if (live) setResumable(r && r.progress > 0.01 ? { progress: r.progress, key: r.manifest.key } : null);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [settingsKey, clip, snap.trim]);
+  const startOver = async () => {
+    if (resumable) await loadJournal().then((j) => j.removeJournal(resumable.key)).catch(() => undefined);
+    setResumable(null);
+    void studio.exportVideo();
+  };
+  const err = exp.state === "error" ? friendlyExportError(exp.message) : null;
+  const bigSource = !!info && Math.min(info.displayW, info.displayH) > 1080;
 
   // In the app the output lives (or is copied) in the sandbox and goes to
   // Photos / the gallery and the system share sheet through the plugin.
@@ -118,13 +164,22 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
           <>
             <dl className="export__facts">
               <div><dt>Processing</dt><dd>{processingChain(chainTools, photo ? 1 : visibleSegments(snap.segments.cuts, snap.trim, duration).length)}</dd></div>
-              <div><dt>Output</dt><dd>{photo ? `${outSize} · JPEG` : `${outSize} · H.264 MP4${info?.hasAudio ? " · original audio" : ""}`}</dd></div>
+              <div><dt>Output</dt><dd>{photo ? `${outSize} · JPEG` : `${outSize}${info?.fps ? ` · ${Math.round(info.fps)} fps` : ""} · MP4${info?.hasAudio ? " · original audio" : ""}`}</dd></div>
               {!photo && <div><dt>Length</dt><dd>{snap.trim ? `${selectionLabel(snap.trim, duration)} · ${formatTimecode(snap.trim.start)}–${formatTimecode(snap.trim.end)}` : formatTime(duration)}</dd></div>}
               {photo && snap.photoLimited && <div><dt>Note</dt><dd>Original is {snap.photoLimited.w}×{snap.photoLimited.h}; this browser renders at most {outSize}</dd></div>}
             </dl>
-            <button type="button" className="btn btn--primary btn--block" onClick={() => void studio.exportVideo()}>
-              <IconExport size={18} /> {photo ? "Export photo" : "Export video"}
-            </button>
+            {resumable ? (
+              <>
+                <button type="button" className="btn btn--primary btn--block" onClick={() => void studio.exportVideo()}>
+                  <IconExport size={18} /> Resume ({Math.round(resumable.progress * 100)}%)
+                </button>
+                <button type="button" className="btn btn--quiet btn--block" onClick={() => void startOver()}>Start over</button>
+              </>
+            ) : (
+              <button type="button" className="btn btn--primary btn--block" onClick={() => void studio.exportVideo()}>
+                <IconExport size={18} /> {photo ? "Export photo" : "Export video"}
+              </button>
+            )}
             <p className="export__note">
               {photo ? "Rendered on this device at full resolution. Nothing is uploaded."
                 : exportMode === "realtime" ? "Plays the clip through once while recording, so it takes about as long as the clip. Nothing is uploaded."
@@ -139,15 +194,17 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
             <div className="export__progress">
               <div className="export__pct" aria-hidden="true"><span>{pct}</span>%</div>
               <div className="export__meta" aria-live="polite">
-                <span>{exp.state === "preparing" ? exp.detail : photo ? exp.detail : `${exp.frames} frames · ${exp.fps.toFixed(1)} fps${exportMode === "realtime" ? " · real time" : ""}`}</span>
-                <span>{exp.etaSec !== null && exp.state === "running" && !photo ? `${formatTime(exp.etaSec)} left` : ""}</span>
+                <span>{exp.paused ? "Paused" : exp.state === "preparing" ? exp.detail : photo ? exp.detail : `${exp.frames} frames · ${exp.fps.toFixed(1)} fps${exportMode === "realtime" ? " · real time" : ""}`}</span>
+                <span>{exp.etaSec !== null && exp.state === "running" && !photo && !exp.paused ? `${formatTime(exp.etaSec)} left` : ""}</span>
               </div>
               <div className="bar" role="progressbar" aria-label="Export progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}><div style={{ width: `${pct}%` }} /></div>
             </div>
             {!photo && <button type="button" className="btn btn--ghost btn--block" onClick={() => studio.cancelExport()}>Cancel</button>}
-            <p className="export__note">{exportMode === "realtime" ? "Keep this screen open: switching away pauses the recording."
+            {exp.note && <p className="export__note" role="status">{exp.note}</p>}
+            <p className="export__note">{exp.paused ? "Paused while the app is in the background: it carries on when you come back."
+              : exportMode === "realtime" ? "Keep this screen open: switching away pauses the recording."
               : exportMode === "native" ? "You can switch apps: the export carries on or pauses until you come back, and progress shows on the Lock Screen or in notifications."
-              : "Keep this screen open while it renders."}</p>
+              : "Keep this screen open while it renders. If it's interrupted, it picks up where it stopped."}</p>
           </>
         )}
 
@@ -156,8 +213,10 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
             <dl className="export__facts">
               <div><dt>File</dt><dd className="mono">{exp.result.name}</dd></div>
               <div><dt>Size</dt><dd>{fmtBytes(exp.result.bytes)} · {photo ? `${exp.result.width}×${exp.result.height}` : `${exp.result.frames} frames`} in {(exp.result.elapsedMs / 1000).toFixed(1)} s</dd></div>
+              {!photo && <div><dt>Video</dt><dd>{exp.result.width}×{exp.result.height}</dd></div>}
               {!exp.result.audioIncluded && <div><dt>Audio</dt><dd>Not supported in this browser, video only</dd></div>}
             </dl>
+            {exp.note && <p className="export__note" role="status">{exp.note}</p>}
             <div className="export__actions">
               {shareable && (
                 <button type="button" className="btn btn--strong" onClick={() => void share()}>
@@ -175,8 +234,13 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
 
         {exp.state === "error" && (
           <>
-            <div className="export__error" role="alert"><IconWarning size={18} /> <span>{exp.message}</span></div>
-            <button type="button" className="btn btn--strong btn--block" onClick={() => void studio.exportVideo()}>Try again</button>
+            <div className="export__error" role="alert"><IconWarning size={18} /> <span>{err?.text}</span></div>
+            <button type="button" className="btn btn--strong btn--block" onClick={() => void studio.exportVideo()}>
+              {resumable ? `Try again (from ${Math.round(resumable.progress * 100)}%)` : "Try again"}
+            </button>
+            {!photo && bigSource && (err?.suggestSmaller ?? true) && (
+              <button type="button" className="btn btn--quiet btn--block" onClick={() => void studio.exportVideo({ maxLongEdge: 1920 })}>Export at 1080p</button>
+            )}
           </>
         )}
       </div>
