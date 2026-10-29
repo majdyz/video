@@ -22,7 +22,7 @@
 
 import { assembleMemory, frameIndex, isEmpty, newBank, pruneBank, storeMemory, type MemEntry, type MemoryInputs, type ObjectBank } from "./bank.ts";
 import { denseFlow, warp, type Flow, type Gray } from "./flow.ts";
-import { area, bbox, boxMean, feather, guidedFilter, iou, promptFromMask, resize, smoothstep } from "./mask.ts";
+import { area, bbox, boxMean, DEPART_STEP, departMap, feather, guidedFilter, iou, promptFromMask, resize, smoothstep } from "./mask.ts";
 
 export const SEG = {
   /** Keyframes per clip second. */
@@ -74,7 +74,8 @@ export interface SegModel {
 }
 
 /** One frame for the pass: the model input (not needed for a filled frame) and the luma on the mask grid. */
-export type PassFrame = { rgba1024?: Uint8ClampedArray; luma: Uint8Array };
+/** `rgb`: the frame on the mask grid (RGBA), for the water-departure map (a close-up's leak cap). */
+export type PassFrame = { rgba1024?: Uint8ClampedArray; luma: Uint8Array; rgb?: Uint8ClampedArray };
 export type FrameSource = (t: number, lumaOnly?: boolean) => Promise<PassFrame>;
 
 /** A keyframe: the tracker's probabilities (union of includes / excludes), its luma and its confidence. */
@@ -83,6 +84,8 @@ export type Keyframe = {
   inc: Float32Array;
   exc: Float32Array | null;
   luma: Float32Array;
+  /** The frame on the mask grid (RGBA), when the source gave it. */
+  rgb?: Uint8ClampedArray;
   conf: number;
   /** Diagnostics */
   reprompts: number;
@@ -130,7 +133,7 @@ export type PassOptions = {
   onKeyframes?: (K: Keyframe[]) => void;
 };
 
-type PerKey = { inc: Float32Array | null; exc: Float32Array | null; luma: Float32Array; conf: number; reprompts: number; score: number };
+type PerKey = { inc: Float32Array | null; exc: Float32Array | null; luma: Float32Array; rgb?: Uint8ClampedArray; conf: number; reprompts: number; score: number };
 
 /** Runs the pass; resolves to the keyframes (null when cancelled). */
 export async function runPass(o: PassOptions): Promise<SegTrack | null> {
@@ -157,6 +160,7 @@ export async function runPass(o: PassOptions): Promise<SegTrack | null> {
   let done = 0;
   let lastEncoded = NaN;
   const lumaCache = new Map<number, Float32Array>();
+  const rgbCache = new Map<number, Uint8ClampedArray>();
   const dropAll = async () => { for (const g of groups.values()) for (const mb of g.members) await o.model.drop(mb.key); };
   for (const g of groups.values()) {
     const { list, reverse } = g;
@@ -171,6 +175,7 @@ export async function runPass(o: PassOptions): Promise<SegTrack | null> {
         lastEncoded = t;
         luma = Float32Array.from(fr.luma, (x) => x / 255);
         lumaCache.set(t, luma);
+        if (fr.rgb) rgbCache.set(t, fr.rgb);
       }
       let encodeMs = performance.now() - t0;
       const fi = frameIndex(t);
@@ -209,7 +214,7 @@ export async function runPass(o: PassOptions): Promise<SegTrack | null> {
         encodeMs = 0;
         mb.prev = { m, luma };
         const conf = reprompts ? 0.5 : (r.score > 0 ? smoothstep(-1, 2, r.score) : 0) * (agree < 1 ? smoothstep(0.3, 0.7, agree) : 1);
-        const e = per.get(t) ?? { inc: null, exc: null, luma, conf: 1, reprompts: 0, score: Infinity };
+        const e = per.get(t) ?? { inc: null, exc: null, luma, rgb: rgbCache.get(t), conf: 1, reprompts: 0, score: Infinity };
         const visible = area(m) > 0;
         if (mb.ob.kind === "include") {
           e.inc = e.inc ? max(e.inc, m) : m;
@@ -226,7 +231,7 @@ export async function runPass(o: PassOptions): Promise<SegTrack | null> {
   }
   const K: Keyframe[] = [...per.keys()].sort((a, b) => a - b).map((t) => {
     const e = per.get(t)!;
-    return { t, inc: e.inc ?? new Float32Array(mw * mh), exc: e.exc, luma: e.luma, conf: e.conf, reprompts: e.reprompts, score: e.score };
+    return { t, inc: e.inc ?? new Float32Array(mw * mh), exc: e.exc, luma: e.luma, rgb: e.rgb, conf: e.conf, reprompts: e.reprompts, score: e.score };
   });
   o.onKeyframes?.(K);
   const base = done;
@@ -241,6 +246,7 @@ export async function fillTrack(K: Keyframe[], mw: number, mh: number, source: F
   if (!K.length) return new SegTrack(mw, mh, [], 0, [], []);
   const grid = sampleRange(K[0].t, K[K.length - 1].t);
   const inc: Uint8Array[] = new Array(grid.n), exc: (Uint8Array | null)[] = new Array(grid.n).fill(null);
+  const dep: (Uint8Array | null)[] = new Array(grid.n).fill(null);
   const anyExc = K.some((k) => k.exc);
   const gr = Math.max(1, Math.round(SEG.guidedR * mw / 640));
   let done = 0;
@@ -253,12 +259,12 @@ export async function fillTrack(K: Keyframe[], mw: number, mh: number, source: F
       if (t >= a.t - 1e-6 && (b ? t < b.t - 1e-6 : t <= a.t + 1e-6)) idx.push(i);
     }
     if (!idx.length) continue;
-    const lumas: Float32Array[] = [];
+    const lumas: Float32Array[] = [], rgbs: (Uint8ClampedArray | undefined)[] = [];
     for (const i of idx) {
       if (opts.cancelled?.()) return null;
       const t = grid.time(i);
-      if (Math.abs(t - a.t) < 1e-6) lumas.push(a.luma);
-      else lumas.push(Float32Array.from((await source(t, true)).luma, (x) => x / 255));
+      if (Math.abs(t - a.t) < 1e-6) { lumas.push(a.luma); rgbs.push(a.rgb); }
+      else { const f = await source(t, true); lumas.push(Float32Array.from(f.luma, (x) => x / 255)); rgbs.push(f.rgb); }
       opts.onProgress?.(done += SEG.fillCost);
     }
     const times = idx.map((i) => grid.time(i));
@@ -267,11 +273,13 @@ export async function fillTrack(K: Keyframe[], mw: number, mh: number, source: F
       inc[i] = toU8(guidedFilter(lumas[j], remap(filled[j].inc), mw, mh, gr, SEG.guidedEps));
       const e = filled[j].exc;
       if (e) exc[i] = toU8(guidedFilter(lumas[j], remap(e), mw, mh, gr, SEG.guidedEps));
+      const rgb = rgbs[j];
+      if (rgb) dep[i] = departMap(rgb, inc[i], mw, mh).data;
     });
   }
   // The keyframes' masks live in the filled frames now; the track keeps their times and confidences.
-  const keys = K.map((k) => ({ ...k, inc: new Float32Array(0), exc: null, luma: new Float32Array(0) }));
-  return new SegTrack(mw, mh, keys, grid.i0, inc, exc);
+  const keys = K.map((k) => ({ ...k, inc: new Float32Array(0), exc: null, luma: new Float32Array(0), rgb: undefined }));
+  return new SegTrack(mw, mh, keys, grid.i0, inc, exc, dep);
 }
 
 /** Per-frame flow for the fill, estimated at SEG.fillFlowScale of the mask grid (motion between frames is small). */
@@ -368,6 +376,8 @@ export type SegMask = {
   near: Float32Array;
   /** Confidence weight at this time (0..1). */
   weight: number;
+  /** How far each pixel departs from the water around it (0..1, mask grid), or null (no colour in the pass). */
+  depart: Float32Array | null;
 };
 
 /** The pass result: filled 8-bit masks on the 30 Hz grid and the mask at any clip time (pure; deterministic). */
@@ -379,13 +389,16 @@ export class SegTrack {
   readonly i0: number;
   readonly inc: Uint8Array[];
   readonly exc: (Uint8Array | null)[];
-  constructor(width: number, height: number, keys: Keyframe[], i0: number, inc: Uint8Array[], exc: (Uint8Array | null)[]) {
+  /** Water departure per filled frame, at 1/DEPART_STEP of the grid (null: no colour). */
+  readonly dep: (Uint8Array | null)[];
+  constructor(width: number, height: number, keys: Keyframe[], i0: number, inc: Uint8Array[], exc: (Uint8Array | null)[], dep: (Uint8Array | null)[] = []) {
     this.width = width;
     this.height = height;
     this.keys = keys;
     this.i0 = i0;
     this.inc = inc;
     this.exc = exc;
+    this.dep = dep;
   }
 
   get start(): number { return this.keys.length ? this.keys[0].t : 0; }
@@ -445,7 +458,19 @@ export class SegTrack {
     const nr = Math.max(2, Math.round(SEG.nearK * r));
     const near = boxMean(boxMean(raw.inc, w, h, nr), w, h, nr);
     for (let i = 0; i < near.length; i++) near[i] = Math.min(1, near[i] * 4) * weight;
-    return { width: w, height: h, alpha, exclude: exc, near, weight };
+    return { width: w, height: h, alpha, exclude: exc, near, weight, depart: this.departAt(t) };
+  }
+
+  /** The water departure map of the filled frame at t, on the mask grid (null when the pass had no colour). */
+  departAt(t: number): Float32Array | null {
+    const n = this.inc.length;
+    if (!n) return null;
+    const i = Math.min(n - 1, Math.max(0, Math.round(t * SEG.sampleHz - this.i0)));
+    const d = this.dep[i];
+    if (!d) return null;
+    const qw = Math.ceil(this.width / DEPART_STEP), qh = Math.ceil(this.height / DEPART_STEP);
+    const f = resize(Float32Array.from(d, (x) => x / 255), qw, qh, this.width, this.height);
+    return f;
   }
 }
 

@@ -20,7 +20,7 @@ import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validat
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
 import { pickAnimal, type SubjectOverride, type SubjectPathPoint, type SubjectSelection } from "../../../aqua-fix/src/engine/animals.ts";
 import { toggleOverride } from "./subjects.ts";
-import { autoObjects, segPopsAt, SubjectSeg, type SegStatus } from "./seg/studio-seg.ts";
+import { autoObjects, outlineSelection, segPopsAt, SubjectSeg, type SegStatus } from "./seg/studio-seg.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometrySource } from "./geometry.ts";
@@ -467,6 +467,12 @@ export class Studio {
     return this.engine?.subjectSelection() ?? null;
   }
 
+  /** What the tap outlines draw: with AI on, the ML mask at the paused frame over the engine's other animals. */
+  outlineSelection(): SubjectSelection | null {
+    const t = this.snap.kind === "video" ? this.video?.currentTime ?? 0 : 0;
+    return outlineSelection(this.segOverlay(t), this.subjectSelection());
+  }
+
   /**
    * A tap at upright frame position (u, v) (0..1): toggles the animal there out of / into the Subject pop selection,
    * or (on anything the engine did not pick out) asks for a new subject grown from the tap. Playback pauses first
@@ -562,9 +568,10 @@ export class Studio {
         const i = list.indexOf(o0);
         if (i >= 0) {
           if (path.length) list[i] = { ...o0, path };
-          else if (include) list.splice(i, 1);
+          // AI on: the ML follows it even where the engine finds nothing to grow (a close-up, a blue-on-blue animal).
+          else if (include && !this.seg.on) list.splice(i, 1);
         }
-        this.set({ subjectTracking: null, subjectNote: !path.length && include ? (this.openWater ? "Nothing to follow there" : "Subject pop works in open blue water") : null });
+        this.set({ subjectTracking: null, subjectNote: !path.length && include && !this.seg.on ? (this.openWater ? "Nothing to follow there" : "Subject pop works in open blue water") : null });
         console.info(`[subjects] ${o0.action} at ${o0.t.toFixed(2)} s: followed ${path.length ? `${path[0].t.toFixed(2)}–${path[path.length - 1].t.toFixed(2)} s (${path.length} samples)` : "nothing"}`);
         this.engine?.setSubjectOverrides(list);
         this.set({ subjectOverrides: list });
@@ -604,16 +611,16 @@ export class Studio {
     // The engine's own choice on this frame, seeded once per clip (taps then add or take away).
     if (!this.seg.autos) { const a = autoObjects(this.subjectSelection(), t0, e.personBoxesNow()); if (a.length) this.seg.autos = a; }
     let touched = false;
-    const source = async (t: number) => {
+    const source = async (t: number, lumaOnly?: boolean) => {
       if (gen !== this.gen) throw new Error("clip changed");
       if (!touched) { touched = true; this.previewOn = false; }
       await seekVideo(v, t);
       this.uploadToEngine(v, t, false);
-      const rgba1024 = await e.readUpright(1024, 1024);
+      const rgba1024 = lumaOnly ? undefined : await e.readUpright(1024, 1024);
       const small = await e.readUpright(mw, mh);
       const luma = new Uint8Array(mw * mh);
       for (let i = 0; i < luma.length; i++) luma[i] = Math.round(0.299 * small[i * 4] + 0.587 * small[i * 4 + 1] + 0.114 * small[i * 4 + 2]);
-      return { rgba1024, luma };
+      return { rgba1024, luma, rgb: small };
     };
     void this.seg.run({
       list: this.snap.subjectOverrides, autos: this.seg.autos ?? [], start: span.start, end: span.end, width: W, height: H, source,

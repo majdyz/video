@@ -234,7 +234,7 @@ export default function App() {
     if (selectActive) void studio.refreshSubjects();
   }, [studio, selectActive]);
   useEffect(() => studio.setSplit(holding ? 1 : selectActive ? null : split), [studio, split, holding, selectActive]);
-  const getSelection = useCallback(() => studio.subjectSelection(), [studio]);
+  const getSelection = useCallback(() => studio.outlineSelection(), [studio]);
   const openAdv = () => {
     setAdvOpen(true);
     setDockOpen(true);

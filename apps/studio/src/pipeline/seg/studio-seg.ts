@@ -87,6 +87,28 @@ export function autoObjects(sel: SubjectSelection | null, t: number, boxes: read
   return out;
 }
 
+/** Outline id of the ML subject in outlineSelection. */
+export const ML_OUTLINE_ID = 65000;
+
+/**
+ * The selection the tap outlines draw with AI on: what the ML mask pops (alpha > 0.5 where it rules) as one solid
+ * subject, over the engine's other animals (still dashed, tappable), on the overlay's grid. Without an overlay:
+ * the engine's selection unchanged.
+ */
+export function outlineSelection(o: SegOverlay | null, engine: SubjectSelection | null): SubjectSelection | null {
+  if (!o) return engine;
+  const { width: w, height: h } = o, ids = new Uint16Array(w * h);
+  let ml = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (o.alpha[i] > 0.5 && o.near[i] > 0.3) { ids[i] = ML_OUTLINE_ID; ml++; continue; }
+    if (engine) ids[i] = engine.ids[Math.min(engine.height - 1, Math.floor(((y + 0.5) / h) * engine.height)) * engine.width + Math.min(engine.width - 1, Math.floor(((x + 0.5) / w) * engine.width))];
+  }
+  const animals = (engine?.animals ?? []).filter((a) => ids.includes(a.id));
+  if (ml) animals.push({ id: ML_OUTLINE_ID, strength: 1 });
+  return { width: w, height: h, ids, animals };
+}
+
 /** True when the ML overlay pops the picture at upright (u, v): a tap there means "take it out". */
 export function segPopsAt(o: SegOverlay | null, u: number, v: number): boolean {
   if (!o) return false;
@@ -272,7 +294,7 @@ export class SubjectSeg {
     if (!this.on || !this.track) return null;
     if (this.cache && Math.abs(this.cache.t - t) < 1e-6) return this.cache.o;
     const m = this.track.at(t);
-    const o = m && (m.weight > 0 || m.exclude) ? { width: m.width, height: m.height, alpha: m.alpha, exclude: m.exclude, near: m.near } : null;
+    const o = m && (m.weight > 0 || m.exclude) ? { width: m.width, height: m.height, alpha: m.alpha, exclude: m.exclude, near: m.near, depart: m.depart } : null;
     this.cache = { t, o };
     return o;
   }

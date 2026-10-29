@@ -177,3 +177,49 @@ export function smoothstep(lo: number, hi: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - lo) / (hi - lo)));
   return t * t * (3 - 2 * t);
 }
+
+/** sRGB 8-bit → CIE Lab (D65). */
+export function srgbToLab(r8: number, g8: number, b8: number): [number, number, number] {
+  const lin = (c: number) => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  const r = lin(r8), g = lin(g8), b = lin(b8);
+  const X = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047, Y = 0.2126 * r + 0.7152 * g + 0.0722 * b, Z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+  const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+  return [116 * f(Y) - 16, 500 * (f(X) - f(Y)), 200 * (f(Y) - f(Z))];
+}
+
+/** Departure map scale: one value per DEPART_STEP × DEPART_STEP mask pixels. */
+export const DEPART_STEP = 4;
+
+/**
+ * How far each part of the frame departs from the water around it (0 = water, 1 = clearly not), at 1/DEPART_STEP of
+ * the mask grid: the local water colour is a wide normalised blur of the pixels outside the subject mask (`inc`,
+ * 0..255), and the departure ramps over a CIE76 ΔE of lo..hi from it. Where the frame shows no water at all: 1.
+ */
+export function departMap(rgba: Uint8ClampedArray | Uint8Array, inc: Uint8Array, w: number, h: number, lo = 3, hi = 10): { width: number; height: number; data: Uint8Array } {
+  const S = DEPART_STEP, qw = Math.max(1, Math.ceil(w / S)), qh = Math.max(1, Math.ceil(h / S)), n = qw * qh;
+  const L = new Float32Array(n), A = new Float32Array(n), B = new Float32Array(n), wt = new Float32Array(n);
+  for (let qy = 0; qy < qh; qy++) for (let qx = 0; qx < qw; qx++) {
+    let r = 0, g = 0, b = 0, m = 0, c = 0;
+    for (let y = qy * S; y < Math.min(h, qy * S + S); y++) for (let x = qx * S; x < Math.min(w, qx * S + S); x++) {
+      const i = y * w + x;
+      r += rgba[i * 4]; g += rgba[i * 4 + 1]; b += rgba[i * 4 + 2]; m = Math.max(m, inc[i]); c++;
+    }
+    const q = qy * qw + qx, lab = srgbToLab(r / c, g / c, b / c);
+    L[q] = lab[0]; A[q] = lab[1]; B[q] = lab[2];
+    wt[q] = m < 13 ? 1 : 0; // nowhere near the subject: water (or background)
+  }
+  let tw = 0, gl = 0, ga = 0, gb = 0;
+  for (let q = 0; q < n; q++) if (wt[q]) { tw++; gl += L[q]; ga += A[q]; gb += B[q]; }
+  const out = new Uint8Array(n);
+  if (!tw) { out.fill(255); return { width: qw, height: qh, data: out }; }
+  const R = Math.max(2, Math.round(qw / 6));
+  const wl = new Float32Array(n), wa = new Float32Array(n), wb = new Float32Array(n);
+  for (let q = 0; q < n; q++) { wl[q] = L[q] * wt[q]; wa[q] = A[q] * wt[q]; wb[q] = B[q] * wt[q]; }
+  const bw = boxMean(wt, qw, qh, R), bl = boxMean(wl, qw, qh, R), ba = boxMean(wa, qw, qh, R), bb = boxMean(wb, qw, qh, R);
+  for (let q = 0; q < n; q++) {
+    const k = bw[q] > 0.02 ? 1 / bw[q] : 0;
+    const el = k ? bl[q] * k : gl / tw, ea = k ? ba[q] * k : ga / tw, eb = k ? bb[q] * k : gb / tw;
+    out[q] = Math.round(255 * smoothstep(lo, hi, Math.hypot(L[q] - el, A[q] - ea, B[q] - eb)));
+  }
+  return { width: qw, height: qh, data: out };
+}

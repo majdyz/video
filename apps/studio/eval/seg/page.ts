@@ -35,10 +35,10 @@ async function frame(i: number, lumaOnly = false) {
   mctx.drawImage(src, 0, 0, mw, mh);
   const m = mctx.getImageData(0, 0, mw, mh).data, luma = new Uint8Array(mw * mh);
   for (let k = 0; k < mw * mh; k++) luma[k] = Math.round(0.299 * m[k * 4] + 0.587 * m[k * 4 + 1] + 0.114 * m[k * 4 + 2]);
-  if (lumaOnly) return { luma };
+  if (lumaOnly) return { luma, rgb: m };
   bctx.imageSmoothingQuality = "high";
   bctx.drawImage(src, 0, 0, 1024, 1024);
-  return { rgba1024: bctx.getImageData(0, 0, 1024, 1024).data, luma };
+  return { rgba1024: bctx.getImageData(0, 0, 1024, 1024).data, luma, rgb: m };
 }
 
 const post = (name: string, body: Blob | Uint8Array) => fetch(`/evaldata/out?clip=${clip}&name=${name}`, { method: "POST", body: body as BodyInit }).then(() => undefined);

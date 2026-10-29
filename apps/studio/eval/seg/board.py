@@ -3,7 +3,8 @@
   board.jpg       per clip: source | engine's Subject pop | AI subject detection, at the pseudo-GT frames
   robust.jpg      per clip at frame 75: clean ML render, corrupted renders (shift 10 px, 2 keyframes dropped,
                   20% leak, and a hard unfeathered mask shifted 10 px for contrast) and their dE maps (x25)
-usage: board.py <eval out dir> <board out dir>"""
+  before-after.jpg (with a third argument, an earlier eval dir) close-up / blue-on-blue clips: engine, AI before, AI after
+usage: board.py <eval out dir> <board out dir> [earlier eval dir]"""
 import json, os, sys
 import cv2, numpy as np
 
@@ -52,6 +53,19 @@ def main():
     if rows:
         w = max(r.shape[1] for r in rows)
         cv2.imwrite(os.path.join(out, "robust.jpg"), np.vstack([np.pad(r, ((0, 0), (0, w - r.shape[1]), (0, 0))) for r in rows]), [cv2.IMWRITE_JPEG_QUALITY, 88])
+    # Optional: an earlier eval's frames (argv[3]) for a before / after of the tone rules on chosen clips.
+    if len(sys.argv) > 3:
+        v1 = os.path.join(sys.argv[3], "frames")
+        rows = []
+        for c in ("sharkclose", "dolphins", "whitetip"):
+            for f in (6, 90, 165):
+                names = [(fr, "src", f"{c} f{f} source"), (fr, "engine", "engine Subject pop"), (v1, "ml", "AI before (capped, open water only)"), (fr, "ml", "AI after (sure: full tone, close-ups)")]
+                ims = [cv2.imread(os.path.join(d, f"{c}_{n}_{f}.png")) for d, n, _ in names]
+                if any(i is None for i in ims):
+                    continue
+                rows.append(np.hstack([label(fit(i, 288), t) for i, (_, _, t) in zip(ims, names)]))
+        if rows:
+            cv2.imwrite(os.path.join(out, "before-after.jpg"), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 88])
     print("boards ->", out)
 
 

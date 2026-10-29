@@ -3,9 +3,11 @@
 import assert from "node:assert/strict";
 import { assembleMemory, frameIndex, isEmpty, MEM_DIM, MEM_TOKENS, newBank, pruneBank, storeMemory, type MemEntry } from "../src/pipeline/seg/bank.ts";
 import { denseFlow, warp, type Gray } from "../src/pipeline/seg/flow.ts";
-import { boxMean, distanceTransform, feather, guidedFilter, iou, promptFromMask } from "../src/pipeline/seg/mask.ts";
+import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, guidedFilter, iou, promptFromMask } from "../src/pipeline/seg/mask.ts";
+import { composeSegStrength } from "../../aqua-fix/src/engine/seg-overlay.ts";
+import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { fillInterval, keyTimes, sampleRange, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
-import { autoObjects, promptFor, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
+import { autoObjects, ML_OUTLINE_ID, outlineSelection, promptFor, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
 
 const entry = (v: number): MemEntry => ({ mem: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), pos: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), ptr: new Float32Array(256).fill(v), score: 1 });
 const tpos = Float32Array.from({ length: 7 * 64 }, (_, i) => Math.floor(i / 64) * 100);
@@ -156,6 +158,35 @@ const img = (dx: number, dy: number): Gray => {
   assert.equal(segPopsAt({ width: 4, height: 4, alpha, exclude: null, near }, 3.5 / 4, 3.5 / 4), false);
   assert.equal(segPopsAt({ width: 4, height: 4, alpha, exclude: null, near: new Float32Array(16) }, 1.5 / 4, 1.5 / 4), false);
   assert.equal(segPopsAt(null, 0.5, 0.5), false);
+  // Outlines with AI on: the ML subject (solid) over the engine's other animals, on the overlay grid.
+  const eng = { width: 2, height: 2, ids: Uint16Array.from([0, 0, 0, 7]), animals: [{ id: 7, strength: 0.1 }] };
+  const os = outlineSelection({ width: 4, height: 4, alpha, exclude: null, near }, eng)!;
+  assert.equal(os.ids[5], ML_OUTLINE_ID);
+  assert.equal(os.ids[15], 7, "the engine's animal elsewhere, resampled");
+  assert.deepEqual(os.animals.map((a) => a.id).sort(), [7, ML_OUTLINE_ID].sort());
+  assert.equal(outlineSelection(null, eng), eng, "AI off: the engine's selection");
+}
+
+// Close-ups: the water-departure map tells water (even where the mask leaked onto it) from the subject, and the
+// overlay folds the leak cap into the ML alpha when the engine sees no open water.
+{
+  const w = 64, h = 32, rgba = new Uint8ClampedArray(w * h * 4), inc = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, subject = x >= 24 && x < 40;
+    rgba.set(subject ? [150, 150, 145, 255] : [20, 90, 170, 255], i * 4); // grey subject, blue water
+    if (x >= 20 && x < 44) inc[i] = 255; // the mask leaks 4 px onto the water either side
+  }
+  const d = departMap(rgba, inc, w, h);
+  const at = (x: number, y: number) => d.data[Math.floor(y / DEPART_STEP) * d.width + Math.floor(x / DEPART_STEP)] / 255;
+  assert.ok(at(4, 16) < 0.1, "open water: 0");
+  assert.ok(at(30, 16) > 0.9, "the grey subject: 1");
+  assert.ok(at(21, 16) < 0.2, "the leak onto water reads as water");
+  const ov = { width: 2, height: 1, alpha: Float32Array.from([1, 1]), exclude: null, near: Float32Array.from([1, 1]), depart: Float32Array.from([0, 1]) };
+  const st = { width: 1, height: 1, data: new Float32Array(4) };
+  const c = composeSegStrength(st, ov, true).data;
+  assert.ok(c[2] <= SEG_TONE.waterFloor + 1e-6, `a sure leak on water keeps the cap (${c[2]})`);
+  assert.equal(c[6], 1, "the subject keeps the full alpha");
+  assert.equal(composeSegStrength(st, ov, false).data[2], 1, "open water: the shader caps it instead");
 }
 
 console.log("seg tests passed");

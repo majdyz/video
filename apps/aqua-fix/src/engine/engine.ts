@@ -799,7 +799,7 @@ export class GradeEngine {
     // Per-animal Subject pop strength (data texture 3); none without Subject pop.
     if (this.settings.subjectPop) {
       const st = this.animals.strength(this.lastTickSec);
-      this.backend.setData(3, this.seg ? composeSegStrength(st, this.seg) : st);
+      this.backend.setData(3, this.seg ? composeSegStrength(st, this.seg, (this.current.backdrop ?? 0) <= 0) : st);
       this.strengthOn = true;
     } else if (this.strengthOn) {
       this.backend.setData(3, { width: 1, height: 1, data: new Float32Array(4) });

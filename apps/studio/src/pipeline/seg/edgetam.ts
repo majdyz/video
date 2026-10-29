@@ -32,7 +32,8 @@ export class EdgeTam {
     this.tpos = Float32Array.from(bank.memory_temporal_positional_encoding.flat());
   }
 
-  static async create(ort: Ort, models: Record<GraphName, Uint8Array>, bank: BankParams, eps: string[]): Promise<EdgeTam> {
+  /** Tries the execution providers in order (WebGPU first when the device has it); `failed` records why one was skipped. */
+  static async create(ort: Ort, models: Record<GraphName, Uint8Array>, bank: BankParams, eps: string[], failed: string[] = []): Promise<EdgeTam> {
     let lastErr: unknown = null;
     for (const ep of eps) {
       try {
@@ -41,6 +42,7 @@ export class EdgeTam {
         return new EdgeTam(ort, s, bank, ep);
       } catch (e) {
         lastErr = e;
+        failed.push(`${ep}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300));
       }
     }
     throw lastErr ?? new Error("no execution provider");

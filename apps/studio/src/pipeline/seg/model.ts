@@ -116,9 +116,10 @@ export class WorkerSegModel implements SegModel {
     void pruneCache(keys);
     const bank = await (await fetch(`${base}bank.json?v=${man.files["bank.json"]?.sha256.slice(0, 16) ?? "0"}`)).json();
     const threads = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
-    const r = await this.call({ type: "init", models, bank, wasmBase: new URL(`${base}ort/`, location.href).href, threads, prefer: opts.prefer ?? "auto" }, Object.values(models));
+    const r = await this.call({ type: "init", models, bank, threads, prefer: opts.prefer ?? "auto" }, Object.values(models));
     this.info = { ep: String(r.ep), f16: !!r.f16, threads: Number(r.threads), loadMs: performance.now() - t0, bytes: total };
-    segLog("model ready", this.info);
+    segLog(`model ready on ${this.info.ep} (tried ${(r.tried as string[]).join(", ")}; WebGPU adapter ${r.webgpu ? "yes" : "no"}, shader-f16 ${r.f16 ? "yes" : "no"}; WASM threads ${this.info.threads}, cross-origin isolated ${r.coi ? "yes" : "no"})`, this.info);
+    for (const f of r.failed as string[]) segLog("execution provider skipped:", f);
     return this.info;
   }
 

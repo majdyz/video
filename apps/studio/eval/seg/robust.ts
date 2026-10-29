@@ -85,7 +85,7 @@ export async function robustness(o: {
   const read = document.createElement("canvas"); read.width = W; read.height = H;
   const rctx = read.getContext("2d", { willReadFrequently: true })!;
   const render = async (t: number, ov: ReturnType<SegTrack["at"]> | null): Promise<Uint8ClampedArray> => {
-    engine.setSegOverlay(ov ? { width: ov.width, height: ov.height, alpha: ov.alpha, exclude: ov.exclude, near: ov.near } : null);
+    engine.setSegOverlay(ov ? { width: ov.width, height: ov.height, alpha: ov.alpha, exclude: ov.exclude, near: ov.near, depart: ov.depart } : null);
     const vf = await engine.renderToFrame(0, Math.round(t * 1e6), 33_333);
     rctx.drawImage(vf, 0, 0, W, H);
     vf.close();

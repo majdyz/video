@@ -16,10 +16,13 @@ const p = await ctx.newPage();
 const logs = []; p.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`)); p.on("pageerror", (e) => logs.push("PAGEERROR " + e.message));
 const t0 = Date.now(); const ts = () => ((Date.now() - t0) / 1000).toFixed(1) + "s";
 const snap = () => p.evaluate(() => { const s = window.studio.getSnapshot(); return { phase: s.phase, seg: s.seg, tracking: s.subjectTracking, overrides: s.subjectOverrides.length, exp: s.exp?.state }; });
+// The first visit installs the service worker, which then reloads the page once, cross-origin isolated (sw.js coi).
 await p.goto(base + `?debug=1&webgl2&dock=open&segslow=7200000${process.env.EXTRA ?? ""}`);
+for (let i = 0; i < 60; i++) { const ok = await p.evaluate(() => crossOriginIsolated).catch(() => false); if (ok) break; await p.waitForTimeout(500); }
+await p.waitForLoadState("load");
 await p.setInputFiles("input[type=file]", clip);
 await p.waitForFunction(() => window.studio?.getSnapshot().phase === "ready" && window.studio.getSnapshot().colourProfiled && !window.studio.getSnapshot().busy, null, { timeout: 180000 });
-console.log(ts(), "ready", JSON.stringify(await snap()));
+console.log(ts(), "ready", JSON.stringify(await snap()), "isolation", JSON.stringify(await p.evaluate(() => ({ crossOriginIsolated, sab: typeof SharedArrayBuffer !== "undefined", sw: !!navigator.serviceWorker?.controller, engine: window.studio.engine?.stats }))));
 await p.evaluate((t) => { window.studio.pause(); window.studio.seek(t); }, T);
 await p.waitForTimeout(2000);
 const stage = async () => p.locator(".stage__content").boundingBox();
