@@ -152,8 +152,12 @@ export async function robustness(o: {
       await png("src", sc); await png("engine", base); await png("ml", clean);
       // The same grade with Subject pop off: what the pop itself changes.
       engine.settings = { ...DEFAULT_SETTINGS, subjectPop: false };
-      await png("nopop", await render(t, null));
+      const nopop = await render(t, null);
+      await png("nopop", nopop);
       engine.settings = { ...DEFAULT_SETTINGS, subjectPop: true };
+      // The pop's own effect (pop on vs off): its strength (p99 ΔE) and the step at its edge (ΔE per pixel).
+      (acc["pop-engine"] ??= []).push(stats(deltaE(base, nopop, W * H), W, H));
+      (acc["pop-ml"] ??= []).push(stats(deltaE(clean, nopop, W * H), W, H));
       const m = o.clean.at(t);
       if (m) {
         // The subject region on the frame grid (the mask, nearest).
