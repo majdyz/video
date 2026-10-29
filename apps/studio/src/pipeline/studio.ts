@@ -390,7 +390,9 @@ export class Studio {
     try {
       const mod = await loadColour();
       this.colour = mod;
-      const engine = await mod.GradeEngine.create(canvas, (e) => this.set({ error: e.message }), !q.has("webgl2"));
+      // WebGL2 by default: the WebGPU path rendered black on iPhone Safari (29 Oct) and can't be checked on the
+      // devbox. `?webgpu=1` opts back in while it's being fixed.
+      const engine = await mod.GradeEngine.create(canvas, (e) => this.set({ error: e.message }), q.get("webgpu") === "1");
       engine.settings = this.colourFor(this.tools.colour);
       engine.setSubjectOverrides(this.snap.subjectOverrides);
       engine.personEnabled = q.get("person") !== "0";
