@@ -18,10 +18,13 @@ if ("serviceWorker" in navigator && import.meta.env.PROD && !("Capacitor" in win
   window.addEventListener("load", () => {
     // Cross-origin isolation comes from the service worker's headers (sw.js coi), so the very first visit (not yet
     // controlled) is not isolated: once the worker takes over, reload once, but only right after start-up (never
-    // under someone's edit); later the next visit is isolated anyway.
+    // under someone's edit); later the next visit is isolated anyway. Any interaction (opening a clip, the sample,
+    // a drop) cancels it: a reload would throw away what they just opened.
     const t0 = performance.now();
+    let touched = false;
+    for (const ev of ["pointerdown", "keydown", "drop", "change"]) window.addEventListener(ev, () => (touched = true), { capture: true, once: true });
     navigator.serviceWorker.addEventListener("controllerchange", () => {
-      if (window.crossOriginIsolated || performance.now() - t0 > 15_000) return;
+      if (touched || window.crossOriginIsolated || performance.now() - t0 > 15_000) return;
       try {
         if (sessionStorage.getItem("coi-reloaded")) return;
         sessionStorage.setItem("coi-reloaded", "1");
