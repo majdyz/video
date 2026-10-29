@@ -21,6 +21,8 @@ import { linearToOklab, srgbToLinear } from "../src/engine/color.ts";
 import { DEFAULT_SETTINGS, type FrameAnalysis } from "../src/engine/params.ts";
 import { ClipSim } from "./clip-sim.ts";
 import { deltaE00, srgb8ToLab } from "./colour-metrics.ts";
+// SIM_VIVID=1 grades with the Vivid look (the studio default) instead of the engine's plain Auto.
+const SETTINGS = { ...DEFAULT_SETTINGS, ...(process.env.SIM_VIVID ? { vivid: parseFloat(process.env.SIM_VIVID) } : {}) };
 
 const args = process.argv.slice(2);
 const opt = (n: string, d: string) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : d; };
@@ -67,7 +69,7 @@ for (const c of list) {
   for (let f = 0; f < thumbs.length && f < fulls.length; f++) {
     for (const s of sims) s.step(f, thumbs);
     if (f % step) continue;
-    const outs = sims.map((s) => { const x = s.state(); return applyGrade({ params: x.params, settings: DEFAULT_SETTINGS, depth: x.depth, clahe: x.clahe }, fulls[f], GW, GH); });
+    const outs = sims.map((s) => { const x = s.state(); return applyGrade({ params: x.params, settings: SETTINGS, depth: x.depth, clahe: x.clahe }, fulls[f], GW, GH); });
     // Old vs new, per pixel (every 2nd pixel).
     let fs_ = 0, fn = 0;
     for (let i = 0; i < GW * GH; i += 2) {

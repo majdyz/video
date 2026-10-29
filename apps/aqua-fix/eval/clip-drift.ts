@@ -17,7 +17,7 @@
 // Ablations (env): SIM_NOFOLLOW=1 (no anchor/follow) with SIM_SNAPSEG=1 (snap at
 // every profiled segment switch) replays the engine before 29 Oct 2026;
 // SIM_LOCKZ=1 also locks the range normalisation; SIM_CLARITY sets the
-// clarity; SIM_TAU / SIM_WINDOW tune the follow.
+// clarity, SIM_VIVID the Vivid amount (0..1; the studio default is 1); SIM_TAU / SIM_WINDOW tune the follow.
 //
 // Probes:
 //  - tracked sand (the one to watch): the brightest quarter of the low-chroma
@@ -100,7 +100,7 @@ console.log(`${path.basename(clip)}: ${info.w}x${info.h} @ ${fps.toFixed(2)} fps
 const sim = new ClipSim(mode, fps, LAT);
 const lockInfo = sim.profile(thumbs);
 console.log(`profile: ${lockInfo}`);
-const settings = { ...DEFAULT_SETTINGS, ...(process.env.SIM_CLARITY ? { clarity: parseFloat(process.env.SIM_CLARITY) } : {}) };
+const settings = { ...DEFAULT_SETTINGS, ...(process.env.SIM_CLARITY ? { clarity: parseFloat(process.env.SIM_CLARITY) } : {}), ...(process.env.SIM_VIVID ? { vivid: parseFloat(process.env.SIM_VIVID) } : {}) };
 
 type Probe = { name: string; ref: [number, number, number]; first: [number, number, number] | null; max: number; maxAb: number; series: number[] };
 /** ΔE00 of the colour only (b's lightness set to a's): brightness changes and probe selection noise left out. */

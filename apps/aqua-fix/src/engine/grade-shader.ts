@@ -270,21 +270,25 @@ vec3 vividLook(vec3 lab, float v, float g) {
   float h = atan(lab.z, lab.y);
   float hh = h < 0.0 ? h + 6.2831853 : h;
   float d = h - VL_TARGET; d -= 6.2831853 * round(d / 6.2831853);
-  float cl = VL_C_LIFT * smoothstepf(VL_C_LIFT_LO, VL_C_LIFT_HI, lab.x);
-  float wC = smoothstepf(VL_C_LO + cl, VL_C_HI + cl, C) * smoothstepf(VL_L_LO, VL_L_HI, lab.x);
+  float wC = smoothstepf(VL_C_LO, VL_C_HI, C) * smoothstepf(VL_L_LO, VL_L_HI, lab.x);
   float hiKeep = 1.0 - smoothstepf(VL_BAND_HI0, VL_BAND_HI1, hh);
   float band = smoothstepf(VL_BAND_LO0, VL_BAND_LO1, hh) * hiKeep * (1.0 - smoothstepf(VL_VIOLET_C_LO, VL_VIOLET_C_HI, C) * smoothstepf(VL_TARGET, VL_BAND_HI1, hh));
   float gLo = smoothstepf(VL_GREEN_LO0, VL_GREEN_LO1, hh);
   float gBand = gLo * (1.0 - smoothstepf(VL_GREEN_TOP0, VL_GREEN_TOP1, hh));
   float h2 = h + ((1.0 - g) * band * VL_PULL * -d + g * gBand * VL_GREEN_SHIFT) * wC * v;
-  float w = ((1.0 - g) * band + g * gLo * hiKeep) * smoothstepf(VL_DARK_C_LO, VL_DARK_C_HI, C) * v;
+  float water = (1.0 - g) * band + g * gLo * hiKeep;
+  float cw = smoothstepf(VL_DARK_C_LO, VL_DARK_C_HI, C);
+  float w = water * cw * cw * v;
   C *= 1.0 + VL_CHROMA * w * (1.0 - g);
   float L2 = lab.x * (1.0 - (VL_DARK + (VL_DARK_GREEN - VL_DARK) * g) * w * smoothstepf(VL_DARK_L_LO, VL_DARK_L_HI, lab.x));
   L2 *= 1.0 - VL_BLACK_K * v * (1.0 - smoothstepf(VL_BLACK_LO, VL_BLACK_HI, L2));
   float cD = VL_SHADOW_C0 + VL_SHADOW_C1 * smoothstepf(VL_SHADOW_L_LO, VL_SHADOW_L_HI, L2);
   if (C > cD) C -= (C - cD) * (1.0 - VL_SHADOW_KEEP) * v * (1.0 - smoothstepf(VL_SHADOW_FADE_LO, VL_SHADOW_FADE_HI, L2));
-  C *= 1.0 - VL_WHITE_MIX * v * smoothstepf(VL_WHITE_L_LO, VL_WHITE_L_HI, L2) * (1.0 - smoothstepf(VL_WHITE_C_LO, VL_WHITE_C_HI, C));
-  return vec3(L2, C * cos(h2), C * sin(h2));
+  float lw = v * (1.0 + (water - 1.0) * smoothstepf(0.0, VL_LIFT_NEUTRAL_C, C)) * smoothstepf(VL_LIFT_L_LO, 1.0, lab.x);
+  L2 += VL_LIFT * lw * (1.0 - L2);
+  C *= 1.0 - VL_HI_DESAT * lw;
+  float wt = VL_WARM_C * lw;
+  return vec3(L2, C * cos(h2) + wt * cos(VL_WARM_HUE), C * sin(h2) + wt * sin(VL_WARM_HUE));
 }
 // Near-white pink guard (see HIGHLIGHT_PINK; mirrors apply.ts highlightPink).
 vec2 highlightPink(float L, vec2 ab) {
@@ -725,21 +729,25 @@ fn vividLook(lab: vec3<f32>, v: f32, g: f32) -> vec3<f32> {
   let h = atan2(lab.z, lab.y);
   let hh = select(h, h + 6.2831853, h < 0.0);
   var d = h - VL_TARGET; d -= 6.2831853 * round(d / 6.2831853);
-  let cl = VL_C_LIFT * smoothstepf(VL_C_LIFT_LO, VL_C_LIFT_HI, lab.x);
-  let wC = smoothstepf(VL_C_LO + cl, VL_C_HI + cl, C) * smoothstepf(VL_L_LO, VL_L_HI, lab.x);
+  let wC = smoothstepf(VL_C_LO, VL_C_HI, C) * smoothstepf(VL_L_LO, VL_L_HI, lab.x);
   let hiKeep = 1.0 - smoothstepf(VL_BAND_HI0, VL_BAND_HI1, hh);
   let band = smoothstepf(VL_BAND_LO0, VL_BAND_LO1, hh) * hiKeep * (1.0 - smoothstepf(VL_VIOLET_C_LO, VL_VIOLET_C_HI, C) * smoothstepf(VL_TARGET, VL_BAND_HI1, hh));
   let gLo = smoothstepf(VL_GREEN_LO0, VL_GREEN_LO1, hh);
   let gBand = gLo * (1.0 - smoothstepf(VL_GREEN_TOP0, VL_GREEN_TOP1, hh));
   let h2 = h + ((1.0 - g) * band * VL_PULL * -d + g * gBand * VL_GREEN_SHIFT) * wC * v;
-  let w = ((1.0 - g) * band + g * gLo * hiKeep) * smoothstepf(VL_DARK_C_LO, VL_DARK_C_HI, C) * v;
+  let water = (1.0 - g) * band + g * gLo * hiKeep;
+  let cw = smoothstepf(VL_DARK_C_LO, VL_DARK_C_HI, C);
+  let w = water * cw * cw * v;
   C *= 1.0 + VL_CHROMA * w * (1.0 - g);
   var L2 = lab.x * (1.0 - (VL_DARK + (VL_DARK_GREEN - VL_DARK) * g) * w * smoothstepf(VL_DARK_L_LO, VL_DARK_L_HI, lab.x));
   L2 *= 1.0 - VL_BLACK_K * v * (1.0 - smoothstepf(VL_BLACK_LO, VL_BLACK_HI, L2));
   let cD = VL_SHADOW_C0 + VL_SHADOW_C1 * smoothstepf(VL_SHADOW_L_LO, VL_SHADOW_L_HI, L2);
   if (C > cD) { C -= (C - cD) * (1.0 - VL_SHADOW_KEEP) * v * (1.0 - smoothstepf(VL_SHADOW_FADE_LO, VL_SHADOW_FADE_HI, L2)); }
-  C *= 1.0 - VL_WHITE_MIX * v * smoothstepf(VL_WHITE_L_LO, VL_WHITE_L_HI, L2) * (1.0 - smoothstepf(VL_WHITE_C_LO, VL_WHITE_C_HI, C));
-  return vec3(L2, C * cos(h2), C * sin(h2));
+  let lw = v * (1.0 + (water - 1.0) * smoothstepf(0.0, VL_LIFT_NEUTRAL_C, C)) * smoothstepf(VL_LIFT_L_LO, 1.0, lab.x);
+  L2 += VL_LIFT * lw * (1.0 - L2);
+  C *= 1.0 - VL_HI_DESAT * lw;
+  let wt = VL_WARM_C * lw;
+  return vec3(L2, C * cos(h2) + wt * cos(VL_WARM_HUE), C * sin(h2) + wt * sin(VL_WARM_HUE));
 }
 fn highlightPink(L: f32, ab: vec2<f32>) -> vec2<f32> {
   let C = length(ab);

@@ -440,8 +440,7 @@ export function vividLook(L: number, a: number, b: number, v: number, g: number)
   const h = Math.atan2(b, a);
   const hh = h < 0 ? h + 2 * Math.PI : h;
   const d = h - V.target - 2 * Math.PI * Math.round((h - V.target) / (2 * Math.PI));
-  const cl = V.cLift * smoothstep(V.cLiftLo, V.cLiftHi, L);
-  const wC = smoothstep(V.cLo + cl, V.cHi + cl, C) * smoothstep(V.lLo, V.lHi, L);
+  const wC = smoothstep(V.cLo, V.cHi, C) * smoothstep(V.lLo, V.lHi, L);
   const hiKeep = 1 - smoothstep(V.bandHi0, V.bandHi1, hh);
   // Clear water: pull toward the target over the cyan band (vivid violets keep their hue).
   const band = smoothstep(V.bandLo0, V.bandLo1, hh) * hiKeep * (1 - smoothstep(V.violetCLo, V.violetCHi, C) * smoothstep(V.target, V.bandHi1, hh));
@@ -450,16 +449,25 @@ export function vividLook(L: number, a: number, b: number, v: number, g: number)
   const gBand = gLo * (1 - smoothstep(V.greenTop0, V.greenTop1, hh));
   const h2 = h + ((1 - g) * band * V.pull * -d + g * gBand * V.greenShift) * wC * v;
   // Darker, slightly richer water: by hue and (gently) by chroma.
-  const w = ((1 - g) * band + g * gLo * hiKeep) * smoothstep(V.darkCLo, V.darkCHi, C) * v;
+  const water = (1 - g) * band + g * gLo * hiKeep;
+  // Darkening / chroma gain grow with the square of a wide chroma ramp: whitish water (the sun opening,
+  // sunbeams, the surface) is left alone, saturated water gets the full look, and the tone curve stays
+  // compressive in L (slope ≤ 1: bright water never sharpens into new edges).
+  const cw = smoothstep(V.darkCLo, V.darkCHi, C);
+  const w = water * cw * cw * v;
   C *= 1 + V.chroma * w * (1 - g);
   let L2 = L * (1 - (V.dark + (V.darkGreen - V.dark) * g) * w * smoothstep(V.darkLLo, V.darkLHi, L));
   // Shadow toe: blacks stay black.
   L2 *= 1 - V.blackK * v * (1 - smoothstep(V.blackLo, V.blackHi, L2));
-  // Dark-area chroma bound (violet / green speckle in dark rock) and neutral near-whites.
+  // Dark-area chroma bound (violet / green speckle in dark rock).
   const cD = V.shadowC0 + V.shadowC1 * smoothstep(V.shadowLLo, V.shadowLHi, L2);
   if (C > cD) C -= (C - cD) * (1 - V.shadowKeep) * v * (1 - smoothstep(V.shadowFadeLo, V.shadowFadeHi, L2));
-  C *= 1 - V.whiteMix * v * smoothstep(V.whiteLLo, V.whiteLHi, L2) * (1 - smoothstep(V.whiteCLo, V.whiteCHi, C));
-  return [L2, C * Math.cos(h2), C * Math.sin(h2)];
+  // Sun / surface highlight: bright water lifted gently toward a warm white.
+  const lw = v * (1 + (water - 1) * smoothstep(0, V.liftNeutralC, C)) * smoothstep(V.liftLLo, 1, L);
+  L2 += V.lift * lw * (1 - L2);
+  C *= 1 - V.hiDesat * lw;
+  const wt = V.warmC * lw;
+  return [L2, C * Math.cos(h2) + wt * Math.cos(V.warmHue), C * Math.sin(h2) + wt * Math.sin(V.warmHue)];
 }
 
 /** Near-white pink guard (mirrors the shaders; see HIGHLIGHT_PINK in params.ts). Returns (a, b). */

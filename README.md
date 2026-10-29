@@ -21,10 +21,14 @@ Three on-device PWAs for diver-shot footage, in one monorepo.
   keeps skin on the restoration path and pulls it toward a skin tone.
   Controls: Intensity (50 % = the estimate), scene presets (Auto / Green
   water / Deep blue / Shallow reef) as priors, a Deep-blue look fitted to
-  reference grades, an opt-in Vivid look (cyan water turned a muted navy
-  and darkened, shadows kept black, near-white highlights neutral; a smooth
-  per-pixel function of the graded colour, `VIVID_LOOK` in params.ts,
-  checked with `apps/aqua-fix/eval/vivid.ts`), and advanced sliders. Export decodes/encodes offline
+  reference grades, a Vivid look — on by default in the studio, one switch
+  in the Colour panel turns it off and the choice is remembered (`?vivid=0|1`
+  overrides) — (cyan water turned a muted navy and darkened, shadows kept
+  black, the whitish sun opening and sunbeams not darkened but lifted toward a warm
+  white; a smooth per-pixel function of the graded colour, `VIVID_LOOK` in
+  params.ts; it stands down by itself on graded / topside, night / torch and
+  ROV footage, `VIVID_GATE`; checked with `apps/aqua-fix/eval/vivid.ts`), and
+  advanced sliders. Export decodes/encodes offline
   with WebCodecs and copies the original audio through; on WebKit, where the
   canvas capture is slow, it plays the clip and records the graded canvas in
   real time, then remuxes the original audio.

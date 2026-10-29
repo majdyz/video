@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Studio } from "./pipeline/studio.ts";
-import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, lookOf, profileDefaults, type ToolId, type ToolsState } from "./pipeline/tools.ts";
+import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, initialVivid, lookOf, profileDefaults, savedVivid, type ToolId, type ToolsState } from "./pipeline/tools.ts";
 import { BRAND, SAMPLE } from "./brand.ts";
 import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
@@ -31,11 +31,13 @@ const ACCEPT = "video/*,image/*,.mov,.mp4,.m4v,.heic,.heif";
 function initialTools(): ToolsState {
   // Headless/debug presets: ?tools=colour,stabilise,dewarp&profile=…
   const q = new URLSearchParams(location.search);
+  // Vivid: ?vivid=0|1, else the user's saved switch choice, else on.
+  const vivid = initialVivid(location.search, savedVivid());
   const list = q.get("tools");
-  if (!list) return DEFAULT_TOOLS;
+  if (!list) return { ...DEFAULT_TOOLS, colour: { ...DEFAULT_TOOLS.colour, vivid } };
   const on = new Set(list.split(","));
   const t: ToolsState = {
-    colour: { ...DEFAULT_TOOLS.colour, enabled: on.has("colour"), vivid: q.get("vivid") === "1" },
+    colour: { ...DEFAULT_TOOLS.colour, enabled: on.has("colour"), vivid },
     stabilise: { ...DEFAULT_TOOLS.stabilise, enabled: on.has("stabilise") },
     dewarp: { ...DEFAULT_TOOLS.dewarp, enabled: on.has("dewarp") },
   };

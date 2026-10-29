@@ -28,7 +28,7 @@ export type ColourState = {
   veil: number;
   /** Advanced: "Subject pop" (opt-in): subjects in open blue water toned silver and lifted. */
   subjectPop?: boolean;
-  /** "Vivid" look (opt-in): deep muted navy water, darker water, black shadows (VIVID_LOOK in the engine). */
+  /** "Vivid" look (on by default): deep muted navy water, darker water, black shadows, the sun kept bright (VIVID_LOOK in the engine; it stands down by itself on graded, topside, night and ROV footage). */
   vivid?: boolean;
 };
 
@@ -51,8 +51,32 @@ export const DEFAULT_COLOUR: ColourState = {
   clarity: DEFAULT_SETTINGS.clarity,
   veil: DEFAULT_SETTINGS.veil,
   subjectPop: false,
-  vivid: false,
+  vivid: true,
 };
+
+/** Where an explicit Vivid choice (the main-panel switch) is remembered. */
+export const VIVID_PREF_KEY = "studio.vivid";
+
+/**
+ * Vivid at start-up: `?vivid=0|1` overrides; otherwise a saved explicit choice
+ * ("0" / "1" under VIVID_PREF_KEY); otherwise on.
+ */
+export function initialVivid(search: string, saved: string | null): boolean {
+  const q = new URLSearchParams(search).get("vivid");
+  if (q === "0" || q === "1") return q === "1";
+  if (saved === "0" || saved === "1") return saved === "1";
+  return DEFAULT_COLOUR.vivid !== false;
+}
+
+/** Reads the saved Vivid choice (null when none, or storage is unavailable). */
+export function savedVivid(): string | null {
+  try { return typeof localStorage === "undefined" ? null : localStorage.getItem(VIVID_PREF_KEY); } catch { return null; }
+}
+
+/** Remembers an explicit Vivid choice from the switch. */
+export function saveVivid(on: boolean): void {
+  try { localStorage.setItem(VIVID_PREF_KEY, on ? "1" : "0"); } catch { /* private mode */ }
+}
 
 /** A segment's colour settings (Split on the timeline): everything but the on/off, which stays global. */
 export type ColourLook = Omit<ColourState, "enabled">;

@@ -14,6 +14,8 @@ import {
   solveParams,
   GYRO_DEFAULT_SMOOTHING,
   subjectPopVisible,
+  initialVivid,
+  VIVID_PREF_KEY,
 } from "../src/pipeline/tools.ts";
 import { DEFAULT_GYRO_PARAMS } from "../../motion-fix/src/lib/gyro/gyro-stabilize.ts";
 import { dewarpParams, dewarpUniforms } from "../src/pipeline/dewarp.ts";
@@ -24,15 +26,26 @@ import { samplePoint } from "../../dewarp/src/fisheye.ts";
 import { profileTimes, segmentProfile, type ProfileSample } from "../../aqua-fix/src/engine/profile.ts";
 import { IDENTITY_PARAMS } from "../../aqua-fix/src/engine/params.ts";
 
-// Colour: strength 50 is exactly the engine's own estimate (intensity 1), defaults pass through.
-assert.deepEqual(colourSettings(DEFAULT_TOOLS.colour), { ...DEFAULT_SETTINGS });
+// Colour: strength 50 is exactly the engine's own estimate (intensity 1), defaults pass through — with Vivid on.
+assert.deepEqual(colourSettings(DEFAULT_TOOLS.colour), { ...DEFAULT_SETTINGS, vivid: 1 });
+assert.deepEqual(colourSettings({ ...DEFAULT_TOOLS.colour, vivid: false }), { ...DEFAULT_SETTINGS });
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 100 }).intensity, 2);
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 0 }).intensity, 0);
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 140 }).intensity, 2, "clamped");
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, preset: "murky" }).preset, "murky");
-// Vivid is opt-in: off by default, a full-strength look when switched on.
-assert.equal(DEFAULT_TOOLS.colour.vivid, false);
+// Vivid is on by default; a saved explicit "off" is respected; ?vivid=0|1 overrides both.
+assert.equal(DEFAULT_TOOLS.colour.vivid, true);
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, vivid: true }).vivid, 1);
+assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, vivid: false }).vivid, 0);
+assert.equal(initialVivid("", null), true);
+assert.equal(initialVivid("", "0"), false);
+assert.equal(initialVivid("", "1"), true);
+assert.equal(initialVivid("", "garbage"), true);
+assert.equal(initialVivid("?vivid=0", null), false);
+assert.equal(initialVivid("?vivid=0", "1"), false);
+assert.equal(initialVivid("?vivid=1&tools=colour", "0"), true);
+assert.equal(initialVivid("?vivid=x", "0"), false);
+assert.equal(VIVID_PREF_KEY, "studio.vivid");
 
 // Stabilise: defaults are Motion Fix's; presets set both knobs.
 assert.deepEqual(stabiliseParams(DEFAULT_TOOLS.stabilise), DEFAULT_PARAMS);
