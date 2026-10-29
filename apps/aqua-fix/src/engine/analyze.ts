@@ -30,7 +30,7 @@ import {
   type FrameAnalysis,
   type GradeParams,
   type Vec3,
- CONF_BRIGHT, DEFAULT_SETTINGS, HAZE_AUTO, hazeLiftRatio, hazeWeightOf } from "./params.ts";
+ CONF_BRIGHT, DEFAULT_SETTINGS, HAZE_AUTO, hazeLiftRatio, hazeWeightOf, vividGateOf } from "./params.ts";
 
 /** Thumbnail size the engine analyses at (upright, 16:9 box). */
 export const ANALYSIS_W = 256;
@@ -576,6 +576,19 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
   const haze = clamp01(black / HAZE_BLACK_REF);
   const evidence = calmEvidence(lin, n);
   const { calm, calmTone } = calmScores(evidence, haze);
+  // Vivid gate evidence: veil lightness / chroma and bottom-minus-top mean lightness (letterbox black skipped).
+  let topL = 0, topN = 0, botL = 0, botN = 0;
+  for (let y = 0; y < h; y++) {
+    const band = y < h / 3 ? 1 : y >= (2 * h) / 3 ? 2 : 0;
+    if (!band) continue;
+    for (let x = 0; x < w; x++) {
+      const L = okL[y * w + x];
+      if (L < 0.02) continue;
+      if (band === 1) { topL += L; topN++; } else { botL += L; botN++; }
+    }
+  }
+  const veilLab = linearToOklab(binf[0], binf[1], binf[2]);
+  const vividGate = vividGateOf(veilLab[0], Math.hypot(veilLab[1], veilLab[2]), topN > 0 && botN > 0 ? botL / botN - topL / topN : 0);
   const params: GradeParams = {
     binf,
     betaB,
@@ -619,6 +632,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     backdrop: backdropValidity,
     backdropFit: Array.from(backdropFit),
     subjectTone,
+    vividGate,
   };
   return { params, depth, clahe, mean, diag: { sandWeight: sand.weight, sandFrac: sand.frac, sandMask, calm: evidence, backdrop: backdropValidity } };
 }

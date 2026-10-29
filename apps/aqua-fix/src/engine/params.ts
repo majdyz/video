@@ -341,13 +341,19 @@ export const LOOK = {
  * swaps the pull for a coherent shift of `greenShift` over the whole cool
  * half of the frame (band from `greenLo0..greenLo1`), so murk over reef moves
  * as one instead of the water alone turning blue. Pixels below `cLo..cHi`
- * chroma (sand, greys, the sun opening) or `lLo..lHi` lightness hardly move.
+ * chroma (sand, greys) or `lLo..lHi` lightness hardly move. Whitish water
+ * (the sun opening, sunbeams, the surface) is not darkened — the darkening
+ * grows with the square of the chroma — and the brightest water is lifted
+ * toward a warm white (`lift*`). The tone curve stays compressive along L
+ * (a lightness-only fade would steepen bright water into new edges), and
+ * every ramp is wide enough that the look adds no edges Auto does not
+ * (eval/vivid.ts newEdgePct).
  */
 export const VIVID_LOOK = {
   target: (242 * Math.PI) / 180, // Oklab ≈ CIELAB 260°: the references' navy
-  pull: 0.9,
-  bandLo0: (150 * Math.PI) / 180,
-  bandLo1: (212 * Math.PI) / 180,
+  pull: 0.6,
+  bandLo0: (130 * Math.PI) / 180, // a wide entry ramp: the pull expands hues where it starts (teal next to green would split)
+  bandLo1: (225 * Math.PI) / 180,
   bandHi0: (255 * Math.PI) / 180,
   bandHi1: (305 * Math.PI) / 180,
   violetCLo: 0.08, // violets above this chroma are real colour …
@@ -357,35 +363,37 @@ export const VIVID_LOOK = {
   greenLo1: (125 * Math.PI) / 180,
   greenTop0: (205 * Math.PI) / 180, // … the green shift fades out toward blue (never into violet)
   greenTop1: (240 * Math.PI) / 180,
-  cLo: 0.02,
-  cHi: 0.06,
-  cLift: 0.045, // … and light pixels need this much more chroma (a whitish sun opening is not water) …
-  cLiftLo: 0.6,
-  cLiftHi: 0.88,
+  cLo: 0.0, // the pull grows with chroma over a wide ramp (greys hardly turn; no chroma step becomes a hue step)
+  cHi: 0.1,
   lLo: 0.15,
   lHi: 0.4,
   chroma: 0.1, // modest chroma gain on the turned water
-  dark: 0.24, // water darkening at full weight (Oklab L ×(1 − dark·ramp)) …
+  dark: 0.2, // water darkening at full weight (Oklab L ×(1 − dark·ramp)) …
   darkGreen: 0.1, // … in green water, where it covers the whole cool half
   darkLLo: 0.3, // darkening ramp on L (dark water is not darkened further)
-  darkLHi: 0.8,
-  darkCLo: 0.0, // darkening / chroma gain grow with chroma over a wide ramp (whitish water near the surface or the sun
-  darkCHi: 0.14, // stays light, and a smooth cyan-to-white gradient never turns into a dark-blue / white boundary)
-  blackK: 0.15, // shadow toe: L ×(1 − blackK) at black, easing out by blackHi (Auto's lifted shadows go back to black;
-  blackLo: 0.1, // a smooth function of the graded lightness, so no per-pixel noise drives it)
-  blackHi: 0.45,
+  darkLHi: 0.6,
+  darkCLo: 0.015, // darkening / chroma gain grow with the square of a wide chroma ramp: whitish water near the surface,
+  darkCHi: 0.16, // sunbeams and the sun opening (C ≲ 0.04) are not darkened, and a smooth cyan-to-white gradient never
+  // turns into a dark-blue / white boundary; along L the curve stays compressive (no new edges in bright water)
+  blackK: 0.1, // shadow toe: L ×(1 − blackK) at black, easing out by blackHi (Auto's lifted shadows go back to black;
+  blackLo: 0.0, // a smooth function of the graded lightness, so no per-pixel noise drives it; kept to the deep
+  blackHi: 0.25, // shadows — a toe reaching into the mid-tones sharpens murky reef texture into new edges)
   shadowC0: 0.006, // dark-area chroma bound c0 + c1·smoothstep(sLo, sHi, L) …
   shadowC1: 0.1,
   shadowLLo: 0.15,
   shadowLHi: 0.6,
-  shadowKeep: 0.35, // … chroma above it is kept at this share (violet speckle in dark rock)
+  shadowKeep: 0.5, // … chroma above it is kept at this share (violet speckle in dark rock)
   shadowFadeLo: 0.35, // … in dark areas only (fades out over this lightness)
   shadowFadeHi: 0.55,
-  whiteLLo: 0.8, // near-white highlights (the sun opening) go neutral …
-  whiteLHi: 0.94,
-  whiteCLo: 0.05, // … unless they are clearly coloured
-  whiteCHi: 0.09,
-  whiteMix: 0.85,
+  // Sun / surface highlight: bright water-hued pixels (the sun opening, sunbeams, the surface) go toward a
+  // warm white instead of navy — L += lift·(1 − L), chroma ×(1 − hiDesat) plus a warm tint of warmC at
+  // warmHue — on a smooth ramp over the graded lightness from liftLLo (no clipping, no flat blob, no new edge).
+  liftLLo: 0.9,
+  liftNeutralC: 0.04, // near-neutral pixels count as water here (their hue is noise)
+  lift: 0.08,
+  hiDesat: 0.45,
+  warmC: 0.006,
+  warmHue: (80 * Math.PI) / 180,
 };
 
 /**
@@ -395,12 +403,44 @@ export const VIVID_LOOK = {
  */
 export const HIGHLIGHT_PINK = { hue: (355 * Math.PI) / 180, bandIn: (30 * Math.PI) / 180, bandOut: (55 * Math.PI) / 180, lLo: 0.86, lHi: 0.96, cLo: 0.04, cHi: 0.08, mix: 0.85 };
 
-/** The Vivid amount the shader reads (0..1): off on footage the do-no-harm gate calls already graded / not underwater. */
+/**
+ * Where Vivid (on by default) stands down. The look is fitted to daylight
+ * water with a cast; on other footage it softens or switches off, from
+ * clip-locked frame evidence (never per pixel):
+ *  - already graded / topside: the do-no-harm scores (calm.ts) — off from
+ *    calmHi, eased in from calmLo (the scores stop at 0.9, so a plain
+ *    1 − calm would leave a tenth of the look on);
+ *  - night, torch-lit caves: a dark veil (Oklab L of B∞ below veilLLo..
+ *    veilLHi; daylight water measures ≥ 0.39 on the valset, torch / night
+ *    ≤ 0.29);
+ *  - ROV / lamp-lit seabed: the frame is lit from the camera, not from the
+ *    surface — the bottom third clearly brighter than the top (`lift`, Oklab
+ *    L) under a grey, low-chroma veil — softened to rovKeep (a daylight
+ *    frame looking down at bright sand under a grey veil softens too).
+ * Cenote and cave sunbeams are handled per pixel (whitish beams are lifted,
+ * not darkened: VIVID_LOOK.darkC*, lift*); torch-lit caves by the veil.
+ */
+export const VIVID_GATE = { calmLo: 0.15, calmHi: 0.6, veilLLo: 0.27, veilLHi: 0.38, liftLo: 0.08, liftHi: 0.25, veilCLo: 0.06, veilCHi: 0.11, rovKeep: 0.25 };
+
+function smoothstepP(e0: number, e1: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
+
+/** Frame evidence for the Vivid gate (analyze.ts): veil Oklab L and chroma, bottom-minus-top mean Oklab L. 1 = full look. */
+export function vividGateOf(veilL: number, veilC: number, lift: number): number {
+  const G = VIVID_GATE;
+  const night = smoothstepP(G.veilLLo, G.veilLHi, veilL);
+  const rov = smoothstepP(G.liftLo, G.liftHi, lift) * (1 - smoothstepP(G.veilCLo, G.veilCHi, veilC));
+  return night * (1 - (1 - G.rovKeep) * rov);
+}
+
+/** The Vivid amount the shader reads (0..1): the user's setting through the gate (VIVID_GATE). */
 export function vividAmountOf(p: GradeParams, s: UserSettings): number {
   const v = Math.min(1, Math.max(0, s.vivid ?? 0));
   if (v <= 0) return 0;
   const calm = Math.min(1, Math.max(0, Math.max(p.calm ?? 0, p.calmTone ?? 0)));
-  return v * (1 - calm);
+  return v * (1 - smoothstepP(VIVID_GATE.calmLo, VIVID_GATE.calmHi, calm)) * Math.min(1, Math.max(0, p.vividGate ?? 1));
 }
 
 /** Push amount above the estimate, 0..1. */
@@ -603,6 +643,8 @@ export type GradeParams = {
   backdropFit?: number[];
   /** 1 when the frame holds an open-water animal with a lit side (backdrop.ts growSubjects); clip-locked, it gates the subject tone. */
   subjectTone?: number;
+  /** Vivid gate from the frame (vividGateOf: night / torch / ROV evidence), 0..1; clip-locked. Absent = 1. */
+  vividGate?: number;
 };
 
 export const IDENTITY_PARAMS: GradeParams = {
@@ -857,6 +899,7 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     calmTone: m(a.calmTone ?? 0, b.calmTone ?? 0),
     backdrop: m(a.backdrop ?? 0, b.backdrop ?? 0),
     subjectTone: m(a.subjectTone ?? 0, b.subjectTone ?? 0),
+    vividGate: m(a.vividGate ?? 1, b.vividGate ?? 1),
     backdropFit: a.backdropFit && b.backdropFit && a.backdropFit.length === b.backdropFit.length ? a.backdropFit.map((x, i) => m(x, b.backdropFit![i])) : b.backdropFit,
   };
 }
