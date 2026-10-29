@@ -35,3 +35,13 @@ export function noteCut(segments: readonly LockSegment[], cutSeen: Map<number, n
     if (s.window && !cutSeen.has(i) && timeSec >= s.window[0] && timeSec <= s.window[1]) cutSeen.set(i, timeSec);
   });
 }
+
+/**
+ * A frame's parameters under a locked estimate: the lock's globals, with the
+ * frame's own range normalisation (unless `lockRange`) and backdrop surface
+ * (it describes this frame's view of the water and moves with the camera).
+ */
+export function lockParams(l: GradeParams, p: GradeParams, lockRange = false): GradeParams {
+  const fit = p.backdropFit ?? l.backdropFit;
+  return lockRange ? { ...l, backdropFit: fit } : { ...l, zLo: p.zLo, zHi: p.zHi, backdropFit: fit };
+}

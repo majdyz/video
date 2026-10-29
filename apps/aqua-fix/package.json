@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "node scripts/build-icons.mjs && tsc -b && vite build",
     "preview": "vite preview",
-    "icons": "node scripts/build-icons.mjs"
+    "icons": "node scripts/build-icons.mjs",
+    "test": "node --experimental-strip-types --no-warnings test/run-all.ts"
   },
   "dependencies": {
     "@dive-tools/shared": "workspace:*",

@@ -358,6 +358,7 @@ export class Studio {
       engine.setSubjectOverrides(this.snap.subjectOverrides);
       engine.personEnabled = q.get("person") !== "0";
       engine.temporalEnabled = q.get("temporal") !== "0";
+      engine.followEnabled = q.get("follow") !== "0";
       this.engine = engine;
       this.set({ engine: engine.backend.kind });
       return engine;
