@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Studio } from "./pipeline/studio.ts";
+import { segStatusText } from "./pipeline/seg/studio-seg.ts";
 import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, lookOf, profileDefaults, type ToolId, type ToolsState } from "./pipeline/tools.ts";
 import { BRAND, SAMPLE } from "./brand.ts";
 import { Stage } from "./ui/stage";
@@ -319,7 +320,7 @@ export default function App() {
             )}
             {selectActive && (
               <div className="select-bar" role="status">
-                <span>{s.subjectTracking !== null ? `Following it through the clip… ${Math.round(s.subjectTracking * 100)}%` : s.subjectNote ?? "Tap a subject to leave it out or add it"}</span>
+                <span>{s.subjectTracking !== null ? `Following it through the clip… ${Math.round(s.subjectTracking * 100)}%` : s.seg.on && (s.seg.phase === "tracking" || s.seg.phase === "download") ? segStatusText(s.seg) : s.subjectNote ?? "Tap a subject to leave it out or add it"}</span>
                 <button type="button" className="link-btn" onClick={closeAdv}>Done</button>
               </div>
             )}
@@ -382,7 +383,7 @@ export default function App() {
                   <AdvancedDrawer open={advOpen && (wide || dockOpen)} onToggle={() => (advOpen ? setAdvOpen(false) : openAdv())} onClose={closeAdv} disabled={exporting || !ready} id="adv-section"
                     label={`${TOOL_LABEL[tab]} advanced settings${tab === "colour" && segNum ? `, segment ${segNum.index} of ${segNum.count}` : ""}`}>
                     <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined}
-                      subjects={{ corrections: s.subjectOverrides.length, onReset: () => studio.setSubjectOverrides([]) }} />
+                      subjects={{ corrections: s.subjectOverrides.length, onReset: () => studio.setSubjectOverrides([]), ai: { on: s.seg.on, status: segStatusText(s.seg), onToggle: (on) => studio.setSegEnabled(on) } }} />
                     {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
                   </AdvancedDrawer>
                 } />

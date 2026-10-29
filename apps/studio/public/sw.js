@@ -39,6 +39,8 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET" || !req.url.startsWith(self.location.origin)) return;
   // Sample clip: let the browser stream it (range requests), don't cache it.
   if (req.url.includes("/samples/")) return;
+  // AI subject detection models (~33 MB): the app keeps them in its own cache across deploys (seg/model.ts).
+  if (req.url.includes("/seg/")) return;
   const immutable = req.url.includes("/mediapipe/") || req.url.includes("/assets/");
   if (immutable) {
     event.respondWith(caches.match(req).then((hit) => hit || fetch(req).then((res) => put(req, res))));

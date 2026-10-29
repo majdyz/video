@@ -148,7 +148,12 @@ function MotionLogField({ name, onChange }: { name: string | null; onChange: (fi
 
 /** Everything that isn't the main Strength. */
 /** Subject pop selection controls (App owns the select mode; the studio keeps the corrections). */
-export type SubjectControls = { corrections: number; onReset: () => void };
+export type SubjectControls = {
+  corrections: number;
+  onReset: () => void;
+  /** AI subject detection (beta): the per-device toggle and its inline status (download / following progress). */
+  ai?: { on: boolean; status: string | null; onToggle: (on: boolean) => void };
+};
 
 export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, subjects }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus; onMotionLog?: (file: File | null) => void; subjects?: SubjectControls }) {
   if (tool === "colour") {
@@ -173,6 +178,12 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, sub
             <span className="adv__actions">
               <button type="button" className="link-btn" onClick={subjects.onReset} disabled={!subjects.corrections}>Reset selection</button>
             </span>
+          </div>
+        )}
+        {subjectPopVisible() && c.subjectPop && subjects?.ai && (
+          <div className="adv__field adv__field--row">
+            <span className="adv__label">AI subject detection<span className="adv__beta">Beta</span> <small role="status" aria-live="polite">{subjects.ai.status ?? "Follows the subjects you tap with an on-device model (33 MB download once)"}</small></span>
+            <Switch checked={subjects.ai.on} onChange={subjects.ai.onToggle} label="AI subject detection" />
           </div>
         )}
         <p className="adv__hint">Strength 50 is the engine's own estimate for this clip; above it the correction is pushed harder (redder reds, whiter sand) at some cost to fidelity.</p>

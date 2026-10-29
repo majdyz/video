@@ -19,6 +19,7 @@ import { linearToOklab, oklabToLinear } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
 import { BalanceFollow } from "./follow.ts";
 import { AnimalTracker, type AnimalMap, type SubjectOverride, type SubjectSelection } from "./animals.ts";
+import { composeSegStrength, type SegOverlay } from "./seg-overlay.ts";
 import {
   CLAHE_BINS,
   CLAHE_TILES_X,
@@ -143,6 +144,8 @@ export class GradeEngine {
   /** Clip time of the frame the in-flight analysis was captured from. */
   private reqTimeSec = 0;
   private strengthOn = false;
+  /** AI subject detection overlay (Studio seg/) for the frame being drawn; null = the engine's masks alone. */
+  private seg: SegOverlay | null = null;
   private personWorker: Worker | null = null;
   private personInflight = false;
   private personReqId = 0;
@@ -750,7 +753,8 @@ export class GradeEngine {
     }
     // Per-animal Subject pop strength (data texture 3); none without Subject pop.
     if (this.settings.subjectPop) {
-      this.backend.setData(3, this.animals.strength(this.lastTickSec));
+      const st = this.animals.strength(this.lastTickSec);
+      this.backend.setData(3, this.seg ? composeSegStrength(st, this.seg) : st);
       this.strengthOn = true;
     } else if (this.strengthOn) {
       this.backend.setData(3, { width: 1, height: 1, data: new Float32Array(4) });
@@ -817,6 +821,34 @@ export class GradeEngine {
       this.animals.reset();
     }
     this.lastRenderSec = t;
+  }
+
+  /**
+   * AI subject detection (Studio seg/): the ML subject mask for the frame about to be drawn (upright, any size), or
+   * null for the engine's own subject masks. Set before render / renderToFrame, per frame.
+   */
+  setSegOverlay(o: SegOverlay | null): void {
+    if (o === this.seg) return;
+    this.seg = o;
+    this.dirtyData = true;
+  }
+
+  /** The current source, upright, resized to w×h (RGBA8): the frame the ML segmenter sees is the frame graded. */
+  async readUpright(w: number, h: number): Promise<Uint8ClampedArray> {
+    for (let i = 0; ; i++) {
+      try {
+        return await this.backend.analyze(w, h);
+      } catch (e) {
+        // An analysis readback still in flight: wait for it.
+        if (i > 1500 || !/in flight/.test(String(e))) throw e;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+  }
+
+  /** The person detector's current boxes (upright 0..1), for prompting the ML segmenter with a diver's box. */
+  personBoxesNow(): readonly PersonBox[] {
+    return this.personBoxes ?? [];
   }
 
   /** The latest analysis found open blue water (Subject pop has something to work on). */

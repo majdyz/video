@@ -8,7 +8,7 @@
     "build": "node scripts/build-icons.mjs && tsc -b && vite build",
     "preview": "vite preview",
     "icons": "node scripts/build-icons.mjs",
-    "test": "node --experimental-strip-types --no-warnings test/geometry.test.ts && node --experimental-strip-types --no-warnings test/tools.test.ts && node --experimental-strip-types --no-warnings test/profiles.test.ts && node --experimental-strip-types --no-warnings test/photo.test.ts && node --experimental-strip-types --no-warnings test/footage.test.ts && node --experimental-strip-types --no-warnings test/exif.test.ts && node --experimental-strip-types --no-warnings test/camera.test.ts && node --experimental-strip-types --no-warnings test/trim.test.ts && node --experimental-strip-types --no-warnings test/segments.test.ts && node --experimental-strip-types --no-warnings test/divelog.test.ts && node --experimental-strip-types --no-warnings test/highlights.test.ts && node --experimental-strip-types --no-warnings test/subjects.test.ts"
+    "test": "node --experimental-strip-types --no-warnings test/geometry.test.ts && node --experimental-strip-types --no-warnings test/tools.test.ts && node --experimental-strip-types --no-warnings test/profiles.test.ts && node --experimental-strip-types --no-warnings test/photo.test.ts && node --experimental-strip-types --no-warnings test/footage.test.ts && node --experimental-strip-types --no-warnings test/exif.test.ts && node --experimental-strip-types --no-warnings test/camera.test.ts && node --experimental-strip-types --no-warnings test/trim.test.ts && node --experimental-strip-types --no-warnings test/segments.test.ts && node --experimental-strip-types --no-warnings test/divelog.test.ts && node --experimental-strip-types --no-warnings test/highlights.test.ts && node --experimental-strip-types --no-warnings test/subjects.test.ts && node --experimental-strip-types --no-warnings test/seg.test.ts"
   },
   "dependencies": {
     "@capacitor/core": "^8.5.3",
@@ -20,6 +20,7 @@
     "@fontsource-variable/space-grotesk": "^5.3.0",
     "@mediapipe/tasks-vision": "^1.0.1",
     "mediabunny": "^1.46.0",
+    "onnxruntime-web": "1.20.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
