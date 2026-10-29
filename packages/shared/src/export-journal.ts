@@ -103,9 +103,14 @@ export async function fileFingerprint(file: Blob): Promise<string> {
   return hashBytes(all);
 }
 
-/** Journal key: the clip fingerprint + the caller's settings key (look, trim, tools, build). */
-export async function journalKey(file: Blob, settingsKey: string): Promise<string> {
-  return (await hashString(`${await fileFingerprint(file)}|${settingsKey}`)).slice(0, 24);
+/**
+ * Journal key: the clip fingerprint + the caller's settings key (look, tools,
+ * build) + the exported range and size cap. The export and the "Resume" lookup
+ * must call this with the same arguments.
+ */
+export async function journalKey(file: Blob, settingsKey: string, range?: { start: number; end: number } | null, maxLongEdge?: number): Promise<string> {
+  const r = range ? `${range.start}-${range.end}` : "all";
+  return (await hashString(`${await fileFingerprint(file)}|${settingsKey}|${r}|${maxLongEdge ?? 0}`)).slice(0, 24);
 }
 
 export function toBase64(data: ArrayBuffer | ArrayBufferView): string {
@@ -474,10 +479,10 @@ export async function pruneJournals(keep?: string, now = Date.now()): Promise<vo
  * What the export sheet offers: a committed partial export of this clip with
  * these settings (null when there is none).
  */
-export async function findResumable(file: Blob, settingsKey: string): Promise<{ progress: number; chunks: number; manifest: JournalManifest } | null> {
+export async function findResumable(file: Blob, settingsKey: string, range?: { start: number; end: number } | null, maxLongEdge?: number): Promise<{ progress: number; chunks: number; manifest: JournalManifest } | null> {
   if (!opfsAvailable()) return null;
   try {
-    const key = await journalKey(file, settingsKey);
+    const key = await journalKey(file, settingsKey, range, maxLongEdge);
     const m = await readJson<JournalManifest>([JOURNAL_DIR, key, "manifest.json"]);
     if (!m || !m.chunks.length) return null;
     return { progress: journalProgress(m), chunks: m.chunks.length, manifest: m };

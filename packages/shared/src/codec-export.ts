@@ -398,7 +398,7 @@ export async function exportWithCodec(
     const jp: JournalPlan = { codec: plan.codec, codecString: plan.codecString, width: plan.width, height: plan.height, bitrate: plan.bitrate, fps };
     resumable = !!opts.resumeKey && !memoryOnly;
     const key = resumable
-      ? await journalKey(file, `${opts.resumeKey}|${range ? `${range.start}-${range.end}` : "all"}|${opts.maxLongEdge ?? 0}`)
+      ? await journalKey(file, opts.resumeKey!, range, opts.maxLongEdge)
       : `tmp${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     if (!memoryOnly) store = await OpfsChunkStore.open(key, file.name, jp, chunkSec, span, MEMORY_FALLBACK_BYTES);
     if (!store) {

@@ -80,7 +80,7 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
     }
     let live = true;
     void loadJournal()
-      .then((j) => j.findResumable(clip, settingsKey))
+      .then((j) => j.findResumable(clip, settingsKey, snap.trim))
       .then((r) => {
         if (live) setResumable(r && r.progress > 0.01 ? { progress: r.progress, key: r.manifest.key } : null);
       })
@@ -88,7 +88,7 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
     return () => {
       live = false;
     };
-  }, [settingsKey, clip]);
+  }, [settingsKey, clip, snap.trim]);
   const startOver = async () => {
     if (resumable) await loadJournal().then((j) => j.removeJournal(resumable.key)).catch(() => undefined);
     setResumable(null);
