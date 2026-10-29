@@ -221,6 +221,8 @@ export default function App() {
   const dockOpen = dockPref ?? (aspect !== null && aspect > 1.05);
   const pill = s.busy ?? (tools.stabilise.enabled && !photo && !exporting && (s.stab.state === "analysing" || s.stab.state === "solving")
     ? (s.stab.state === "solving" ? "Planning a smooth path…" : `Analysing motion ${Math.round(s.stab.progress * 100)}%`)
+    // AI subject detection works in the background, also while the clip plays.
+    : s.seg.on && s.seg.phase === "tracking" && !exporting && tools.colour.enabled && tools.colour.subjectPop ? `AI subjects ${Math.round((s.seg.progress ?? 0) * 100)}%`
     : null);
 
   const closeAdv = useCallback(() => setAdvOpen(false), []);
@@ -324,8 +326,10 @@ export default function App() {
               <div className="pill" role="status"><span className="pill__dot" aria-hidden="true" />{pill}</div>
             )}
             {selectActive && (
-              <div className="select-bar" role="status">
+              // Its buttons are never a click "outside" (Undo can re-render away under the click before it bubbles).
+              <div className="select-bar" role="status" onClick={(e) => e.stopPropagation()}>
                 <span>{s.subjectTracking !== null ? `Following it through the clip… ${Math.round(s.subjectTracking * 100)}%` : s.seg.on && (s.seg.phase === "tracking" || s.seg.phase === "download") ? segStatusText(s.seg) : s.subjectNote ?? "Tap a subject to leave it out or add it"}</span>
+                {s.subjectUndo > 0 && <button type="button" className="link-btn" onClick={() => void studio.undoSubjectTap()}>Undo</button>}
                 <button type="button" className="link-btn" onClick={closeAdv}>Done</button>
               </div>
             )}

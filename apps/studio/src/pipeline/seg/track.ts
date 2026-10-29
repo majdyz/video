@@ -22,7 +22,7 @@
 
 import { assembleMemory, frameIndex, isEmpty, newBank, pruneBank, storeMemory, type MemEntry, type MemoryInputs, type ObjectBank } from "./bank.ts";
 import { denseFlow, warp, type Flow, type Gray } from "./flow.ts";
-import { area, bbox, boxMean, DEPART_STEP, departMap, feather, guidedFilter, iou, promptFromMask, resize, smoothstep } from "./mask.ts";
+import { area, bbox, DEPART_STEP, departMap, guidedFilter, iou, nearMap, promptFromMask, resize, sdfFeather, smoothstep } from "./mask.ts";
 
 export const SEG = {
   /** Keyframes per clip second. */
@@ -35,6 +35,8 @@ export const SEG = {
   guardShare: 0.25,
   /** ...of a carried mask at least this share of the frame. */
   guardMinArea: 0.001,
+  /** A tapped subject whose prompted mask covers more than this share of the frame is the water, not a subject. */
+  maxTapArea: 0.45,
   /** Probability remap before the guided filter: drop sub-threshold haze, keep the 0.5 contour. */
   remapLo: 0.15,
   remapSpan: 0.7,
@@ -105,7 +107,7 @@ export function keyTimes(start: number, end: number, extra: number[] = [], fps =
   return [...out].sort((a, b) => a - b);
 }
 
-function sigmoidResize(lg: Float32Array, lw: number, lh: number, w: number, h: number): Float32Array {
+export function sigmoidResize(lg: Float32Array, lw: number, lh: number, w: number, h: number): Float32Array {
   const r = resize(lg, lw, lh, w, h);
   for (let i = 0; i < r.length; i++) r[i] = 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, r[i]))));
   return r;
@@ -301,13 +303,13 @@ export function sampleRange(t0: number, t1: number): { i0: number; n: number; ti
   return { i0, n: Math.max(0, i1 - i0 + 1), time: (i: number) => +((i0 + i) / hz).toFixed(6) };
 }
 
-function remap(p: Float32Array): Float32Array {
+export function remap(p: Float32Array): Float32Array {
   const q = new Float32Array(p.length);
   for (let i = 0; i < p.length; i++) q[i] = Math.min(1, Math.max(0, (p[i] - SEG.remapLo) / SEG.remapSpan));
   return q;
 }
 
-function toU8(m: Float32Array): Uint8Array {
+export function toU8(m: Float32Array): Uint8Array {
   const o = new Uint8Array(m.length);
   for (let i = 0; i < m.length; i++) o[i] = Math.round(255 * Math.min(1, Math.max(0, m[i])));
   return o;
@@ -450,14 +452,14 @@ export class SegTrack {
     const bb = bbox(raw.inc, w, h);
     const diag = bb ? Math.hypot(bb.x1 - bb.x0 + 1, bb.y1 - bb.y0 + 1) : 0;
     const r = Math.max(SEG.featherMinPx, SEG.featherShare * diag);
-    const inc = feather(raw.inc, w, h, r);
-    const exc = raw.exc ? feather(raw.exc, w, h, r) : null;
+    const inc = sdfFeather(raw.inc, w, h, r);
+    const exc = raw.exc ? sdfFeather(raw.exc, w, h, r) : null;
     const alpha = new Float32Array(w * h);
     for (let i = 0; i < alpha.length; i++) alpha[i] = inc[i] * (exc ? 1 - exc[i] : 1);
     // Near: the include region grown and softened by a wide blur (the engine keeps everything farther out).
     const nr = Math.max(2, Math.round(SEG.nearK * r));
-    const near = boxMean(boxMean(raw.inc, w, h, nr), w, h, nr);
-    for (let i = 0; i < near.length; i++) near[i] = Math.min(1, near[i] * 4) * weight;
+    const near = nearMap(raw.inc, w, h, nr);
+    for (let i = 0; i < near.length; i++) near[i] *= weight;
     return { width: w, height: h, alpha, exclude: exc, near, weight, depart: this.departAt(t) };
   }
 

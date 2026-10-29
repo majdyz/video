@@ -50,6 +50,34 @@ export function feather(src: Float32Array, w: number, h: number, radius: number)
   return boxMean(a, w, h, r);
 }
 
+/**
+ * The tone's feather: a ramp of about ±r px across the mask's own 0.5 contour, from the signed distance to it. A
+ * blur of the same width would erase anything thinner than the blur (a fin, a tail tip); this keeps every part of
+ * the mask above 0.5 along its middle, with a soft edge.
+ */
+export function sdfFeather(m: Float32Array, w: number, h: number, r: number): Float32Array {
+  const n = w * h, bin = new Uint8Array(n), inv = new Uint8Array(n);
+  for (let i = 0; i < n; i++) { const b = m[i] > 0.5; bin[i] = b ? 1 : 0; inv[i] = b ? 0 : 1; }
+  const din = distanceTransform(bin, w, h), dout = distanceTransform(inv, w, h), out = new Float32Array(n);
+  const k = 1 / (2 * Math.max(0.5, r));
+  for (let i = 0; i < n; i++) {
+    const s = bin[i] ? din[i] - 0.5 : -(dout[i] - 0.5);
+    out[i] = Math.min(1, Math.max(0, 0.5 + s * k));
+  }
+  return out;
+}
+
+/**
+ * Where the ML mask is trusted over the engine's: 1 on the subject and within r of it, easing to 0 by 2r. Grown from
+ * the binary mask (a dilation, then a box blur), so a thin fin counts as fully as the body (a plain blur would thin
+ * it out to nothing).
+ */
+export function nearMap(inc: Float32Array, w: number, h: number, r: number): Float32Array {
+  const bin = new Float32Array(w * h);
+  for (let i = 0; i < bin.length; i++) bin[i] = inc[i] > 0.5 ? 1 : 0;
+  return boxMean(dilate(bin, w, h, r), w, h, r);
+}
+
 /** Square max filter (dilation) of radius r. */
 export function dilate(src: Float32Array, w: number, h: number, r: number): Float32Array {
   const tmp = new Float32Array(w * h), o = new Float32Array(w * h);
@@ -196,16 +224,34 @@ export const DEPART_STEP = 4;
  * 0..255), and the departure ramps over a CIE76 ΔE of lo..hi from it. Where the frame shows no water at all: 1.
  */
 export function departMap(rgba: Uint8ClampedArray | Uint8Array, inc: Uint8Array, w: number, h: number, lo = 3, hi = 10): { width: number; height: number; data: Uint8Array } {
+  return departFromCells(cellLab(rgba, w, h), inc, w, h, lo, hi);
+}
+
+/** The frame's mean colour per DEPART_STEP cell, as CIE Lab (3 floats per cell): what departMap needs of a frame. */
+export function cellLab(rgba: Uint8ClampedArray | Uint8Array, w: number, h: number): Float32Array {
+  const S = DEPART_STEP, qw = Math.max(1, Math.ceil(w / S)), qh = Math.max(1, Math.ceil(h / S));
+  const out = new Float32Array(qw * qh * 3);
+  for (let qy = 0; qy < qh; qy++) for (let qx = 0; qx < qw; qx++) {
+    let r = 0, g = 0, b = 0, c = 0;
+    for (let y = qy * S; y < Math.min(h, qy * S + S); y++) for (let x = qx * S; x < Math.min(w, qx * S + S); x++) {
+      const i = y * w + x;
+      r += rgba[i * 4]; g += rgba[i * 4 + 1]; b += rgba[i * 4 + 2]; c++;
+    }
+    const lab = srgbToLab(r / c, g / c, b / c), q = (qy * qw + qx) * 3;
+    out[q] = lab[0]; out[q + 1] = lab[1]; out[q + 2] = lab[2];
+  }
+  return out;
+}
+
+/** departMap from cellLab's cells and the subject mask (0..255 on the w × h grid). */
+export function departFromCells(cells: Float32Array, inc: Uint8Array, w: number, h: number, lo = 3, hi = 10): { width: number; height: number; data: Uint8Array } {
   const S = DEPART_STEP, qw = Math.max(1, Math.ceil(w / S)), qh = Math.max(1, Math.ceil(h / S)), n = qw * qh;
   const L = new Float32Array(n), A = new Float32Array(n), B = new Float32Array(n), wt = new Float32Array(n);
   for (let qy = 0; qy < qh; qy++) for (let qx = 0; qx < qw; qx++) {
-    let r = 0, g = 0, b = 0, m = 0, c = 0;
-    for (let y = qy * S; y < Math.min(h, qy * S + S); y++) for (let x = qx * S; x < Math.min(w, qx * S + S); x++) {
-      const i = y * w + x;
-      r += rgba[i * 4]; g += rgba[i * 4 + 1]; b += rgba[i * 4 + 2]; m = Math.max(m, inc[i]); c++;
-    }
-    const q = qy * qw + qx, lab = srgbToLab(r / c, g / c, b / c);
-    L[q] = lab[0]; A[q] = lab[1]; B[q] = lab[2];
+    let m = 0;
+    for (let y = qy * S; y < Math.min(h, qy * S + S); y++) for (let x = qx * S; x < Math.min(w, qx * S + S); x++) m = Math.max(m, inc[y * w + x]);
+    const q = qy * qw + qx;
+    L[q] = cells[q * 3]; A[q] = cells[q * 3 + 1]; B[q] = cells[q * 3 + 2];
     wt[q] = m < 13 ? 1 : 0; // nowhere near the subject: water (or background)
   }
   let tw = 0, gl = 0, ga = 0, gb = 0;
