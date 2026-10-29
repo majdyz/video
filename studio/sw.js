@@ -8,8 +8,8 @@
 // network-first so a deploy never serves an index pointing at deleted
 // bundles. Each deploy gets a new cache and the old one is deleted on
 // activate.
-const VERSION = "studio-315826985dec";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker--wK0gl3y.js","./assets/analysis-worker-DbtqEL7Z.js","./assets/bridge-DEzh20dy.js","./assets/colour-DkMNy9Uw.js","./assets/dewarp-CoSDw-AB.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-Bb2hZhso.js","./assets/fisheye-D0_b3mZj.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-B-f-uGJB.js","./assets/index-BMr-hGeF.css","./assets/media-CDZNy6uR.js","./assets/motion-D0n6QsFt.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/seg-worker-DeMH3Gcr.js","./assets/videoframe-colorspace-zfqeaqOD.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-D4TrakeJ.js"];
+const VERSION = "studio-a412049fc0c9";
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker--wK0gl3y.js","./assets/analysis-worker-DbtqEL7Z.js","./assets/bridge-KSvK5BQL.js","./assets/colour-C4L07lkk.js","./assets/dewarp-3CFDDfZC.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-B1007H4P.js","./assets/fisheye-D0_b3mZj.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-BMr-hGeF.css","./assets/index-BkROW9Eu.js","./assets/media-DeUhZQTK.js","./assets/motion-D0n6QsFt.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/seg-worker-DeMH3Gcr.js","./assets/videoframe-colorspace-zfqeaqOD.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-D4TrakeJ.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -30,7 +30,11 @@ self.addEventListener("activate", (event) => {
 // every response this worker serves gets COOP / COEP / CORP added. The page is then crossOriginIsolated, which
 // SharedArrayBuffer and so multi-threaded WASM (AI subject detection, onnxruntime-web) need. Everything the
 // studio loads is same-origin (fonts and MediaPipe are self-hosted), so require-corp blocks nothing.
+// Disabled 29 Oct: on iPhone Safari the isolated page rendered a black preview. Pass-through until it's proven on
+// a device; the AI then runs single-threaded.
+const COI = false;
 function coi(res) {
+  if (!COI) return res;
   if (!res || res.status === 0 || res.type === "opaque" || res.type === "opaqueredirect") return res;
   const headers = new Headers(res.headers);
   headers.set("Cross-Origin-Opener-Policy", "same-origin");
