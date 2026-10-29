@@ -10,7 +10,14 @@ Three on-device PWAs for diver-shot footage, in one monorepo.
   applied at native resolution in one WebGPU (or WebGL2) pass. For video the
   global correction is locked to the median over ~12 frames of the clip
   (a subject passing through can't swing it); the per-pixel water/object
-  maps still follow the content. An on-device person model (MediaPipe)
+  maps still follow the content. Within a locked shot the balance eases
+  toward what holds the near sand / white rubble at the colour the lock gives
+  it over the shot (a closed loop through the CPU reference of the shader),
+  which cancels the camera's own auto white balance hunting as it tilts
+  between seabed and open water (open water, green water and red subjects
+  are not evidence). Frames are analysed once per 0.1 s of clip time
+  (awaited in the offline export), so a frame's grade depends on the clip
+  alone, not on how fast the device ran. An on-device person model (MediaPipe)
   keeps skin on the restoration path and pulls it toward a skin tone.
   Controls: Intensity (50 % = the estimate), scene presets (Auto / Green
   water / Deep blue / Shallow reef) as priors, a Deep-blue look fitted to
@@ -71,7 +78,12 @@ Safari's MediaRecorder ceiling).
 
 Offline evaluation on still photos: `node --experimental-strip-types
 scripts/aqua-eval.ts <out dir> <images…>` runs the exact CPU reference of the
-shader and writes before/after comparisons.
+shader and writes before/after comparisons. On video clips,
+`apps/aqua-fix/eval/` replays the engine (profile, lock, analyses, easing)
+on the CPU: `clip-drift.ts` tracks a material's colour through a shot,
+`region-drift.py` compares per-region change with the source, `board.py`
+draws before/after boards, `valset.ts` runs the validation set. Tests:
+`pnpm --filter aqua-fix test`.
 
 ### Motion Fix
 

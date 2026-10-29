@@ -365,6 +365,7 @@ export default function App() {
     setCompareActive(false);
     setBusy(isVideo ? "Loading video…" : "Loading photo…");
     engineRef.current?.lockGlobals(null);
+    engineRef.current?.forgetProfile();
     try {
       await touchFile(file);
       if (isVideo) await loadVideo(file);
@@ -443,6 +444,7 @@ export default function App() {
     e.lockRange = new URLSearchParams(location.search).get("lockz") === "1";
     e.personEnabled = new URLSearchParams(location.search).get("person") !== "0";
     e.temporalEnabled = new URLSearchParams(location.search).get("temporal") !== "0";
+    e.followEnabled = new URLSearchParams(location.search).get("follow") !== "0";
     if (new URLSearchParams(location.search).get("lock") !== "0") void profileClip(video, myGen);
   }
 
@@ -464,7 +466,7 @@ export default function App() {
         await seekVideoTo(video, t);
         e.upload(video, video.videoWidth, video.videoHeight, 0);
         try {
-          const r = await e.analyzeRaw();
+          const r = await e.analyzeRaw(10_000, t);
           samples.push({ t, params: r.params, mean: r.mean });
         } catch {
           // a failed sample just doesn't vote
@@ -696,7 +698,12 @@ export default function App() {
           e.setPreviewScale(Math.min(1, Math.min(PREVIEW_MAX_WIDTH, stage.clientWidth * dpr) / sw, (stage.clientHeight * dpr) / sh));
         }
       }
-      let lastShownAt = 0;
+      // Live view: every LIVE_EVERY-th frame (by frame count, inside the engine gate: a draw advances
+      // the temporal layer's history, so a wall-clock cadence made the export depend on timing).
+      const LIVE_EVERY = 6;
+      // The engine's part of each frame (upload → analysis → tick → render submit) runs in frame
+      // order, one frame at a time, even while readbacks overlap: the grade must not depend on timing.
+      let engineGate: Promise<unknown> = Promise.resolve();
       const result = await exportWithCodec(
         file,
         async (sample, info) => {
@@ -706,30 +713,40 @@ export default function App() {
           const frame = squarePixels(sample.toVideoFrame());
           try {
             const rot = (info.rotation / 90) as Rotation;
-            const t0 = performance.now();
+            const prevEngine = engineGate;
+            let release!: () => void;
+            engineGate = new Promise<void>((r) => (release = r));
+            let pending: Promise<VideoFrame>;
+            let t0 = 0, t1 = 0;
+            try {
+            await prevEngine;
+            await e.exportReady();
+            t0 = performance.now();
             e.upload(frame, frame.displayWidth, frame.displayHeight, rot);
             // The first frame waits for its analysis (and person mask) and
-            // snaps; after that the analysis runs alongside the frame loop —
-            // waiting on it cost a GPU readback round-trip per frame on
-            // iPhone (up ≈ 100 ms), and the eased maps hide a frame of lag.
+            // snaps; after that one analysis per clip-time slot (0.1 s), awaited
+            // so the result never depends on how fast the worker ran (the cost
+            // is a readback round-trip per slot, not per frame).
             if (frames === 0) {
               console.info(`[export] first frame coded ${frame.codedWidth}x${frame.codedHeight} visible ${frame.visibleRect?.width ?? "?"}x${frame.visibleRect?.height ?? "?"} display ${frame.displayWidth}x${frame.displayHeight} ${frame.format ?? ""}`);
-              await e.analyzeNow(true);
-            } else if (e.inCutWindow(info.timeSec)) {
-              // Near a profiled cut the exact frame matters: wait for this frame's analysis.
-              await e.analyzeNow(true).catch(() => undefined);
-            } else e.analyzeSoon();
+              await e.analyzeDue(info.timeSec, true);
+            } else {
+              // Analyses on clip time, awaited (one per analysis slot): the grade depends on the clip alone.
+              // Near a profiled cut the exact frame matters: wait for and snap to this frame's analysis.
+              await e.analyzeDue(info.timeSec, e.inCutWindow(info.timeSec)).catch(() => undefined);
+            }
             e.tick(info.timeSec);
             frames++;
-            const t1 = performance.now();
+            t1 = performance.now();
             // Stamp with the shifted presentation time, never the decoder's raw
             // timestamp (WebKit emits negative ones; the muxer rejects those).
-            const out = await e.renderToFrame(rot, Math.round(info.timeSec * 1e6), frame.duration ?? undefined);
-            const t2 = performance.now();
-            if (t2 - lastShownAt > 80) {
-              lastShownAt = t2;
-              e.render(rot);
+            pending = e.renderToFrame(rot, Math.round(info.timeSec * 1e6), frame.duration ?? undefined);
+            if (frames % LIVE_EVERY === 0) e.render(rot);
+            } finally {
+              release();
             }
+            const out = await pending;
+            const t2 = performance.now();
             stage.upload += t1 - t0;
             stage.render += t2 - t1;
             stage.draw += e.backend.lastDrawMs;

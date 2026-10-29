@@ -35,3 +35,20 @@ export function noteCut(segments: readonly LockSegment[], cutSeen: Map<number, n
     if (s.window && !cutSeen.has(i) && timeSec >= s.window[0] && timeSec <= s.window[1]) cutSeen.set(i, timeSec);
   });
 }
+
+/**
+ * A frame's parameters under a locked estimate: the lock's globals, with the
+ * frame's own range normalisation (unless `lockRange`) and backdrop surface
+ * (it describes this frame's view of the water and moves with the camera).
+ */
+export function lockParams(l: GradeParams, p: GradeParams, lockRange = false): GradeParams {
+  const fit = p.backdropFit ?? l.backdropFit;
+  return lockRange ? { ...l, backdropFit: fit } : { ...l, zLo: p.zLo, zHi: p.zHi, backdropFit: fit };
+}
+
+/** Clip time between analyses, preview and export alike (engine tick / analyzeDue): the grade of a frame depends on the clip, not on timing. */
+export const ANALYSIS_SLOT_S = 0.1;
+/** The analysis slot a clip time falls in. */
+export function analysisSlot(timeSec: number, slotSec = ANALYSIS_SLOT_S): number {
+  return Math.floor(timeSec / slotSec + 1e-6);
+}

@@ -1,5 +1,5 @@
 // Runtime that ties the pieces together for the app:
-//   backend (WebGPU → WebGL2) · worker analysis every ANALYSIS_INTERVAL_MS ·
+//   backend (WebGPU → WebGL2) · worker analysis once per clip-time slot (ANALYSIS_SLOT_S; awaited in offline export) ·
 //   temporal smoothing of the estimated grade with scene-cut reset ·
 //   uniform packing · render / export frames.
 //
@@ -10,13 +10,14 @@
 import { WebGL2Backend } from "./backend-webgl2.ts";
 import { WebGPUBackend } from "./backend-webgpu.ts";
 import { ANALYSIS_H, ANALYSIS_W } from "./analyze.ts";
-import type { AnalysisPacket, AnalysisRequest } from "./analysis-worker.ts";
+import type { AnalysisPacket, AnalysisRequest, TargetsReply, TargetsRequest } from "./analysis-worker.ts";
 import type { PersonPacket, PersonRequest } from "./person-worker.ts";
 import { boxGate, PERSON_BOX_MIN_SCORE, type PersonBox } from "./person-gate.ts";
-import { inCutWindow as lockInCutWindow, noteCut as lockNoteCut, segmentAt, type LockSegment } from "./lock.ts";
+import { ANALYSIS_SLOT_S, analysisSlot, inCutWindow as lockInCutWindow, lockParams, noteCut as lockNoteCut, segmentAt, type LockSegment } from "./lock.ts";
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
 import { linearToOklab, oklabToLinear } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
+import { BalanceFollow } from "./follow.ts";
 import { AnimalTracker, type AnimalMap, type SubjectOverride, type SubjectSelection } from "./animals.ts";
 import {
   CLAHE_BINS,
@@ -33,6 +34,7 @@ import {
   type Vec3,
 } from "./params.ts";
 
+/** Lower bound on the analysis slot (ms); the slot itself is clip time (ANALYSIS_SLOT_S, see tick). */
 export const ANALYSIS_INTERVAL_MS = 70;
 const TAU_PARAMS_S = 0.6;
 // Spatial maps ease over a short window: snapping them pulsed brightness and
@@ -47,6 +49,9 @@ const TAU_CLAHE_S = 0.7;
 // and untoned parts where it went); the shaders trim it per pixel.
 const TAU_CONF_OPEN_S = 0.05;
 const SCENE_CUT_MEAN_DIFF = 0.16;
+export { ANALYSIS_SLOT_S, analysisSlot };
+// Media-time gap between two analyses beyond which the balance follow starts afresh (a seek).
+const FOLLOW_SEEK_S = 1;
 // Person segmentation runs on every Nth analysis (it costs ~25–40 ms of
 // worker CPU on the same thumbnail the analysis uses).
 const PERSON_EVERY = 2;
@@ -115,6 +120,19 @@ export class GradeEngine {
   personEnabled = true;
   /** Temporal layer on/off (debug `?temporal=0`). */
   temporalEnabled = true;
+  /** Material-anchored balance follow under the clip lock on/off (debug `?follow=0`; follow.ts, anchor.ts). */
+  followEnabled = true;
+  private follow = new BalanceFollow();
+  /** Media time of the last analysis packet (the follow's time step). */
+  private lastPacketSec = 0;
+  /** The lock sent with the analysis in flight (its anchor is relative to it). */
+  private reqLock: GradeParams | null = null;
+  /** Profile thumbnails by clip time (analyzeRaw with a time): the anchor targets are measured on them. */
+  private profileThumbs = new Map<number, Uint8ClampedArray>();
+  private keepThumbAt: number | null = null;
+  /** Anchor target per locked segment (null: none measurable, that shot keeps the plain lock); request id. */
+  private anchorTargets: ([number, number] | null)[] = [];
+  private targetsReq = 0;
   private lastRenderSec = -1;
   /** The in-flight analysis is a raw sample (startAnalysis). */
   private rawReq = false;
@@ -145,7 +163,8 @@ export class GradeEngine {
   private personDetectInflight = false;
   private personDetectWarned = false;
   private personWaiters: (() => void)[] = [];
-  private lastAnalysisAt = -Infinity;
+  /** Clip-time analysis slot of the last analysis started by tick / analyzeDue. */
+  private lastSlot = Number.NaN;
   private current: GradeParams = IDENTITY_PARAMS;
   private target: GradeParams | null = null;
   private fields: Packed | null = null;
@@ -211,10 +230,38 @@ export class GradeEngine {
   lockGlobals(segments: LockSegment[] | null): void {
     this.locked = segments && segments.length > 0 ? [...segments].sort((a, b) => a.from - b.from) : null;
     this.cutSeen.clear();
+    this.follow.reset();
+    this.anchorTargets = [];
+    this.targetsReq++;
     if (this.locked) {
       this.current = this.applyLock(this.current);
       if (this.target) this.target = this.applyLock(this.target);
+      this.requestTargets();
     }
+  }
+
+  /** Forgets the profile thumbnails (a new clip, or a new colour input for the same clip). */
+  forgetProfile(): void {
+    this.profileThumbs.clear();
+  }
+
+  /** Asks the worker for each locked segment's anchor target, measured on the profile thumbnails inside it. */
+  private requestTargets(): void {
+    const segs = this.locked;
+    if (!segs || !this.followEnabled || this.profileThumbs.size === 0) return;
+    const shots = segs.map((s, i) => {
+      const lo = i === 0 ? -Infinity : s.from, hi = i + 1 < segs.length ? segs[i + 1].from : Infinity;
+      const thumbs = [...this.profileThumbs].filter(([t]) => t >= lo && t < hi).map(([, px]) => px.slice().buffer as ArrayBuffer);
+      return { lock: s.params, thumbs };
+    });
+    const req: TargetsRequest = { kind: "targets", id: this.targetsReq, width: ANALYSIS_W, height: ANALYSIS_H, shots };
+    this.ensureWorker().postMessage(req, shots.flatMap((s) => s.thumbs));
+  }
+
+  private onTargets(r: TargetsReply): void {
+    if (r.id !== this.targetsReq) return;
+    this.anchorTargets = r.targets;
+    console.info(`[anchor] targets for ${r.targets.length} segment(s): ${r.targets.map((t) => (t ? `${t[0].toFixed(3)},${t[1].toFixed(3)}` : "none")).join(" | ")}`);
   }
 
   get isLocked(): boolean {
@@ -252,13 +299,15 @@ export class GradeEngine {
   private applyLock(p: GradeParams): GradeParams {
     const l = this.lockedAt(this.lastTickSec);
     if (!l) return p;
-    // The backdrop surface describes this frame's view of the water (it moves with the camera): never locked.
-    const fit = p.backdropFit ?? l.backdropFit;
-    return this.lockRange ? { ...l, backdropFit: fit } : { ...l, zLo: p.zLo, zHi: p.zHi, backdropFit: fit };
+    return this.withFollow(lockParams(l, p, this.lockRange));
+  }
+
+  private withFollow(p: GradeParams): GradeParams {
+    return this.followEnabled ? this.follow.apply(p) : p;
   }
 
   /** Runs one analysis of the current source and returns its raw parameters and mean colour (clip profiling). */
-  async analyzeRaw(timeoutMs = 10_000, seeds?: { u: number; v: number }[]): Promise<{ params: GradeParams; mean: Vec3; animals?: AnimalMap }> {
+  async analyzeRaw(timeoutMs = 10_000, timeSec?: number, seeds?: { u: number; v: number }[]): Promise<{ params: GradeParams; mean: Vec3; animals?: AnimalMap }> {
     const p = new Promise<AnalysisPacket>((resolve, reject) => {
       this.resolveWaiters.push(resolve);
       this.rejectWaiters.push(reject);
@@ -268,6 +317,8 @@ export class GradeEngine {
       this.resolveWaiters.push(resolve);
       this.rejectWaiters.push(reject);
     });
+    // With a clip time the thumbnail is kept for the anchor targets (see requestTargets).
+    this.keepThumbAt = timeSec ?? null;
     await this.startAnalysis({ raw: true, seeds });
     const packet = await new Promise<AnalysisPacket>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error("Frame analysis timed out")), timeoutMs);
@@ -285,7 +336,10 @@ export class GradeEngine {
   private ensureWorker(): Worker {
     if (this.worker) return this.worker;
     const w = new Worker(new URL("./analysis-worker.ts", import.meta.url), { type: "module" });
-    w.onmessage = (e: MessageEvent<AnalysisPacket>) => this.onPacket(e.data);
+    w.onmessage = (e: MessageEvent<AnalysisPacket | TargetsReply>) => {
+      if (e.data.kind === "targets") this.onTargets(e.data);
+      else this.onPacket(e.data);
+    };
     w.onerror = (e) => {
       this.inflight = false;
       const err = new Error("Analysis worker failed: " + e.message);
@@ -416,21 +470,57 @@ export class GradeEngine {
     const prevLock = this.lockedAt(this.lastTickSec);
     this.lastTickSec = timeSec;
     const nextLock = this.lockedAt(timeSec);
-    if (prevLock !== nextLock && nextLock) {
-      // Crossed a segment boundary (a cut): snap the globals to the new estimate.
-      this.current = { ...nextLock, zLo: this.current.zLo, zHi: this.current.zHi };
-      if (this.target) this.target = { ...nextLock, zLo: this.target.zLo, zHi: this.target.zHi };
+    if (prevLock !== nextLock && nextLock && prevLock && this.locked) {
+      const seg = segmentAt(this.locked, this.cutSeen, timeSec);
+      if (!seg.window || this.cutSeen.has(this.locked.indexOf(seg))) {
+        // Crossed a segment boundary at a cut (the analysis saw it, or the user split there): snap the
+        // globals to the new estimate. (The cut's packet already restarted the follow.)
+        this.current = this.withFollow(lockParams(nextLock, this.current, this.lockRange));
+        if (this.target) this.target = this.withFollow(lockParams(nextLock, this.target, this.lockRange));
+      } else {
+        // The profile split here but no cut was seen: the same shot changed (a pan into open water).
+        // Snapping would step the colour mid-shot; ease to the new estimate instead.
+        this.follow.rebase(prevLock, nextLock);
+        const base = this.target ?? this.current;
+        this.target = this.withFollow(lockParams(nextLock, base, this.lockRange));
+      }
     }
     this.smooth(dt);
-    const nowMs = performance.now();
-    if (!this.inflight && (force || nowMs - this.lastAnalysisAt >= this.analysisIntervalMs)) {
+    // Analyses follow clip time, not the wall clock: one per analysis slot of
+    // the clip (analysisSlot), the same frames the export analyses, so preview
+    // and export grade a frame alike (wall-clock cadence made two exports of
+    // one clip differ by up to 8.7 ΔE00). A slot the worker was too busy for
+    // is taken up at the next tick inside it.
+    const slot = analysisSlot(timeSec, this.slotSec());
+    if (!this.inflight && (force || slot !== this.lastSlot)) {
+      this.lastSlot = slot;
       void this.startAnalysis();
       return true;
     }
     return false;
   }
 
-  /** Starts an analysis of the current source if none is in flight (export loop). */
+  /** Clip-time analysis slot length (s): ANALYSIS_SLOT_S, or longer when analysisIntervalMs asks for less work. */
+  private slotSec(): number {
+    return Math.max(ANALYSIS_SLOT_S, this.analysisIntervalMs / 1000);
+  }
+
+  /**
+   * Offline export: analyses the uploaded frame at clip time `timeSec` when
+   * it opens a new analysis slot, and waits for it (and for a person pass it
+   * started), so every frame's grade depends on the clip alone, never on how
+   * fast the worker happened to be. `snap` (first frame, a cut window, a new
+   * segment) always analyses and snaps to the result. Call before tick(timeSec).
+   */
+  async analyzeDue(timeSec: number, snap = false, timeoutMs = 10_000): Promise<void> {
+    const slot = analysisSlot(timeSec, this.slotSec());
+    if (!snap && slot === this.lastSlot && this.hasAnalysis) return;
+    this.lastSlot = slot;
+    await this.analyzeNow(snap, timeoutMs);
+    if (!snap) await Promise.race([this.waitPerson(), new Promise<void>((r) => setTimeout(r, timeoutMs))]);
+  }
+
+  /** Starts an analysis of the current source if none is in flight (real-time export loop). */
   analyzeSoon(): void {
     if (!this.inflight) void this.startAnalysis();
   }
@@ -462,6 +552,8 @@ export class GradeEngine {
       if (this.personTarget) { this.person = this.personTarget; this.personTarget = null; }
     }
     if (snap && packet.id === this.reqId) this.snapTo(toGpuPacket(packet));
+    // A snap (clip load, export start) covers the current slot: the next tick doesn't analyse it again.
+    if (snap) this.lastSlot = analysisSlot(this.lastTickSec, this.slotSec());
   }
 
   private settle(packet: AnalysisPacket | null, error: Error | null): void {
@@ -480,9 +572,12 @@ export class GradeEngine {
   private async startAnalysis(opts: { raw?: boolean; seeds?: { u: number; v: number }[] } = {}): Promise<void> {
     if (this.inflight) return;
     this.inflight = true;
-    this.lastAnalysisAt = performance.now();
     try {
       const rgba = await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
+      if (this.keepThumbAt !== null) {
+        this.profileThumbs.set(this.keepThumbAt, rgba.slice());
+        this.keepThumbAt = null;
+      }
       // Person segmentation: a copy of this thumbnail (full frame) or a
       // quadrant at 2× detail, cycling through PERSON_RECTS. Both readbacks
       // finish before anything is posted: once the analysis reply lands,
@@ -492,9 +587,14 @@ export class GradeEngine {
       const detect = wantPerson && this.personPasses++ % PERSON_DETECT_EVERY === 0;
       const rect = detect ? FULL_RECT : PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
       const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.backend.analyze(ANALYSIS_W, ANALYSIS_H, rect);
+      // The anchor (follow.ts) needs the lock in force and its shot's target.
+      const seg = this.followEnabled && this.locked ? segmentAt(this.locked, this.cutSeen, this.lastTickSec) : null;
+      const target = seg ? this.anchorTargets[this.locked!.indexOf(seg)] ?? null : null;
+      const lock = seg && target ? seg.params : null;
+      this.reqLock = lock;
       const seeds = opts.seeds ?? (this.settings.subjectPop && !opts.raw ? this.animals.seeds(this.lastTickSec) : []);
       this.rawReq = !!opts.raw;
-      const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, ...(seeds.length ? { seeds } : {}) };
+      const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, ...(lock && target ? { lock, target } : {}), ...(seeds.length ? { seeds } : {}) };
       this.reqTimeSec = this.lastTickSec;
       this.ensureWorker().postMessage(req, [req.rgba]);
       if (px) {
@@ -533,10 +633,23 @@ export class GradeEngine {
       else this.animals.fadeAll();
     }
     this.leadBase = { fields: packet.fields, guide: packet.guide };
+    // Material-anchored balance (follow.ts): a cut, a fresh start or a seek forgets the shot's offset.
+    const jumped = Math.abs(this.lastTickSec - this.lastPacketSec) > FOLLOW_SEEK_S;
+    if (!this.hasAnalysis || cut || jumped) this.follow.reset();
+    // A cut inside a profiled cut window switches the lock here (before the follow reads it).
+    if (cut) this.noteSceneCut(this.lastTickSec);
+    const lockNow = this.lockedAt(this.lastTickSec);
+    if (lockNow && this.followEnabled) {
+      // The anchor was solved under the lock sent with the request: re-express it against the lock now in force.
+      let anchor = raw.anchor ?? null;
+      const sent = this.reqLock;
+      if (anchor && sent && sent !== lockNow) anchor = { ...anchor, log: [anchor.log[0] + Math.log(sent.wb[0] / lockNow.wb[0]), anchor.log[1] + Math.log(sent.wb[2] / lockNow.wb[2])] };
+      this.follow.update(anchor, packet.params, this.hasAnalysis && !cut && !jumped ? this.lastTickSec - this.lastPacketSec : 0);
+    }
+    this.lastPacketSec = this.lastTickSec;
     if (!this.hasAnalysis || cut) {
       if (cut) {
         this.stats.sceneCuts++;
-        this.noteSceneCut(this.lastTickSec);
         this.backend.resetTemporal?.();
         // New scene: the detector must speak again before any mask counts.
         this.personBoxes = null;
@@ -733,9 +846,11 @@ export class GradeEngine {
     this.claheTarget = null;
     this.current = IDENTITY_PARAMS;
     this.lastMean = null;
-    this.lastAnalysisAt = -Infinity;
+    this.lastSlot = Number.NaN;
     this.lastTickSec = 0;
     this.cutSeen.clear();
+    this.follow.reset();
+    this.lastPacketSec = 0;
     this.settle({ id: -1 } as AnalysisPacket, null);
     this.personReqId++;
     this.personInflight = false;
@@ -776,6 +891,26 @@ export class GradeEngine {
     u[0] = rotation;
     this.backend.setUniforms(u);
     this.backend.render();
+  }
+
+  /**
+   * Moves the compare split without grading again: redraws the canvas from
+   * the last rendered frame (the temporal history is left alone). False when
+   * the backend has no reusable frame; call render() then.
+   */
+  recomposite(split: number): boolean {
+    this.split = split;
+    return this.backend.recomposite?.(split) ?? false;
+  }
+
+  /** The picture shown left of the compare split when the source is not the original (see GpuBackend.setBefore). */
+  setBefore(src: SourceInput | null, width: number, height: number): void {
+    this.backend.setBefore?.(src, width, height);
+  }
+
+  /** Export with frames in flight: resolves when the next renderToFrame will draw without waiting (see backend-webgpu readbackSlotFree). */
+  async exportReady(): Promise<void> {
+    await (this.backend as unknown as { readbackSlotFree?: () => Promise<void> }).readbackSlotFree?.();
   }
 
   /** Renders and wraps the result as a VideoFrame for the exporter. */

@@ -58,6 +58,18 @@ export interface GpuBackend {
   setPreviewScale(scale: number): void;
   /** Forgets the temporal history (scene cut, seek, new clip); optional. */
   resetTemporal?(): void;
+  /**
+   * The picture shown left of the compare split (upright, any size): null =
+   * the source itself. Set when the source is not the original (a geometry
+   * pass in front of the engine).
+   */
+  setBefore?(src: SourceInput | null, width: number, height: number): void;
+  /**
+   * Redraws the canvas from the last graded frame with a new compare split
+   * (uniform p0.y), without grading or touching the temporal history. False
+   * when there is no reusable frame (anything changed since): call render().
+   */
+  recomposite?(split: number): boolean;
   dispose(): void;
 }
 

@@ -20,8 +20,21 @@
 //   shipped. Fit error over natural colours (chroma < 0.25 of the code range,
 //   no channel above 0.8): RMS 0.015, max 0.072 of full scale; the neutral
 //   axis is within 5/1023.
+// * GoPro GP-Log (HERO11 Labs LOGB=400, HERO12 / HERO13 "Log"): the transfer
+//   is a plain base-400 log, code = log(1 + 399·lin) / log(400), with
+//   lin = 1 at sensor clip. GoPro publishes no formula; this one reproduces
+//   the grey axis of GoPro's "MAX2 GP-Log to Rec.709 Technical" LUT through
+//   the BT.709 OETF to 5e-6 (`gplogDecode`). The rendering in
+//   `footageToSdr` is our own fit to GoPro's free HERO12 (firmware 2.00+) /
+//   HERO13 "GPLOG_Creative_EV0" LUT (GoPro support article "GoPro Log
+//   Profiles LUT Downloads"), which emulates the in-camera Natural profile:
+//   the D-Log M structure (3×3 mix in a 10^(k·code) domain, grey curve) plus
+//   a display-side 3×3 and a bounded cubic chroma term for the LUT's hue
+//   twists. The LUTs are not shipped. Fit error over natural colours
+//   (chroma < 0.25 of the code range, no channel above 0.8, the D-Log M
+//   criterion): RMS 0.019, max 0.15; the neutral axis is within 4/1023.
 
-export type FootageProfile = "standard" | "wide" | "hlg" | "pq" | "dlogm" | "applelog";
+export type FootageProfile = "standard" | "wide" | "hlg" | "pq" | "dlogm" | "applelog" | "gplog";
 /** UI choice: auto-detect, or one profile forced. */
 export type FootageChoice = "auto" | FootageProfile;
 
@@ -32,10 +45,11 @@ export const FOOTAGE_LABEL: Record<FootageProfile, string> = {
   pq: "HDR PQ / HDR10",
   dlogm: "DJI D-Log M",
   applelog: "Apple Log",
+  gplog: "GoPro GP-Log",
 };
 
 /** Shader mode numbers (u_footage in FOOTAGE_GLSL). */
-export const FOOTAGE_MODE: Record<FootageProfile, number> = { standard: 0, wide: 1, hlg: 2, pq: 3, dlogm: 4, applelog: 5 };
+export const FOOTAGE_MODE: Record<FootageProfile, number> = { standard: 0, wide: 1, hlg: 2, pq: 3, dlogm: 4, applelog: 5, gplog: 6 };
 
 export type ColourTags = { primaries?: string | null; transfer?: string | null; matrix?: string | null; fullRange?: boolean | null };
 
@@ -113,9 +127,15 @@ export function detectFootage(h: FootageHints): FootageInfo {
     detected = "applelog";
     ev.push("Apple metadata names Apple Log");
   } else if (/gopro colour profile: /.test(vendor)) {
-    // GoPro's PTCL: Natural / Vibrant / Flat are Rec.709 looks; GP-Log has no published curve yet.
+    // GoPro's PTCL: Natural / Vibrant / Flat are Rec.709 looks; "GP-LOG" (HERO12 / HERO13 Log, HERO11 Labs LOGB) is log.
     const p = vendor.match(/gopro colour profile: ([a-z0-9 -]+)/)![1].trim();
-    ev.push(/log/.test(p) ? "GoPro colour profile GP-Log: no published curve, shown as Rec.709" : `GoPro colour profile ${p}`);
+    if (/log/.test(p)) {
+      detected = "gplog";
+      ev.push("GoPro metadata: colour profile GP-Log");
+    } else ev.push(`GoPro colour profile ${p}`);
+  } else if (/gp-?log/.test(vendor)) {
+    detected = "gplog";
+    ev.push("metadata names GP-Log");
   } else if (/dji colour mode: (normal|d-cinelike|hlg)/.test(vendor)) {
     // The camera says what it recorded: a 10-bit Normal clip is Rec.709.
     ev.push(`DJI metadata: colour mode ${vendor.match(/dji colour mode: ([a-z-]+)/)![1]}`);
@@ -161,6 +181,41 @@ export const DLOGM = {
   ],
   /** Neutral tone curve, c0 + c1·x + … + c7·x⁷ on code values 0..1. */
   neutral: [0.0010071500529459216, -0.16114334055092874, 5.497273250729976, -4.998002182182485, -18.132840948559608, 48.98985798003423, -43.78406825156554, 13.590076458738451],
+};
+
+/**
+ * GP-Log fit (see header). Rendering, for code values c (0..1):
+ *   t = N(log10(m1 · 10^(k·c)) / k) per channel   (N = `neutral`)
+ *   out = clamp(m2 · t + Q(d1, d2, n))
+ * with n = mean(c), d1 = clamp(c.r - c.b, ±bound), d2 = clamp(c.g - (c.r + c.b) / 2, ±bound),
+ * Q_ch = Σ_t d1^i·d2^j · (q[ch][2t] + q[ch][2t + 1]·n). Rows of m1 and m2 sum to 1
+ * and every Q term carries chroma, so greys follow N exactly.
+ */
+export const GPLOG = {
+  /** Log base: code = log(1 + (base - 1)·lin) / log(base). */
+  base: 400,
+  k: 3.47591380727,
+  m1: [
+    1.385793096, -0.3523110486, -0.03348204759,
+    -0.1103099012, 1.290623466, -0.1803135651,
+    0.02833006086, -0.3619572201, 1.333627159,
+  ],
+  m2: [
+    1.302685533, -0.1133820739, -0.1893034589,
+    -0.1476880006, 1.114305581, 0.03338241933,
+    -0.3244830541, -0.2992978852, 1.623780939,
+  ],
+  /** Grey axis, c0 + c1·x + … + c7·x⁷ on code values 0..1. */
+  neutral: [-0.0004785959627, 0.7891030723, -5.216234316, 22.7485165, -42.14380812, 48.46756675, -34.19456796, 10.5490847],
+  bound: 0.3,
+  /** Chroma monomials d1^i·d2^j, in the order of each row of q. */
+  terms: [[1, 0], [0, 1], [2, 0], [1, 1], [0, 2], [3, 0], [2, 1], [1, 2], [0, 3]] as [number, number][],
+  /** Per output channel: for each term, [coefficient, coefficient × n]. */
+  q: [
+    [0.03786169572, 0.202746832, -0.00008931772139, -0.5996464107, -1.73242587, 1.588599214, -2.669908499, -2.18652379, 0.1314563461, 0.9556406721, 8.475831213, -19.06607341, 10.21695208, 20.14668605, 3.695008767, 3.148321746, -0.05676797683, -12.29289389],
+    [-0.00655020507, 0.2715597781, -0.02456146167, 0.5584987488, -0.06261134428, 0.6450082467, 0.2590427545, -0.1283236704, 0.1606534369, 1.921733043, -0.1319015241, 2.221950747, 1.568834441, -14.48726957, -3.159800438, -3.478383067, 1.138294523, -5.727155057],
+    [0.023000827, 0.6168813317, -0.09203589444, -0.06856977769, 0.04618013746, 0.2556276697, -0.5094169435, -0.8741242945, 0.4311835458, -1.958592923, -0.4032375884, 6.105392266, 0.4510187241, 19.19769363, -3.361395677, -8.501608038, -3.596946062, -4.383716739],
+  ],
 };
 
 export const APPLE_LOG = { R0: -0.05641088, Rt: 0.01, sigma: 47.28711236, beta: 0.00964052, gamma: 0.08550479, delta: 0.69336945 };
@@ -210,6 +265,16 @@ export function appleLogDecode(p: number): number {
 }
 
 PEAK.appleLog = appleLogDecode(1) * SCENE_TO_DISPLAY;
+
+/** GP-Log code → scene linear (1 = sensor clip): the inverse of log(1 + 399·x) / log(400). */
+export function gplogDecode(c: number): number {
+  return (Math.pow(GPLOG.base, c) - 1) / (GPLOG.base - 1);
+}
+
+/** Scene linear → GP-Log code (the camera's encoding). */
+export function gplogEncode(lin: number): number {
+  return Math.log(1 + (GPLOG.base - 1) * Math.max(lin, 0)) / Math.log(GPLOG.base);
+}
 
 /** Highlight roll-off: identity below SHOULDER, then a rational curve that is
  * C¹ at the joint and reaches 1 exactly at `peak`, so every level up to the
@@ -263,6 +328,23 @@ export function footageToSdr(p: FootageProfile, rgb: V3): V3 {
       const lin = mul3(BT2020_TO_709, rgb.map((v) => appleLogDecode(v) * SCENE_TO_DISPLAY) as V3);
       return lin.map((v) => sdrEncode(shoulder(v, PEAK.appleLog))) as V3;
     }
+    case "gplog": {
+      const c = rgb.map(clamp01) as V3;
+      const k = GPLOG.k;
+      const m = mul3(GPLOG.m1, c.map((v) => Math.pow(10, k * v)) as V3);
+      const t = m.map((v) => clamp01(polyval(GPLOG.neutral, clamp01(Math.log10(Math.max(v, 1e-6)) / k)))) as V3;
+      const o = mul3(GPLOG.m2, t);
+      const n = (c[0] + c[1] + c[2]) / 3;
+      const B = GPLOG.bound;
+      const d1 = Math.min(B, Math.max(-B, c[0] - c[2]));
+      const d2 = Math.min(B, Math.max(-B, c[1] - (c[0] + c[2]) / 2));
+      for (let ti = 0; ti < GPLOG.terms.length; ti++) {
+        const [i, j] = GPLOG.terms[ti];
+        const mono = d1 ** i * d2 ** j;
+        for (let ch = 0; ch < 3; ch++) o[ch] += mono * (GPLOG.q[ch][2 * ti] + GPLOG.q[ch][2 * ti + 1] * n);
+      }
+      return o.map(clamp01) as V3;
+    }
     case "dlogm": {
       const k = DLOGM.k;
       const ex = rgb.map((v) => Math.pow(10, k * clamp01(v))) as V3;
@@ -280,6 +362,8 @@ export const FOOTAGE_GLSL = `
 uniform int u_footage;
 const mat3 BT2020_TO_709 = mat3(${[0, 3, 6, 1, 4, 7, 2, 5, 8].map((i) => BT2020_TO_709[i].toFixed(7)).join(", ")});
 const mat3 DLOGM_MIX = mat3(${[0, 3, 6, 1, 4, 7, 2, 5, 8].map((i) => DLOGM.mix[i].toPrecision(10)).join(", ")});
+const mat3 GPLOG_M1 = mat3(${[0, 3, 6, 1, 4, 7, 2, 5, 8].map((i) => GPLOG.m1[i].toPrecision(10)).join(", ")});
+const mat3 GPLOG_M2 = mat3(${[0, 3, 6, 1, 4, 7, 2, 5, 8].map((i) => GPLOG.m2[i].toPrecision(10)).join(", ")});
 float shoulderF(float x, float peak) {
   if (x <= ${SHOULDER.toFixed(4)}) return max(x, 0.0);
   float span = max(peak - ${SHOULDER.toFixed(4)}, 1e-3);
@@ -309,6 +393,30 @@ float dlogmNeutral(float x) {
 ${DLOGM.neutral.slice(0, 7).reverse().map((c) => `  y = y * x + (${c.toPrecision(12)});`).join("\n")}
   return clamp(y, 0.0, 1.0);
 }
+float gplogNeutral(float x) {
+  x = clamp(x, 0.0, 1.0);
+  float y = ${GPLOG.neutral[7].toPrecision(12)};
+${GPLOG.neutral.slice(0, 7).reverse().map((c) => `  y = y * x + (${c.toPrecision(12)});`).join("\n")}
+  return clamp(y, 0.0, 1.0);
+}
+vec3 gplogToSdr(vec3 s) {
+  s = clamp(s, 0.0, 1.0);
+  float k = ${GPLOG.k.toPrecision(12)};
+  vec3 m = GPLOG_M1 * pow(vec3(10.0), k * s);
+  vec3 c = log2(max(m, vec3(1e-6))) * ${(Math.LOG10E * Math.LN2).toPrecision(12)} / k;
+  vec3 o = GPLOG_M2 * vec3(gplogNeutral(c.r), gplogNeutral(c.g), gplogNeutral(c.b));
+  float n = (s.r + s.g + s.b) / 3.0;
+  float d1 = clamp(s.r - s.b, ${(-GPLOG.bound).toFixed(4)}, ${GPLOG.bound.toFixed(4)});
+  float d2 = clamp(s.g - 0.5 * (s.r + s.b), ${(-GPLOG.bound).toFixed(4)}, ${GPLOG.bound.toFixed(4)});
+${GPLOG.terms
+  .map(([i, j], t) => {
+    const mono = [...Array(i).fill("d1"), ...Array(j).fill("d2")].join(" * ");
+    const v = (q: number) => `vec3(${[0, 1, 2].map((ch) => GPLOG.q[ch][2 * t + q].toPrecision(10)).join(", ")})`;
+    return `  o += (${mono}) * (${v(0)} + n * ${v(1)});`;
+  })
+  .join("\n")}
+  return clamp(o, 0.0, 1.0);
+}
 vec3 footageToSdr(vec3 s) {
   if (u_footage == 0) return clamp(s, 0.0, 1.0);
   if (u_footage == 1) return sdrEncode3(BT2020_TO_709 * pow(clamp(s, 0.0, 1.0), vec3(2.4)));
@@ -320,6 +428,7 @@ vec3 footageToSdr(vec3 s) {
   }
   if (u_footage == 3) return sdrEncode3(shoulder3(BT2020_TO_709 * (vec3(pqEotf(s.r), pqEotf(s.g), pqEotf(s.b)) / ${HDR_REF_WHITE_NITS.toFixed(1)}), ${PEAK.hdr.toPrecision(10)}));
   if (u_footage == 5) return sdrEncode3(shoulder3(BT2020_TO_709 * (vec3(appleLog(s.r), appleLog(s.g), appleLog(s.b)) * ${SCENE_TO_DISPLAY.toPrecision(10)}), ${PEAK.appleLog.toPrecision(10)}));
+  if (u_footage == 6) return gplogToSdr(s);
   if (u_footage == 4) {
     float k = ${DLOGM.k.toPrecision(12)};
     vec3 m = DLOGM_MIX * pow(vec3(10.0), k * clamp(s, 0.0, 1.0));

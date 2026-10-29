@@ -1,5 +1,5 @@
 import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput, FULL_RECT, type Rect } from "./backend.ts";
-import { WGSL_GRADE, WGSL_DOWNSCALE, WGSL_GRADE_EXT, WGSL_DOWNSCALE_EXT } from "./shaders.ts";
+import { WGSL_GRADE, WGSL_DOWNSCALE, WGSL_GRADE_EXT, WGSL_DOWNSCALE_EXT, WGSL_COMPOSITE, WGSL_COMPOSITE_EXT } from "./shaders.ts";
 import { WGSL_TP_FIELD, WGSL_TP_FLOW, WGSL_TP_LUM, tpExternal } from "./temporal.ts";
 import { TEMPORAL } from "./params.ts";
 import { WEBGPU_LAYOUTS, type BindingKind, type LayoutSpec } from "./webgpu-layouts.ts";
@@ -76,6 +76,16 @@ export class WebGPUBackend implements GpuBackend {
   private tpTex: { lum: GPUTexture[]; f0: GPUTexture[]; f1: GPUTexture; flow: GPUTexture; out: GPUTexture[] } | null = null;
   private readonly tpDummyHalf: GPUTexture;
   private readonly tpDummyOut: GPUTexture;
+  // Compare wipe (WGSL_COMPOSITE): pipelines, its params, the "before"
+  // picture when it is not the source, the graded target used while the wipe
+  // is on without the temporal layer, and the last graded frame recomposite()
+  // can reuse (null once the source, uniforms, data or canvas size change).
+  private readonly compPipe: GPURenderPipeline;
+  private readonly compPipeExt: GPURenderPipeline;
+  private readonly compBuf: GPUBuffer;
+  private beforeTex: GPUTexture | null = null;
+  private wipeTex: GPUTexture | null = null;
+  private lastGraded: GPUTexture | null = null;
 
   private constructor(canvas: HTMLCanvasElement, device: GPUDevice) {
     this.canvas = canvas;
@@ -118,6 +128,9 @@ export class WebGPUBackend implements GpuBackend {
     this.tpLumPipeExt = pipeline(tpExternal(WGSL_TP_LUM), "rgba16float", downLayoutExt);
     const flowLayout = layout(WEBGPU_LAYOUTS.flow);
     this.tpFlowPipe = pipeline(WGSL_TP_FLOW, "rgba16float", flowLayout);
+    this.compPipe = pipeline(WGSL_COMPOSITE, this.format, layout(WEBGPU_LAYOUTS.composite));
+    this.compPipeExt = pipeline(WGSL_COMPOSITE_EXT, this.format, layout(WEBGPU_LAYOUTS.compositeExt));
+    this.compBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const fieldLayout = layout(WEBGPU_LAYOUTS.field);
     const fieldModule = device.createShaderModule({ code: WGSL_TP_FIELD });
     this.tpFieldPipe = device.createRenderPipeline({
@@ -152,6 +165,7 @@ export class WebGPUBackend implements GpuBackend {
   }
 
   upload(src: SourceInput, width: number, height: number, rotation: Rotation): void {
+    this.lastGraded = null;
     this.rotation = rotation;
     const [ow, oh] = uprightSize(width, height, rotation);
     this.outputWidth = ow;
@@ -225,6 +239,7 @@ export class WebGPUBackend implements GpuBackend {
     const w = Math.max(1, Math.round(this.outputWidth * scale));
     const h = Math.max(1, Math.round(this.outputHeight * scale));
     if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.lastGraded = null;
       this.canvas.width = w;
       this.canvas.height = h;
     }
@@ -233,11 +248,13 @@ export class WebGPUBackend implements GpuBackend {
   setUniforms(block: Float32Array): void {
     if (block.length !== UNIFORM_FLOATS) throw new Error(`uniform block must have ${UNIFORM_FLOATS} floats`);
     this.uniforms.set(block);
+    this.lastGraded = null;
     this.device.queue.writeBuffer(this.uniformBuf, 0, this.uniforms);
   }
 
   setData(slot: number, spec: DataTextureSpec): void {
     if (spec.data.length !== spec.width * spec.height * 4) throw new Error("data texture size mismatch");
+    this.lastGraded = null;
     const cur = this.data[slot];
     if (cur.width !== spec.width || cur.height !== spec.height) {
       cur.destroy();
@@ -316,6 +333,7 @@ export class WebGPUBackend implements GpuBackend {
   }
 
   private tpRelease(): void {
+    this.lastGraded = null;
     const t = this.tpTex;
     if (t) for (const x of [...t.lum, ...t.f0, t.f1, t.flow, ...t.out]) x.destroy();
     this.tpTex = null;
@@ -367,18 +385,91 @@ export class WebGPUBackend implements GpuBackend {
         ],
       }));
     }
-    const out = tp ? this.tpTex!.out[this.tpIdx] : target;
+    // The grade never applies the compare wipe (p0.y): with the wipe on it
+    // renders into a texture (the temporal output, which is also the next
+    // frame's history) and the composite pass draws the target from it.
+    const split = this.uniforms[1];
+    const out = tp ? this.tpTex!.out[this.tpIdx] : split > 0 ? this.wipeTarget(target.width, target.height) : target;
     const pass = encoder.beginRenderPass({ colorAttachments: [{ view: out.createView(), loadOp: "clear", storeOp: "store" }] });
     pass.setPipeline(this.extSource ? this.gradePipelineExt : this.gradePipeline);
     pass.setBindGroup(0, this.gradeGroup(ext));
     pass.draw(3);
     pass.end();
+    if (split > 0) this.composite(encoder, out, target, split, ext);
+    else if (tp) encoder.copyTextureToTexture({ texture: out }, { texture: target }, [target.width, target.height]);
     if (tp) {
-      encoder.copyTextureToTexture({ texture: out }, { texture: target }, [target.width, target.height]);
       this.tpIdx = 1 - this.tpIdx;
       this.tpValid = true;
     }
     this.device.queue.submit([encoder.finish()]);
+    // An external (VideoFrame) source only lives for this task: nothing to recomposite from later.
+    this.lastGraded = out !== target && !ext ? out : null;
+  }
+
+  /** Graded target for the compare wipe when the temporal layer is off (target size). */
+  private wipeTarget(w: number, h: number): GPUTexture {
+    if (this.wipeTex && this.wipeTex.width === w && this.wipeTex.height === h) return this.wipeTex;
+    this.wipeTex?.destroy();
+    this.wipeTex = this.device.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    return this.wipeTex;
+  }
+
+  /** Draws `target`: the "before" picture left of `split`, the graded frame right of it. */
+  private composite(encoder: GPUCommandEncoder, graded: GPUTexture, target: GPUTexture, split: number, ext: GPUExternalTexture | null): void {
+    const before = this.beforeTex ? this.beforeTex.createView() : ext ?? this.source!.createView();
+    const pipe = !this.beforeTex && ext ? this.compPipeExt : this.compPipe;
+    this.device.queue.writeBuffer(this.compBuf, 0, new Float32Array([split, this.beforeTex ? 0 : this.rotation, 0, 0]));
+    const group = this.device.createBindGroup({
+      layout: pipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.compBuf } },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: before },
+        { binding: 3, resource: graded.createView() },
+      ],
+    });
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store" }] });
+    pass.setPipeline(pipe);
+    pass.setBindGroup(0, group);
+    pass.draw(3);
+    pass.end();
+  }
+
+  recomposite(split: number): boolean {
+    if (!this.lastGraded) return false;
+    const target = this.ctx.getCurrentTexture();
+    if (target.width !== this.lastGraded.width || target.height !== this.lastGraded.height) return false;
+    this.uniforms[1] = split;
+    const encoder = this.device.createCommandEncoder();
+    this.composite(encoder, this.lastGraded, target, split, null);
+    this.device.queue.submit([encoder.finish()]);
+    return true;
+  }
+
+  setBefore(src: SourceInput | null, width: number, height: number): void {
+    this.lastGraded = null;
+    if (!src) {
+      this.beforeTex?.destroy();
+      this.beforeTex = null;
+      return;
+    }
+    if (!this.beforeTex || this.beforeTex.width !== width || this.beforeTex.height !== height) {
+      this.beforeTex?.destroy();
+      this.beforeTex = this.device.createTexture({
+        size: [width, height],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+    }
+    // Direct only where upload() proved it works for this kind of source; else through a 2D canvas.
+    const kind = isVideoFrame(src) ? "frame" : src instanceof HTMLVideoElement ? "video" : "image";
+    if (this.directUpload[kind] === true) {
+      this.device.queue.copyExternalImageToTexture({ source: src as GPUCopyExternalImageSource, flipY: false }, { texture: this.beforeTex, colorSpace: "srgb", premultipliedAlpha: false }, [width, height]);
+    } else {
+      if (!this.scratch || this.scratch.width !== width || this.scratch.height !== height) this.scratch = new OffscreenCanvas(width, height);
+      this.scratch.getContext("2d")!.drawImage(src as CanvasImageSource, 0, 0, width, height);
+      this.device.queue.copyExternalImageToTexture({ source: this.scratch }, { texture: this.beforeTex }, [width, height]);
+    }
   }
 
   private downGroup(): GPUBindGroup {
@@ -543,6 +634,15 @@ export class WebGPUBackend implements GpuBackend {
     if (ext) this.extSource = ext;
   }
 
+  /**
+   * Resolves once a readback slot is free, so the next renderToFrame draws
+   * synchronously (an export that keeps several frames in flight calls this
+   * before uploading a frame: no other frame's upload can slip in before its draw).
+   */
+  async readbackSlotFree(): Promise<void> {
+    while (this.readbackRing.length > 0 && !this.readbackRing.some((r) => !r.busy)) await new Promise<void>((r) => setTimeout(r, 1));
+  }
+
   private async captureAs(mode: "canvas" | "bitmap" | "readback", timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
     const w = this.outputWidth;
     const h = this.outputHeight;
@@ -648,6 +748,9 @@ export class WebGPUBackend implements GpuBackend {
     for (const t of this.data) t.destroy();
     this.uniformBuf.destroy();
     this.downParamsBuf.destroy();
+    this.compBuf.destroy();
+    this.beforeTex?.destroy();
+    this.wipeTex?.destroy();
     this.analysisTex?.destroy();
     this.analysisBuf?.destroy();
     this.exportTex?.destroy();

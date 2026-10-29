@@ -32,6 +32,8 @@ import { seekVideo, waitForEvent, waitForFirstFrame, type VideoWithRVFC } from "
 import { decodePhoto, encodeJpeg, isPhotoFile, photoLimits } from "./photo.ts";
 import { readExif, withExif } from "./photo-exif.ts";
 import { canvasFrameFix } from "@dive-tools/shared/frame-orientation.ts";
+import { releaseExportBlob } from "@dive-tools/shared/output-sink.ts";
+import { exportSettingsKey } from "./export-key.ts";
 import { detectFootage, FOOTAGE_LABEL, FOOTAGE_MODE, isHdrProfile, parseCodec, resolveFootage, type FootageChoice, type FootageInfo, type FootageProfile } from "./footage.ts";
 import type { CalibKind, SignalCalibration } from "./signal-probe.ts";
 import { isNativeShell, nativeFileOf, type NativeFileRef } from "../native/registry.ts";
@@ -104,7 +106,14 @@ export type ExportStatus = {
   detail: string;
   message: string | null;
   result: ExportResult | null;
+  /** Why the output differs from the source (downscaled for this device's encoder), or that it resumed. */
+  note: string | null;
+  /** Held while the page is in the background (resumes when it is back). */
+  paused: boolean;
 };
+
+/** Export options from the sheet's fallbacks. */
+export type ExportRequest = { maxLongEdge?: number };
 
 export type ExportResult = {
   /** The file in page memory (web exports); null when the native encoder wrote it. */
@@ -198,7 +207,7 @@ export function codecHelp(codecString: string | null | undefined): string | null
   return null;
 }
 
-const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null };
+const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null, note: null, paused: false };
 const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null, refine: "idle", refineProgress: 0, bobbing: null, motionLog: null };
 
 /** Real-time recorder default: WebKit (offline capture is ~10 fps there); `?rt=1` / `?rt=0` force it. */
@@ -258,6 +267,9 @@ export class Studio {
   private tools: ToolsState = DEFAULT_TOOLS;
   private dewarpU: WarpUniforms | null = null;
   private split: number | null = null;
+  /** Pending split repaint (one per frame) and whether the engine holds the raw frame as its "before" picture. */
+  private splitRaf = 0;
+  private beforeSet = false;
   private file: File | null = null;
   /** Sidecar motion log for the open clip (Stabilise › Advanced), used instead of the clip's own telemetry. */
   private motionLog: File | null = null;
@@ -346,6 +358,8 @@ export class Studio {
     video.addEventListener("pause", () => {
       this.set({ playing: false });
       void this.captureStill();
+      // Subject pop: the outlines (and the next tap) must match the paused frame, not the last analysis in play.
+      if (this.tools.colour.subjectPop) this.schedulePausedAnalysis();
     });
     video.addEventListener("seeked", () => {
       if (this.snap.kind !== "video") return;
@@ -373,6 +387,7 @@ export class Studio {
       engine.setSubjectOverrides(this.snap.subjectOverrides);
       engine.personEnabled = q.get("person") !== "0";
       engine.temporalEnabled = q.get("temporal") !== "0";
+      engine.followEnabled = q.get("follow") !== "0";
       this.engine = engine;
       this.set({ engine: engine.backend.kind });
       return engine;
@@ -494,7 +509,7 @@ export class Studio {
     const sample = async (t: number, seed: { u: number; v: number }) => {
       await seekVideo(v, t);
       this.uploadToEngine(v, t, false);
-      const r = await e.analyzeRaw(10_000, include ? [seed] : []);
+      const r = await e.analyzeRaw(10_000, undefined, include ? [seed] : []);
       if (t === o0.t) this.openWater = (r.params.backdrop ?? 0) > 0;
       return (r.params.backdrop ?? 0) > 0 ? r.animals ?? null : null;
     };
@@ -623,7 +638,7 @@ export class Studio {
     const e = this.engine;
     if (e) e.settings = this.settingsAt(this.video?.currentTime ?? 0);
     // The profile samples what the colour engine is fed: a new framing makes them stale for later top-ups.
-    if (next.dewarp !== prev.dewarp || next.stabilise.enabled !== prev.stabilise.enabled) this.sampleCache = [];
+    if (next.dewarp !== prev.dewarp || next.stabilise.enabled !== prev.stabilise.enabled) { this.sampleCache = []; this.engine?.forgetProfile(); }
     const info = this.snap.info;
     if (info && (next.dewarp !== prev.dewarp || !this.dewarpU)) void this.updateDewarp();
     const video = this.snap.kind === "video";
@@ -673,7 +688,23 @@ export class Studio {
 
   setSplit(split: number | null): void {
     this.split = split;
-    this.repaint();
+    // One paint per frame however fast the pointer moves. A paused frame only
+    // re-composites the wipe over the last graded frame: no upload, geometry,
+    // temporal pass or grade.
+    if (this.splitRaf) return;
+    this.splitRaf = requestAnimationFrame(() => {
+      this.splitRaf = 0;
+      if (!this.recompositeSplit()) this.repaint();
+    });
+  }
+
+  private recompositeSplit(): boolean {
+    const e = this.engine;
+    if (!e || !this.tools.colour.enabled || this.exporting || this.snap.phase !== "ready") return false;
+    if (this.snap.kind === "video" && !this.video?.paused) return false;
+    // Behind a geometry pass the raw frame is handed to the engine only while the wipe is on.
+    if (this.geometryActive() && this.split !== null && !this.beforeSet) return false;
+    return e.recomposite(this.split ?? 0);
   }
 
   // ------------------------------------------------------------ open
@@ -801,6 +832,7 @@ export class Studio {
     if (this.snap.kind !== "video" || this.snap.phase !== "ready") return;
     this.dropStill();
     this.sampleCache = [];
+    this.engine?.forgetProfile();
     if (this.tools.colour.enabled && this.engine && !this.exporting) {
       this.engine.lockGlobals(null);
       this.set({ colourProfiled: false });
@@ -952,6 +984,7 @@ export class Studio {
     this.trim = null;
     this.segs = NO_SEGMENTS;
     this.sampleCache = [];
+    this.engine?.forgetProfile();
     this.autoLock = null;
     this.lastLook = -1;
     this.analysedSpan = null;
@@ -1028,15 +1061,23 @@ export class Studio {
     if (!e || !info) return;
     const split = withSplit ? this.split : null;
     e.split = split ?? 0;
+    const sw = (src as HTMLVideoElement).videoWidth || (src as ImageBitmap).width || info.displayW;
+    const sh = (src as HTMLVideoElement).videoHeight || (src as ImageBitmap).height || info.displayH;
+    this.beforeSet = false;
     if (this.geometryActive() && this.geo) {
       const [w, h] = size ?? this.previewSize();
       this.geo.resize(w, h);
-      this.geo.render(src, this.geoParams(t, info.rot), this.uprightOpts(split));
+      // The engine draws the compare wipe itself (its temporal history must
+      // never see it): the geometry renders the whole frame and the raw frame
+      // goes along as the "before" picture.
+      this.geo.render(src, this.geoParams(t, info.rot), this.uprightOpts(null));
       e.upload(this.geo.canvas, w, h, 0);
+      e.setBefore(split !== null ? src : null, sw, sh);
+      this.beforeSet = split !== null;
       e.setPreviewScale(1);
     } else {
-      const w = (src as HTMLVideoElement).videoWidth || (src as ImageBitmap).width || info.displayW;
-      const h = (src as HTMLVideoElement).videoHeight || (src as ImageBitmap).height || info.displayH;
+      const w = sw, h = sh;
+      e.setBefore(null, 0, 0);
       e.upload(src, w, h, 0);
       if (size) e.setPreviewScale(Math.min(1, size[0] / w));
       else e.setPreviewScale(Math.min(1, this.previewSize()[0] / w));
@@ -1355,7 +1396,7 @@ export class Studio {
           await seekVideo(v, t);
           this.uploadToEngine(v, t, false);
           try {
-            const r = await e.analyzeRaw();
+            const r = await e.analyzeRaw(10_000, t);
             this.sampleCache.push({ t, params: r.params, mean: r.mean });
           } catch {
             // a failed sample just doesn't vote
@@ -1578,7 +1619,10 @@ export class Studio {
 
   private beginExport(): AbortController {
     const old = this.snap.exp.result;
-    if (old?.blob) URL.revokeObjectURL(old.url);
+    if (old?.blob) {
+      URL.revokeObjectURL(old.url);
+      void releaseExportBlob(old.blob);
+    }
     this.exporting = true;
     this.previewOn = false;
     this.video?.pause();
@@ -1601,7 +1645,17 @@ export class Studio {
     this.wakeLock = null;
   }
 
-  async exportVideo(): Promise<void> {
+  /** The open clip (the export sheet looks up a resumable export of it). */
+  get clipFile(): File | null {
+    return this.file;
+  }
+
+  /** Settings key of the next export (export journal: same clip + same key = resumable). */
+  exportKey(): string {
+    return exportSettingsKey(this.tools, this.snap);
+  }
+
+  async exportVideo(req: ExportRequest = {}): Promise<void> {
     if (this.snap.kind === "photo") return this.exportPhoto();
     const e = this.engine, file = this.file, v = this.video, info = this.snap.info;
     if (!file || !v || !info || this.exporting) return;
@@ -1646,7 +1700,7 @@ export class Studio {
       } else {
         const res = mode === "realtime"
           ? await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl, trim)
-          : await this.runOffline(media, file, bitrate, total, colourOn, ctrl, trim);
+          : await this.runOffline(media, file, bitrate, total, colourOn, ctrl, trim, req);
         console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (${mode}), ${res.blob.type}, audio ${res.audioIncluded ? "kept" : "dropped"}`);
         this.setExp({
           state: "done",
@@ -1654,7 +1708,7 @@ export class Studio {
           etaSec: 0,
           frames: res.frames,
           detail: "",
-          result: { ...res, native: null, bytes: res.blob.size, mime: res.blob.type, name: this.outName(res.blob.type === "video/webm" ? "webm" : "mp4"), url: URL.createObjectURL(res.blob), width: info.displayW, height: info.displayH },
+          result: { ...res, native: null, bytes: res.blob.size, mime: res.blob.type, name: this.outName(res.blob.type === "video/webm" ? "webm" : "mp4"), url: URL.createObjectURL(res.blob), width: "width" in res ? (res.width as number) : info.displayW, height: "height" in res ? (res.height as number) : info.displayH },
         });
       }
     } catch (err) {
@@ -1701,7 +1755,7 @@ export class Studio {
    * The stage shows bitmaps of the encoded frames (never the full-size
    * render canvas, see ARCHITECTURE.md).
    */
-  private async runOffline(media: MediaMod, file: File, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null) {
+  private async runOffline(media: MediaMod, file: File, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null, req: ExportRequest = {}) {
     const e = this.engine, geo = this.geo;
     const geoOn = this.geometryActive();
     const footage = this.footageMode("frame");
@@ -1716,10 +1770,17 @@ export class Studio {
     const started = performance.now();
     let frames = 0;
     let lastUi = 0, lastLive = 0;
+    // ETA from the work done in this run: a resumed export starts part-way, and paused time doesn't count.
+    let startProgress = 0, pausedMs = 0, pausedAt = 0;
     // One frame at a time whenever a canvas is shared between stages (the
     // geometry canvas, or the engine's canvas/bitmap capture paths); the
     // engine's readback path keeps several in flight.
     let gate: Promise<unknown> = Promise.resolve();
+    // The engine's part of a frame (upload → analysis → tick → render submit) runs one frame at a
+    // time in frame order even when readbacks overlap: an upload of the next frame landing while
+    // this frame's analysis reads back would grade from the wrong frame (and timing-dependent).
+    let engineGate: Promise<unknown> = Promise.resolve();
+    let engineFrames = 0;
     const result = await media.exportWithCodec(
       file,
       async (sample, fi) => {
@@ -1750,23 +1811,33 @@ export class Studio {
               out = new VideoFrame(geo!.canvas, { timestamp: ts, duration: dur });
             } else {
               const eng = e!;
-              let rotE: Rotation = rot;
-              if (geoOn) {
-                eng.upload(geo!.canvas, fi.displayWidth, fi.displayHeight, 0);
-                rotE = 0;
-              } else {
-                eng.upload(frame, frame.displayWidth, frame.displayHeight, rot);
+              const prevEngine = engineGate;
+              let release!: () => void;
+              engineGate = new Promise<void>((r) => (release = r));
+              let pending: Promise<VideoFrame>;
+              try {
+                await prevEngine;
+                await eng.exportReady();
+                let rotE: Rotation = rot;
+                if (geoOn) {
+                  eng.upload(geo!.canvas, fi.displayWidth, fi.displayHeight, 0);
+                  rotE = 0;
+                } else {
+                  eng.upload(frame, frame.displayWidth, frame.displayHeight, rot);
+                }
+                // First frame waits for its analysis and snaps; near a profiled
+                // cut the exact frame matters, and the first frame of a split
+                // segment starts its lock fresh. Analyses run on clip time and are
+                // awaited: the grade of a frame depends on the clip alone.
+                const segStart = this.applyLook(fi.timeSec);
+                await eng.analyzeDue(fi.timeSec, engineFrames++ === 0 || segStart || eng.inCutWindow(fi.timeSec)).catch(() => undefined);
+                eng.settings = this.settingsAt(fi.timeSec);
+                eng.tick(fi.timeSec);
+                pending = eng.renderToFrame(rotE, ts, dur);
+              } finally {
+                release();
               }
-              // First frame waits for its analysis and snaps; near a profiled
-              // cut the exact frame matters, and the first frame of a split
-              // segment starts its lock fresh; otherwise analysis runs alongside.
-              const segStart = this.applyLook(fi.timeSec);
-              if (frames === 0) await eng.analyzeNow(true).catch(() => undefined);
-              else if (segStart || eng.inCutWindow(fi.timeSec)) await eng.analyzeNow(true).catch(() => undefined);
-              else eng.analyzeSoon();
-              eng.settings = this.settingsAt(fi.timeSec);
-              eng.tick(fi.timeSec);
-              out = await eng.renderToFrame(rotE, ts, dur);
+              out = await pending;
             }
             // Frames wrapped from a canvas (not the WebGPU backend's buffer readback).
             if (fixFrame && (!colourOn || e?.backend.kind === "webgl2" || (e?.backend as unknown as { capture?: string | null }).capture !== "readback")) out = await fixFrame(out);
@@ -1777,12 +1848,13 @@ export class Studio {
               lastLive = now;
               await this.emitFrame(out);
             }
-            if (now - lastUi > 250) {
+            if (now - lastUi > 250 && !fi.prime) {
               lastUi = now;
-              const secs = (now - started) / 1000;
+              const secs = Math.max(1e-3, (now - started - pausedMs) / 1000);
               const fps = frames / secs;
               const progress = total > 0 ? Math.min(1, fi.outTimeSec / total) : 0;
-              const eta = progress > 0.02 ? (secs / progress) * (1 - progress) : null;
+              const done = progress - startProgress;
+              const eta = done > 0.02 ? (secs / done) * (1 - progress) : null;
               this.setExp({ frames, fps, progress, etaSec: eta, detail: `${fi.displayWidth}×${fi.displayHeight} · ${fps.toFixed(1)} fps` });
             }
             return out;
@@ -1801,9 +1873,22 @@ export class Studio {
         log: (line) => console.info("[export]", line),
         onProgress: (p) => this.setExp({ progress: p }),
         range: trim,
+        resumeKey: this.exportKey(),
+        maxLongEdge: req.maxLongEdge,
+        onPlan: (plan, resume) => {
+          startProgress = resume?.progress ?? 0;
+          const notes = [plan.note, resume ? `Resumed at ${Math.round(resume.progress * 100)}%.` : null].filter(Boolean);
+          this.setExp({ note: notes.length ? notes.join(" ") : null, progress: startProgress });
+        },
+        onPause: (paused) => {
+          const now = performance.now();
+          if (paused) pausedAt = now;
+          else if (pausedAt) pausedMs += now - pausedAt;
+          this.setExp({ paused });
+        },
       },
     );
-    return { blob: result.blob, frames: result.frames, elapsedMs: performance.now() - started, audioIncluded: result.audioIncluded };
+    return { blob: result.blob, frames: result.frames, elapsedMs: performance.now() - started, audioIncluded: result.audioIncluded, width: result.width, height: result.height };
   }
 
   /**
@@ -1899,8 +1984,7 @@ export class Studio {
               eng.upload(frame, frame.displayWidth, frame.displayHeight, rot);
             }
             const segStart = this.applyLook(fi.timeSec);
-            if (frames === 0 || segStart || eng.inCutWindow(fi.timeSec)) await eng.analyzeNow(true).catch(() => undefined);
-            else eng.analyzeSoon();
+            await eng.analyzeDue(fi.timeSec, frames === 0 || segStart || eng.inCutWindow(fi.timeSec)).catch(() => undefined);
             eng.settings = this.settingsAt(fi.timeSec);
             eng.tick(fi.timeSec);
             out = await eng.renderToFrame(rotE, ts, dur);
@@ -2116,7 +2200,11 @@ export class Studio {
   dismissExport(): void {
     if (this.exporting) return;
     const r = this.snap.exp.result;
-    if (r?.blob) URL.revokeObjectURL(r.url);
+    if (r?.blob) {
+      URL.revokeObjectURL(r.url);
+      // The file behind the Blob lives in private storage until released (a 4K export can be gigabytes).
+      void releaseExportBlob(r.blob);
+    }
     this.set({ exp: IDLE_EXPORT });
   }
 }
