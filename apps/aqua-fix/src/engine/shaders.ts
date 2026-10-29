@@ -170,3 +170,47 @@ function externalVariant(code: string): string {
 }
 export const WGSL_GRADE_EXT = externalVariant(WGSL_GRADE);
 export const WGSL_DOWNSCALE_EXT = externalVariant(WGSL_DOWNSCALE);
+
+// Compare wipe. The grade never applies it (the temporal layer's history must
+// hold the whole graded frame, or the old line lingers after the wipe moves):
+// while the wipe is on, the backends grade into a texture and this pass draws
+// the screen from it, showing the "before" picture left of the split. Moving
+// the split while paused only re-runs this pass. u_before / u_source is the
+// grade's source (rotated like the grade) or a separate upright picture (the
+// studio's raw frame when a geometry pass feeds the engine).
+export const GLSL_COMPOSITE = `#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D u_before;
+uniform sampler2D u_graded;
+uniform float u_split;
+uniform int u_rot;
+in vec2 v_uv;
+out vec4 o_color;
+${ROTATE_GLSL}
+void main() {
+  if (v_uv.x < u_split) o_color = vec4(texture(u_before, rotateUV(v_uv, u_rot)).rgb, 1.0);
+  else o_color = vec4(texelFetch(u_graded, ivec2(gl_FragCoord.xy), 0).rgb, 1.0);
+}`;
+
+export const WGSL_COMPOSITE = `
+struct CompParams { split: f32, rot: f32, pad0: f32, pad1: f32 };
+@group(0) @binding(0) var<uniform> cp: CompParams;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var u_source: texture_2d<f32>;
+@group(0) @binding(3) var u_graded: texture_2d<f32>;
+struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+  var p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+  var o: VSOut;
+  o.pos = vec4(p[i], 0.0, 1.0);
+  o.uv = vec2(p[i].x * 0.5 + 0.5, 1.0 - (p[i].y * 0.5 + 0.5));
+  return o;
+}
+${ROTATE_WGSL}
+@fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
+  let orig = textureSampleLevel(u_source, samp, rotateUV(in.uv, u32(cp.rot + 0.5)), 0.0).rgb;
+  let graded = textureLoad(u_graded, vec2<i32>(in.pos.xy), 0).rgb;
+  return vec4(select(graded, orig, in.uv.x < cp.split), 1.0);
+}`;
+export const WGSL_COMPOSITE_EXT = externalVariant(WGSL_COMPOSITE);

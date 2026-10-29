@@ -246,6 +246,9 @@ export class Studio {
   private tools: ToolsState = DEFAULT_TOOLS;
   private dewarpU: WarpUniforms | null = null;
   private split: number | null = null;
+  /** Pending split repaint (one per frame) and whether the engine holds the raw frame as its "before" picture. */
+  private splitRaf = 0;
+  private beforeSet = false;
   private file: File | null = null;
   /** Sidecar motion log for the open clip (Stabilise › Advanced), used instead of the clip's own telemetry. */
   private motionLog: File | null = null;
@@ -513,7 +516,23 @@ export class Studio {
 
   setSplit(split: number | null): void {
     this.split = split;
-    this.repaint();
+    // One paint per frame however fast the pointer moves. A paused frame only
+    // re-composites the wipe over the last graded frame: no upload, geometry,
+    // temporal pass or grade.
+    if (this.splitRaf) return;
+    this.splitRaf = requestAnimationFrame(() => {
+      this.splitRaf = 0;
+      if (!this.recompositeSplit()) this.repaint();
+    });
+  }
+
+  private recompositeSplit(): boolean {
+    const e = this.engine;
+    if (!e || !this.tools.colour.enabled || this.exporting || this.snap.phase !== "ready") return false;
+    if (this.snap.kind === "video" && !this.video?.paused) return false;
+    // Behind a geometry pass the raw frame is handed to the engine only while the wipe is on.
+    if (this.geometryActive() && this.split !== null && !this.beforeSet) return false;
+    return e.recomposite(this.split ?? 0);
   }
 
   // ------------------------------------------------------------ open
@@ -868,15 +887,23 @@ export class Studio {
     if (!e || !info) return;
     const split = withSplit ? this.split : null;
     e.split = split ?? 0;
+    const sw = (src as HTMLVideoElement).videoWidth || (src as ImageBitmap).width || info.displayW;
+    const sh = (src as HTMLVideoElement).videoHeight || (src as ImageBitmap).height || info.displayH;
+    this.beforeSet = false;
     if (this.geometryActive() && this.geo) {
       const [w, h] = size ?? this.previewSize();
       this.geo.resize(w, h);
-      this.geo.render(src, this.geoParams(t, info.rot), this.uprightOpts(split));
+      // The engine draws the compare wipe itself (its temporal history must
+      // never see it): the geometry renders the whole frame and the raw frame
+      // goes along as the "before" picture.
+      this.geo.render(src, this.geoParams(t, info.rot), this.uprightOpts(null));
       e.upload(this.geo.canvas, w, h, 0);
+      e.setBefore(split !== null ? src : null, sw, sh);
+      this.beforeSet = split !== null;
       e.setPreviewScale(1);
     } else {
-      const w = (src as HTMLVideoElement).videoWidth || (src as ImageBitmap).width || info.displayW;
-      const h = (src as HTMLVideoElement).videoHeight || (src as ImageBitmap).height || info.displayH;
+      const w = sw, h = sh;
+      e.setBefore(null, 0, 0);
       e.upload(src, w, h, 0);
       if (size) e.setPreviewScale(Math.min(1, size[0] / w));
       else e.setPreviewScale(Math.min(1, this.previewSize()[0] / w));
