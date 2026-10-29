@@ -1652,9 +1652,8 @@ export class Studio {
               // cut the exact frame matters, and the first frame of a split
               // segment starts its lock fresh; otherwise analysis runs alongside.
               const segStart = this.applyLook(fi.timeSec);
-              if (frames === 0) await eng.analyzeNow(true).catch(() => undefined);
-              else if (segStart || eng.inCutWindow(fi.timeSec)) await eng.analyzeNow(true).catch(() => undefined);
-              else eng.analyzeSoon();
+              // Analyses on clip time, awaited: the grade of a frame depends on the clip alone.
+              await eng.analyzeDue(fi.timeSec, frames === 0 || segStart || eng.inCutWindow(fi.timeSec)).catch(() => undefined);
               eng.settings = this.settingsAt(fi.timeSec);
               eng.tick(fi.timeSec);
               out = await eng.renderToFrame(rotE, ts, dur);
@@ -1804,8 +1803,7 @@ export class Studio {
               eng.upload(frame, frame.displayWidth, frame.displayHeight, rot);
             }
             const segStart = this.applyLook(fi.timeSec);
-            if (frames === 0 || segStart || eng.inCutWindow(fi.timeSec)) await eng.analyzeNow(true).catch(() => undefined);
-            else eng.analyzeSoon();
+            await eng.analyzeDue(fi.timeSec, frames === 0 || segStart || eng.inCutWindow(fi.timeSec)).catch(() => undefined);
             eng.settings = this.settingsAt(fi.timeSec);
             eng.tick(fi.timeSec);
             out = await eng.renderToFrame(rotE, ts, dur);

@@ -4,7 +4,7 @@
 // and person segmentation are off (their defaults for a clip without people).
 import { analyzeThumbnail, ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.ts";
 import { inCutWindow, noteCut, segmentAt, type LockSegment } from "../src/engine/lock.ts";
-import { lockParams } from "../src/engine/lock.ts";
+import { analysisSlot, lockParams } from "../src/engine/lock.ts";
 import { BalanceFollow, FOLLOW, sceneTrust, shotTarget } from "../src/engine/follow.ts";
 // Tuning experiments: SIM_TAU / SIM_WINDOW override the follow's ease and median span.
 if (process.env.SIM_TAU) FOLLOW.tau = parseFloat(process.env.SIM_TAU);
@@ -21,7 +21,6 @@ const TAU_MAPS_S = 0.4;
 const TAU_CLAHE_S = 0.7;
 const TAU_CONF_OPEN_S = 0.05;
 const SCENE_CUT_MEAN_DIFF = 0.16;
-const ANALYSIS_INTERVAL_S = 0.07;
 
 export class ClipSim {
   locked: LockSegment[] | null = null;
@@ -39,7 +38,7 @@ export class ClipSim {
   claheShape: Omit<ClaheLuts, "data"> | null = null;
   lastMean: Vec3 | null = null;
   lastTick = 0;
-  lastAnalysisT = -Infinity;
+  lastSlot = Number.NaN;
   /** Analyses in flight: frame they were taken from and frame they land on. */
   pending: { at: number; lands: number; a: Analysed }[] = [];
   cuts: number[] = [];
@@ -200,27 +199,28 @@ export class ClipSim {
   /** Advances to frame `f` the way the app does for this mode. */
   step(f: number, thumbs: Uint8ClampedArray[]): void {
     const t = f / this.fps;
-    // Packets that land on this frame (their analysis reads lastTick as of landing, like the worker reply).
+    const slot = analysisSlot(t);
+    // Packets that land on this frame (preview: the worker reply arrives `latency` frames later).
     while (this.pending.length && this.pending[0].lands <= f) this.onPacket(this.pending.shift()!.a);
     if (this.mode === "export") {
-      const cutWin = this.locked ? inCutWindow(this.locked, this.cutSeen, t) : false;
-      if (f === 0 || cutWin) {
-        // analyzeNow(true): waits, and snaps (a cut is noted in onPacket first).
-        this.pending = [];
+      // engine.analyzeDue: one analysis per clip-time slot, awaited before the frame is drawn
+      // (snapping on the first frame and inside a profiled cut window). No timing enters.
+      const snap = f === 0 || (this.locked ? inCutWindow(this.locked, this.cutSeen, t) : false);
+      if (snap || slot !== this.lastSlot) {
+        this.lastSlot = slot;
         const a = this.analyse(f, thumbs);
         this.onPacket(a);
-        this.snapTo(a);
-      } else if (this.pending.length === 0) {
-        this.pending.push({ at: f, lands: f + this.latency, a: this.analyse(f, thumbs) });
+        if (snap) this.snapTo(a);
       }
       this.tick(t);
     } else {
       // Loading a clip grades its first frame with analyzeNow(true).
-      if (f === 0) this.onPacket(this.analyse(f, thumbs));
+      if (f === 0) { this.onPacket(this.analyse(f, thumbs)); this.lastSlot = slot; }
       this.tick(t);
-      if (this.pending.length === 0 && t - this.lastAnalysisT >= ANALYSIS_INTERVAL_S - 1e-9) {
-        this.lastAnalysisT = t;
-        this.pending.push({ at: f, lands: f + 1, a: this.analyse(f, thumbs) });
+      // engine.tick: a new clip-time slot starts an analysis when the worker is free.
+      if (this.pending.length === 0 && slot !== this.lastSlot) {
+        this.lastSlot = slot;
+        this.pending.push({ at: f, lands: f + this.latency, a: this.analyse(f, thumbs) });
       }
     }
   }

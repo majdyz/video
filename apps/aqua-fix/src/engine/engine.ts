@@ -1,5 +1,5 @@
 // Runtime that ties the pieces together for the app:
-//   backend (WebGPU → WebGL2) · worker analysis every ANALYSIS_INTERVAL_MS ·
+//   backend (WebGPU → WebGL2) · worker analysis once per clip-time slot (ANALYSIS_SLOT_S; awaited in offline export) ·
 //   temporal smoothing of the estimated grade with scene-cut reset ·
 //   uniform packing · render / export frames.
 //
@@ -13,7 +13,7 @@ import { ANALYSIS_H, ANALYSIS_W } from "./analyze.ts";
 import type { AnalysisPacket, AnalysisRequest, TargetsReply, TargetsRequest } from "./analysis-worker.ts";
 import type { PersonPacket, PersonRequest } from "./person-worker.ts";
 import { boxGate, PERSON_BOX_MIN_SCORE, type PersonBox } from "./person-gate.ts";
-import { inCutWindow as lockInCutWindow, lockParams, noteCut as lockNoteCut, segmentAt, type LockSegment } from "./lock.ts";
+import { ANALYSIS_SLOT_S, analysisSlot, inCutWindow as lockInCutWindow, lockParams, noteCut as lockNoteCut, segmentAt, type LockSegment } from "./lock.ts";
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
 import { linearToOklab, oklabToLinear } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
@@ -35,6 +35,7 @@ import {
   type Vec3,
 } from "./params.ts";
 
+/** Lower bound on the analysis slot (ms); the slot itself is clip time (ANALYSIS_SLOT_S, see tick). */
 export const ANALYSIS_INTERVAL_MS = 70;
 const TAU_PARAMS_S = 0.6;
 // Spatial maps ease over a short window: snapping them pulsed brightness and
@@ -49,6 +50,7 @@ const TAU_CLAHE_S = 0.7;
 // and untoned parts where it went); the shaders trim it per pixel.
 const TAU_CONF_OPEN_S = 0.05;
 const SCENE_CUT_MEAN_DIFF = 0.16;
+export { ANALYSIS_SLOT_S, analysisSlot };
 // Media-time gap between two analyses beyond which the balance follow starts afresh (a seek).
 const FOLLOW_SEEK_S = 1;
 // Person segmentation runs on every Nth analysis (it costs ~25–40 ms of
@@ -164,7 +166,8 @@ export class GradeEngine {
   private personDetectInflight = false;
   private personDetectWarned = false;
   private personWaiters: (() => void)[] = [];
-  private lastAnalysisAt = -Infinity;
+  /** Clip-time analysis slot of the last analysis started by tick / analyzeDue. */
+  private lastSlot = Number.NaN;
   private current: GradeParams = IDENTITY_PARAMS;
   private target: GradeParams | null = null;
   private fields: Packed | null = null;
@@ -486,15 +489,41 @@ export class GradeEngine {
       }
     }
     this.smooth(dt);
-    const nowMs = performance.now();
-    if (!this.inflight && (force || nowMs - this.lastAnalysisAt >= this.analysisIntervalMs)) {
+    // Analyses follow clip time, not the wall clock: one per analysis slot of
+    // the clip (analysisSlot), the same frames the export analyses, so preview
+    // and export grade a frame alike (wall-clock cadence made two exports of
+    // one clip differ by up to 8.7 ΔE00). A slot the worker was too busy for
+    // is taken up at the next tick inside it.
+    const slot = analysisSlot(timeSec, this.slotSec());
+    if (!this.inflight && (force || slot !== this.lastSlot)) {
+      this.lastSlot = slot;
       void this.startAnalysis();
       return true;
     }
     return false;
   }
 
-  /** Starts an analysis of the current source if none is in flight (export loop). */
+  /** Clip-time analysis slot length (s): ANALYSIS_SLOT_S, or longer when analysisIntervalMs asks for less work. */
+  private slotSec(): number {
+    return Math.max(ANALYSIS_SLOT_S, this.analysisIntervalMs / 1000);
+  }
+
+  /**
+   * Offline export: analyses the uploaded frame at clip time `timeSec` when
+   * it opens a new analysis slot, and waits for it (and for a person pass it
+   * started), so every frame's grade depends on the clip alone, never on how
+   * fast the worker happened to be. `snap` (first frame, a cut window, a new
+   * segment) always analyses and snaps to the result. Call before tick(timeSec).
+   */
+  async analyzeDue(timeSec: number, snap = false, timeoutMs = 10_000): Promise<void> {
+    const slot = analysisSlot(timeSec, this.slotSec());
+    if (!snap && slot === this.lastSlot && this.hasAnalysis) return;
+    this.lastSlot = slot;
+    await this.analyzeNow(snap, timeoutMs);
+    if (!snap) await Promise.race([this.waitPerson(), new Promise<void>((r) => setTimeout(r, timeoutMs))]);
+  }
+
+  /** Starts an analysis of the current source if none is in flight (real-time export loop). */
   analyzeSoon(): void {
     if (!this.inflight) void this.startAnalysis();
   }
@@ -526,6 +555,8 @@ export class GradeEngine {
       if (this.personTarget) { this.person = this.personTarget; this.personTarget = null; }
     }
     if (snap && packet.id === this.reqId) this.snapTo(toGpuPacket(packet));
+    // A snap (clip load, export start) covers the current slot: the next tick doesn't analyse it again.
+    if (snap) this.lastSlot = analysisSlot(this.lastTickSec, this.slotSec());
   }
 
   private settle(packet: AnalysisPacket | null, error: Error | null): void {
@@ -540,7 +571,6 @@ export class GradeEngine {
   private async startAnalysis(): Promise<void> {
     if (this.inflight) return;
     this.inflight = true;
-    this.lastAnalysisAt = performance.now();
     try {
       const rgba = await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
       if (this.keepThumbAt !== null) {
@@ -790,7 +820,7 @@ export class GradeEngine {
     this.claheTarget = null;
     this.current = IDENTITY_PARAMS;
     this.lastMean = null;
-    this.lastAnalysisAt = -Infinity;
+    this.lastSlot = Number.NaN;
     this.lastTickSec = 0;
     this.cutSeen.clear();
     this.follow.reset();

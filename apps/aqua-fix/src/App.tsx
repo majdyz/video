@@ -711,16 +711,17 @@ export default function App() {
             const t0 = performance.now();
             e.upload(frame, frame.displayWidth, frame.displayHeight, rot);
             // The first frame waits for its analysis (and person mask) and
-            // snaps; after that the analysis runs alongside the frame loop —
-            // waiting on it cost a GPU readback round-trip per frame on
-            // iPhone (up ≈ 100 ms), and the eased maps hide a frame of lag.
+            // snaps; after that one analysis per clip-time slot (0.1 s), awaited
+            // so the result never depends on how fast the worker ran (the cost
+            // is a readback round-trip per slot, not per frame).
             if (frames === 0) {
               console.info(`[export] first frame coded ${frame.codedWidth}x${frame.codedHeight} visible ${frame.visibleRect?.width ?? "?"}x${frame.visibleRect?.height ?? "?"} display ${frame.displayWidth}x${frame.displayHeight} ${frame.format ?? ""}`);
-              await e.analyzeNow(true);
-            } else if (e.inCutWindow(info.timeSec)) {
-              // Near a profiled cut the exact frame matters: wait for this frame's analysis.
-              await e.analyzeNow(true).catch(() => undefined);
-            } else e.analyzeSoon();
+              await e.analyzeDue(info.timeSec, true);
+            } else {
+              // Analyses on clip time, awaited (one per analysis slot): the grade depends on the clip alone.
+              // Near a profiled cut the exact frame matters: wait for and snap to this frame's analysis.
+              await e.analyzeDue(info.timeSec, e.inCutWindow(info.timeSec)).catch(() => undefined);
+            }
             e.tick(info.timeSec);
             frames++;
             const t1 = performance.now();

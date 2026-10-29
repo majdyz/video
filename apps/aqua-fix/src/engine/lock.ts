@@ -45,3 +45,10 @@ export function lockParams(l: GradeParams, p: GradeParams, lockRange = false): G
   const fit = p.backdropFit ?? l.backdropFit;
   return lockRange ? { ...l, backdropFit: fit } : { ...l, zLo: p.zLo, zHi: p.zHi, backdropFit: fit };
 }
+
+/** Clip time between analyses, preview and export alike (engine tick / analyzeDue): the grade of a frame depends on the clip, not on timing. */
+export const ANALYSIS_SLOT_S = 0.1;
+/** The analysis slot a clip time falls in. */
+export function analysisSlot(timeSec: number, slotSec = ANALYSIS_SLOT_S): number {
+  return Math.floor(timeSec / slotSec + 1e-6);
+}

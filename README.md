@@ -15,7 +15,9 @@ Three on-device PWAs for diver-shot footage, in one monorepo.
   it over the shot (a closed loop through the CPU reference of the shader),
   which cancels the camera's own auto white balance hunting as it tilts
   between seabed and open water (open water, green water and red subjects
-  are not evidence). An on-device person model (MediaPipe)
+  are not evidence). Frames are analysed once per 0.1 s of clip time
+  (awaited in the offline export), so a frame's grade depends on the clip
+  alone, not on how fast the device ran. An on-device person model (MediaPipe)
   keeps skin on the restoration path and pulls it toward a skin tone.
   Controls: Intensity (50 % = the estimate), scene presets (Auto / Green
   water / Deep blue / Shallow reef) as priors, a Deep-blue look fitted to

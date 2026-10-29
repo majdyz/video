@@ -11,6 +11,7 @@ import { linearToSrgb } from "../src/engine/color.ts";
 import { BalanceFollow } from "../src/engine/follow.ts";
 import { DEFAULT_SETTINGS, IDENTITY_PARAMS } from "../src/engine/params.ts";
 import { ClipSim } from "../eval/clip-sim.ts";
+import { analysisSlot } from "../src/engine/lock.ts";
 import { deltaE00, srgb8ToLab } from "../eval/colour-metrics.ts";
 
 const W = ANALYSIS_W, H = ANALYSIS_H, FPS = 10;
@@ -164,4 +165,29 @@ const dAb = (a: number[], b: number[]) => deltaE00(a, [a[0], b[1], b[2]]);
   f.rebase(lock, to);
   assert.ok(Math.abs(f.apply(to).wb[0] - wb0) < 1e-9, "rebase keeps the balance the follow asks for");
   console.log("ok  balance follow");
+}
+
+// 4. Determinism on clip time: the export analyses one frame per analysis slot of the clip and waits for it, so
+// how fast the worker runs cannot change the grade (two exports of one clip used to differ by up to 8.7 ΔE00), and
+// the preview analyses the same frames.
+{
+  process.env.SIM_NOFOLLOW = "";
+  assert.equal(analysisSlot(0), 0);
+  assert.equal(analysisSlot(0.0999), 0);
+  assert.equal(analysisSlot(0.1), 1);
+  assert.equal(analysisSlot(3 * (1 / 30)), 1, "frame 3 of a 30 fps clip opens slot 1 (float time)");
+  const fps = 30, n = 45;
+  const px = Array.from({ length: n }, (_, f) => frame(BLUE, 0.05 + 0.3 * (f / n), f * 1.5, [1 + 0.2 * (f / n), 1, 1]).px);
+  const run = (mode: "export" | "preview", latency: number) => {
+    const sim = new ClipSim(mode, fps, latency);
+    sim.profile(px);
+    const wb: string[] = [];
+    for (let f = 0; f < n; f++) { sim.step(f, px); wb.push(sim.state().params.wb.map((x) => x.toFixed(6)).join(",")); }
+    return { wb, analysed: sim.paramLog.slice(1).map((r) => +r.split(",")[0]) };
+  };
+  const a = run("export", 1), b = run("export", 4);
+  assert.deepEqual(a.wb, b.wb, "the export grade depends on the worker's speed");
+  const p = run("preview", 1);
+  assert.deepEqual(p.analysed, a.analysed, "preview and export analyse different frames");
+  console.log(`ok  clip-time analysis: ${a.analysed.length} analyses on the same frames in preview and export; export independent of worker speed`);
 }
