@@ -111,6 +111,14 @@ export class GradeEngine {
   settings: UserSettings = { ...DEFAULT_SETTINGS };
   /** Compare-wipe split, 0..1 (pixels left of it show the source). */
   split = 0;
+  /** Cumulative worker time (ms) of the analyses and person passes answered (export profiling). */
+  readonly workerMs = { analysis: 0, person: 0, analyses: 0, readback: 0, poolWait: 0, personWait: 0 };
+  /** Analyse-first workers (precompute): analyses run on this many workers beside the engine's own. */
+  analysisPoolSize = 2;
+  /** Debug: read every precomputed thumbnail back again at render time and use the live one on a mismatch. */
+  verifyPrecomputed = false;
+  /** Analyse-first: render-time analyses served from the cache / analysed live; thumbnails that differed (verifyPrecomputed). */
+  readonly precomputeStats = { hits: 0, misses: 0, mismatches: 0 };
   private worker: Worker | null = null;
   private inflight = false;
   private reqId = 0;
@@ -189,6 +197,12 @@ export class GradeEngine {
   private locked: LockSegment[] | null = null;
   /** Media time at which the cut of each windowed segment was actually observed (by segment index). */
   private cutSeen = new Map<number, number>();
+  private pool: Worker[] = [];
+  private poolLoad: number[] = [];
+  private preId = 0;
+  private preWaiters = new Map<number, { resolve: (a: AnalysisPacket | null) => void; worker: number }>();
+  /** Analyse-first cache: clip time → the thumbnail read back there, the lock / anchor target it was analysed under, and the analysis (pending in the pool). */
+  private pre = new Map<number, Precomputed>();
   private resolveWaiters: ((p: AnalysisPacket) => void)[] = [];
   private rejectWaiters: ((e: Error) => void)[] = [];
   private onError: (e: Error) => void;
@@ -383,6 +397,7 @@ export class GradeEngine {
 
   private onPersonPacket(p: PersonPacket): void {
     this.personInflight = false;
+    this.workerMs.person += p.ms;
     this.settlePerson();
     if (p.id !== this.personReqId) return;
     if (this.personDetectInflight) {
@@ -519,8 +534,10 @@ export class GradeEngine {
     const slot = analysisSlot(timeSec, this.slotSec());
     if (!snap && slot === this.lastSlot && this.hasAnalysis) return;
     this.lastSlot = slot;
-    await this.analyzeNow(snap, timeoutMs);
+    await this.analyzeNow(snap, timeoutMs, timeSec);
+    const tp = performance.now();
     if (!snap) await Promise.race([this.waitPerson(), new Promise<void>((r) => setTimeout(r, timeoutMs))]);
+    this.workerMs.personWait += performance.now() - tp;
   }
 
   /** Starts an analysis of the current source if none is in flight (real-time export loop). */
@@ -533,7 +550,7 @@ export class GradeEngine {
    * on a GPU/worker failure or after `timeoutMs`, so callers can carry on
    * with the ungraded frame instead of hanging.
    */
-  async analyzeNow(snap: boolean, timeoutMs = 10_000): Promise<void> {
+  async analyzeNow(snap: boolean, timeoutMs = 10_000, dueSec?: number): Promise<void> {
     const wait = () =>
       new Promise<AnalysisPacket>((resolve, reject) => {
         this.resolveWaiters.push(resolve);
@@ -546,7 +563,7 @@ export class GradeEngine {
       });
     if (this.inflight) await withTimeout(wait()).catch(() => undefined);
     const p = wait();
-    await this.startAnalysis();
+    await this.startAnalysis({ dueSec });
     const packet = await withTimeout(p);
     if (snap) {
       // First frame of an export / a photo: let the person mask land too so
@@ -572,11 +589,25 @@ export class GradeEngine {
    * `raw`: a sample taken out of playback order (clip profile, Subject pop track pass) — it does not feed the
    * animal tracker; `seeds` replaces the corrections' own seeds.
    */
-  private async startAnalysis(opts: { raw?: boolean; seeds?: { u: number; v: number }[] } = {}): Promise<void> {
+  private async startAnalysis(opts: { raw?: boolean; seeds?: { u: number; v: number }[]; dueSec?: number } = {}): Promise<void> {
     if (this.inflight) return;
     this.inflight = true;
     try {
-      const rgba = await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
+      // Analyse-first (precompute): the thumbnail of this clip time was read back ahead, from the same
+      // upload of the same frame, and its analysis is running or done in the pool.
+      let cached = opts.dueSec !== undefined && !opts.raw ? this.takePrecomputed(opts.dueSec) : undefined;
+      const tr = performance.now();
+      let rgba = cached?.rgba ?? await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
+      if (cached && this.verifyPrecomputed) {
+        const live = await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
+        if (!sameBytes(live, cached.rgba)) {
+          this.precomputeStats.mismatches++;
+          console.warn(`[engine] precomputed thumbnail differs at t=${opts.dueSec!.toFixed(3)}s: using the live one`);
+          rgba = live;
+          cached = undefined;
+        }
+      }
+      this.workerMs.readback += performance.now() - tr;
       if (this.keepThumbAt !== null) {
         this.profileThumbs.set(this.keepThumbAt, rgba.slice());
         this.keepThumbAt = null;
@@ -591,15 +622,27 @@ export class GradeEngine {
       const rect = detect ? FULL_RECT : PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
       const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.backend.analyze(ANALYSIS_W, ANALYSIS_H, rect);
       // The anchor (follow.ts) needs the lock in force and its shot's target.
-      const seg = this.followEnabled && this.locked ? segmentAt(this.locked, this.cutSeen, this.lastTickSec) : null;
-      const target = seg ? this.anchorTargets[this.locked!.indexOf(seg)] ?? null : null;
-      const lock = seg && target ? seg.params : null;
+      const { lock, target } = this.anchorAt(this.lastTickSec);
       this.reqLock = lock;
       const seeds = opts.seeds ?? (this.settings.subjectPop && !opts.raw ? this.animals.seeds(this.lastTickSec) : []);
+      // The pool analysed this thumbnail under the lock and target in force now (and without seeds, which
+      // change the analysis): its packet is the one the engine's worker would send. Otherwise it runs there.
+      const tw = performance.now();
+      const done = cached && cached.lock === lock && cached.target === target && !seeds.length
+        ? await Promise.race([cached.packet, new Promise<null>((r) => setTimeout(() => r(null), 10_000))])
+        : null;
+      this.workerMs.poolWait += performance.now() - tw;
+      if (opts.dueSec !== undefined && this.pool.length > 0) this.precomputeStats[done ? "hits" : "misses"]++;
       this.rawReq = !!opts.raw;
       const req: AnalysisRequest = { id: ++this.reqId, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, ...(lock && target ? { lock, target } : {}), ...(seeds.length ? { seeds } : {}) };
       this.reqTimeSec = this.lastTickSec;
-      this.ensureWorker().postMessage(req, [req.rgba]);
+      if (done) {
+        const id = req.id;
+        // Delivered as the worker's reply would be (after this request is fully issued).
+        queueMicrotask(() => this.onPacket({ ...done, id }));
+      } else {
+        this.ensureWorker().postMessage(req, [req.rgba]);
+      }
       if (px) {
         if (!detect) this.personRectIdx++;
         const preq: PersonRequest = { id: ++this.personReqId, rgba: px.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, timestampMs: Math.round(this.lastTickSec * 1000), detect };
@@ -625,6 +668,8 @@ export class GradeEngine {
     const packet = toGpuPacket(raw);
     this.stats.analyses++;
     this.stats.analysisMs = packet.ms;
+    this.workerMs.analysis += packet.ms;
+    this.workerMs.analyses++;
     const cut = this.lastMean !== null && meanDiff(this.lastMean, packet.mean) > SCENE_CUT_MEAN_DIFF;
     this.lastMean = packet.mean;
     // Subject pop: per-animal tracking, stability and fades (animals.ts); a cut starts over.
@@ -869,6 +914,7 @@ export class GradeEngine {
    */
   reset(opts: { keepPerson?: boolean } = {}): void {
     const verdict = opts.keepPerson ? this.personBoxes : null;
+    this.clearPrecomputed();
     this.reqId++;
     this.inflight = false;
     this.hasAnalysis = false;
@@ -940,6 +986,108 @@ export class GradeEngine {
     this.backend.setBefore?.(src, width, height);
   }
 
+  // ---------------------------------------------------------- analyse-first
+
+  /** The analysis slot of a clip time under the current slot length (export lookahead). */
+  analysisSlotAt(timeSec: number): number {
+    return analysisSlot(timeSec, this.slotSec());
+  }
+
+  /** True when `timeSec` lies in any profiled cut window (seen or not): an export may analyse every frame there. */
+  inAnyCutWindow(timeSec: number): boolean {
+    return !!this.locked?.some((s) => s.window !== undefined && timeSec >= s.window[0] && timeSec < s.window[1]);
+  }
+
+  /**
+   * Analyse-first (offline export): reads the thumbnail of the frame just
+   * uploaded (clip time `timeSec`) and starts its analysis in the pool,
+   * without waiting for it, under the lock / anchor target the render will
+   * have in force there (`prevSec`: the clip time of the frame rendered
+   * before it, which is the engine's clock when that frame is analysed).
+   * The analyzeDue of that clip time later takes this thumbnail and packet:
+   * the same pixels through the same worker code under the same lock, so the
+   * same grade, without the render waiting for a worker. A lock that changed
+   * meanwhile (a cut seen in a cut window) sends it to the engine's worker.
+   */
+  async precompute(timeSec: number, prevSec: number): Promise<void> {
+    if (this.pre.has(timeSec)) return;
+    const tr = performance.now();
+    const rgba = await this.backend.analyze(ANALYSIS_W, ANALYSIS_H);
+    this.workerMs.readback += performance.now() - tr;
+    const { lock, target } = this.anchorAt(prevSec);
+    const w = this.poolWorker();
+    const id = ++this.preId;
+    const copy = rgba.slice();
+    // Every pool worker failed: the thumbnail is still reused, the analysis runs in the engine's worker.
+    if (this.poolLoad[w] === Infinity) {
+      this.pre.set(timeSec, { rgba, lock, target, packet: Promise.resolve(null) });
+      return;
+    }
+    const packet = new Promise<AnalysisPacket | null>((resolve) => this.preWaiters.set(id, { resolve, worker: w }));
+    this.poolLoad[w]++;
+    const req: AnalysisRequest = { id, rgba: copy.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, ...(lock && target ? { lock, target } : {}) };
+    this.pool[w].postMessage(req, [req.rgba]);
+    this.pre.set(timeSec, { rgba, lock, target, packet });
+  }
+
+  /** The anchor's inputs at engine clock `timeSec`: the lock in force and its shot's target (both null without). */
+  private anchorAt(timeSec: number): { lock: GradeParams | null; target: [number, number] | null } {
+    const seg = this.followEnabled && this.locked ? segmentAt(this.locked, this.cutSeen, timeSec) : null;
+    const target = seg ? this.anchorTargets[this.locked!.indexOf(seg)] ?? null : null;
+    return target ? { lock: seg!.params, target } : { lock: null, target: null };
+  }
+
+  /** Forgets precomputed analyses before `timeSec` (the render has passed them). */
+  dropPrecomputedBefore(timeSec: number): void {
+    for (const t of this.pre.keys()) if (t < timeSec) this.pre.delete(t);
+  }
+
+  /** Drops the analyse-first cache; `terminate` also stops the pool (end of an export). */
+  clearPrecomputed(terminate = false): void {
+    this.pre.clear();
+    for (const { resolve } of this.preWaiters.values()) resolve(null);
+    this.preWaiters.clear();
+    if (terminate) {
+      for (const w of this.pool) w.terminate();
+      this.pool = [];
+      this.poolLoad = [];
+    }
+  }
+
+  private takePrecomputed(timeSec: number): Precomputed | undefined {
+    const c = this.pre.get(timeSec);
+    if (c) this.pre.delete(timeSec);
+    return c;
+  }
+
+  /** The least loaded pool worker (started on first use). */
+  private poolWorker(): number {
+    const n = Math.max(1, this.analysisPoolSize);
+    while (this.pool.length < n) {
+      const i = this.pool.length;
+      const w = new Worker(new URL("./analysis-worker.ts", import.meta.url), { type: "module" });
+      w.onmessage = (e: MessageEvent<AnalysisPacket>) => {
+        const r = e.data;
+        const waiter = this.preWaiters.get(r.id);
+        this.poolLoad[i] = Math.max(0, this.poolLoad[i] - 1);
+        if (!waiter) return;
+        this.preWaiters.delete(r.id);
+        waiter.resolve(r);
+      };
+      w.onerror = (e) => {
+        // A failed pool worker: its pending analyses fall back to the engine's own worker.
+        console.warn("Analysis pool worker failed:", e.message);
+        for (const [id, wt] of this.preWaiters) if (wt.worker === i) { wt.resolve(null); this.preWaiters.delete(id); }
+        this.poolLoad[i] = Infinity;
+      };
+      this.pool.push(w);
+      this.poolLoad.push(0);
+    }
+    let best = 0;
+    for (let i = 1; i < this.pool.length; i++) if (this.poolLoad[i] < this.poolLoad[best]) best = i;
+    return best;
+  }
+
   /** Export with frames in flight: resolves when the next renderToFrame will draw without waiting (see backend-webgpu readbackSlotFree). */
   async exportReady(): Promise<void> {
     await (this.backend as unknown as { readbackSlotFree?: () => Promise<void> }).readbackSlotFree?.();
@@ -956,6 +1104,7 @@ export class GradeEngine {
   }
 
   dispose(): void {
+    this.clearPrecomputed(true);
     this.worker?.terminate();
     this.worker = null;
     this.personWorker?.terminate();
@@ -1045,4 +1194,12 @@ function lerpInto4(dst: Float32Array, src: Float32Array, t: number, t1: number):
 
 function meanDiff(a: Vec3, b: Vec3): number {
   return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+}
+
+type Precomputed = { rgba: Uint8ClampedArray; lock: GradeParams | null; target: [number, number] | null; packet: Promise<AnalysisPacket | null> };
+
+function sameBytes(a: Uint8ClampedArray, b: Uint8ClampedArray): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }

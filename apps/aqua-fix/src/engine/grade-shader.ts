@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, VIVID } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, VIVID, VIVID_LOOK } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 import { BACKDROP } from "./backdrop.ts";
 import { RED_GLSL, RED_WGSL } from "./red.ts";
@@ -111,6 +111,8 @@ const float ON_WARM_COS = ${Math.cos(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_SIN = ${Math.sin(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_LO = ${OBJECT_NEUTRAL.warmLo.toFixed(4)};
 const float ON_WARM_HI = ${OBJECT_NEUTRAL.warmHi.toFixed(4)};
+${Object.entries(VIVID_LOOK).map(([k, v]) => `const float VL_${k.replace(/[A-Z]/g, (c) => "_" + c).toUpperCase()} = ${v.toFixed(6)};`).join("\n")}
+${Object.entries(HIGHLIGHT_PINK).map(([k, v]) => `const float HP_${k.replace(/[A-Z]/g, (c) => "_" + c).toUpperCase()} = ${v.toFixed(6)};`).join("\n")}
 `;
 const LOOK_CONSTS_WGSL = LOOK_CONSTS_GLSL.replace(/const float (\w+) = ([^;]+);/g, "const $1: f32 = $2;");
 
@@ -267,6 +269,38 @@ vec3 deepBlueLook(vec3 lab, float look, float water, float hazeW, float deep) {
   vec2 t = Ct * vec2(cos(LOOK_TARGET_HUE), sin(LOOK_TARGET_HUE));
   float ds = 1.0 - look * LOOK_NEUTRAL_DESAT * (1.0 - smoothstepf(LOOK_NEUTRAL_LO, LOOK_NEUTRAL_HI, C)) * smoothstepf(LOOK_NEUTRAL_L_LO, LOOK_NEUTRAL_L_HI, lab.x);
   return vec3(L2, (lab.yz + (t - lab.yz) * w) * ds);
+}
+// Vivid look in Oklab (see VIVID_LOOK in params.ts; mirrors apply.ts vividLook).
+vec3 vividLook(vec3 lab, float v, float g) {
+  if (v <= 0.0) return lab;
+  float C = length(lab.yz);
+  float h = atan(lab.z, lab.y);
+  float hh = h < 0.0 ? h + 6.2831853 : h;
+  float d = h - VL_TARGET; d -= 6.2831853 * round(d / 6.2831853);
+  float cl = VL_C_LIFT * smoothstepf(VL_C_LIFT_LO, VL_C_LIFT_HI, lab.x);
+  float wC = smoothstepf(VL_C_LO + cl, VL_C_HI + cl, C) * smoothstepf(VL_L_LO, VL_L_HI, lab.x);
+  float hiKeep = 1.0 - smoothstepf(VL_BAND_HI0, VL_BAND_HI1, hh);
+  float band = smoothstepf(VL_BAND_LO0, VL_BAND_LO1, hh) * hiKeep * (1.0 - smoothstepf(VL_VIOLET_C_LO, VL_VIOLET_C_HI, C) * smoothstepf(VL_TARGET, VL_BAND_HI1, hh));
+  float gLo = smoothstepf(VL_GREEN_LO0, VL_GREEN_LO1, hh);
+  float gBand = gLo * (1.0 - smoothstepf(VL_GREEN_TOP0, VL_GREEN_TOP1, hh));
+  float h2 = h + ((1.0 - g) * band * VL_PULL * -d + g * gBand * VL_GREEN_SHIFT) * wC * v;
+  float w = ((1.0 - g) * band + g * gLo * hiKeep) * smoothstepf(VL_DARK_C_LO, VL_DARK_C_HI, C) * v;
+  C *= 1.0 + VL_CHROMA * w * (1.0 - g);
+  float L2 = lab.x * (1.0 - (VL_DARK + (VL_DARK_GREEN - VL_DARK) * g) * w * smoothstepf(VL_DARK_L_LO, VL_DARK_L_HI, lab.x));
+  L2 *= 1.0 - VL_BLACK_K * v * (1.0 - smoothstepf(VL_BLACK_LO, VL_BLACK_HI, L2));
+  float cD = VL_SHADOW_C0 + VL_SHADOW_C1 * smoothstepf(VL_SHADOW_L_LO, VL_SHADOW_L_HI, L2);
+  if (C > cD) C -= (C - cD) * (1.0 - VL_SHADOW_KEEP) * v * (1.0 - smoothstepf(VL_SHADOW_FADE_LO, VL_SHADOW_FADE_HI, L2));
+  C *= 1.0 - VL_WHITE_MIX * v * smoothstepf(VL_WHITE_L_LO, VL_WHITE_L_HI, L2) * (1.0 - smoothstepf(VL_WHITE_C_LO, VL_WHITE_C_HI, C));
+  return vec3(L2, C * cos(h2), C * sin(h2));
+}
+// Near-white pink guard (see HIGHLIGHT_PINK; mirrors apply.ts highlightPink).
+vec2 highlightPink(float L, vec2 ab) {
+  float C = length(ab);
+  if (C < 1e-6) return ab;
+  float h = atan(ab.y, ab.x);
+  float d = h - HP_HUE; d -= 6.2831853 * round(d / 6.2831853);
+  float w = HP_MIX * smoothstepf(HP_L_LO, HP_L_HI, L) * (1.0 - smoothstepf(HP_C_LO, HP_C_HI, C)) * (1.0 - smoothstepf(HP_BAND_IN, HP_BAND_OUT, abs(d)));
+  return ab * (1.0 - w);
 }
 float hueFar(vec2 ab, vec2 veilHue, float lo, float hi, float achroma) {
   float c = length(ab);
@@ -546,6 +580,9 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   float Ls = lab.x + objectLift(lab.x, ow, p[16].w);
   vec3 lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y);
   lk.yz = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
+  // Vivid look (opt-in, p23.z), then the near-white pink guard (always).
+  lk = vividLook(lk, p[23].z, p[22].w);
+  lk.yz = highlightPink(lk.x, lk.yz);
   vec3 o1 = oklabToLinear(capChroma(lk, cSrc));
   vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
   vec3 outS = linearToSrgb(o2);
@@ -698,6 +735,37 @@ fn deepBlueLook(lab: vec3<f32>, look: f32, water: f32, hazeW: f32, deep: f32) ->
   let t = Ct * vec2(cos(LOOK_TARGET_HUE), sin(LOOK_TARGET_HUE));
   let ds = 1.0 - look * LOOK_NEUTRAL_DESAT * (1.0 - smoothstepf(LOOK_NEUTRAL_LO, LOOK_NEUTRAL_HI, C)) * smoothstepf(LOOK_NEUTRAL_L_LO, LOOK_NEUTRAL_L_HI, lab.x);
   return vec3(L2, (lab.yz + (t - lab.yz) * w) * ds);
+}
+// Vivid look (mirrors the GLSL / apply.ts vividLook).
+fn vividLook(lab: vec3<f32>, v: f32, g: f32) -> vec3<f32> {
+  if (v <= 0.0) { return lab; }
+  var C = length(lab.yz);
+  let h = atan2(lab.z, lab.y);
+  let hh = select(h, h + 6.2831853, h < 0.0);
+  var d = h - VL_TARGET; d -= 6.2831853 * round(d / 6.2831853);
+  let cl = VL_C_LIFT * smoothstepf(VL_C_LIFT_LO, VL_C_LIFT_HI, lab.x);
+  let wC = smoothstepf(VL_C_LO + cl, VL_C_HI + cl, C) * smoothstepf(VL_L_LO, VL_L_HI, lab.x);
+  let hiKeep = 1.0 - smoothstepf(VL_BAND_HI0, VL_BAND_HI1, hh);
+  let band = smoothstepf(VL_BAND_LO0, VL_BAND_LO1, hh) * hiKeep * (1.0 - smoothstepf(VL_VIOLET_C_LO, VL_VIOLET_C_HI, C) * smoothstepf(VL_TARGET, VL_BAND_HI1, hh));
+  let gLo = smoothstepf(VL_GREEN_LO0, VL_GREEN_LO1, hh);
+  let gBand = gLo * (1.0 - smoothstepf(VL_GREEN_TOP0, VL_GREEN_TOP1, hh));
+  let h2 = h + ((1.0 - g) * band * VL_PULL * -d + g * gBand * VL_GREEN_SHIFT) * wC * v;
+  let w = ((1.0 - g) * band + g * gLo * hiKeep) * smoothstepf(VL_DARK_C_LO, VL_DARK_C_HI, C) * v;
+  C *= 1.0 + VL_CHROMA * w * (1.0 - g);
+  var L2 = lab.x * (1.0 - (VL_DARK + (VL_DARK_GREEN - VL_DARK) * g) * w * smoothstepf(VL_DARK_L_LO, VL_DARK_L_HI, lab.x));
+  L2 *= 1.0 - VL_BLACK_K * v * (1.0 - smoothstepf(VL_BLACK_LO, VL_BLACK_HI, L2));
+  let cD = VL_SHADOW_C0 + VL_SHADOW_C1 * smoothstepf(VL_SHADOW_L_LO, VL_SHADOW_L_HI, L2);
+  if (C > cD) { C -= (C - cD) * (1.0 - VL_SHADOW_KEEP) * v * (1.0 - smoothstepf(VL_SHADOW_FADE_LO, VL_SHADOW_FADE_HI, L2)); }
+  C *= 1.0 - VL_WHITE_MIX * v * smoothstepf(VL_WHITE_L_LO, VL_WHITE_L_HI, L2) * (1.0 - smoothstepf(VL_WHITE_C_LO, VL_WHITE_C_HI, C));
+  return vec3(L2, C * cos(h2), C * sin(h2));
+}
+fn highlightPink(L: f32, ab: vec2<f32>) -> vec2<f32> {
+  let C = length(ab);
+  if (C < 1e-6) { return ab; }
+  let h = atan2(ab.y, ab.x);
+  var d = h - HP_HUE; d -= 6.2831853 * round(d / 6.2831853);
+  let w = HP_MIX * smoothstepf(HP_L_LO, HP_L_HI, L) * (1.0 - smoothstepf(HP_C_LO, HP_C_HI, C)) * (1.0 - smoothstepf(HP_BAND_IN, HP_BAND_OUT, abs(d)));
+  return ab * (1.0 - w);
 }
 fn hueFar(ab: vec2<f32>, veilHue: vec2<f32>, lo: f32, hi: f32, achroma: f32) -> f32 {
   let c = length(ab);
@@ -941,6 +1009,8 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   var lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - hueConf(lab0.yz, veilHue, hueLo, hueHi, achroma), p[16].x, p[16].y);
   let gab = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
   lk = vec3(lk.x, gab);
+  lk = vividLook(lk, p[23].z, p[22].w);
+  lk = vec3(lk.x, highlightPink(lk.x, lk.yz));
   let o1 = oklabToLinear(capChroma(lk, cSrc));
   let o2 = fitToGamut(o1 * detailRatio(src, lin));
   let outS = linearToSrgb(o2);

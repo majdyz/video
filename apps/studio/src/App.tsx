@@ -36,7 +36,7 @@ function initialTools(): ToolsState {
   if (!list) return DEFAULT_TOOLS;
   const on = new Set(list.split(","));
   const t: ToolsState = {
-    colour: { ...DEFAULT_TOOLS.colour, enabled: on.has("colour") },
+    colour: { ...DEFAULT_TOOLS.colour, enabled: on.has("colour"), vivid: q.get("vivid") === "1" },
     stabilise: { ...DEFAULT_TOOLS.stabilise, enabled: on.has("stabilise") },
     dewarp: { ...DEFAULT_TOOLS.dewarp, enabled: on.has("dewarp") },
   };
@@ -111,6 +111,9 @@ export default function App() {
   const onZoom = useCallback((z: number) => studio.setZoom(z), [studio]);
   const exporting = s.exp.state === "preparing" || s.exp.state === "running";
   const ready = s.phase === "ready";
+  // Colour on and its analysis (the clip's scene lock, the photo's balance) not in yet: an export now would come out
+  // without it, so Export waits (the panel says "Reading the water…").
+  const colourPending = ready && tools.colour.enabled && !s.colourProfiled && studio.hasColourEngine;
   const photo = s.kind === "photo";
 
   // ---- split / per-segment colour
@@ -424,9 +427,10 @@ export default function App() {
                 </ol>
               </section>
             )}
-            <button type="button" className="btn btn--primary export-btn" onClick={() => { studio.pause(); setExportOpen(true); }} disabled={!ready || !s.canExport}>
+            <button type="button" className="btn btn--primary export-btn" onClick={() => { studio.pause(); setExportOpen(true); }} disabled={!ready || !s.canExport || colourPending}
+              title={colourPending ? `Export unlocks once the colour analysis of this ${photo ? "photo" : "clip"} is done` : undefined}>
               <IconExport size={18} />
-              <span>Export</span>
+              <span>{colourPending ? "Reading the water…" : "Export"}</span>
             </button>
           </aside>
         )}

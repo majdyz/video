@@ -161,6 +161,10 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, sub
     const up = (patch: Partial<typeof c>) => setTools((t) => ({ ...t, colour: { ...t.colour, ...patch } }));
     return (
       <div className="adv">
+        <div className="adv__field adv__field--row">
+          <span className="adv__label">Vivid <small>Deep, muted blue water, darker water, black shadows; sand, skin and reef stay natural</small></span>
+          <Switch checked={!!c.vivid} onChange={(v) => up({ vivid: v })} label="Vivid" />
+        </div>
         <Slider label="Deep-blue look" value={c.look * 100} min={0} max={100} defaultValue={0} onChange={(v) => up({ look: v / 100 })} />
         <p className="adv__hint">A creative grade on top of the correction: darker, water tinted toward deep blue, subjects keep their colour.</p>
         <Slider label="Saturation" value={c.saturation * 100} min={0} max={200} defaultValue={100} format={(v) => `${Math.round(v)}%`} onChange={(v) => up({ saturation: v / 100 })} />
