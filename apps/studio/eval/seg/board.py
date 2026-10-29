@@ -33,7 +33,7 @@ def tone_board(new, old, strip, out):
     for c, frames in plan:
         rb = json.load(open(os.path.join(new, f"{c}.robust.json"))) if os.path.exists(os.path.join(new, f"{c}.robust.json")) else {}
         g = rb.get("guard-ml", {})
-        gtag = f" | L {g.get('lStdRatio', 0):.2f} HP {g.get('hpRatio', 0):.2f} C {g.get('cStdRatio', 0):.2f}" if g else ""
+        gtag = f" L{g.get('lStdRatio', 0):.2f} HP{g.get('hpRatio', 0):.2f} C{g.get('cStdRatio', 0):.2f}" if g else ""
         for j, f in enumerate(frames):
             srcim = cv2.imread(os.path.join(fr, f"{c}_src_{f}.png"))
             if srcim is None:
@@ -44,7 +44,7 @@ def tone_board(new, old, strip, out):
             else:
                 lv = cv2.imread(os.path.join(ofr, f"{c}_engine_{f}.png"))
             ims = [srcim, lv, cv2.imread(os.path.join(fr, f"{c}_engine_{f}.png")), cv2.imread(os.path.join(fr, f"{c}_ml_{f}.png")), cv2.imread(os.path.join(fr, f"{c}_nopop_{f}.png"))]
-            labels = [f"{c} {f / 30:.1f}s source", "current live (old tone)", "new tone, engine mask", "new tone, AI mask" + gtag, "pop off (same grade)"]
+            labels = [f"{c} {f / 30:.1f}s source", "current live (old tone)", "new tone, engine mask", "new, AI" + gtag, "pop off (same grade)"]
             ims = [i if i is not None else np.zeros_like(srcim) for i in ims]
             rows.append(np.hstack([label(fit(i, 256), t) for i, t in zip(ims, labels)]))
     if rows:
