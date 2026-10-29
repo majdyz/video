@@ -28,6 +28,8 @@ export type ColourState = {
   veil: number;
   /** Advanced: "Subject pop" (opt-in): subjects in open blue water toned silver and lifted. */
   subjectPop?: boolean;
+  /** "Vivid" look (opt-in): deep muted navy water, darker water, black shadows (VIVID_LOOK in the engine). */
+  vivid?: boolean;
 };
 
 /** The "Subject pop" switch stays hidden until its mask tracking is clean (the engine path ships off; `?pop=1` forces it on for checks). */
@@ -49,6 +51,7 @@ export const DEFAULT_COLOUR: ColourState = {
   clarity: DEFAULT_SETTINGS.clarity,
   veil: DEFAULT_SETTINGS.veil,
   subjectPop: false,
+  vivid: false,
 };
 
 /** A segment's colour settings (Split on the timeline): everything but the on/off, which stays global. */
@@ -69,6 +72,7 @@ export function colourSettings(c: ColourLook): UserSettings {
     clarity: c.clarity,
     veil: c.veil,
     subjectPop: !!c.subjectPop,
+    vivid: c.vivid ? 1 : 0,
   };
 }
 

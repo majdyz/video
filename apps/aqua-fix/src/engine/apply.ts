@@ -4,7 +4,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, HAZE_LIFT, boostParams, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, boostParams, vividAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -28,7 +28,7 @@ export function resolveContext(ctx: ApplyContext): PixelContext {
   const hz = ctx.settings.hazeAuto !== false;
   const params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(ctx.params), pushOf(ctx.settings)), ctx.settings)), ctx.settings);
   const base = greenSettings(presetSettings(calmSettings(resolveSettings(ctx.settings), params), ctx.settings), params);
-  return { ...ctx, params, settings: lookSettings(hz ? hazeSettings(base, params) : base, params) };
+  return { ...ctx, params, settings: { ...lookSettings(hz ? hazeSettings(base, params) : base, params), vivid: vividAmountOf(params, ctx.settings) } };
 }
 
 /**
@@ -294,8 +294,11 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const looked = deepBlueLook(Ls, skinned[0], skinned[1], s.look, 1 - hueConf(pa, pb, p), hazeWeight(p), deepHaze(p));
   const guarded0 = redGuard(looked[0], looked[1], looked[2], a0, bb0, person, onFar);
   const guarded = warmMaterial(looked[0], guarded0[0], guarded0[1], greenWeight(p), onFar);
-  const capped = capChroma(looked[0], guarded[0], guarded[1], cSrc);
-  const [r1, g1, b1] = oklabToLinear(looked[0], capped[0], capped[1]);
+  // Vivid look (opt-in), then the near-white pink guard (always).
+  const vv = vividLook(looked[0], guarded[0], guarded[1], s.vivid ?? 0, greenWeight(p));
+  const hn = highlightPink(vv[0], vv[1], vv[2]);
+  const capped = capChroma(vv[0], hn[0], hn[1], cSrc);
+  const [r1, g1, b1] = oklabToLinear(vv[0], capped[0], capped[1]);
   void C;
 
   // Artifact guard: the pixel's detail against its base, at unit gain.
@@ -423,6 +426,51 @@ export function deepBlueLook(L: number, a: number, b: number, look: number, wate
   // Light near-neutral pixels (sand, white coral) go fully neutral.
   const ds = 1 - look * LOOK.neutralDesat * (1 - smoothstep(LOOK.neutralLo, LOOK.neutralHi, C)) * smoothstep(LOOK.neutralLLo, LOOK.neutralLHi, L);
   return [L2, (a + (Ct * Math.cos(LOOK.targetHue) - a) * w) * ds, (b + (Ct * Math.sin(LOOK.targetHue) - b) * w) * ds];
+}
+
+/**
+ * Vivid look in Oklab (mirrors the shaders; see VIVID_LOOK in params.ts).
+ * (L, a, b) = graded colour, v = amount (vividAmountOf),
+ * g = green-water weight. Every weight is a smooth function of these.
+ */
+export function vividLook(L: number, a: number, b: number, v: number, g: number): [number, number, number] {
+  if (v <= 0) return [L, a, b];
+  const V = VIVID_LOOK;
+  let C = Math.hypot(a, b);
+  const h = Math.atan2(b, a);
+  const hh = h < 0 ? h + 2 * Math.PI : h;
+  const d = h - V.target - 2 * Math.PI * Math.round((h - V.target) / (2 * Math.PI));
+  const cl = V.cLift * smoothstep(V.cLiftLo, V.cLiftHi, L);
+  const wC = smoothstep(V.cLo + cl, V.cHi + cl, C) * smoothstep(V.lLo, V.lHi, L);
+  const hiKeep = 1 - smoothstep(V.bandHi0, V.bandHi1, hh);
+  // Clear water: pull toward the target over the cyan band (vivid violets keep their hue).
+  const band = smoothstep(V.bandLo0, V.bandLo1, hh) * hiKeep * (1 - smoothstep(V.violetCLo, V.violetCHi, C) * smoothstep(V.target, V.bandHi1, hh));
+  // Green water: one coherent shift over the cool half of the frame.
+  const gLo = smoothstep(V.greenLo0, V.greenLo1, hh);
+  const gBand = gLo * (1 - smoothstep(V.greenTop0, V.greenTop1, hh));
+  const h2 = h + ((1 - g) * band * V.pull * -d + g * gBand * V.greenShift) * wC * v;
+  // Darker, slightly richer water: by hue and (gently) by chroma.
+  const w = ((1 - g) * band + g * gLo * hiKeep) * smoothstep(V.darkCLo, V.darkCHi, C) * v;
+  C *= 1 + V.chroma * w * (1 - g);
+  let L2 = L * (1 - (V.dark + (V.darkGreen - V.dark) * g) * w * smoothstep(V.darkLLo, V.darkLHi, L));
+  // Shadow toe: blacks stay black.
+  L2 *= 1 - V.blackK * v * (1 - smoothstep(V.blackLo, V.blackHi, L2));
+  // Dark-area chroma bound (violet / green speckle in dark rock) and neutral near-whites.
+  const cD = V.shadowC0 + V.shadowC1 * smoothstep(V.shadowLLo, V.shadowLHi, L2);
+  if (C > cD) C -= (C - cD) * (1 - V.shadowKeep) * v * (1 - smoothstep(V.shadowFadeLo, V.shadowFadeHi, L2));
+  C *= 1 - V.whiteMix * v * smoothstep(V.whiteLLo, V.whiteLHi, L2) * (1 - smoothstep(V.whiteCLo, V.whiteCHi, C));
+  return [L2, C * Math.cos(h2), C * Math.sin(h2)];
+}
+
+/** Near-white pink guard (mirrors the shaders; see HIGHLIGHT_PINK in params.ts). Returns (a, b). */
+export function highlightPink(L: number, a: number, b: number): [number, number] {
+  const C = Math.hypot(a, b);
+  if (C < 1e-6) return [a, b];
+  const H = HIGHLIGHT_PINK;
+  const h = Math.atan2(b, a);
+  const dist = Math.abs(h - H.hue - 2 * Math.PI * Math.round((h - H.hue) / (2 * Math.PI)));
+  const w = H.mix * smoothstep(H.lLo, H.lHi, L) * (1 - smoothstep(H.cLo, H.cHi, C)) * (1 - smoothstep(H.bandIn, H.bandOut, dist));
+  return [a * (1 - w), b * (1 - w)];
 }
 
 /** Mirrors analyze.ts hueFarness: 1 when the hue is ≥ hueFarHi from the veil's. */

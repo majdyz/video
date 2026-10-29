@@ -35,7 +35,7 @@ function initialTools(): ToolsState {
   if (!list) return DEFAULT_TOOLS;
   const on = new Set(list.split(","));
   const t: ToolsState = {
-    colour: { ...DEFAULT_TOOLS.colour, enabled: on.has("colour") },
+    colour: { ...DEFAULT_TOOLS.colour, enabled: on.has("colour"), vivid: q.get("vivid") === "1" },
     stabilise: { ...DEFAULT_TOOLS.stabilise, enabled: on.has("stabilise") },
     dewarp: { ...DEFAULT_TOOLS.dewarp, enabled: on.has("dewarp") },
   };

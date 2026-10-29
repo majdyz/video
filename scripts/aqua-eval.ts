@@ -24,6 +24,7 @@ const settings: UserSettings = {
   clarity: flag("clarity", DEFAULT_SETTINGS.clarity),
   veil: flag("veil", DEFAULT_SETTINGS.veil),
   look: flag("look", DEFAULT_SETTINGS.look),
+  vivid: flag("vivid", 0),
   hazeAuto: flag("hazeauto", 1) !== 0,
   preset: ((): UserSettings["preset"] => { const i = args.indexOf("--preset"); const v = i >= 0 ? args[i + 1] : "auto"; return (["auto", "murky", "deep", "reef"].includes(v) ? v : "auto") as UserSettings["preset"]; })(),
 };

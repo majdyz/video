@@ -34,6 +34,12 @@ export type UserSettings = {
   look: number;
   /** Scene preset (prior on the estimate). */
   preset: ScenePreset;
+  /**
+   * "Vivid" look, 0..1 (opt-in, default 0; see VIVID_LOOK): cyan water turned
+   * a deep, muted navy and darkened, shadows kept black, near-white highlights
+   * neutral. A per-pixel function of the graded colour only (no masks).
+   */
+  vivid?: number;
   /** Debug (?hazeauto=0): disables the haze-adaptive default for A/B runs. */
   hazeAuto?: boolean;
   /**
@@ -65,7 +71,7 @@ export const PRESET_ADJUST: Record<ScenePreset, { red: number; blue: number; red
   reef: { red: 1, blue: 1, redMax: 1.6, dehaze: 0, clarity: -0.1, exposure: 0.97, hazeLift: 0 },
 };
 
-export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto", subjectPop: false };
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto", subjectPop: false, vivid: 0 };
 export const INTENSITY_MAX = 2;
 
 /** Internal controls the shader reads, derived from the intensity. */
@@ -94,6 +100,8 @@ export type GradeSettings = {
   hazeLift: number;
   /** Open-water subject tone on (UserSettings.subjectPop). */
   subjectPop?: boolean;
+  /** Vivid look amount after the do-no-harm gate (vividAmountOf; CPU reference). */
+  vivid?: number;
 };
 
 /**
@@ -316,6 +324,84 @@ export const LOOK = {
   farKeep: 0.55, // … keep this much of their own hue, so the reef keeps colour variety
   mix: 0.8, // how far (a, b) move toward the target
 };
+
+/**
+ * "Vivid" look (UserSettings.vivid), fitted to the user's graded pairs
+ * (refgrade: water CIELAB hue ≈204° → ≈255°, water ≈0.77× darker, shadows
+ * black, sand and skin natural). Runs last in Oklab on the graded colour,
+ * and every weight is a smooth function of that colour (and of the source
+ * nothing else) — never of a mask or the water/object split,
+ * so it cannot draw an edge the picture does not already have.
+ *
+ * Hue: graded hues in the cyan band are pulled toward `target` by `pull`;
+ * the band fades in over `bandLo0..bandLo1` (teal reef turns a little teal-
+ * blue, greens and everything warm are untouched) and out over `bandHi0..
+ * bandHi1` (dull violets — dark-rock speckle — come back to blue; vivid
+ * violets, purple coral, keep theirs). Green water (red.ts greenWeight g)
+ * swaps the pull for a coherent shift of `greenShift` over the whole cool
+ * half of the frame (band from `greenLo0..greenLo1`), so murk over reef moves
+ * as one instead of the water alone turning blue. Pixels below `cLo..cHi`
+ * chroma (sand, greys, the sun opening) or `lLo..lHi` lightness hardly move.
+ */
+export const VIVID_LOOK = {
+  target: (242 * Math.PI) / 180, // Oklab ≈ CIELAB 260°: the references' navy
+  pull: 0.9,
+  bandLo0: (150 * Math.PI) / 180,
+  bandLo1: (212 * Math.PI) / 180,
+  bandHi0: (255 * Math.PI) / 180,
+  bandHi1: (305 * Math.PI) / 180,
+  violetCLo: 0.08, // violets above this chroma are real colour …
+  violetCHi: 0.14,
+  greenShift: (22 * Math.PI) / 180,
+  greenLo0: (85 * Math.PI) / 180,
+  greenLo1: (125 * Math.PI) / 180,
+  greenTop0: (205 * Math.PI) / 180, // … the green shift fades out toward blue (never into violet)
+  greenTop1: (240 * Math.PI) / 180,
+  cLo: 0.02,
+  cHi: 0.06,
+  cLift: 0.045, // … and light pixels need this much more chroma (a whitish sun opening is not water) …
+  cLiftLo: 0.6,
+  cLiftHi: 0.88,
+  lLo: 0.15,
+  lHi: 0.4,
+  chroma: 0.1, // modest chroma gain on the turned water
+  dark: 0.24, // water darkening at full weight (Oklab L ×(1 − dark·ramp)) …
+  darkGreen: 0.1, // … in green water, where it covers the whole cool half
+  darkLLo: 0.3, // darkening ramp on L (dark water is not darkened further)
+  darkLHi: 0.8,
+  darkCLo: 0.0, // darkening / chroma gain grow with chroma over a wide ramp (whitish water near the surface or the sun
+  darkCHi: 0.14, // stays light, and a smooth cyan-to-white gradient never turns into a dark-blue / white boundary)
+  blackK: 0.15, // shadow toe: L ×(1 − blackK) at black, easing out by blackHi (Auto's lifted shadows go back to black;
+  blackLo: 0.1, // a smooth function of the graded lightness, so no per-pixel noise drives it)
+  blackHi: 0.45,
+  shadowC0: 0.006, // dark-area chroma bound c0 + c1·smoothstep(sLo, sHi, L) …
+  shadowC1: 0.1,
+  shadowLLo: 0.15,
+  shadowLHi: 0.6,
+  shadowKeep: 0.35, // … chroma above it is kept at this share (violet speckle in dark rock)
+  shadowFadeLo: 0.35, // … in dark areas only (fades out over this lightness)
+  shadowFadeHi: 0.55,
+  whiteLLo: 0.8, // near-white highlights (the sun opening) go neutral …
+  whiteLHi: 0.94,
+  whiteCLo: 0.05, // … unless they are clearly coloured
+  whiteCHi: 0.09,
+  whiteMix: 0.85,
+};
+
+/**
+ * Near-white tint guard in the default grade: faint pink/magenta in a
+ * near-white highlight (a sun opening, the surface) goes neutral. Skin hues
+ * (≥ ~55°) and the warm white of sunlight are outside the band.
+ */
+export const HIGHLIGHT_PINK = { hue: (355 * Math.PI) / 180, bandIn: (30 * Math.PI) / 180, bandOut: (55 * Math.PI) / 180, lLo: 0.86, lHi: 0.96, cLo: 0.04, cHi: 0.08, mix: 0.85 };
+
+/** The Vivid amount the shader reads (0..1): off on footage the do-no-harm gate calls already graded / not underwater. */
+export function vividAmountOf(p: GradeParams, s: UserSettings): number {
+  const v = Math.min(1, Math.max(0, s.vivid ?? 0));
+  if (v <= 0) return 0;
+  const calm = Math.min(1, Math.max(0, Math.max(p.calm ?? 0, p.calmTone ?? 0)));
+  return v * (1 - calm);
+}
 
 /** Push amount above the estimate, 0..1. */
 export function pushOf(s: UserSettings): number {
@@ -635,7 +721,7 @@ export const CLAHE_BINS = 32;
  *  p16: hazeWeight, deepHaze, detail guard, object-neutral strength
  *  p17: haze-lift subtraction per channel (hazeLiftT), neutral subtraction (hazeLift·hazeBlack)
  *  p18–p22: backdrop surface (18 coefficients, L / a / b; backdrop.ts), p22.z subject tone, p22.w green-water weight (red.ts)
- *  p23: temporal history valid (backend), temporal layer on (engine), 0, 0
+ *  p23: temporal history valid (backend), temporal layer on (engine), Vivid amount (vividAmountOf), 0
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -679,8 +765,9 @@ export function packUniforms(
   if (params.backdropFit && params.backdropFit.length === 18) u.set(params.backdropFit, 72);
   u[90] = settings.subjectPop ? Math.min(1, Math.max(0, params.subjectTone ?? 0)) : 0;
   u[91] = greenWeight(params); // p22.w: green-water weight (red.ts)
-  // p23: history valid (set by the backend per frame), temporal layer on, 0, 0
+  // p23: history valid (set by the backend per frame), temporal layer on, Vivid amount, 0
   u[93] = 1;
+  u[94] = vividAmountOf(params, settings);
   return u;
 }
 
