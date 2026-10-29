@@ -30,7 +30,11 @@ self.addEventListener("activate", (event) => {
 // every response this worker serves gets COOP / COEP / CORP added. The page is then crossOriginIsolated, which
 // SharedArrayBuffer and so multi-threaded WASM (AI subject detection, onnxruntime-web) need. Everything the
 // studio loads is same-origin (fonts and MediaPipe are self-hosted), so require-corp blocks nothing.
+// Disabled 29 Oct: on iPhone Safari the isolated page rendered a black preview. Pass-through until it's proven on
+// a device; the AI then runs single-threaded.
+const COI = false;
 function coi(res) {
+  if (!COI) return res;
   if (!res || res.status === 0 || res.type === "opaque" || res.type === "opaqueredirect") return res;
   const headers = new Headers(res.headers);
   headers.set("Cross-Origin-Opener-Policy", "same-origin");
