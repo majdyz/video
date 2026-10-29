@@ -29,6 +29,9 @@ export function friendlyExportError(message: string | null): { text: string; sug
   return { text: m ? `The export stopped: ${m}` : "The export stopped.", suggestSmaller: false };
 }
 
+/** `?debug=1`: the export sheet shows the per-stage timing line (export-profile.ts). */
+const DEBUG = typeof location !== "undefined" && new URLSearchParams(location.search).has("debug");
+
 function fmtBytes(n: number): string {
   return n > 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(1)} MB`;
 }
@@ -201,6 +204,7 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
             </div>
             {!photo && <button type="button" className="btn btn--ghost btn--block" onClick={() => studio.cancelExport()}>Cancel</button>}
             {exp.note && <p className="export__note" role="status">{exp.note}</p>}
+            {DEBUG && exp.profile && <p className="export__note mono" data-testid="export-profile">{exp.profile}</p>}
             <p className="export__note">{exp.paused ? "Paused while the app is in the background: it carries on when you come back."
               : exportMode === "realtime" ? "Keep this screen open: switching away pauses the recording."
               : exportMode === "native" ? "You can switch apps: the export carries on or pauses until you come back, and progress shows on the Lock Screen or in notifications."
@@ -228,6 +232,7 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
               </button>
             </div>
             {saveNote && <p className="export__note" role="status">{saveNote}</p>}
+            {DEBUG && exp.profile && <p className="export__note mono" data-testid="export-profile">{exp.profile}</p>}
             <button type="button" className="btn btn--quiet btn--block" onClick={() => { studio.dismissExport(); onClose(); }}>Done</button>
           </>
         )}

@@ -248,7 +248,37 @@ export class WebGL2Backend implements GpuBackend {
     return { prog, loc };
   }
 
+  /**
+   * Export profiling (?profile=sync): wait for the GPU after the upload, the
+   * temporal passes and the grade so each one's time lands in `stageMs`
+   * (costs the overlap between them; off otherwise). `capture` is always counted.
+   */
+  syncProfile = false;
+  readonly stageMs = { upload: 0, temporal: 0, grade: 0, capture: 0 };
+  private syncPx = new Uint8Array(4);
+
+  /** Waits for the GPU to finish all work issued so far: a 1-pixel read of the canvas (gl.finish() returns early in Chrome). */
+  private gpuSync(): void {
+    const gl = this.gl;
+    const read = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.syncPx);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read);
+  }
+
   upload(src: SourceInput, width: number, height: number, rotation: Rotation): void {
+    const t0 = this.syncProfile ? performance.now() : 0;
+    try {
+      this.uploadNow(src, width, height, rotation);
+    } finally {
+      if (this.syncProfile) {
+        this.gpuSync();
+        this.stageMs.upload += performance.now() - t0;
+      }
+    }
+  }
+
+  private uploadNow(src: SourceInput, width: number, height: number, rotation: Rotation): void {
     const gl = this.gl;
     this.lastGraded = null;
     this.rotation = rotation;
@@ -345,7 +375,14 @@ export class WebGL2Backend implements GpuBackend {
     // The layer runs only while the engine asks for it (p23.y); off, the history lapses.
     const tp = this.uniforms[93] > 0.5 && this.tpEnsure();
     if (!tp) this.tpValid = false;
+    let ts = this.syncProfile ? performance.now() : 0;
     if (tp) this.tpPasses();
+    if (this.syncProfile) {
+      this.gpuSync();
+      const now = performance.now();
+      this.stageMs.temporal += now - ts;
+      ts = now;
+    }
     else if (this.uniforms[92] !== 0) {
       this.uniforms[92] = 0;
       gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
@@ -393,6 +430,10 @@ export class WebGL2Backend implements GpuBackend {
       this.tpValid = true;
     }
     this.lastGraded = graded;
+    if (this.syncProfile) {
+      this.gpuSync();
+      this.stageMs.grade += performance.now() - ts;
+    }
   }
 
   /** Graded target for the compare wipe when the temporal layer is off (canvas size, RGBA8). */
@@ -463,6 +504,7 @@ export class WebGL2Backend implements GpuBackend {
     const f = new VideoFrame(this.canvas, { timestamp: timestampUs, duration: durationUs });
     this.lastDrawMs = t1 - t0;
     this.lastCaptureMs = performance.now() - t1;
+    this.stageMs.capture += this.lastCaptureMs;
     return f;
   }
 

@@ -34,6 +34,8 @@ import { readExif, withExif } from "./photo-exif.ts";
 import { canvasFrameFix } from "@dive-tools/shared/frame-orientation.ts";
 import { releaseExportBlob } from "@dive-tools/shared/output-sink.ts";
 import { exportSettingsKey } from "./export-key.ts";
+import { ExportProfile } from "@dive-tools/shared/export-profile.ts";
+import { AnalysisLookahead } from "./lookahead.ts";
 import { detectFootage, FOOTAGE_LABEL, FOOTAGE_MODE, isHdrProfile, parseCodec, resolveFootage, type FootageChoice, type FootageInfo, type FootageProfile } from "./footage.ts";
 import type { CalibKind, SignalCalibration } from "./signal-probe.ts";
 import { isNativeShell, nativeFileOf, type NativeFileRef } from "../native/registry.ts";
@@ -110,6 +112,8 @@ export type ExportStatus = {
   note: string | null;
   /** Held while the page is in the background (resumes when it is back). */
   paused: boolean;
+  /** Per-stage timing line of the running / last offline export (shown with ?debug=1). */
+  profile: string | null;
 };
 
 /** Export options from the sheet's fallbacks. */
@@ -207,7 +211,7 @@ export function codecHelp(codecString: string | null | undefined): string | null
   return null;
 }
 
-const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null, note: null, paused: false };
+const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null, note: null, paused: false, profile: null };
 const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null, refine: "idle", refineProgress: 0, bobbing: null, motionLog: null };
 
 /** Real-time recorder default: WebKit (offline capture is ~10 fps there); `?rt=1` / `?rt=0` force it. */
@@ -943,7 +947,18 @@ export class Studio {
   }
 
   /** One analysis of the (geometry-corrected) photo, snapped: there is no frame loop to ease into it. */
-  private async analysePhoto(): Promise<void> {
+  /** The photo analysis in flight (an export waits for it). */
+  private photoAnalysing: Promise<void> | null = null;
+
+  private analysePhoto(): Promise<void> {
+    const p = this.analysePhotoNow().finally(() => {
+      if (this.photoAnalysing === p) this.photoAnalysing = null;
+    });
+    this.photoAnalysing = p;
+    return p;
+  }
+
+  private async analysePhotoNow(): Promise<void> {
     const e = this.engine, bmp = this.photoPreview;
     if (!e || !bmp) return;
     await this.settleEngine();
@@ -957,6 +972,7 @@ export class Studio {
   private schedulePhotoAnalysis(): void {
     clearTimeout(this.photoAnalyseTimer);
     this.photoAnalyseTimer = window.setTimeout(() => {
+      this.photoAnalyseTimer = 0;
       if (this.snap.kind === "photo" && !this.exporting) void this.analysePhoto();
     }, 150);
   }
@@ -1376,12 +1392,16 @@ export class Studio {
     if (this.profiling) return this.profiling;
     const run = async () => {
       const v = this.video, e = this.engine, mod = this.colour;
-      if (!v || !e || !mod || new URLSearchParams(location.search).get("lock") === "0") return;
+      if (!v || !e || !mod) return;
       const gen = this.gen;
       // Trimmed: the samples (and so the scene lock) come from the selection only.
       const span = this.trim;
       const times = rangeTimes(mod.profileTimes, span, v.duration);
-      if (!times.length) return;
+      // Nothing to profile (?lock=0, no sample times): the per-frame analysis is all there is, and Export needn't wait.
+      if (!times.length || new URLSearchParams(location.search).get("lock") === "0") {
+        this.set({ colourProfiled: true });
+        return;
+      }
       // Split: every segment gets frames of its own for its lock (the base spacing may miss a short one).
       const extra = topUpTimes(times, visibleSegments(this.segs.cuts, span, v.duration));
       const needed = [...times, ...extra].filter((t) => !this.cachedSample(t));
@@ -1392,7 +1412,8 @@ export class Studio {
       this.set({ busy: "Profiling colour…" });
       try {
         for (const t of needed) {
-          if (gen !== this.gen || this.exporting) return;
+          // An export started meanwhile waits for this profile (exportVideo): stopping here would export without the lock.
+          if (gen !== this.gen) return;
           await seekVideo(v, t);
           this.uploadToEngine(v, t, false);
           try {
@@ -1645,6 +1666,11 @@ export class Studio {
     this.wakeLock = null;
   }
 
+  /** A colour engine is running (without one Colour can't apply, and nothing waits for its analysis). */
+  get hasColourEngine(): boolean {
+    return !!this.engine;
+  }
+
   /** The open clip (the export sheet looks up a resumable export of it). */
   get clipFile(): File | null {
     return this.file;
@@ -1673,8 +1699,10 @@ export class Studio {
     let failure: unknown = null;
     try {
       const media = await loadMedia();
+      // The clip's scene lock must be in before the first frame: a profile still to run starts now, and the export waits.
+      if (colourOn && !this.snap.colourProfiled && !this.profiling) void this.profileColour();
       if (this.profiling) {
-        this.setExp({ detail: "Profiling colour…" });
+        this.setExp({ detail: "Reading the water…" });
         await this.profiling;
       }
       await this.waitForPath();
@@ -1719,6 +1747,9 @@ export class Studio {
       if (e && this.colour) {
         // The export's last analysis may still be reading back.
         await this.settleEngine();
+        e.clearPrecomputed(true);
+        const clocks = this.backendClocks();
+        if (clocks) clocks.syncProfile = false;
         e.analysisIntervalMs = this.colour.ANALYSIS_INTERVAL_MS;
         e.personEvery = 2;
         e.reset();
@@ -1750,6 +1781,71 @@ export class Studio {
   }
 
   /**
+   * Analyse-first lookahead for an export with Colour on (lookahead.ts): a
+   * second decoder runs ahead and precomputes the colour analyses of the
+   * frames the render will analyse, in the engine's worker pool. Frames go
+   * through exactly the render's preparation (re-tag, square pixels, the
+   * geometry pass, the same engine upload), so the thumbnails are the
+   * render's own. `clock` is the time the export loop passes to analyzeDue.
+   * `?ahead=0` turns it off, `?pool=N` sizes the pool, `?precheck=1` checks
+   * every thumbnail against a live readback.
+   */
+  private async lookaheadFor(media: MediaMod, file: File, clock: "clip" | "container", o: { geoOn: boolean; footage: number; hp: boolean; retag: boolean; prof: ExportProfile; signal: AbortSignal; endSec?: number }): Promise<AnalysisLookahead | null> {
+    const e = this.engine, geo = this.geo;
+    const q = new URLSearchParams(location.search);
+    if (!e || q.get("ahead") === "0" || (o.geoOn && !geo)) return null;
+    const reader = await media.openSampleReader(file).catch(() => null);
+    if (!reader) return null;
+    const pool = Number(q.get("pool"));
+    e.analysisPoolSize = Number.isFinite(pool) && pool >= 1 ? Math.min(4, Math.floor(pool)) : 2;
+    e.verifyPrecomputed = q.get("precheck") === "1";
+    Object.assign(e.precomputeStats, { hits: 0, misses: 0, mismatches: 0 });
+    const fps = this.snap.info?.fps || 30;
+    const lookAt = (t: number) => (this.segs.cuts.length ? lookIndexAt(this.segs.cuts, t, this.trim, this.snap.duration, fps) : 0);
+    // Superset of the frames analyzeDue analyses: the first, each slot's first, every frame in a profiled cut
+    // window, a segment's first, and the frame after any of those snap frames (a snap re-arms the slot).
+    let prevSnap = false;
+    const want = (t: number, prev: number | null): boolean => {
+      const snap = prev === null || e.inAnyCutWindow(t) || lookAt(t) !== lookAt(prev);
+      const r = snap || prevSnap || e.analysisSlotAt(t) !== e.analysisSlotAt(prev!);
+      prevSnap = snap;
+      return r;
+    };
+    const rot = ((reader.rotation / 90) % 4) as Rotation;
+    const dw = reader.displayWidth, dh = reader.displayHeight;
+    return new AnalysisLookahead({
+      reader,
+      clock,
+      endSec: o.endSec,
+      signal: o.signal,
+      want,
+      analyse: async (sample, t, prev) => {
+        let decoded = (sample as unknown as { toVideoFrame(): VideoFrame }).toVideoFrame();
+        if (o.retag) {
+          const raw = await media.retagFrame(decoded).catch(() => null);
+          if (raw) {
+            decoded.close();
+            decoded = raw;
+          }
+        }
+        const frame = media.squarePixels(decoded);
+        try {
+          if (o.geoOn) {
+            geo!.resize(dw, dh);
+            geo!.render(frame, this.geoParams(t, rot as QuarterTurns), { texCoded: true, split: null, footage: o.footage as never, highPrecision: o.hp });
+            e.upload(geo!.canvas, dw, dh, 0);
+          } else {
+            e.upload(frame, frame.displayWidth, frame.displayHeight, rot);
+          }
+          await e.precompute(t, prev ?? 0);
+        } finally {
+          frame.close();
+        }
+      },
+    });
+  }
+
+  /**
    * Offline WebCodecs export (Chrome, Android, desktop Safari fallback):
    * every frame decoded, rendered once, encoded with its own timestamp.
    * The stage shows bitmaps of the encoded frames (never the full-size
@@ -1767,6 +1863,19 @@ export class Studio {
     const fixFrame = await canvasFrameFix((line) => console.info("[export]", line));
     await this.engineForExport();
     this.setExp({ state: "running", detail: "Rendering" });
+    const prof = this.startProfile();
+    const worker0 = e ? { ...e.workerMs } : null;
+    const workerTimes = () => {
+      if (!e || !worker0) return;
+      prof.ms.analysisWorker = e.workerMs.analysis - worker0.analysis;
+      prof.ms.person = e.workerMs.person - worker0.person;
+      prof.analyses = e.workerMs.analyses - worker0.analyses;
+      prof.thumbReadbackMs = e.workerMs.readback - worker0.readback;
+      prof.extra = { poolWait: e.workerMs.poolWait - worker0.poolWait, personWait: e.workerMs.personWait - worker0.personWait };
+    };
+    const look = colourOn ? await this.lookaheadFor(media, file, "clip", { geoOn, footage, hp, retag, prof, signal: ctrl.signal, endSec: trim?.end }) : null;
+    // ?framehash=1 (determinism checks): a hash of every encoded frame's pixels, before the encoder.
+    const hashes: string[] | null = new URLSearchParams(location.search).get("framehash") === "1" ? [] : null;
     const started = performance.now();
     let frames = 0;
     let lastUi = 0, lastLive = 0;
@@ -1788,6 +1897,9 @@ export class Studio {
         const serial = geoOn || !colourOn || capture !== "readback";
         if (serial) await gate;
         const job = (async (): Promise<VideoFrame> => {
+          // One frame at a time: nothing else uses the geometry canvas or the engine's source now.
+          if (look && serial) await prof.time("prepass", () => look.ensure(fi.timeSec));
+          let tp = performance.now();
           let decoded = sample.toVideoFrame();
           if (retag) {
             const raw = await media.retagFrame(decoded).catch(() => null);
@@ -1797,6 +1909,7 @@ export class Studio {
             }
           }
           const frame = media.squarePixels(decoded);
+          prof.add("decode", performance.now() - tp);
           try {
             const rot = ((fi.rotation / 90) % 4) as Rotation;
             // Output clock (0 at the trim's first frame); the warp and the grade read source time.
@@ -1804,11 +1917,15 @@ export class Studio {
             const dur = frame.duration ?? undefined;
             let out: VideoFrame;
             if (geoOn || !colourOn) {
+              tp = performance.now();
               geo!.resize(fi.displayWidth, fi.displayHeight);
               geo!.render(frame, this.geoParams(fi.timeSec, rot as QuarterTurns), { texCoded: true, split: null, footage, highPrecision: hp });
+              prof.add("geometry", performance.now() - tp);
             }
             if (!colourOn) {
+              tp = performance.now();
               out = new VideoFrame(geo!.canvas, { timestamp: ts, duration: dur });
+              prof.add("readback", performance.now() - tp);
             } else {
               const eng = e!;
               const prevEngine = engineGate;
@@ -1818,6 +1935,9 @@ export class Studio {
               try {
                 await prevEngine;
                 await eng.exportReady();
+                // Frames in flight are past their upload: the lookahead may use the engine's source now.
+                if (look && !serial) await prof.time("prepass", () => look.ensure(fi.timeSec));
+                tp = performance.now();
                 let rotE: Rotation = rot;
                 if (geoOn) {
                   eng.upload(geo!.canvas, fi.displayWidth, fi.displayHeight, 0);
@@ -1830,23 +1950,34 @@ export class Studio {
                 // segment starts its lock fresh. Analyses run on clip time and are
                 // awaited: the grade of a frame depends on the clip alone.
                 const segStart = this.applyLook(fi.timeSec);
+                const ta = performance.now();
+                prof.add("upload", ta - tp);
                 await eng.analyzeDue(fi.timeSec, engineFrames++ === 0 || segStart || eng.inCutWindow(fi.timeSec)).catch(() => undefined);
+                eng.dropPrecomputedBefore(fi.timeSec);
+                tp = performance.now();
+                prof.add("analysisWait", tp - ta);
                 eng.settings = this.settingsAt(fi.timeSec);
                 eng.tick(fi.timeSec);
                 pending = eng.renderToFrame(rotE, ts, dur);
+                prof.add("render", performance.now() - tp);
               } finally {
                 release();
               }
+              tp = performance.now();
               out = await pending;
+              prof.add("readback", performance.now() - tp);
             }
+            tp = performance.now();
             // Frames wrapped from a canvas (not the WebGPU backend's buffer readback).
             if (fixFrame && (!colourOn || e?.backend.kind === "webgl2" || (e?.backend as unknown as { capture?: string | null }).capture !== "readback")) out = await fixFrame(out);
             out = media.evenFrame(out);
+            prof.add("readback", performance.now() - tp);
+            if (hashes && !fi.prime) hashes.push(await frameHash(out));
             frames++;
             const now = performance.now();
             if (now - lastLive > LIVE_EVERY_MS) {
               lastLive = now;
-              await this.emitFrame(out);
+              await prof.time("ui", () => this.emitFrame(out));
             }
             if (now - lastUi > 250 && !fi.prime) {
               lastUi = now;
@@ -1855,7 +1986,9 @@ export class Studio {
               const progress = total > 0 ? Math.min(1, fi.outTimeSec / total) : 0;
               const done = progress - startProgress;
               const eta = done > 0.02 ? (secs / done) * (1 - progress) : null;
-              this.setExp({ frames, fps, progress, etaSec: eta, detail: `${fi.displayWidth}×${fi.displayHeight} · ${fps.toFixed(1)} fps` });
+              workerTimes();
+              prof.pausedMs = pausedMs;
+              this.setExp({ frames, fps, progress, etaSec: eta, detail: `${fi.displayWidth}×${fi.displayHeight} · ${fps.toFixed(1)} fps`, profile: prof.summary() });
             }
             return out;
           } finally {
@@ -1872,6 +2005,7 @@ export class Studio {
         signal: ctrl.signal,
         log: (line) => console.info("[export]", line),
         onProgress: (p) => this.setExp({ progress: p }),
+        profile: prof,
         range: trim,
         resumeKey: this.exportKey(),
         maxLongEdge: req.maxLongEdge,
@@ -1887,8 +2021,54 @@ export class Studio {
           this.setExp({ paused });
         },
       },
-    );
+    ).finally(() => look?.dispose());
+    prof.end();
+    prof.pausedMs = pausedMs;
+    workerTimes();
+    this.reportProfile(prof, look);
+    if (hashes) {
+      (window as unknown as { exportFrameHashes?: string[] }).exportFrameHashes = hashes;
+      console.info(`[export] frame hashes: ${hashes.length} frames, first ${hashes[0]}, last ${hashes[hashes.length - 1]}`);
+    }
     return { blob: result.blob, frames: result.frames, elapsedMs: performance.now() - started, audioIncluded: result.audioIncluded, width: result.width, height: result.height };
+  }
+
+  /** The colour backend's own stage clocks (WebGL2: upload / temporal / grade / capture; see syncProfile). */
+  private backendClocks(): BackendClocks | null {
+    const b = this.engine?.backend as unknown as Partial<BackendClocks> | undefined;
+    return b?.stageMs && b.syncProfile !== undefined ? (b as BackendClocks) : null;
+  }
+  private clocks0: BackendClocks["stageMs"] | null = null;
+
+  /** A new export profile; `?profile=sync` also has the backend finish the GPU per stage (exact, a little slower). */
+  private startProfile(): ExportProfile {
+    const c = this.backendClocks();
+    if (c) {
+      c.syncProfile = new URLSearchParams(location.search).get("profile") === "sync";
+      this.clocks0 = { ...c.stageMs };
+    }
+    return new ExportProfile();
+  }
+
+  /** Logs the export's per-stage timing and puts its line on the export sheet (?debug=1). */
+  private reportProfile(prof: ExportProfile, look: AnalysisLookahead | null): void {
+    const e = this.engine;
+    const c = this.backendClocks();
+    if (c?.syncProfile && this.clocks0) {
+      // The grade call holds the temporal passes and the canvas capture: split them out.
+      const temporal = c.stageMs.temporal - this.clocks0.temporal;
+      const capture = c.stageMs.capture - this.clocks0.capture;
+      prof.ms.temporal = temporal;
+      prof.ms.render = Math.max(0, prof.ms.render - temporal - capture);
+      prof.ms.readback += capture;
+      c.syncProfile = false;
+    }
+    const line = prof.summary();
+    const ps = e?.precomputeStats;
+    const ahead = look ? ` · analyse-first ${look.analysed} thumbnails, ${ps?.hits ?? 0} used, ${ps?.misses ?? 0} live${ps?.mismatches ? `, ${ps.mismatches} mismatched` : ""}` : "";
+    console.info(`[export] profile: ${line}${ahead}`);
+    console.info(`[export] profile ms: ${JSON.stringify(prof.table())}`);
+    this.setExp({ profile: line + ahead });
   }
 
   /**
@@ -1913,6 +2093,18 @@ export class Studio {
     const hp = this.highPrecision(footage);
     const retag = footage !== 0 && this.signal?.frame === "retag";
     await this.engineForExport();
+    const prof = this.startProfile();
+    const w0 = e ? { ...e.workerMs } : null;
+    const workerTimes = () => {
+      if (!e || !w0) return;
+      prof.ms.analysisWorker = e.workerMs.analysis - w0.analysis;
+      prof.ms.person = e.workerMs.person - w0.person;
+      prof.analyses = e.workerMs.analyses - w0.analyses;
+      prof.thumbReadbackMs = e.workerMs.readback - w0.readback;
+      prof.extra = { poolWait: e.workerMs.poolWait - w0.poolWait, personWait: e.workerMs.personWait - w0.personWait };
+    };
+    // decodeFrames reports container time, and so does everything below (analyzeDue, the warp, the looks).
+    const look = colourOn ? await this.lookaheadFor(media, file, "container", { geoOn, footage, hp, retag, prof, signal: ctrl.signal, endSec: trim?.end }) : null;
     const outName = this.outName("mp4");
     let session: Awaited<ReturnType<typeof nat.DiveNative.startExport>> | null = null;
     let sink: InstanceType<typeof nat.NativeFrameSink> | null = null;
@@ -1928,10 +2120,25 @@ export class Studio {
       console.info(`[export] native state: ${ev.state}${ev.message ? ` (${ev.message})` : ""}`);
       if (ev.state === "cancelled-by-user" || ev.state === "background-expired") ctrl.abort();
     });
+    // Trimmed: only the selection is decoded; the first kept frame's source time aligns the audio (shiftSec).
+    const frameIter = media.decodeFrames(file, ctrl.signal, trim)[Symbol.asyncIterator]();
     try {
       this.setExp({ state: "running", detail: "Rendering" });
-      // Trimmed: only the selection is decoded; the first kept frame's source time aligns the audio (shiftSec).
-      for await (const { sample, info: fi } of media.decodeFrames(file, ctrl.signal, trim)) {
+      for (;;) {
+        let tp = performance.now();
+        const nextFrame = await frameIter.next();
+        if (nextFrame.done) break;
+        const { sample, info: fi } = nextFrame.value;
+        if (look) {
+          prof.add("decode", performance.now() - tp);
+          try {
+            await prof.time("prepass", () => look.ensure(fi.timeSec));
+          } catch (err) {
+            sample.close();
+            throw err;
+          }
+          tp = performance.now();
+        }
         let decoded = sample.toVideoFrame();
         sample.close();
         if (retag) {
@@ -1942,6 +2149,7 @@ export class Studio {
           }
         }
         const frame = media.squarePixels(decoded);
+        prof.add("decode", performance.now() - tp);
         try {
           if (t0 === null) {
             t0 = fi.timeSec;
@@ -1969,9 +2177,12 @@ export class Studio {
           const dur = frame.duration ?? undefined;
           let out: VideoFrame;
           if (geoOn || !colourOn) {
+            tp = performance.now();
             geo!.resize(fi.displayWidth, fi.displayHeight);
             geo!.render(frame, this.geoParams(fi.timeSec, rot as QuarterTurns), { texCoded: true, split: null, footage, highPrecision: hp });
+            prof.add("geometry", performance.now() - tp);
           }
+          tp = performance.now();
           if (!colourOn) {
             out = new VideoFrame(geo!.canvas, { timestamp: ts, duration: dur });
           } else {
@@ -1984,18 +2195,25 @@ export class Studio {
               eng.upload(frame, frame.displayWidth, frame.displayHeight, rot);
             }
             const segStart = this.applyLook(fi.timeSec);
+            const ta = performance.now();
+            prof.add("upload", ta - tp);
             await eng.analyzeDue(fi.timeSec, frames === 0 || segStart || eng.inCutWindow(fi.timeSec)).catch(() => undefined);
+            eng.dropPrecomputedBefore(fi.timeSec);
+            tp = performance.now();
+            prof.add("analysisWait", tp - ta);
             eng.settings = this.settingsAt(fi.timeSec);
             eng.tick(fi.timeSec);
             out = await eng.renderToFrame(rotE, ts, dur);
           }
+          prof.add("readback", performance.now() - tp);
           try {
-            await sink!.push(out, ts, dur);
+            await prof.time("encode", () => sink!.push(out, ts, dur));
             frames++;
+            prof.frames = frames;
             const now = performance.now();
             if (now - lastLive > LIVE_EVERY_MS) {
               lastLive = now;
-              await this.emitFrame(out);
+              await prof.time("ui", () => this.emitFrame(out));
             }
             if (now - lastUi > 250) {
               lastUi = now;
@@ -2003,7 +2221,8 @@ export class Studio {
               const fps = frames / secs;
               const progress = total > 0 ? Math.min(1, timeSec / total) : 0;
               const eta = progress > 0.02 ? (secs / progress) * (1 - progress) : null;
-              this.setExp({ frames, fps, progress, etaSec: eta, detail: `${width}×${height} · ${fps.toFixed(1)} fps · native encoder` });
+              workerTimes();
+              this.setExp({ frames, fps, progress, etaSec: eta, detail: `${width}×${height} · ${fps.toFixed(1)} fps · native encoder`, profile: prof.summary() });
             }
           } finally {
             out.close();
@@ -2013,9 +2232,12 @@ export class Studio {
         }
       }
       if (!session || !sink) throw new Error("Decoder produced no frames");
-      await sink.flush();
+      await prof.time("encode", () => sink!.flush());
       this.setExp({ detail: "Finishing file", progress: 1 });
-      const outFile = await nat.DiveNative.finishExport({ id: session.id });
+      const outFile = await prof.time("mux", () => nat.DiveNative.finishExport({ id: session!.id }));
+      prof.end();
+      workerTimes();
+      this.reportProfile(prof, look);
       return {
         blob: null,
         native: { path: outFile.path, name: outFile.name, mime: outFile.mime, size: outFile.size },
@@ -2033,6 +2255,8 @@ export class Studio {
       if (session) await nat.DiveNative.cancelExport({ id: session.id }).catch(() => undefined);
       throw ctrl.signal.aborted ? new DOMException("Aborted", "AbortError") : err;
     } finally {
+      look?.dispose();
+      await frameIter.return?.(undefined).catch(() => undefined);
       ctrl.signal.removeEventListener("abort", onAbort);
       void stateSub.remove();
     }
@@ -2144,12 +2368,23 @@ export class Studio {
   private async exportPhoto(): Promise<void> {
     const e = this.engine, bmp = this.photo, info = this.snap.info;
     if (!bmp || !info || this.exporting) return;
+    // A settings change still waiting to re-analyse the photo, or its analysis in flight: the export takes its result.
+    if (this.photoAnalyseTimer && this.tools.colour.enabled && e) {
+      clearTimeout(this.photoAnalyseTimer);
+      this.photoAnalyseTimer = 0;
+      void this.analysePhoto();
+    }
+    const analysing = this.photoAnalysing;
     this.beginExport();
     const started = performance.now();
     let failure: unknown = null;
     try {
       const W = info.displayW, H = info.displayH;
       const colourOn = this.tools.colour.enabled && !!e;
+      if (colourOn && analysing) {
+        this.setExp({ detail: "Reading the water…" });
+        await analysing;
+      }
       this.setExp({ state: "running", detail: `${W}×${H}`, progress: 0.2 });
       let src: VideoFrame | HTMLCanvasElement;
       if (colourOn) {
@@ -2214,6 +2449,20 @@ export class Studio {
  * can't decode it at all; otherwise (WebCodecs decodes it but the player
  * refuses the file, e.g. a container or audio track it can't handle) say so.
  */
+/** FNV-1a of a frame's RGBX pixels (determinism checks only: copies the frame out). */
+async function frameHash(f: VideoFrame): Promise<string> {
+  const r = f.visibleRect;
+  const w = r?.width ?? f.codedWidth, h = r?.height ?? f.codedHeight;
+  const buf = new Uint8Array(w * h * 4);
+  await f.copyTo(buf, { format: "RGBX", rect: { x: r?.x ?? 0, y: r?.y ?? 0, width: w, height: h } } as VideoFrameCopyToOptions);
+  let a = 0x811c9dc5;
+  const u32 = new Uint32Array(buf.buffer);
+  for (let i = 0; i < u32.length; i++) a = Math.imul(a ^ (u32[i] & 0xffffff), 0x01000193);
+  return (a >>> 0).toString(16).padStart(8, "0");
+}
+
+type BackendClocks = { stageMs: { upload: number; temporal: number; grade: number; capture: number }; syncProfile: boolean };
+
 function playerHelp(info: ClipInfo | null): string | null {
   if (!info) return null;
   if (info.canDecode) return `This browser decodes the video (${parseCodec(info.codecString).label ?? "codec"}) but its player can't open this file. Try re-saving it as MP4 (e.g. export from Photos), or open it in Safari or Chrome.`;
