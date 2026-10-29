@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
-  appleLogDecode, detectFootage, PEAK, FOOTAGE_GLSL, footageToSdr, hlgInverseOetf, parseCodec, pqEotf, resolveFootage, sdrEncode, shoulder,
+  appleLogDecode, detectFootage, PEAK, FOOTAGE_GLSL, FOOTAGE_MODE, footageToSdr, gplogDecode, gplogEncode, hlgInverseOetf, parseCodec, pqEotf, resolveFootage, sdrEncode, shoulder,
 } from "../src/pipeline/footage.ts";
 import { sanitizeColorSpace } from "../../../packages/shared/src/videoframe-colorspace.ts";
 import { djiColourMode, goproColourProfile, protoVarintAt } from "../src/pipeline/camera.ts";
@@ -88,8 +88,49 @@ for (const [x, y] of [[0.25, 0.192473], [0.5, 0.487409], [0.75, 0.774289], [0.93
 // D-Log M saturates: a log-flat red becomes a clearly red Rec.709 colour.
 const dr = footageToSdr("dlogm", [0.55, 0.4, 0.38]);
 assert.ok(dr[0] - dr[1] > 0.55 - 0.4, "D-Log M expands chroma");
+// GP-Log transfer: base-400 log. GoPro's "MAX2 GP-Log to Rec.709 Technical" LUT grey axis is
+// exactly gplogDecode then the BT.709 OETF (samples of the published table).
+const oetf709 = (l: number) => (l < 0.018 ? 4.5 * l : 1.099 * Math.pow(l, 0.45) - 0.099);
+for (const [x, y] of [[0.125, 0.01257], [0.25, 0.03916], [0.375, 0.09501], [0.5, 0.18025], [0.625, 0.29702], [0.75, 0.4589], [0.875, 0.68458], [1, 1]] as const) {
+  near(oetf709(gplogDecode(x)), y, 6e-5, `GP-Log technical grey ${x}`);
+}
+for (const l of [0, 0.001, 0.0476, 0.18, 1]) near(gplogDecode(gplogEncode(l)), l, 1e-12, `GP-Log round trip ${l}`);
+near(gplogDecode(0.5), 19 / 399, 1e-12, "GP-Log code 0.5 = 1/20 of clip, 4.3 stops under");
+// GP-Log rendering follows GoPro's HERO12 (fw 2.00+) / HERO13 Creative LUT: grey axis …
+for (const [x, y] of [[0.125, 0.05199], [0.25, 0.1021], [0.375, 0.20171], [0.5, 0.36608], [0.625, 0.55236], [0.75, 0.7453], [0.875, 0.88699], [1, 0.9995]] as const) {
+  const g = grey("gplog", x);
+  near(g[1], y, 0.005, `GP-Log neutral ${x}`);
+  near(g[0], g[2], 1e-9, `GP-Log grey stays grey ${x}`);
+}
+// … and natural colours (nodes of the published 33³ table, code → Rec.709).
+const GPLOG_NODES: [[number, number, number], [number, number, number]][] = [
+  [[0.4375, 0.5, 0.5625], [0.17084, 0.34665, 0.5465]], [[0.375, 0.5, 0.59375], [0, 0.33114, 0.65234]],
+  [[0.3125, 0.46875, 0.5625], [0, 0.30245, 0.62846]], [[0.5, 0.46875, 0.40625], [0.40789, 0.33581, 0.16667]],
+  [[0.5625, 0.46875, 0.4375], [0.55755, 0.30097, 0.23987]], [[0.625, 0.5, 0.46875], [0.68817, 0.32889, 0.28608]],
+  [[0.40625, 0.53125, 0.46875], [0.0088, 0.48998, 0.2238]], [[0.34375, 0.4375, 0.53125], [0.04266, 0.24076, 0.51438]],
+  [[0.53125, 0.53125, 0.40625], [0.43502, 0.45388, 0.05826]], [[0.46875, 0.40625, 0.5], [0.32561, 0.16324, 0.49929]],
+  [[0.6875, 0.625, 0.5625], [0.72914, 0.5595, 0.368]], [[0.25, 0.34375, 0.4375], [0.01573, 0.14617, 0.36127]],
+  [[0.59375, 0.5625, 0.5], [0.54975, 0.47211, 0.27897]], [[0.375, 0.5625, 0.625], [0, 0.4826, 0.74824]],
+  [[0.28125, 0.375, 0.375], [0.03549, 0.22136, 0.21694]], [[0.65625, 0.53125, 0.53125], [0.74397, 0.35351, 0.41732]],
+];
+{
+  let se = 0, max = 0;
+  for (const [inp, want] of GPLOG_NODES) {
+    const got = footageToSdr("gplog", inp);
+    for (let c = 0; c < 3; c++) {
+      se += (got[c] - want[c]) ** 2;
+      max = Math.max(max, Math.abs(got[c] - want[c]));
+    }
+  }
+  const rms = Math.sqrt(se / GPLOG_NODES.length / 3);
+  assert.ok(rms < 0.02 && max < 0.07, `GP-Log natural colours vs GoPro LUT: rms ${rms.toFixed(4)}, max ${max.toFixed(4)}`);
+}
+// GP-Log is flat: the conversion expands chroma, a log-flat blue-green becomes clearly blue-green.
+const gw = footageToSdr("gplog", [0.42, 0.5, 0.55]);
+assert.ok(gw[2] - gw[0] > 0.55 - 0.42, "GP-Log expands chroma");
+
 // Every profile maps into 0..1 and is monotone on neutrals.
-for (const p of ["standard", "wide", "hlg", "pq", "dlogm", "applelog"] as const) {
+for (const p of ["standard", "wide", "hlg", "pq", "dlogm", "applelog", "gplog"] as const) {
   let prev = -1;
   for (let i = 0; i <= 64; i++) {
     const v = grey(p, i / 64)[1];
@@ -121,6 +162,29 @@ if (lutPath && fs.existsSync(lutPath)) {
   console.log(`D-Log M vs DJI LUT (natural colours): rms ${rms.toFixed(4)}, max ${max.toFixed(4)}`);
   assert.ok(rms < 0.02 && max < 0.08);
 }
+// Optional: GPLOG_LUT=/path/to/"GPLOG_Creative_EV0.cube" (HERO12 fw 2.00+ / HERO13, from GoPro's
+// "GoPro Log Profiles LUT Downloads" article; not shipped) checks every natural-colour node.
+const gplogLut = process.env.GPLOG_LUT;
+if (gplogLut && fs.existsSync(gplogLut)) {
+  const rows = fs.readFileSync(gplogLut, "utf8").split("\n").map((l) => l.trim()).filter((l) => /^[\d.-]/.test(l)).map((l) => l.split(/\s+/).map(Number)).filter((r) => r.length === 3);
+  const n = Math.round(Math.cbrt(rows.length));
+  let se = 0, cnt = 0, max = 0;
+  for (let b = 0; b < n; b++) for (let g = 0; g < n; g++) for (let r = 0; r < n; r++) {
+    const inp: [number, number, number] = [r / (n - 1), g / (n - 1), b / (n - 1)];
+    if (Math.max(...inp) - Math.min(...inp) >= 0.25 || Math.max(...inp) >= 0.8) continue;
+    const want = rows[(b * n + g) * n + r];
+    const got = footageToSdr("gplog", inp);
+    for (let c = 0; c < 3; c++) {
+      const d = Math.abs(got[c] - want[c]);
+      se += d * d;
+      cnt++;
+      max = Math.max(max, d);
+    }
+  }
+  const rms = Math.sqrt(se / cnt);
+  console.log(`GP-Log vs GoPro LUT (natural colours): rms ${rms.toFixed(4)}, max ${max.toFixed(4)}`);
+  assert.ok(rms < 0.02 && max < 0.16);
+}
 
 // Vendor colour modes. DJI djmd: StreamMeta(2) → ColorMode(4) → color_mode(1) = 19 (D-Log M), as in Osmo Action 5 Pro files.
 const djmd = Uint8Array.from([0x0a, 0x03, 0x61, 0x62, 0x63, 0x12, 0x09, 0x1a, 0x03, 0x28, 0x0a, 0x30, 0x22, 0x02, 0x08, 0x13, 0x1a, 0x00]);
@@ -132,6 +196,11 @@ assert.equal(djiColourMode(Uint8Array.from([0xff, 0xff])), null, "garbage");
 const gpmf = new Uint8Array(40);
 gpmf.set([0x50, 0x54, 0x43, 0x4c, 0x63, 0x06, 0x00, 0x01, ...new TextEncoder().encode("GP-LOG")], 10);
 assert.equal(goproColourProfile(gpmf), "GP-LOG");
+const goproLog = detectFootage({ codec: "hvc1.2.4.L153.B0", tags: { primaries: "bt709", transfer: "bt709" }, brand: "GoPro", vendorText: `GoPro colour profile: ${goproColourProfile(gpmf)}` });
+assert.equal(goproLog.detected, "gplog", "GoPro PTCL GP-LOG");
+assert.ok(goproLog.evidence.some((e) => /GP-Log/.test(e)));
+assert.equal(resolveFootage("auto", goproLog), "gplog");
+assert.equal(detectFootage({ codec: "hvc1.2.4.L153.B0", tags: null, vendorText: "GP-Log" }).detected, "gplog");
 assert.equal(detectFootage({ codec: "hvc1.2.4.L153.B0", tags: { primaries: "bt709" }, brand: "DJI", vendorText: "DJI colour mode: Normal" }).detected, "standard", "10-bit Normal stays Rec.709");
 assert.equal(detectFootage({ codec: "hvc1.2.4.L153.B0", tags: { primaries: "bt709" }, brand: "DJI", vendorText: "DJI colour mode: D-Log M" }).detected, "dlogm");
 assert.equal(detectFootage({ codec: "hvc1.2.4.L153.B0", tags: { primaries: "bt709" }, brand: "GoPro", vendorText: "GoPro colour profile: FLAT" }).detected, "standard");
@@ -144,5 +213,6 @@ assert.deepEqual(sanitizeColorSpace(null), { primaries: null, transfer: null, ma
 // The GLSL twin carries the same constants (compiled and compared on a GPU by scripts in the scratchpad).
 assert.ok(FOOTAGE_GLSL.includes("vec3 footageToSdr(vec3 s)"));
 assert.ok(!/NaN|undefined/.test(FOOTAGE_GLSL), "no unformatted constants in the shader");
+assert.ok(FOOTAGE_GLSL.includes(`u_footage == ${FOOTAGE_MODE.gplog}) return gplogToSdr(s)`), "GP-Log has a shader branch");
 
 console.log("footage tests passed");
