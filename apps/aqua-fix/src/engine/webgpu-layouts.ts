@@ -20,4 +20,7 @@ export const WEBGPU_LAYOUTS = {
   downExt: { 0: "uniform", 1: "sampler", 2: "external" },
   flow: { 0: "unfilterable", 1: "unfilterable" },
   field: { 0: "uniform", ...DATA, 6: "unfilterable", 7: "unfilterable", 8: "unfilterable" },
+  /** Compare wipe: params · sampler · before picture · graded frame (read with textureLoad). */
+  composite: { 0: "uniform", 1: "sampler", 2: "texture", 3: "texture" },
+  compositeExt: { 0: "uniform", 1: "sampler", 2: "external", 3: "texture" },
 } as const satisfies Record<string, LayoutSpec>;
