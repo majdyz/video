@@ -30,3 +30,6 @@ apps/*/dev
 apps/aqua-fix/dev/seg/*.jpg
 apps/aqua-fix/dev/seg/*.tflite
 .claude/
+
+# eval scripts
+__pycache__/

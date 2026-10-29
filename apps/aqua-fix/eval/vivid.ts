@@ -30,7 +30,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.ts";
 import { applyGrade } from "../src/engine/apply.ts";
-import { DEFAULT_SETTINGS, type FrameAnalysis, type UserSettings } from "../src/engine/params.ts";
+import { DEFAULT_SETTINGS, vividAmountOf, type FrameAnalysis, type UserSettings } from "../src/engine/params.ts";
 import { ClipSim } from "./clip-sim.ts";
 import { deltaE00, srgb8ToLab } from "./colour-metrics.ts";
 
@@ -117,7 +117,7 @@ for (const c of list) {
     auto: { hp: 0, flick: 0, tAbs: 0, crawl: 0, newEdge: 0, violet: 0, pink: 0, redClip: 0, shadowL: 0, shadowN: 0 },
     vivid: { hp: 0, flick: 0, tAbs: 0, crawl: 0, newEdge: 0, violet: 0, pink: 0, redClip: 0, shadowL: 0, shadowN: 0 },
   };
-  let srcFlick = 0, srcTAbs = 0, pairs = 0, frames = 0, edgeVsAuto = 0, dEva = 0, dEvaN = 0;
+  let srcFlick = 0, srcTAbs = 0, pairs = 0, frames = 0, edgeVsAuto = 0, dEva = 0, dEvaN = 0, amount = NaN;
   const waterHue: number[] = [];
   const trk: Record<"src" | "auto" | "vivid", [number, number, number][]> = { src: [], auto: [], vivid: [] };
   let prev: { src: Lab; auto: Lab; vivid: Lab; cdA: Float32Array; cdV: Float32Array; hS: Float32Array; hA: Float32Array; hV: Float32Array } | null = null;
@@ -199,6 +199,7 @@ for (const c of list) {
       for (const [k, p] of Object.entries(px)) await sharp(Buffer.from(p.buffer, p.byteOffset, p.byteLength), { raw: { width: BW, height: BH, channels: 4 } }).png().toFile(path.join(outDir, `${c.id}-${k}-big.png`));
     }
     if (f === mid) {
+      amount = vividAmountOf(x.params, SETTINGS.vivid);
       for (const [k, px] of [["src", fulls[f]], ["auto", outs.auto], ["vivid", outs.vivid]] as const) {
         await sharp(Buffer.from(px.buffer, px.byteOffset, px.byteLength), { raw: { width: GW, height: GH, channels: 4 } }).png().toFile(path.join(outDir, `${c.id}-${k}.png`));
       }
@@ -211,7 +212,7 @@ for (const c of list) {
     return { hpRatio: +(a.hp / Math.max(1e-6, srcHp)).toFixed(3), flick: +(a.flick / P).toFixed(3), tRatio: +((a.tAbs / P) / Math.max(1e-6, srcTAbs / P)).toFixed(3), crawl: +(a.crawl / P).toFixed(3), newEdgePct: +((100 * a.newEdge) / F).toFixed(3), violetPct: +((100 * a.violet) / F).toFixed(3), pinkPct: +((100 * a.pink) / F).toFixed(3), redClipPct: +((100 * a.redClip) / F).toFixed(4), shadowL: +(a.shadowL / Math.max(1, a.shadowN)).toFixed(2) };
   };
   const r = {
-    id: c.id, category: c.category, fps, frames, w: GW, h: GH,
+    id: c.id, category: c.category, fps, frames, w: GW, h: GH, vividAmount: +amount.toFixed(3),
     srcFlick: +(srcFlick / P).toFixed(3),
     auto: sum("auto"), vivid: sum("vivid"),
     vividEdgeVsAutoPct: +((100 * edgeVsAuto) / F).toFixed(3),

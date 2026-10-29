@@ -4,7 +4,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, boostParams, vividAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, boostParams, vividAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -277,17 +277,17 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // water reads peach by simultaneous contrast.
   // Green water (red.ts): the cast the balance could not remove goes to a muted blue-grey.
   [a, b] = greenNeutral(L, a, b, greenWeight(p) * (1 - RED.gnObjKeep * conf));
-  const tN = objectNeutral(L, a, b, r0, g0, b0, onFar, objectWeight(subj), objectNeutralOf(p));
+  // Engine-mask weight, softened where the subject's colour fades into the water's (grade-shader toneWeight).
+  const tN = objectNeutral(L, a, b, r0, g0, b0, onFar, objectWeight(subj) * (SUBJECT_CLEAR.edgeFloor + (1 - SUBJECT_CLEAR.edgeFloor) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)), objectNeutralOf(p));
   // In open blue water the person detector also fires on sharks and big
   // fish: skin colour only where the source has red left to be skin.
   const personS = person * (1 - objectNeutralOf(p) * redDeficit(r0, g0, b0));
   scale *= warmClamp(a, b, r0, g0, b0, onFar, personS, objectNeutralOf(p));
   const [, vla, vlb] = linearToOklab(p.veilColor[0], p.veilColor[1], p.veilColor[2]);
   const vln = Math.hypot(vla, vlb) || 1;
-  const na = a * scale + ((vla / vln) * OBJECT_NEUTRAL.silver - a * scale) * tN;
-  const nb = b * scale + ((vlb / vln) * OBJECT_NEUTRAL.silver - b * scale) * tN;
-  // Subjects in open water also step forward a little in lightness.
-  const Ls = L + objectLift(L, objectWeight(subj), objectNeutralOf(p));
+  const [na, nb] = clearCast(a * scale, b * scale, vla / vln, vlb / vln, tN / OBJECT_NEUTRAL.mix);
+  // Lightness stays as graded: shading, counter-shading and highlights are the subject's own.
+  const Ls = L;
   const skinned = skinTone(Ls, na, nb, personS);
   // Water-likeness for the look comes from the pixel's own hue (the mask or
   // the water/object split would cut one garment into differently treated parts).
@@ -332,6 +332,16 @@ function smoothstep(e0: number, e1: number, x: number): number {
  * (L, a, b) = corrected Oklab; r, g, bl = linear source; srcFar = source hue
  * farness from the veil (hueFar); conf = object confidence.
  */
+/** Subject clearing (SUBJECT_CLEAR; mirrors grade-shader clearCast): part of the water's cast out of the chroma. */
+export function clearCast(a: number, b: number, vha: number, vhb: number, g: number): [number, number] {
+  const C = Math.hypot(a, b);
+  if (g <= 0 || C < 1e-6) return [a, b];
+  // The cast is the chroma along the water's hue: shrink the chroma by that share, bounded, without turning the hue.
+  const pc = Math.max(0, a * vha + b * vhb);
+  const c1 = Math.max(0, (C - g * Math.min(SUBJECT_CLEAR.k * pc, SUBJECT_CLEAR.cMax)) * (1 - g * SUBJECT_CLEAR.desat));
+  return [(a * c1) / C, (b * c1) / C];
+}
+
 export function objectNeutral(L: number, a: number, b: number, r: number, g: number, bl: number, srcFar: number, conf: number, strength: number): number {
   if (strength <= 0 || conf <= 0) return 0;
   const C = Math.hypot(a, b);
@@ -440,8 +450,7 @@ export function vividLook(L: number, a: number, b: number, v: number, g: number)
   const h = Math.atan2(b, a);
   const hh = h < 0 ? h + 2 * Math.PI : h;
   const d = h - V.target - 2 * Math.PI * Math.round((h - V.target) / (2 * Math.PI));
-  const cl = V.cLift * smoothstep(V.cLiftLo, V.cLiftHi, L);
-  const wC = smoothstep(V.cLo + cl, V.cHi + cl, C) * smoothstep(V.lLo, V.lHi, L);
+  const wC = smoothstep(V.cLo, V.cHi, C) * smoothstep(V.lLo, V.lHi, L);
   const hiKeep = 1 - smoothstep(V.bandHi0, V.bandHi1, hh);
   // Clear water: pull toward the target over the cyan band (vivid violets keep their hue).
   const band = smoothstep(V.bandLo0, V.bandLo1, hh) * hiKeep * (1 - smoothstep(V.violetCLo, V.violetCHi, C) * smoothstep(V.target, V.bandHi1, hh));
@@ -450,16 +459,25 @@ export function vividLook(L: number, a: number, b: number, v: number, g: number)
   const gBand = gLo * (1 - smoothstep(V.greenTop0, V.greenTop1, hh));
   const h2 = h + ((1 - g) * band * V.pull * -d + g * gBand * V.greenShift) * wC * v;
   // Darker, slightly richer water: by hue and (gently) by chroma.
-  const w = ((1 - g) * band + g * gLo * hiKeep) * smoothstep(V.darkCLo, V.darkCHi, C) * v;
+  const water = (1 - g) * band + g * gLo * hiKeep;
+  // Darkening / chroma gain grow with the square of a wide chroma ramp: whitish water (the sun opening,
+  // sunbeams, the surface) is left alone, saturated water gets the full look, and the tone curve stays
+  // compressive in L (slope ≤ 1: bright water never sharpens into new edges).
+  const cw = smoothstep(V.darkCLo, V.darkCHi, C);
+  const w = water * cw * cw * v;
   C *= 1 + V.chroma * w * (1 - g);
   let L2 = L * (1 - (V.dark + (V.darkGreen - V.dark) * g) * w * smoothstep(V.darkLLo, V.darkLHi, L));
   // Shadow toe: blacks stay black.
   L2 *= 1 - V.blackK * v * (1 - smoothstep(V.blackLo, V.blackHi, L2));
-  // Dark-area chroma bound (violet / green speckle in dark rock) and neutral near-whites.
+  // Dark-area chroma bound (violet / green speckle in dark rock).
   const cD = V.shadowC0 + V.shadowC1 * smoothstep(V.shadowLLo, V.shadowLHi, L2);
   if (C > cD) C -= (C - cD) * (1 - V.shadowKeep) * v * (1 - smoothstep(V.shadowFadeLo, V.shadowFadeHi, L2));
-  C *= 1 - V.whiteMix * v * smoothstep(V.whiteLLo, V.whiteLHi, L2) * (1 - smoothstep(V.whiteCLo, V.whiteCHi, C));
-  return [L2, C * Math.cos(h2), C * Math.sin(h2)];
+  // Sun / surface highlight: bright water lifted gently toward a warm white.
+  const lw = v * (1 + (water - 1) * smoothstep(0, V.liftNeutralC, C)) * smoothstep(V.liftLLo, 1, L);
+  L2 += V.lift * lw * (1 - L2);
+  C *= 1 - V.hiDesat * lw;
+  const wt = V.warmC * lw;
+  return [L2, C * Math.cos(h2) + wt * Math.cos(V.warmHue), C * Math.sin(h2) + wt * Math.sin(V.warmHue)];
 }
 
 /** Near-white pink guard (mirrors the shaders; see HIGHLIGHT_PINK in params.ts). Returns (a, b). */

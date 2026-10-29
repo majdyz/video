@@ -1,6 +1,6 @@
 import type { WarpUniforms } from "./fisheye";
 
-const VS = `#version 300 es
+export const WARP_GLSL_VS = `#version 300 es
 out vec2 uv;
 void main() {
   vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
@@ -102,7 +102,7 @@ export class GlWarper {
       return sh;
     };
     const program = gl.createProgram()!;
-    gl.attachShader(program, compile(gl.VERTEX_SHADER, VS));
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, WARP_GLSL_VS));
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, WARP_GLSL_FS));
     gl.linkProgram(program);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`GLSL link: ${gl.getProgramInfoLog(program)}`);

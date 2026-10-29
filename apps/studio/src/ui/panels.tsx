@@ -12,6 +12,7 @@ import {
   applyStabPreset,
   profileAspectMismatch,
   profileDefaults,
+  saveVivid,
   type ToolId,
   type ToolsState,
 } from "../pipeline/tools.ts";
@@ -93,6 +94,14 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
           <>
             <Chips label="Scene" items={COLOUR_PRESETS} value={tools.colour.preset} disabled={disabled}
               onChange={(id) => setTools((t) => ({ ...t, colour: { ...t.colour, preset: id, enabled: true } }))} />
+            <label className={`lookrow${tools.colour.vivid ? " is-on" : ""}`}>
+              <span className="lookrow__text">
+                <span className="lookrow__name">Vivid</span>
+                <small>{tools.colour.vivid ? "Deep blue water, rich blacks, bright sun" : "Off: natural correction only"}</small>
+              </span>
+              <Switch checked={!!tools.colour.vivid} label="Vivid" disabled={disabled}
+                onChange={(v) => { saveVivid(v); setTools((t) => ({ ...t, colour: { ...t.colour, vivid: v, enabled: true } })); }} />
+            </label>
             <Slider emphasis label="Strength" value={tools.colour.strength} min={0} max={100} defaultValue={DEFAULT_COLOUR.strength} disabled={disabled}
               onChange={(v) => setTools((t) => ({ ...t, colour: { ...t.colour, strength: v, enabled: true } }))} />
           </>
@@ -148,7 +157,12 @@ function MotionLogField({ name, onChange }: { name: string | null; onChange: (fi
 
 /** Everything that isn't the main Strength. */
 /** Subject pop selection controls (App owns the select mode; the studio keeps the corrections). */
-export type SubjectControls = { corrections: number; onReset: () => void };
+export type SubjectControls = {
+  corrections: number;
+  onReset: () => void;
+  /** AI subject detection (beta): the per-device toggle and its inline status (download / following progress). */
+  ai?: { on: boolean; status: string | null; onToggle: (on: boolean) => void };
+};
 
 export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, subjects }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus; onMotionLog?: (file: File | null) => void; subjects?: SubjectControls }) {
   if (tool === "colour") {
@@ -156,10 +170,6 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, sub
     const up = (patch: Partial<typeof c>) => setTools((t) => ({ ...t, colour: { ...t.colour, ...patch } }));
     return (
       <div className="adv">
-        <div className="adv__field adv__field--row">
-          <span className="adv__label">Vivid <small>Deep, muted blue water, darker water, black shadows; sand, skin and reef stay natural</small></span>
-          <Switch checked={!!c.vivid} onChange={(v) => up({ vivid: v })} label="Vivid" />
-        </div>
         <Slider label="Deep-blue look" value={c.look * 100} min={0} max={100} defaultValue={0} onChange={(v) => up({ look: v / 100 })} />
         <p className="adv__hint">A creative grade on top of the correction: darker, water tinted toward deep blue, subjects keep their colour.</p>
         <Slider label="Saturation" value={c.saturation * 100} min={0} max={200} defaultValue={100} format={(v) => `${Math.round(v)}%`} onChange={(v) => up({ saturation: v / 100 })} />
@@ -179,8 +189,14 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, sub
             </span>
           </div>
         )}
+        {subjectPopVisible() && c.subjectPop && subjects?.ai && (
+          <div className="adv__field adv__field--row">
+            <span className="adv__label">AI subject detection<span className="adv__beta">Beta</span> <small role="status" aria-live="polite">{subjects.ai.status ?? "Follows the subjects you tap with an on-device model (33 MB download once)"}</small></span>
+            <Switch checked={subjects.ai.on} onChange={subjects.ai.onToggle} label="AI subject detection" />
+          </div>
+        )}
         <p className="adv__hint">Strength 50 is the engine's own estimate for this clip; above it the correction is pushed harder (redder reds, whiter sand) at some cost to fidelity.</p>
-        <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, colour: { ...DEFAULT_COLOUR, enabled: t.colour.enabled } }))}>Reset colour</button>
+        <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, colour: { ...DEFAULT_COLOUR, enabled: t.colour.enabled, vivid: t.colour.vivid } }))}>Reset colour</button>
       </div>
     );
   }

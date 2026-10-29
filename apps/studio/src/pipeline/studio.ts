@@ -20,6 +20,8 @@ import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validat
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
 import { pickAnimal, type SubjectOverride, type SubjectPathPoint, type SubjectSelection } from "../../../aqua-fix/src/engine/animals.ts";
 import { toggleOverride } from "./subjects.ts";
+import { autoObjects, outlineSelection, segPopsAt, SubjectSeg, type SegStatus } from "./seg/studio-seg.ts";
+import type { SegOverlay } from "../../../aqua-fix/src/engine/seg-overlay.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometryRenderOptions, type GeometrySource } from "./geometry.ts";
@@ -180,6 +182,10 @@ export type Snapshot = {
   subjectTracking: number | null;
   /** A short note about the latest tap (e.g. nothing to follow there); null when none. */
   subjectNote: string | null;
+  /** AI subject detection (beta, Subject pop): toggle, model download and ML track pass (seg/studio-seg.ts). */
+  seg: SegStatus;
+  /** Subject taps that can be undone (newest last). */
+  subjectUndo: number;
 };
 
 const NO_SEGMENTS: Segments<ColourLook> = { cuts: [], looks: [] };
@@ -250,6 +256,8 @@ export class Studio {
     subjectOverrides: [],
     subjectTracking: null,
     subjectNote: null,
+    seg: { on: false, phase: "off", progress: null, note: null },
+    subjectUndo: 0,
   };
   private listeners = new Set<() => void>();
   private frameListeners = new Set<(b: ImageBitmap) => void>();
@@ -391,7 +399,9 @@ export class Studio {
     try {
       const mod = await loadColour();
       this.colour = mod;
-      const engine = await mod.GradeEngine.create(canvas, (e) => this.set({ error: e.message }), !q.has("webgl2"));
+      // WebGL2 by default: the WebGPU path rendered black on iPhone Safari (29 Oct) and can't be checked on the
+      // devbox. `?webgpu=1` opts back in while it's being fixed.
+      const engine = await mod.GradeEngine.create(canvas, (e) => this.set({ error: e.message }), q.get("webgpu") === "1");
       engine.settings = this.colourFor(this.tools.colour);
       engine.setSubjectOverrides(this.snap.subjectOverrides);
       engine.personEnabled = q.get("person") !== "0";
@@ -472,6 +482,12 @@ export class Studio {
     return this.engine?.subjectSelection() ?? null;
   }
 
+  /** What the tap outlines draw: with AI on, the ML mask at the paused frame over the engine's other animals. */
+  outlineSelection(): SubjectSelection | null {
+    const t = this.snap.kind === "video" ? this.video?.currentTime ?? 0 : 0;
+    return outlineSelection(this.segOverlay(t), this.subjectSelection());
+  }
+
   /**
    * A tap at upright frame position (u, v) (0..1): toggles the animal there out of / into the Subject pop selection,
    * or (on anything the engine did not pick out) asks for a new subject grown from the tap. Playback pauses first
@@ -486,8 +502,37 @@ export class Studio {
       await this.refreshSubjects();
     }
     const t = this.snap.kind === "video" ? this.video?.currentTime ?? 0 : 0;
-    const { list, follow, id } = toggleOverride(this.snap.subjectOverrides, this.subjectSelection(), u, v, t);
-    this.set({ subjectNote: null });
+    const before = this.snap.subjectOverrides;
+    const { list, follow, id } = toggleOverride(before, this.subjectSelection(), u, v, t);
+    this.subjectUndo.push({ overrides: before, ai: false });
+    // AI on (video): the tap goes to the background session (session.ts), followed both ways from this frame.
+    if (this.snap.kind === "video" && this.seg.live) {
+      // The ML decides, whatever the engine's own map says there: a tap on what it pops takes that out, a tap
+      // anywhere else (a missed fin inside the engine's animal, a second animal) adds it.
+      const pops = segPopsAt(this.segOverlay(t), u, v);
+      const action = pops ? "exclude" : "include";
+      if (action === "exclude" && follow >= 0 && list[follow].action === "include") list[follow] = { ...list[follow], action: "exclude" };
+      this.subjectUndo[this.subjectUndo.length - 1].ai = true;
+      this.set({ subjectNote: null, subjectUndo: this.subjectUndo.length });
+      // An include leaves the engine's own corrections alone (its toggle there would have taken the animal out).
+      if (action === "exclude") this.setSubjectOverrides(list);
+      if (action === "include") {
+        await this.seg.include(t, u, v, this.engine?.personBoxesNow() ?? []);
+        this.set({ subjectNote: "Adding it: AI is following it both ways from here" });
+      } else {
+        const r = await this.seg.exclude(t, u, v);
+        this.set({ subjectNote: r === "removed" ? "Taken out" : "Taking that part out" });
+        // A whole subject out: the engine's own selection drops the animal along its path too (else it would tone
+        // it where the ML no longer covers it). A part out leaves the engine's animal in.
+        if (r !== "removed") this.setSubjectOverrides(before);
+        else if (follow >= 0) {
+          const run = this.followSubject(follow).finally(() => { if (this.tracking === run) this.tracking = null; });
+          this.tracking = run;
+        }
+      }
+      return id;
+    }
+    this.set({ subjectNote: null, subjectUndo: this.subjectUndo.length });
     this.setSubjectOverrides(list);
     if (follow >= 0) {
       if (this.snap.kind === "video") {
@@ -504,6 +549,20 @@ export class Studio {
       }
     }
     return id;
+  }
+
+  /** Taps so far (oldest first): the corrections before each, and whether it went to the AI session. */
+  private subjectUndo: { overrides: SubjectOverride[]; ai: boolean }[] = [];
+
+  /** Undoes the last subject tap: the corrections go back, and the AI session drops (or restores) what it changed. */
+  async undoSubjectTap(): Promise<void> {
+    const last = this.subjectUndo.pop();
+    if (!last) return;
+    this.setSubjectOverrides(last.overrides);
+    // The bar updates now; the session (busy on a step) takes the undo when it can.
+    this.set({ subjectNote: "Undone", subjectUndo: this.subjectUndo.length });
+    if (last.ai) await this.seg.undo();
+    if (this.paused()) void this.refreshSubjects();
   }
 
   /**
@@ -563,9 +622,10 @@ export class Studio {
         const i = list.indexOf(o0);
         if (i >= 0) {
           if (path.length) list[i] = { ...o0, path };
-          else if (include) list.splice(i, 1);
+          // AI on: the ML follows it even where the engine finds nothing to grow (a close-up, a blue-on-blue animal).
+          else if (include && !this.seg.on) list.splice(i, 1);
         }
-        this.set({ subjectTracking: null, subjectNote: !path.length && include ? (this.openWater ? "Nothing to follow there" : "Subject pop works in open blue water") : null });
+        this.set({ subjectTracking: null, subjectNote: !path.length && include && !this.seg.on ? (this.openWater ? "Nothing to follow there" : "Subject pop works in open blue water") : null });
         console.info(`[subjects] ${o0.action} at ${o0.t.toFixed(2)} s: followed ${path.length ? `${path[0].t.toFixed(2)}–${path[path.length - 1].t.toFixed(2)} s (${path.length} samples)` : "nothing"}`);
         this.engine?.setSubjectOverrides(list);
         this.set({ subjectOverrides: list });
@@ -575,6 +635,74 @@ export class Studio {
           await this.refreshSubjects();
         }
       }
+    }
+  }
+
+  /** AI subject detection toggle (per device; `?seg=ml` forces it on). The model downloads the first time. */
+  setSegEnabled(on: boolean): void {
+    this.seg.setOn(on);
+    // Paused: the frame is analysed afresh first (refreshSubjects starts the pass), so the engine's own choice the
+    // ML follows is this frame's.
+    if (on) { if (this.paused() && this.snap.kind === "video") void this.refreshSubjects(); else this.runSeg(); }
+    else this.repaint();
+  }
+
+  /**
+   * AI subject detection: opens the clip's background session (seg/session.ts: the worker decodes the file itself,
+   * so it runs while the clip plays) and seeds the engine's own subjects once there are some. Cheap to call often.
+   */
+  private runSeg(): void {
+    const v = this.video, file = this.file;
+    if (!this.seg.on || !v || !file || this.snap.kind !== "video" || this.exporting) return;
+    void this.seg.start(file, v.duration || this.snap.duration).then((live) => {
+      if (!live || this.seg.autos || this.file !== file) return;
+      const a = autoObjects(this.subjectSelection(), v.currentTime, this.engine?.personBoxesNow() ?? []);
+      if (a.length) void this.seg.seedAutos(a);
+    });
+  }
+  private segKick = 0;
+
+  /** The ML overlay for the frame at clip time t (null: the engine's own subject masks). */
+  private segOverlay(t: number): SegOverlay | null {
+    const o = this.tools.colour.subjectPop && this.snap.kind === "video" ? this.seg.overlayAt(t) : null;
+    return o && this.geometryActive() ? this.mapSegOverlay(o, t) : o;
+  }
+
+  private segGeo: { r: GeometryRenderer; src: HTMLCanvasElement; read: CanvasRenderingContext2D; t: number; o: SegOverlay; out: SegOverlay } | null = null;
+  /**
+   * The AI masks are made on the upright source frame; with Stabilise / Dewarp on the engine grades the frame after
+   * the geometry pass, so the masks go through the same warp (a small second geometry renderer at mask size).
+   */
+  private mapSegOverlay(o: SegOverlay, t: number): SegOverlay {
+    const info = this.snap.info;
+    if (!info) return o;
+    try {
+      if (!this.segGeo) {
+        const c = document.createElement("canvas"), src = document.createElement("canvas"), rd = document.createElement("canvas");
+        this.segGeo = { r: new GeometryRenderer(c), src, read: rd.getContext("2d", { willReadFrequently: true })!, t: NaN, o, out: o };
+      }
+      const g = this.segGeo;
+      if (g.o === o && g.t === t) return g.out;
+      const w = o.width, h = o.height;
+      g.src.width = w; g.src.height = h;
+      g.r.resize(w, h);
+      g.read.canvas.width = w; g.read.canvas.height = h;
+      const pass = (r: Float32Array, gch: Float32Array | null, b: Float32Array | null): Uint8ClampedArray => {
+        const img = new ImageData(w, h);
+        for (let i = 0; i < w * h; i++) { img.data[i * 4] = r[i] * 255; img.data[i * 4 + 1] = gch ? gch[i] * 255 : 0; img.data[i * 4 + 2] = b ? b[i] * 255 : 0; img.data[i * 4 + 3] = 255; }
+        g.src.getContext("2d")!.putImageData(img, 0, 0);
+        g.r.render(g.src, this.geoParams(t, info.rot), { texCoded: false, split: null, footage: 0, highPrecision: false });
+        g.read.drawImage(g.r.canvas, 0, 0);
+        return g.read.getImageData(0, 0, w, h).data;
+      };
+      const a = pass(o.alpha, o.near, o.depart ?? null);
+      const ex = o.exclude ? pass(o.exclude, null, null) : null;
+      const ch = (d: Uint8ClampedArray, c: number) => { const f = new Float32Array(w * h); for (let i = 0; i < w * h; i++) f[i] = d[i * 4 + c] / 255; return f; };
+      const out: SegOverlay = { width: w, height: h, alpha: ch(a, 0), near: ch(a, 1), depart: o.depart ? ch(a, 2) : null, exclude: ex ? ch(ex, 0) : null };
+      Object.assign(g, { t, o, out });
+      return out;
+    } catch {
+      return o;
     }
   }
 
@@ -591,6 +719,7 @@ export class Studio {
     await e.analyzeNow(true).catch(() => undefined);
     this.openWater = e.openWater();
     this.repaint();
+    if (this.snap.kind === "video" && this.seg.on) this.runSeg();
   }
 
   private pausedTimer = 0;
@@ -598,6 +727,15 @@ export class Studio {
   private openWater = true;
   /** The running Subject pop track pass (an export waits for it). */
   private tracking: Promise<void> | null = null;
+  /** AI subject detection (beta): the ML segmenter's toggle, model and pass; null overlay = the engine's masks. */
+  private seg = (() => {
+    const s = new SubjectSeg(() => this.set({ seg: this.seg.status }));
+    // New AI frames: a paused frame shows them (and its outlines) right away.
+    let last = 0;
+    s.onRejected = () => this.set({ subjectNote: "Nothing found there: tap right on the animal" });
+    s.onFrames = () => { const now = performance.now(); if (now - last > 250 && this.paused()) { last = now; this.repaint(); } };
+    return s;
+  })();
   /**
    * A seek while paused shows a frame the maps were not made for (the last analysis is of another frame: a stale
    * subject map draws a ghost shape): once the seeking settles, the frame is analysed and snapped to.
@@ -614,6 +752,7 @@ export class Studio {
   setSubjectOverrides(list: SubjectOverride[]): void {
     this.set({ subjectOverrides: list });
     this.engine?.setSubjectOverrides(list);
+    if (!this.tracking) this.runSeg();
     this.animateSubjects();
   }
 
@@ -994,6 +1133,9 @@ export class Studio {
 
   private teardown(): void {
     this.gen++;
+    this.seg.reset();
+    this.subjectUndo = [];
+    this.snap = { ...this.snap, subjectUndo: 0 };
     this.previewOn = false;
     this.exportAbort?.abort();
     this.stabAbort?.abort();
@@ -1198,6 +1340,9 @@ export class Studio {
       const changed = this.applyLook(t);
       if (advance) this.engine.tick(t, changed);
       else this.engine.setTime(t);
+      // AI on: the session opens (and seeds the engine's own subjects) whether playing or paused.
+      if (this.seg.on && !this.seg.autos && this.tools.colour.subjectPop && performance.now() - this.segKick > 1000) { this.segKick = performance.now(); this.runSeg(); }
+      this.engine.setSegOverlay(this.segOverlay(t));
       this.engine.render();
     } else if (this.geo) {
       const [w, h] = this.previewSize();
@@ -1766,7 +1911,8 @@ export class Studio {
 
   /** Settings key of the next export (export journal: same clip + same key = resumable). */
   exportKey(): string {
-    return exportSettingsKey(this.tools, this.snap);
+    const seg = this.tools.colour.subjectPop ? this.seg.exportKey() : "";
+    return exportSettingsKey(this.tools, this.snap) + (seg ? `|${seg}` : "");
   }
 
   async exportVideo(req: ExportRequest = {}): Promise<void> {
@@ -1775,6 +1921,7 @@ export class Studio {
     if (!file || !v || !info || this.exporting) return;
     // A tapped subject still being followed: the export waits for its path (it seeks the same video element).
     if (this.tracking) await this.tracking.catch(() => undefined);
+    if (this.seg.pending) await this.seg.pending.catch(() => undefined);
     if (!this.snap.canExport) {
       this.setExp({ state: "error", message: "Saving video isn't supported in this browser: update to the latest Safari or Chrome." });
       return;
@@ -2084,6 +2231,7 @@ export class Studio {
                 prof.add("analysisWait", tp - ta);
                 eng.settings = this.settingsAt(fi.timeSec);
                 eng.tick(fi.timeSec);
+                eng.setSegOverlay(this.segOverlay(fi.timeSec));
                 pending = eng.renderToFrame(rotE, ts, dur);
                 prof.add("render", performance.now() - tp);
               } finally {
@@ -2338,6 +2486,7 @@ export class Studio {
             prof.add("analysisWait", tp - ta);
             eng.settings = this.settingsAt(fi.timeSec);
             eng.tick(fi.timeSec);
+            eng.setSegOverlay(this.segOverlay(fi.timeSec));
             out = await eng.renderToFrame(rotE, ts, dur);
           }
           prof.add("readback", performance.now() - tp);

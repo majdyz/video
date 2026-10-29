@@ -924,6 +924,38 @@ a {
   color: var(--chip-on-ink);
 }
 
+/* ------------------------------------------------------------ look switch (Colour: Vivid) */
+
+.lookrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  min-height: 48px;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: border-color var(--dur-2) var(--ease-out);
+}
+.lookrow.is-on {
+  border-color: var(--line-3);
+}
+.lookrow__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.lookrow__name {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.lookrow small {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
 /* ------------------------------------------------------------ slider */
 
 .slider {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Studio } from "./pipeline/studio.ts";
-import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, lookOf, profileDefaults, type ToolId, type ToolsState } from "./pipeline/tools.ts";
+import { segStatusText } from "./pipeline/seg/studio-seg.ts";
+import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, initialVivid, lookOf, profileDefaults, savedVivid, type ToolId, type ToolsState } from "./pipeline/tools.ts";
 import { BRAND, SAMPLE } from "./brand.ts";
 import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
@@ -31,11 +32,13 @@ const ACCEPT = "video/*,image/*,.mov,.mp4,.m4v,.heic,.heif";
 function initialTools(): ToolsState {
   // Headless/debug presets: ?tools=colour,stabilise,dewarp&profile=…
   const q = new URLSearchParams(location.search);
+  // Vivid: ?vivid=0|1, else the user's saved switch choice, else on.
+  const vivid = initialVivid(location.search, savedVivid());
   const list = q.get("tools");
-  if (!list) return DEFAULT_TOOLS;
+  if (!list) return { ...DEFAULT_TOOLS, colour: { ...DEFAULT_TOOLS.colour, vivid } };
   const on = new Set(list.split(","));
   const t: ToolsState = {
-    colour: { ...DEFAULT_TOOLS.colour, enabled: on.has("colour"), vivid: q.get("vivid") === "1" },
+    colour: { ...DEFAULT_TOOLS.colour, enabled: on.has("colour"), vivid },
     stabilise: { ...DEFAULT_TOOLS.stabilise, enabled: on.has("stabilise") },
     dewarp: { ...DEFAULT_TOOLS.dewarp, enabled: on.has("dewarp") },
   };
@@ -218,6 +221,8 @@ export default function App() {
   const dockOpen = dockPref ?? (aspect !== null && aspect > 1.05);
   const pill = s.busy ?? (tools.stabilise.enabled && !photo && !exporting && (s.stab.state === "analysing" || s.stab.state === "solving")
     ? (s.stab.state === "solving" ? "Planning a smooth path…" : `Analysing motion ${Math.round(s.stab.progress * 100)}%`)
+    // AI subject detection works in the background, also while the clip plays.
+    : s.seg.on && s.seg.phase === "tracking" && !exporting && tools.colour.enabled && tools.colour.subjectPop ? `AI subjects ${Math.round((s.seg.progress ?? 0) * 100)}%`
     : null);
 
   const closeAdv = useCallback(() => setAdvOpen(false), []);
@@ -233,7 +238,7 @@ export default function App() {
     if (selectActive) void studio.refreshSubjects();
   }, [studio, selectActive]);
   useEffect(() => studio.setSplit(holding ? 1 : selectActive ? null : split), [studio, split, holding, selectActive]);
-  const getSelection = useCallback(() => studio.subjectSelection(), [studio]);
+  const getSelection = useCallback(() => studio.outlineSelection(), [studio]);
   const openAdv = () => {
     setAdvOpen(true);
     setDockOpen(true);
@@ -321,8 +326,10 @@ export default function App() {
               <div className="pill" role="status"><span className="pill__dot" aria-hidden="true" />{pill}</div>
             )}
             {selectActive && (
-              <div className="select-bar" role="status">
-                <span>{s.subjectTracking !== null ? `Following it through the clip… ${Math.round(s.subjectTracking * 100)}%` : s.subjectNote ?? "Tap a subject to leave it out or add it"}</span>
+              // Its buttons are never a click "outside" (Undo can re-render away under the click before it bubbles).
+              <div className="select-bar" role="status" onClick={(e) => e.stopPropagation()}>
+                <span>{s.subjectTracking !== null ? `Following it through the clip… ${Math.round(s.subjectTracking * 100)}%` : s.seg.on && (s.seg.phase === "tracking" || s.seg.phase === "download") ? segStatusText(s.seg) : s.subjectNote ?? "Tap a subject to leave it out or add it"}</span>
+                {s.subjectUndo > 0 && <button type="button" className="link-btn" onClick={() => void studio.undoSubjectTap()}>Undo</button>}
                 <button type="button" className="link-btn" onClick={closeAdv}>Done</button>
               </div>
             )}
@@ -385,7 +392,7 @@ export default function App() {
                   <AdvancedDrawer open={advOpen && (wide || dockOpen)} onToggle={() => (advOpen ? setAdvOpen(false) : openAdv())} onClose={closeAdv} disabled={exporting || !ready} id="adv-section"
                     label={`${TOOL_LABEL[tab]} advanced settings${tab === "colour" && segNum ? `, segment ${segNum.index} of ${segNum.count}` : ""}`}>
                     <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined}
-                      subjects={{ corrections: s.subjectOverrides.length, onReset: () => studio.setSubjectOverrides([]) }} />
+                      subjects={{ corrections: s.subjectOverrides.length, onReset: () => studio.setSubjectOverrides([]), ai: { on: s.seg.on, status: segStatusText(s.seg), onToggle: (on) => studio.setSegEnabled(on) } }} />
                     {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
                   </AdvancedDrawer>
                 } />
