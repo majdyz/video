@@ -299,13 +299,13 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const guarded0 = redGuard(looked[0], looked[1], looked[2], a0, bb0, person, onFar);
   const guarded = warmMaterial(looked[0], guarded0[0], guarded0[1], greenWeight(p), onFar);
   // Vivid look (opt-in), then the near-white pink guard (always).
-  // The subject is spared part of Vivid's water treatment (darkening and water chroma) and lifted a little
+  // The subject keeps Vivid's colour but is spared part of its water darkening, and is lifted a little
   // (SUBJECT_POP).
-  const vv = vividLook(looked[0], guarded[0], guarded[1], (s.vivid ?? 0) * (1 - SUBJECT_POP.vividKeep * Math.min(1, popP)), greenWeight(p));
-  const Lv = vv[0];
+  const vv = vividLook(looked[0], guarded[0], guarded[1], s.vivid ?? 0, greenWeight(p));
+  const Lv = popP > 0 ? vividLook(looked[0], guarded[0], guarded[1], (s.vivid ?? 0) * (1 - SUBJECT_POP.vividKeep * Math.min(1, popP)), greenWeight(p))[0] : vv[0];
   const Lp = Lv + SUBJECT_POP.lift * popP * 4 * Lv * Math.max(0, 1 - Lv);
-  // The chroma follows the lift (saturation kept): a lifted blue-grey stays blue-grey.
-  const kc = 1 + SUBJECT_POP.chromaFollow * (Lp / Math.max(1e-4, vv[0]) - 1);
+  // The chroma follows part of the lift: a lifted blue-grey stays blue-grey.
+  const kc = 1 + SUBJECT_POP.chromaFollow * (Lp / Math.max(1e-4, Lv) - 1);
   vv[0] = Lp; vv[1] *= kc; vv[2] *= kc;
   const hn0 = highlightPink(vv[0], vv[1], vv[2]);
   const hn = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * objectNeutralOf(p), 0, 1));

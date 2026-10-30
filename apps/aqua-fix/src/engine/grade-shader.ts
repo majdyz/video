@@ -685,12 +685,13 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   vec3 lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - veilConf, p[16].x, p[16].y);
   lk.yz = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
   // Vivid look (opt-in, p23.z), then the near-white pink guard (always).
-  // The subject is spared part of Vivid's water treatment (its darkening and its water chroma: a subject is not
-  // water), then lifted; the chroma follows the lift (saturation kept): a lifted blue-grey stays blue-grey, not a
-  // grey that reads peach next to saturated water.
-  vec3 lkV = vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w);
-  float Lp = popLift(lkV.x, popP);
-  lk = vec3(Lp, lkV.yz * (1.0 + SP_CHROMA * (Lp / max(1e-4, lkV.x) - 1.0)));
+  // The subject keeps Vivid's colour (its hue pull: sparing it shows a dark tail's purple) but is spared part of
+  // its water darkening, then lifted; the chroma follows part of the lift: a lifted blue-grey stays blue-grey, not
+  // a grey that reads peach next to saturated water, nor a cast belly turned cyan.
+  vec3 lkV = vividLook(lk, p[23].z, p[22].w);
+  float Lv = popP > 0.0 ? vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w).x : lkV.x;
+  float Lp = popLift(Lv, popP);
+  lk = vec3(Lp, lkV.yz * (1.0 + SP_CHROMA * (Lp / max(1e-4, Lv) - 1.0)));
   lk.yz = highlightPink(lk.x, lk.yz);
   lk.yz = popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0));
   vec3 o1 = oklabToLinear(capChroma(lk, cSrc));
@@ -1158,9 +1159,11 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   var lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - veilConf, p[16].x, p[16].y);
   let gab = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
   lk = vec3(lk.x, gab);
-  let lkV = vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w);
-  let Lp = popLift(lkV.x, popP);
-  lk = vec3(Lp, lkV.yz * (1.0 + SP_CHROMA * (Lp / max(1e-4, lkV.x) - 1.0)));
+  let lkV = vividLook(lk, p[23].z, p[22].w);
+  var Lv = lkV.x;
+  if (popP > 0.0) { Lv = vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w).x; }
+  let Lp = popLift(Lv, popP);
+  lk = vec3(Lp, lkV.yz * (1.0 + SP_CHROMA * (Lp / max(1e-4, Lv) - 1.0)));
   lk = vec3(lk.x, highlightPink(lk.x, lk.yz));
   lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0)));
   let o1 = oklabToLinear(capChroma(lk, cSrc));

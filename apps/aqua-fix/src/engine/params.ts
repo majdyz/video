@@ -232,7 +232,7 @@ export const SUBJECT_CLEAR = { k: 0.2, cMax: 0.025, desat: 0.02, edgeFloor: 0.3 
  * inside its contour: grade-shader toneWeight), nothing outside it changes, and none of it invents colour or
  * structure. Subtle on purpose (about +5 L* on a lit subject at the default Strength): the animal steps forward from
  * the water, it is not turned into a white cut-out.
- *   vividKeep  the share of the Vivid look's water treatment (its darkening and water chroma) the subject is spared;
+ *   vividKeep  the share of the Vivid look's water darkening the subject is spared (its colour stays Vivid's);
  *              Vivid tells water by hue, so a blue-grey animal would otherwise darken with the water.
  *   clarity    extra local contrast (the frame's own CLAHE) on the subject: its own texture, more of it.
  *   lift       a midtone lift of the subject's Oklab L (4·L·(1 − L): blacks and highlights stay).
