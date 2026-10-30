@@ -43,6 +43,11 @@ for (let i = 0; i < 14400; i++) {
   await p.waitForTimeout(500);
 }
 console.log(ts(), "pass done", JSON.stringify(await snap()));
+// The ML alpha at a few clip times (for halo.py: the subject's contour on the exported frames). MASKT: times (s).
+for (const t of (process.env.MASKT ?? "1,2,3,4,5").split(",").map(Number)) {
+  const m = await p.evaluate((t) => { const o = window.studio.seg.overlayAt(t); return o ? { w: o.width, h: o.height, a: Array.from(o.alpha, (x) => Math.round(255 * x)) } : null; }, t);
+  if (m) fs.writeFileSync(`${out}/mask-${t}.pgm`, Buffer.concat([Buffer.from(`P5\n${m.w} ${m.h}\n255\n`), Buffer.from(m.a)]));
+}
 const exportTo = async (name) => {
   const dl = p.waitForEvent("download", { timeout: 3600000 }).catch(() => null);
   await p.getByRole("button", { name: /^Export$/ }).first().click(); await p.waitForTimeout(1500);

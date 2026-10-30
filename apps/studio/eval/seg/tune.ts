@@ -11,6 +11,7 @@ import { DEFAULT_SETTINGS, type UserSettings } from "../../../aqua-fix/src/engin
 import { fillTrack, maskSize, type Keyframe } from "../../src/pipeline/seg/track.ts";
 import { bbox, dilate } from "../../src/pipeline/seg/mask.ts";
 import { deltaE, guard, lab, stats } from "./robust.ts";
+import { halo, upsample } from "./halo.ts";
 
 const q = new URLSearchParams(location.search);
 const clip = q.get("clip")!;
@@ -95,7 +96,7 @@ function separation(px: Uint8ClampedArray, mk: Float32Array) {
       c.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(px), W, H), 0, 0);
       await post(name, await new Promise<Blob>((r) => c.toBlob((b) => r(b!), "image/png")));
     };
-    type Row = { f: number; s: number | "off"; de: number; dL: number; Ls: number; Lr: number; lStdRatio?: number; hpRatio?: number; cStdRatio?: number; popDE?: number; stepP999?: number };
+    type Row = { f: number; s: number | "off"; de: number; dL: number; Ls: number; Lr: number; lStdRatio?: number; hpRatio?: number; cStdRatio?: number; popDE?: number; stepP999?: number; halo?: number; ringDL?: number; farDL?: number; liftDL?: number };
     const rows: Row[] = [];
     for (const f of boardf) {
       const t = f / 30;
@@ -107,11 +108,15 @@ function separation(px: Uint8ClampedArray, mk: Float32Array) {
       await engine.analyzeNow(true);
       const m = track.at(t);
       if (!m) continue;
-      const mk = new Float32Array(W * H);
-      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) mk[y * W + x] = m.alpha[Math.min(m.height - 1, Math.floor((y / H) * m.height)) * m.width + Math.min(m.width - 1, Math.floor((x / W) * m.width))];
+      log(`frame ${f} backdrop ${(engine as unknown as { current: { backdrop?: number; calmTone?: number } }).current.backdrop?.toFixed(3)} calm ${(engine as unknown as { current: { calmTone?: number } }).current.calmTone?.toFixed(3)}`);
+      // The mask as the shader reads it (bilinear from the mask grid).
+      const mk = upsample(m.alpha, m.width, m.height, W, H);
       const off = await render(t, { ...base, subjectPop: false }, false);
+      const mpx = new Uint8ClampedArray(W * H * 4);
+      for (let i = 0; i < W * H; i++) { const v = Math.round(255 * mk[i]); mpx[i * 4] = mpx[i * 4 + 1] = mpx[i * 4 + 2] = v; mpx[i * 4 + 3] = 255; }
       await png(`tune-src_${f}`, sc);
       await png(`tune-off_${f}`, off);
+      await png(`tune-mask_${f}`, mpx);
       const so = separation(off, mk);
       if (so) rows.push({ f, s: "off", ...so, ...(guard(sc, off, mk, W, H) ?? {}) });
       for (const st of strengths) {
@@ -120,7 +125,9 @@ function separation(px: Uint8ClampedArray, mk: Float32Array) {
         const sp = separation(on, mk);
         const g = guard(sc, on, mk, W, H);
         const d = stats(deltaE(on, off, W * H), W, H);
-        if (sp) rows.push({ f, s: st, ...sp, ...(g ?? {}), popDE: d.p99, stepP999: d.stepP999 });
+        const hl = halo(on, off, mk, W, H);
+        if (sp) rows.push({ f, s: st, ...sp, ...(g ?? {}), popDE: d.p99, stepP999: d.stepP999, ...(hl ? { halo: hl.halo, ringDL: hl.ringDL, farDL: hl.farDL, liftDL: hl.liftDL } : {}) });
+        if (hl) log(`halo f${f} s${st} ${JSON.stringify(hl)}`);
       }
       log(`frame ${f} done`);
     }
@@ -129,7 +136,7 @@ function separation(px: Uint8ClampedArray, mk: Float32Array) {
     const summary = keys.map((k) => {
       const r = rows.filter((x) => x.s === k);
       const m = (f: (x: Row) => number | undefined) => r.length ? r.reduce((s, x) => s + (f(x) ?? 0), 0) / r.length : 0;
-      return { s: k, sepDE: +m((x) => x.de).toFixed(2), dL: +m((x) => x.dL).toFixed(2), lStdRatio: +m((x) => x.lStdRatio).toFixed(3), hpRatio: +m((x) => x.hpRatio).toFixed(3), cStdRatio: +m((x) => x.cStdRatio).toFixed(3), popP99DE: +m((x) => x.popDE).toFixed(2), stepP999: +m((x) => x.stepP999).toFixed(3) };
+      return { s: k, sepDE: +m((x) => x.de).toFixed(2), dL: +m((x) => x.dL).toFixed(2), lStdRatio: +m((x) => x.lStdRatio).toFixed(3), hpRatio: +m((x) => x.hpRatio).toFixed(3), cStdRatio: +m((x) => x.cStdRatio).toFixed(3), popP99DE: +m((x) => x.popDE).toFixed(2), stepP999: +m((x) => x.stepP999).toFixed(3), halo: +m((x) => x.halo).toFixed(2), ringDL: +m((x) => x.ringDL).toFixed(2), farDL: +m((x) => x.farDL).toFixed(2), liftDL: +m((x) => x.liftDL).toFixed(2) };
     });
     await post("tune", new TextEncoder().encode(JSON.stringify({ clip, summary, rows }, null, 1)));
     log(`TUNE ${JSON.stringify(summary)}`);

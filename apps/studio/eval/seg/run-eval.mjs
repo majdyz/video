@@ -6,7 +6,8 @@
 //   env: SEG_DATA (~/video-data/sam), OUT (<SEG_DATA>/app-eval), COI=0 (single-thread WASM), PORT,
 //        ROBUST=1 (also grade frames through the colour engine: engine vs ML vs corrupted ML masks, robust.ts)
 //        TUNE=1 (Subject pop tuning, tune.ts: no segmentation pass; the masks of an earlier run in MASKS, default
-//        <SEG_DATA>/app-eval-tone, graded Vivid on, pop off vs on at STRENGTHS, frames BOARDF; OUT gets <clip>.tune.json)
+//        <SEG_DATA>/app-eval-tone, graded Vivid on, pop off vs on at STRENGTHS, frames BOARDF; OUT gets <clip>.tune.json;
+//        RES=1280: frames from cache/<clip>_1280.npy, the export's size, instead of the 640 px cache; halo.ts metric)
 // Needs the model files (apps/studio/scripts/seg-models.py) and Playwright in ~/browser.
 import { createServer } from "vite";
 import fs from "node:fs";
@@ -50,7 +51,7 @@ function npy(file) {
 }
 const arrays = new Map();
 const arr = (clip) => {
-  if (!arrays.has(clip)) arrays.set(clip, npy(path.join(DATA, `cache/${clip}_640.npy`)));
+  if (!arrays.has(clip)) arrays.set(clip, npy(path.join(DATA, `cache/${clip}_${process.env.RES ?? 640}.npy`)));
   return arrays.get(clip);
 };
 

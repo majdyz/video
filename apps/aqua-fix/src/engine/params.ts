@@ -221,25 +221,29 @@ export const DETAIL_TAPS: readonly (readonly [number, number, number])[] = [
  * Lightness is left as graded (no lift: shading, counter-shading, highlights stay). The gate is OBJECT_NEUTRAL's
  * (red-starved, lit pixels of the subject). The engine-mask weight softens where the subject's colour fades into
  * the water's (edgeFloor at no departure).
+ * Kept light: the clearing raises the luminance of a blue-cast grey (the same Oklab L with less blue reads lighter),
+ * and a full clearing turns a blue-grey shark into a flat white cut-out.
  */
-export const SUBJECT_CLEAR = { k: 0.4, cMax: 0.05, desat: 0.06, edgeFloor: 0.3 };
+export const SUBJECT_CLEAR = { k: 0.2, cMax: 0.025, desat: 0.02, edgeFloor: 0.3 };
 
 /**
  * Subject pop separation (on top of SUBJECT_CLEAR), per unit of the pop weight P = subject tone weight × pop
- * strength × the user's Strength (uniform p23.w, 1 = default): all of it rides the feathered mask, so the edges
- * stay soft, and none of it invents colour or structure.
- *   vividKeep  the share of the Vivid look's water darkening the subject is spared (its colour stays Vivid's);
+ * strength × the user's Strength (uniform p23.w, 1 = default): all of it stays on the subject (with an AI mask,
+ * inside its contour: grade-shader toneWeight), nothing outside it changes, and none of it invents colour or
+ * structure. Subtle on purpose (about +5 L* on a lit subject at the default Strength): the animal steps forward from
+ * the water, it is not turned into a white cut-out.
+ *   vividKeep  the share of the Vivid look's water treatment (its darkening and water chroma) the subject is spared;
  *              Vivid tells water by hue, so a blue-grey animal would otherwise darken with the water.
  *   clarity    extra local contrast (the frame's own CLAHE) on the subject: its own texture, more of it.
  *   lift       a midtone lift of the subject's Oklab L (4·L·(1 − L): blacks and highlights stay).
- *   ring       ML only: the water right around the subject (the ML near map outside its mask, a wide soft ramp)
- *              darkened by this share of L; only what matches the water (an animal part the mask missed is not).
+ *   chromaFollow  the share of the lift's L ratio the chroma follows (1 = saturation kept; less, so a lifted
+ *              cast-blue belly does not turn more cyan, and the lift reads as clearer water)
  *   darkLo/Hi  the whole pop (clearing included) fades out as the graded lightness (Oklab L) drops through
  *              lo..hi: a dark, low-chroma part (a thresher's long tail) keeps the plain grade's colour.
  *   hueMax     on the subject, the output hue stays within this angle (radians) of the source pixel's own hue:
  *              the tone never rotates a dark blue toward magenta or brown.
  */
-export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.3, lift: 0.09, ring: 0.035, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
+export const SUBJECT_POP = { vividKeep: 0.35, clarity: 0.1, lift: 0.035, chromaFollow: 0.5, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
 
 /** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
 export function popStrengthK(s: { subjectPopStrength?: number }): number {

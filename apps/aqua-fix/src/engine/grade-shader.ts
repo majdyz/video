@@ -31,10 +31,20 @@ export const SEG_TONE = {
    * the cap however sure the mask is; a blue-grey dolphin against blue water is toned near fully. */
   departLo: 0.02,
   departHi: 0.25,
-  /** The tone follows the feathered alpha over lo..hi (soft, but the feather's outer half past the subject's edge,
-   * which lies on water, stays nearly untoned: no grey halo where the water test is weak, e.g. a close-up). */
-  alphaLo: 0.3,
-  alphaHi: 0.8,
+  /** The ML alpha is the mask's signed distance: 0.5 on its contour, ramping linearly to 1 (0) this many mask-grid
+   * px inside (outside) it (studio seg/track.ts SEG.alphaR feathers it so; the shader reads the distance back). */
+  alphaR: 6,
+  /** The tone never reaches past the contour: it ramps in over this many mask px inside it (where the mask cuts
+   * across a body, a tail it missed, the step is this soft)... */
+  rampIn: 2.5,
+  /** ...and within trustLo..trustHi mask px of the contour (where a mask is often a little fat: motion blur) it
+   * follows the pixel itself: tone only as far as the pixel departs from the local water (Oklab ΔL and chroma off
+   * the water's hue, evLo..evHi), so the glow never lands on water inside the mask; deeper in, the mask rules
+   * (a shaded flank that matches the water is toned with the rest). */
+  trustLo: 2.5,
+  trustHi: 5.5,
+  evLo: 0.025,
+  evHi: 0.07,
 };
 
 // Look constants shared by both shaders, emitted as literals.
@@ -120,7 +130,7 @@ const float SC_EDGE = ${SUBJECT_CLEAR.edgeFloor.toFixed(4)};
 const float SP_VIVID = ${SUBJECT_POP.vividKeep.toFixed(4)};
 const float SP_CLARITY = ${SUBJECT_POP.clarity.toFixed(4)};
 const float SP_LIFT = ${SUBJECT_POP.lift.toFixed(4)};
-const float SP_RING = ${SUBJECT_POP.ring.toFixed(4)};
+const float SP_CHROMA = ${SUBJECT_POP.chromaFollow.toFixed(4)};
 const float SP_DARK_LO = ${SUBJECT_POP.darkLo.toFixed(4)};
 const float SP_DARK_HI = ${SUBJECT_POP.darkHi.toFixed(4)};
 const float SP_HUE_COS = ${Math.cos(SUBJECT_POP.hueMax).toFixed(6)};
@@ -148,8 +158,12 @@ const float SEG_IN_LO = ${SEG_TONE.insideLo.toFixed(4)};
 const float SEG_IN_HI = ${SEG_TONE.insideHi.toFixed(4)};
 const float SEG_DEP_LO = ${SEG_TONE.departLo.toFixed(4)};
 const float SEG_DEP_HI = ${SEG_TONE.departHi.toFixed(4)};
-const float SEG_A_LO = ${SEG_TONE.alphaLo.toFixed(4)};
-const float SEG_A_HI = ${SEG_TONE.alphaHi.toFixed(4)};
+const float SEG_ALPHA_R = ${SEG_TONE.alphaR.toFixed(4)};
+const float SEG_RAMP_IN = ${SEG_TONE.rampIn.toFixed(4)};
+const float SEG_TRUST_LO = ${SEG_TONE.trustLo.toFixed(4)};
+const float SEG_TRUST_HI = ${SEG_TONE.trustHi.toFixed(4)};
+const float SEG_EV_LO = ${SEG_TONE.evLo.toFixed(4)};
+const float SEG_EV_HI = ${SEG_TONE.evHi.toFixed(4)};
 const float ON_WARM_COS = ${Math.cos(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_SIN = ${Math.sin(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_LO = ${OBJECT_NEUTRAL.warmLo.toFixed(4)};
@@ -452,8 +466,9 @@ float subjectWeight(vec2 uv, float coreJbu, float dev) {
 }
 // Per-animal tone strength (animals.ts: whole-or-nothing, decided per tracked animal on the CPU; one value per
 // map texel, dilated past the animal so the outline comes from the per-pixel test above). Mirrors apply.ts.
-// B, A: AI subject detection (studio seg/): the ML alpha and where / how much it replaces the engine's subject
-// weight (0 without it, so the grade is unchanged).
+// With an AI subject overlay (studio seg/, p24.y; seg-overlay.ts composeSegStrength) the channels are instead
+// R = the local water's Oklab L (< 0: no water to compare with), G = the regional leak cap, B = the ML alpha (the
+// mask's signed distance, SEG_TONE.alphaR), A = the ML weight (near map x confidence); all bilinear.
 vec4 animalStrength(vec2 uv) {
   ivec2 size = textureSize(u_data3, 0);
   ivec2 i = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
@@ -464,7 +479,7 @@ vec4 animalStrength(vec2 uv) {
   vec2 t = f - vec2(i0);
   vec4 c = mix(mix(texelFetch(u_data3, i0, 0), texelFetch(u_data3, ivec2(i1.x, i0.y), 0), t.x),
                mix(texelFetch(u_data3, ivec2(i0.x, i1.y), 0), texelFetch(u_data3, i1, 0), t.x), t.y);
-  return vec4(texelFetch(u_data3, i, 0).r, c.g, c.b, c.a);
+  return vec4(p[24].y > 0.5 ? c.r : texelFetch(u_data3, i, 0).r, c.g, c.b, c.a);
 }
 // Object weight and warm clamp (see apply.ts objectWeight / warmClamp).
 float objectWeight(float conf) { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
@@ -473,8 +488,8 @@ float objectWeight(float conf) { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf
 float segPop(vec4 an) { return an.w > 0.0 ? smoothstepf(SEG_POP_LO, SEG_POP_HI, an.w) : 0.0; }
 float popStrength(vec4 an) { return max(p[16].w, segPop(an)); }
 // Subject pop separation (SUBJECT_POP; mirrors apply.ts): P = tone weight × pop strength × the user's Strength.
-// A midtone lift of the subject's L, and (ML only) the water right around it darkened along the near map's ramp;
-// both reverse for a subject darker than the water (p24.x, seg-overlay.ts popDirection).
+// A midtone lift of the subject's L (reversed for a subject darker than the water: p24.x, seg-overlay.ts
+// popDirection). Nothing outside the subject changes.
 float popLift(float L, float P) { return L + SP_LIFT * P * p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
 // Hue guard: on the subject (weight w) the output hue stays within SUBJECT_POP.hueMax of the source pixel's hue.
 vec2 popHue(vec2 ab, vec2 abSrc, float w) {
@@ -488,19 +503,24 @@ vec2 popHue(vec2 ab, vec2 abSrc, float w) {
   vec2 lim = vec2(s.x * SP_HUE_COS - side * s.y * SP_HUE_SIN, s.y * SP_HUE_COS + side * s.x * SP_HUE_SIN);
   return C * normalize(mix(u, lim, w));
 }
-float popRing(vec4 an, float popS) { return an.w > 0.0 ? SP_RING * popS * p[23].w * p[24].x * clamp(an.w, 0.0, 1.0) * (1.0 - smoothstepf(0.02, 0.5, an.z)) : 0.0; }
+// How far the source pixel (Oklab lab0) departs from the local water (an.x: its L; its hue is the veil's, p14.xy):
+// 0 on water, 1 on a clear subject; 1 where there is no water to compare with.
+float segEvidence(vec4 an, vec3 lab0) {
+  if (an.x < 0.0) return 1.0;
+  float perp = lab0.y * p[14].y - lab0.z * p[14].x;
+  return smoothstepf(SEG_EV_LO, SEG_EV_HI, length(vec2(lab0.x - an.x, perp)));
+}
 // The subject weight the tone uses: the engine's (depart, 0..1: how far the pixel departs from the water, softens
-// it), or the ML alpha, which carries its own regional water cap (seg-overlay.ts composeSegStrength: a leak onto
-// open water only tints; a sure subject is toned whole).
-float toneWeight(float subj, vec4 an, float depart) {
-  // With an AI overlay on the frame (p24.y) the AI alone decides: the engine's coarse per-animal map would show its
-  // blocks once the pop lifts (the subject's tone is the AI's, faded out along its near map).
-  float ow = p[24].y > 0.5 ? 0.0 : objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
-  if (an.w <= 0.0) return ow;
-  // The ML alpha (B) already carries its regional water cap (seg-overlay.ts composeSegStrength): no per-pixel test
-  // here, so a subject is toned whole; it fades out along the near map (A) with segPop.
-  float ml = smoothstepf(SEG_A_LO, SEG_A_HI, an.z) * max(p[22].z, segPop(an));
-  return p[24].y > 0.5 ? ml : mix(ow, ml, clamp(an.w, 0.0, 1.0));
+// it), or with an AI overlay on the frame (p24.y) the AI's alone (the engine's coarse per-animal map would show its
+// blocks once the pop lifts): 0 on and outside the mask's contour, ramping in over SEG_TONE.rampIn; near the
+// contour only as far as the pixel departs from the water, deeper in the whole subject; times the regional leak
+// cap (G) and the ML weight (A, segPop).
+float toneWeight(float subj, vec4 an, float depart, vec3 lab0) {
+  if (p[24].y <= 0.5) return objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
+  if (an.w <= 0.0) return 0.0;
+  float d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
+  float inner = mix(segEvidence(an, lab0), 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));
+  return smoothstepf(0.0, SEG_RAMP_IN, d) * inner * an.y * max(p[22].z, segPop(an));
 }
 float warmClamp(vec2 ab, vec3 lin, float srcFar, float person, float strength) {
   if (strength <= 0.0) return 1.0;
@@ -635,7 +655,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // carries its water cap (seg-overlay.ts composeSegStrength, from the overlay's own water-departure map).
   float depart = p[16].w > 0.0 ? smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev) : 1.0;
   // The pop fades out as the graded lightness drops (SUBJECT_POP.darkLo..Hi): dark parts keep the plain grade.
-  float ow = toneWeight(subj, an, depart) * smoothstepf(SP_DARK_LO, SP_DARK_HI, pow(max(Y, 0.0), 1.0 / 3.0));
+  float ow = toneWeight(subj, an, depart, lab0) * smoothstepf(SP_DARK_LO, SP_DARK_HI, pow(max(Y, 0.0), 1.0 / 3.0));
   float popS = popStrength(an);
   float popP = ow * popS * p[23].w;
   // Local contrast on encoded luminance (the subject takes more of it: SUBJECT_POP.clarity).
@@ -679,14 +699,12 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   vec3 lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - veilConf, p[16].x, p[16].y);
   lk.yz = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
   // Vivid look (opt-in, p23.z), then the near-white pink guard (always).
-  // The subject keeps Vivid's colour but is spared most of its water darkening, lifted a little, and the water
-  // around it darkened.
-  vec3 lkV = vividLook(lk, p[23].z, p[22].w);
-  float Lv = popP > 0.0 ? vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w).x : lkV.x;
-  // The chroma follows the lift (saturation kept): a lifted blue-grey stays blue-grey, not a grey that reads peach
-  // next to saturated water.
-  float Lp = popLift(Lv, popP);
-  lk = vec3(Lp * (1.0 - popRing(an, popS) * (1.0 - depart)), lkV.yz * (Lp / max(1e-4, lkV.x)));
+  // The subject is spared part of Vivid's water treatment (its darkening and its water chroma: a subject is not
+  // water), then lifted; the chroma follows the lift (saturation kept): a lifted blue-grey stays blue-grey, not a
+  // grey that reads peach next to saturated water.
+  vec3 lkV = vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w);
+  float Lp = popLift(lkV.x, popP);
+  lk = vec3(Lp, lkV.yz * (1.0 + SP_CHROMA * (Lp / max(1e-4, lkV.x) - 1.0)));
   lk.yz = highlightPink(lk.x, lk.yz);
   lk.yz = popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0));
   vec3 o1 = oklabToLinear(capChroma(lk, cSrc));
@@ -971,7 +989,7 @@ fn animalStrength(uv: vec2<f32>) -> vec4<f32> {
   let t = f - vec2<f32>(i0);
   let c = mix(mix(textureLoad(u_data3, i0, 0), textureLoad(u_data3, vec2<i32>(i1.x, i0.y), 0), t.x),
               mix(textureLoad(u_data3, vec2<i32>(i0.x, i1.y), 0), textureLoad(u_data3, i1, 0), t.x), t.y);
-  return vec4<f32>(textureLoad(u_data3, i, 0).r, c.g, c.b, c.a);
+  return vec4<f32>(select(textureLoad(u_data3, i, 0).r, c.r, params.p[24].y > 0.5), c.g, c.b, c.a);
 }
 fn objectWeight(conf: f32) -> f32 { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
 fn segPop(an: vec4<f32>) -> f32 { return select(0.0, smoothstepf(SEG_POP_LO, SEG_POP_HI, an.w), an.w > 0.0); }
@@ -986,7 +1004,6 @@ fn popHue(ab: vec2<f32>, abSrc: vec2<f32>, w: f32) -> vec2<f32> {
   let lim = vec2(s.x * SP_HUE_COS - side * s.y * SP_HUE_SIN, s.y * SP_HUE_COS + side * s.x * SP_HUE_SIN);
   return C * normalize(mix(u, lim, w));
 }
-fn popRing(an: vec4<f32>, popS: f32) -> f32 { return select(0.0, SP_RING * popS * params.p[23].w * params.p[24].x * clamp(an.w, 0.0, 1.0) * (1.0 - smoothstepf(0.02, 0.5, an.z)), an.w > 0.0); }
 fn clearCast(ab: vec2<f32>, vh: vec2<f32>, g: f32) -> vec2<f32> {
   let C = length(ab);
   if (g <= 0.0 || C < 1e-6) { return ab; }
@@ -994,11 +1011,17 @@ fn clearCast(ab: vec2<f32>, vh: vec2<f32>, g: f32) -> vec2<f32> {
   let c1 = (C - g * min(SC_K * pc, SC_CMAX)) * (1.0 - g * SC_DESAT);
   return ab * (max(0.0, c1) / C);
 }
-fn toneWeight(subj: f32, an: vec4<f32>, depart: f32) -> f32 {
-  let ow = select(objectWeight(subj) * mix(SC_EDGE, 1.0, depart), 0.0, params.p[24].y > 0.5);
-  if (an.w <= 0.0) { return ow; }
-  let ml = smoothstepf(SEG_A_LO, SEG_A_HI, an.z) * max(params.p[22].z, segPop(an));
-  return select(mix(ow, ml, clamp(an.w, 0.0, 1.0)), ml, params.p[24].y > 0.5);
+fn segEvidence(an: vec4<f32>, lab0: vec3<f32>) -> f32 {
+  if (an.x < 0.0) { return 1.0; }
+  let perp = lab0.y * params.p[14].y - lab0.z * params.p[14].x;
+  return smoothstepf(SEG_EV_LO, SEG_EV_HI, length(vec2<f32>(lab0.x - an.x, perp)));
+}
+fn toneWeight(subj: f32, an: vec4<f32>, depart: f32, lab0: vec3<f32>) -> f32 {
+  if (params.p[24].y <= 0.5) { return objectWeight(subj) * mix(SC_EDGE, 1.0, depart); }
+  if (an.w <= 0.0) { return 0.0; }
+  let d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
+  let inner = mix(segEvidence(an, lab0), 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));
+  return smoothstepf(0.0, SEG_RAMP_IN, d) * inner * an.y * max(params.p[22].z, segPop(an));
 }
 fn warmClamp(ab: vec2<f32>, lin: vec3<f32>, srcFar: f32, person: f32, strength: f32) -> f32 {
   if (strength <= 0.0) { return 1.0; }
@@ -1108,7 +1131,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   Y = max(0.0, Ylv);
 
   let depart = select(1.0, smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, bdev), p[16].w > 0.0);
-  let ow = toneWeight(subj, an, depart) * smoothstepf(SP_DARK_LO, SP_DARK_HI, pow(max(Y, 0.0), 1.0 / 3.0));
+  let ow = toneWeight(subj, an, depart, lab0) * smoothstepf(SP_DARK_LO, SP_DARK_HI, pow(max(Y, 0.0), 1.0 / 3.0));
   let popS = popStrength(an);
   let popP = ow * popS * p[23].w;
   if (clarity > 0.0) {
@@ -1148,11 +1171,9 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   var lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - veilConf, p[16].x, p[16].y);
   let gab = warmMaterial(lk.x, redGuard(lk.x, lk.yz, lab0.yz, person, onFar), p[22].w, onFar);
   lk = vec3(lk.x, gab);
-  let lkV = vividLook(lk, p[23].z, p[22].w);
-  var Lv = lkV.x;
-  if (popP > 0.0) { Lv = vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w).x; }
-  let Lp = popLift(Lv, popP);
-  lk = vec3(Lp * (1.0 - popRing(an, popS) * (1.0 - depart)), lkV.yz * (Lp / max(1e-4, lkV.x)));
+  let lkV = vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w);
+  let Lp = popLift(lkV.x, popP);
+  lk = vec3(Lp, lkV.yz * (1.0 + SP_CHROMA * (Lp / max(1e-4, lkV.x) - 1.0)));
   lk = vec3(lk.x, highlightPink(lk.x, lk.yz));
   lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0)));
   let o1 = oklabToLinear(capChroma(lk, cSrc));

@@ -15,8 +15,8 @@
 // animal), which a straight line between keyframes does not.
 //
 // Mask at clip time t (SegTrack.at): a lookup of the filled frames, so preview and export read the same pure function
-// of the clip and the prompts (the export stays deterministic). The forgiving look: the alpha is feathered by 2–4%
-// of the subject's size, a "near" map says where the ML mask replaces the engine's, and the ML weight follows a
+// of the clip and the prompts (the export stays deterministic). The alpha is the mask's signed distance (SEG.alphaR;
+// the grade keeps the tone inside the contour), a "near" map says where the ML mask replaces the engine's, and the ML weight follows a
 // confidence curve that eases down and back up over ~0.4 s around any doubtful keyframe (symmetric: the pass has
 // seen the future).
 
@@ -51,9 +51,12 @@ export const SEG = {
   /** Guided filter radius (px at 640; scaled) and epsilon. */
   guidedR: 4,
   guidedEps: 2e-3,
-  /** Feather: share of the subject's bounding-box diagonal, clamped to minPx (mask px). */
+  /** Feather radius for the near map: share of the subject's bounding-box diagonal, clamped to minPx (mask px). */
   featherShare: 0.03,
   featherMinPx: 1.5,
+  /** The alpha is the mask's signed distance: 0.5 on the contour, linear to 1 / 0 this many mask px in / out (the
+   * grade reads the distance back: aqua-fix grade-shader SEG_TONE.alphaR, the same number). */
+  alphaR: 6,
   /** The ML mask replaces the engine's within this many feather radii of the subject. */
   nearK: 3,
   /** Confidence curve: dips widen over ±erodeS, then a raised-cosine average over ±easeS (ease down and up). */
@@ -460,8 +463,8 @@ export class SegTrack {
     const bb = bbox(raw.inc, w, h);
     const diag = bb ? Math.hypot(bb.x1 - bb.x0 + 1, bb.y1 - bb.y0 + 1) : 0;
     const r = Math.max(SEG.featherMinPx, SEG.featherShare * diag);
-    const inc = sdfFeather(raw.inc, w, h, r);
-    const exc = raw.exc ? sdfFeather(raw.exc, w, h, r) : null;
+    const inc = sdfFeather(raw.inc, w, h, SEG.alphaR);
+    const exc = raw.exc ? sdfFeather(raw.exc, w, h, SEG.alphaR) : null;
     const alpha = new Float32Array(w * h);
     for (let i = 0; i < alpha.length; i++) alpha[i] = inc[i] * (exc ? 1 - exc[i] : 1);
     // Near: the include region grown and softened by a wide blur (the engine keeps everything farther out).

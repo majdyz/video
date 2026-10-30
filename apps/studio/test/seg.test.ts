@@ -8,7 +8,8 @@ import { composeSegStrength } from "../../aqua-fix/src/engine/seg-overlay.ts";
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
 import { SUBJECT_CLEAR } from "../../aqua-fix/src/engine/params.ts";
-import { fillInterval, keyTimes, sampleRange, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
+import { fillInterval, keyTimes, sampleRange, SEG, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
+import { linearToOklab } from "../../aqua-fix/src/engine/color.ts";
 import { autoObjects, ML_OUTLINE_ID, outlineSelection, popComponentBox, promptFor, SegLive, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
 
 const entry = (v: number): MemEntry => ({ mem: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), pos: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), ptr: new Float32Array(256).fill(v), score: 1 });
@@ -199,16 +200,36 @@ const img = (dx: number, dy: number): Gray => {
   const n = 120, dep = new Float32Array(n);
   for (let x = 60; x < n; x++) dep[x] = x >= 88 && x < 90 ? 0 : 1; // water | subject with a 2-texel water-coloured patch
   const ov = { width: n, height: 1, alpha: new Float32Array(n).fill(1), exclude: null, near: new Float32Array(n).fill(1), depart: dep };
-  const st = { width: 1, height: 1, data: new Float32Array(4) };
   for (const closeUp of [true, false]) {
-    const c = composeSegStrength(st, ov, closeUp).data;
-    assert.ok(c[10 * 4 + 2] <= SEG_TONE.waterFloor + 1e-6, `a sure leak on water keeps the cap (${c[10 * 4 + 2]})`);
-    assert.ok(c[110 * 4 + 2] > 0.99, "the subject keeps the full alpha");
-    assert.ok(c[88 * 4 + 2] > 0.8, `a water-coloured patch on the subject is toned with it (${c[88 * 4 + 2].toFixed(2)})`);
+    const c = composeSegStrength(ov, closeUp).data;
+    assert.ok(c[10 * 4 + 1] <= SEG_TONE.waterFloor + 1e-6, `a sure leak on water keeps the cap (${c[10 * 4 + 1]})`);
+    assert.ok(c[110 * 4 + 1] > 0.99, "the subject is toned in full");
+    assert.ok(c[88 * 4 + 1] > 0.8, `a water-coloured patch on the subject is toned with it (${c[88 * 4 + 1].toFixed(2)})`);
+    assert.equal(c[10 * 4 + 2], 1, "the alpha (the mask's distance) passes as is");
+    assert.equal(c[10 * 4], -1, "no guide: no water to compare with");
   }
   const noDep = { ...ov, depart: null };
-  assert.equal(composeSegStrength(st, noDep, false).data[10 * 4 + 2], 1, "open water without a departure map: no cap here");
-  assert.equal(composeSegStrength(st, noDep, true).data[10 * 4 + 2], SEG_TONE.waterFloor, "a close-up without one: the cap holds");
+  assert.equal(composeSegStrength(noDep, false).data[10 * 4 + 1], 1, "open water without a departure map: no cap here");
+  assert.equal(composeSegStrength(noDep, true).data[10 * 4 + 1], SEG_TONE.waterFloor, "a close-up without one: the cap holds");
+}
+
+// The tone stays inside the subject: the alpha is the mask's signed distance at the grade's own scale, and the local
+// water L (R) is read from the guide's water only, not the subject.
+{
+  assert.equal(SEG.alphaR, SEG_TONE.alphaR, "studio feather and grade read the same distance scale");
+  const W = 40, H = 20, m = new Float32Array(W * H);
+  for (let y = 5; y < 15; y++) for (let x = 15; x < 25; x++) m[y * W + x] = 1;
+  const a = sdfFeather(m, W, H, SEG.alphaR);
+  assert.ok(Math.abs(a[10 * W + 15] - (0.5 + 0.5 / (2 * SEG.alphaR))) < 1e-6 && Math.abs(a[10 * W + 14] - (0.5 - 0.5 / (2 * SEG.alphaR))) < 1e-6, "0.5 on the contour");
+  // Guide at half the overlay grid: bright subject (linear 0.5) in darker water (0.05).
+  const gw = 20, gh = 10, g = new Float32Array(gw * gh * 4);
+  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) { const s = x >= 7 && x < 13 && y >= 2 && y < 8; g.fill(s ? 0.5 : 0.05, (y * gw + x) * 4, (y * gw + x) * 4 + 3); }
+  const ov = { width: W, height: H, alpha: a, exclude: null, near: new Float32Array(W * H).fill(1), depart: null };
+  const c = composeSegStrength(ov, false, { width: gw, height: gh, data: g }).data;
+  const Lw = linearToOklab(0.05, 0.05, 0.05)[0];
+  for (const [x, y] of [[20, 10], [2, 2], [14, 4]]) assert.ok(Math.abs(c[(y * W + x) * 4] - Lw) < 0.01, `water L everywhere, under the subject too (${c[(y * W + x) * 4].toFixed(3)} vs ${Lw.toFixed(3)})`);
+  const full = { width: W, height: H, alpha: new Float32Array(W * H).fill(1), exclude: null, near: ov.near, depart: null };
+  assert.equal(composeSegStrength(full, false, { width: gw, height: gh, data: g }).data[0], -1, "no water in the frame: -1");
 }
 
 // The pop tone (subject clearing): shrinks the water cast along the pixel's own hue, bounded, never a fixed target.

@@ -560,7 +560,7 @@ export class SegSession {
     }
     const diag = bb ? Math.hypot(bb.x1 - bb.x0 + 1, bb.y1 - bb.y0 + 1) : 0;
     const r = Math.max(SEG.featherMinPx, SEG.featherShare * diag);
-    const inc = sdfFeather(incRaw, w, h, r), exc = excRaw ? sdfFeather(excRaw, w, h, r) : null;
+    const inc = sdfFeather(incRaw, w, h, SEG.alphaR), exc = excRaw ? sdfFeather(excRaw, w, h, SEG.alphaR) : null;
     const alpha = new Uint8Array(w * h);
     for (let k = 0; k < alpha.length; k++) alpha[k] = Math.round(255 * Math.min(1, Math.max(0, inc[k] * (exc ? 1 - exc[k] : 1))));
     const nr = Math.max(2, Math.round(SEG.nearK * r));
