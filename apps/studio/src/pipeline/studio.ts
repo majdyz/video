@@ -103,6 +103,9 @@ export type StabStatus = {
   /** File name of the motion log (.gcsv / Sensor Logger CSV) added for this clip, if any. */
   motionLog: string | null;
 };
+/** Export waits for the AI pass; with no progress for this long it exports with the engine's masks instead. */
+const SEG_EXPORT_STALL_MS = 180_000;
+
 export type ExportStatus = {
   state: "idle" | "preparing" | "running" | "done" | "error";
   progress: number;
@@ -659,15 +662,87 @@ export class Studio {
     if (!this.seg.on || !v || !file || this.snap.kind !== "video" || this.exporting) return;
     void this.seg.start(file, v.duration || this.snap.duration).then((live) => {
       if (!live || this.seg.autos || this.file !== file) return;
-      const a = autoObjects(this.subjectSelection(), v.currentTime, this.engine?.personBoxesNow() ?? []);
-      if (a.length) void this.seg.seedAutos(a);
+      void this.seedAutosCanonical();
     });
+  }
+
+  private seeding: Promise<void> | null = null;
+  /** The canonical seed frame is in the engine: the preview skips its frames. */
+  private segSeedBusy = false;
+  /**
+   * Seeds the AI session with the engine's own subjects on one canonical frame: the export range's start (trim start,
+   * else 0), decoded on its own and analysed with fresh tracks. Whenever (and from wherever) the seeding happens, in
+   * the preview or at export, the same frame gives the same subjects, so every export of the clip has the same masks.
+   * The preview's tracks start over once (its next analysis picks up the frame on screen).
+   */
+  private seedAutosCanonical(): Promise<void> {
+    if (this.seeding) return this.seeding;
+    const run = (async () => {
+      const e = this.engine, v = this.video, file = this.file;
+      if (!e || !v || !file || this.seg.autos || !this.seg.live) return;
+      const t0 = this.trim?.start ?? 0;
+      const sv = document.createElement("video");
+      sv.muted = true;
+      sv.playsInline = true;
+      sv.preload = "auto";
+      try {
+        await new Promise<void>((res, rej) => { sv.onloadeddata = () => res(); sv.onerror = () => rej(new Error("seed frame unreadable")); sv.src = v.currentSrc || v.src; });
+        await new Promise<void>((res) => { sv.onseeked = () => res(); sv.currentTime = t0 + 1e-3; });
+        if (this.file !== file || this.seg.autos) return;
+        // The preview stands still meanwhile (no frame of its own may reach the engine between upload and analysis),
+        // and an analysis already in flight lands first.
+        this.segSeedBusy = true;
+        await this.settleEngine();
+        e.resetTracking();
+        e.setTime(t0);
+        this.uploadToEngine(sv, t0, false);
+        await e.analyzeNow(true).catch(() => undefined);
+        const a = autoObjects(this.subjectSelection(), t0, e.personBoxesNow());
+        e.resetTracking();
+        this.segSeedBusy = false;
+        if (a.length) await this.seg.seedAutos(a);
+        console.info(`[seg] seeded on the canonical frame ${t0.toFixed(2)} s: ${a.length} subject(s)`);
+      } catch (err) {
+        console.warn("[seg] canonical seed failed", err);
+      } finally {
+        this.segSeedBusy = false;
+        sv.removeAttribute("src");
+        sv.load();
+        this.repaint();
+      }
+    })();
+    this.seeding = run.finally(() => { if (this.seeding === run) this.seeding = null; });
+    return this.seeding;
   }
   private segKick = 0;
 
+  /** The export falls back to the engine's masks (AI unavailable or too slow; segForExport). */
+  private segExportEngine = false;
+  private segExportNote: string | null = null;
+
+  /**
+   * Export with Subject pop + AI: preview playback is already stopped (beginExport); the clip's session opens if it
+   * has not, the engine's own subjects are seeded on the current frame if they are not yet, and the pass runs to idle
+   * ("Finding subjects 40%… then exporting"). "engine" when the AI is unavailable, stalls, or has nothing to follow.
+   */
+  private async segForExport(signal: AbortSignal): Promise<"ai" | "engine"> {
+    const v = this.video, file = this.file;
+    if (!v || !file) return "engine";
+    const label = (p: number | null) => this.setExp({ detail: p === null ? "Finding subjects… then exporting" : `Finding subjects ${Math.round(p * 100)}%… then exporting` });
+    label(null);
+    const live = await this.seg.start(file, v.duration || this.snap.duration);
+    if (signal.aborted) throw new DOMException("Export cancelled", "AbortError");
+    if (!live) return "engine";
+    // The engine's own subjects on the canonical frame (as the preview seeds them).
+    if (!this.seg.autos) await this.seedAutosCanonical();
+    const r = await this.seg.settle({ signal, stallMs: SEG_EXPORT_STALL_MS, onProgress: label });
+    console.info(`[export] AI subjects: ${r === "ai" ? `pass complete (${Math.round(live.coverage * 100)}% of the clip filled)` : "engine masks"}`);
+    return r;
+  }
+
   /** The ML overlay for the frame at clip time t (null: the engine's own subject masks). */
   private segOverlay(t: number): SegOverlay | null {
-    const o = this.tools.colour.subjectPop && this.snap.kind === "video" ? this.seg.overlayAt(t) : null;
+    const o = this.tools.colour.subjectPop && this.snap.kind === "video" && !(this.exporting && this.segExportEngine) ? this.seg.overlayAt(t) : null;
     return o && this.geometryActive() ? this.mapSegOverlay(o, t) : o;
   }
 
@@ -1338,7 +1413,7 @@ export class Studio {
   /** Draws `src` at media time `t` into the visible canvas. */
   private draw(src: GeometrySource, t: number, advance: boolean): void {
     const info = this.snap.info;
-    if (!info) return;
+    if (!info || this.segSeedBusy) return;
     if (this.tools.colour.enabled && this.engine) {
       this.uploadToEngine(src, t, true);
       // Crossing into another segment while playing: analyse this frame now (the lock snaps in tick).
@@ -1936,7 +2011,6 @@ export class Studio {
     if (!file || !v || !info || this.exporting) return;
     // A tapped subject still being followed: the export waits for its path (it seeks the same video element).
     if (this.tracking) await this.tracking.catch(() => undefined);
-    if (this.seg.pending) await this.seg.pending.catch(() => undefined);
     if (!this.snap.canExport) {
       this.setExp({ state: "error", message: "Saving video isn't supported in this browser: update to the latest Safari or Chrome." });
       return;
@@ -1954,6 +2028,18 @@ export class Studio {
       if (this.profiling) {
         this.setExp({ detail: "Reading the water…" });
         await this.profiling;
+      }
+      // Subject pop with AI: the pass finishes first, so the export has the same masks whenever it starts.
+      this.segExportNote = null;
+      this.segExportEngine = false;
+      // (the AI toggle as the user set it: an AI that turned out unavailable still gets its note)
+      if (colourOn && this.tools.colour.subjectPop && this.seg.status.on && this.snap.kind === "video") {
+        const r = await this.segForExport(ctrl.signal);
+        if (r === "engine") {
+          this.segExportEngine = true;
+          this.segExportNote = "AI subject detection wasn't available for this export: standard subject detection was used.";
+          this.setExp({ note: this.segExportNote });
+        }
       }
       await this.waitForPath();
       if (this.stabActive() && this.path?.kind === "gyro") {
@@ -2300,7 +2386,7 @@ export class Studio {
         maxLongEdge: req.maxLongEdge,
         onPlan: (plan, resume) => {
           startProgress = resume?.progress ?? 0;
-          const notes = [plan.note, resume ? `Resumed at ${Math.round(resume.progress * 100)}%.` : null].filter(Boolean);
+          const notes = [plan.note, this.segExportNote, resume ? `Resumed at ${Math.round(resume.progress * 100)}%.` : null].filter(Boolean);
           this.setExp({ note: notes.length ? notes.join(" ") : null, progress: startProgress });
         },
         onPause: (paused) => {

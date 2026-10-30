@@ -172,6 +172,11 @@ export class WorkerSegModel implements SegModel {
     return (await this.call({ type: "session-exclude", object, t, u, v })) as unknown as { action: "removed"; removed: number } | { action: "part" | "exclude" };
   }
 
+  /** Whether the session still has work (answered in order with its events: an idle sent before this is seen first). */
+  async sessionBusy(): Promise<boolean> {
+    return !!(await this.call({ type: "session-busy" })).busy;
+  }
+
   async sessionClose(): Promise<void> {
     await this.call({ type: "session-close" });
   }

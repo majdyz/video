@@ -170,6 +170,11 @@ export class SegSession {
     return { action: "part" };
   }
 
+  /** Work left (a step, a fill, a queued tap): the export waits until this is false (idle event). */
+  get busy(): boolean {
+    return this.running;
+  }
+
   close(): void {
     this.closed = true;
     this.frames.dispose();

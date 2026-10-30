@@ -405,6 +405,28 @@ export class SubjectSeg {
     this.idleWaiters = [];
   }
 
+  /**
+   * Export: waits until the session has done all its work (every object followed through its range, every interval
+   * filled), so an export started right after opening a clip grades with the same masks as one started later.
+   * onProgress gets the pass's share done (or null while it is opening). Resolves "ai", or "engine" when the AI is
+   * unavailable, the pass makes no progress for stallMs, or there is nothing for it to follow. Rejects on abort.
+   */
+  async settle(o: { signal: AbortSignal; stallMs: number; onProgress: (p: number | null) => void }): Promise<"ai" | "engine"> {
+    if (!this.live || !this.model) return "engine";
+    let last = -1, lastAt = performance.now();
+    for (;;) {
+      if (o.signal.aborted) throw new DOMException("Export cancelled", "AbortError");
+      if (!(await this.model.sessionBusy())) { this.busy = false; break; }
+      const wait = new Promise<void>((r) => this.idleWaiters.push(r));
+      await Promise.race([wait, new Promise((r) => setTimeout(r, 500))]);
+      const p = this.status.progress;
+      o.onProgress(p ?? null);
+      if (p !== null && p !== undefined && p > last + 1e-6) { last = p; lastAt = performance.now(); }
+      if (performance.now() - lastAt > o.stallMs) { segLog(`export: the AI pass made no progress for ${Math.round(o.stallMs / 1000)} s; exporting with the engine's masks`); return "engine"; }
+    }
+    return this.live.filled > 0 ? "ai" : "engine";
+  }
+
   /** Resolves when the session has nothing left to do (an export waits for it: the same masks as the preview). */
   get pending(): Promise<void> | null {
     if (!this.live || !this.busy) return null;

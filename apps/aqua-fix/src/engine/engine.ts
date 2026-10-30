@@ -901,6 +901,13 @@ export class GradeEngine {
     this.checkJump();
   }
 
+  /** The temporal layer and the animal tracks start over (as after a seek): an analysis next sees one frame alone. */
+  resetTracking(): void {
+    this.backend.resetTemporal?.();
+    this.animals.reset();
+    this.lastRenderSec = -1;
+  }
+
   /** A seek (or a jump back) breaks the motion history: the temporal layer and the animal tracks start over. */
   private checkJump(): void {
     const t = this.lastTickSec;

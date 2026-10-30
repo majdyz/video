@@ -17,7 +17,8 @@ type Req =
   | { id: number; type: "session-remove"; object: number }
   | { id: number; type: "session-restore"; object: number }
   | { id: number; type: "session-exclude"; object: number; t: number; u: number; v: number }
-  | { id: number; type: "session-close" };
+  | { id: number; type: "session-close" }
+  | { id: number; type: "session-busy" };
 
 let model: EdgeTam | null = null;
 let session: SegSession | null = null;
@@ -76,6 +77,8 @@ if (!isPthread) self.onmessage = async (ev: MessageEvent<Req>) => {
       });
       session = s;
       post({ ok: true, width: frames.width, height: frames.height, mw: s.mw, mh: s.mh, i0: s.grid.i0, n: s.grid.n });
+    } else if (r.type === "session-busy") {
+      post({ ok: true, busy: !!session?.busy });
     } else if (r.type === "session-close") {
       session?.close();
       session = null;
