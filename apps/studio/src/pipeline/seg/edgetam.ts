@@ -19,6 +19,8 @@ export class EdgeTam {
   private noMem: Float32Array;
   private tpos: Float32Array;
   private pixels = new Float32Array(3 * 1024 * 1024);
+  /** Time spent per stage (ms) and counts, for the pass profile (session.ts). */
+  readonly timing = { encode: 0, encodes: 0, attend: 0, decoder: 0, memEnc: 0, steps: 0 };
 
   private ort: Ort;
   private s: Record<GraphName, Sess>;
@@ -57,7 +59,10 @@ export class EdgeTam {
       px[2 * n + i] = (rgba[i * 4 + 2] / 255 - MEAN[2]) / STD[2];
     }
     this.dispose();
+    const t0 = performance.now();
     const o = await this.s.vision_encoder.run({ pixel_values: new this.ort.Tensor("float32", px, [1, 3, 1024, 1024]) });
+    this.timing.encode += performance.now() - t0;
+    this.timing.encodes++;
     this.feats = { f0: o.feats0, f1: o.feats1, f2: o.feats2, p2: o.pos2 };
     o.pos0?.dispose?.();
     o.pos1?.dispose?.();
@@ -87,6 +92,7 @@ export class EdgeTam {
     const init = !!points && isEmpty(bank);
     const f2 = await F.f2.getData() as Float32Array;
     let pix: Float32Array;
+    const ta = performance.now();
     if (init) {
       pix = new Float32Array(f2.length);
       for (let c = 0; c < HIDDEN; c++) for (let i = 0; i < 4096; i++) pix[c * 4096 + i] = f2[c * 4096 + i] + this.noMem[c];
@@ -95,16 +101,22 @@ export class EdgeTam {
       if (!m) throw new Error("no conditioning frame");
       pix = await this.attend(f2, await F.p2.getData() as Float32Array, m);
     }
+    const tb = performance.now();
+    this.timing.attend += tb - ta;
     const P = points ?? [[0, 0]], L = labels ?? [-1];
     const dec = await this.s.mask_decoder.run({
       feats0: F.f0, feats1: F.f1, feats2: new ort.Tensor("float32", pix, [1, 256, 64, 64]),
       input_points: new ort.Tensor("float32", Float32Array.from(P.flat()), [1, 1, P.length, 2]),
       input_labels: new ort.Tensor("int32", Int32Array.from(L), [1, 1, L.length]),
     });
+    const tc = performance.now();
+    this.timing.decoder += tc - tb;
     const men = await this.s.memory_encoder.run({
       vision_features: F.f2, pred_masks_high_res: dec.high_res_masks.reshape([1, 1, 1024, 1024]),
       is_mask_from_pts: new ort.Tensor("bool", Uint8Array.from([points ? 1 : 0]), [1]),
     });
+    this.timing.memEnc += performance.now() - tc;
+    this.timing.steps++;
     const score = (await dec.object_score_logits.getData() as Float32Array)[0];
     const ious = await dec.iou_scores.getData() as Float32Array;
     storeMemory(bank, frame, {

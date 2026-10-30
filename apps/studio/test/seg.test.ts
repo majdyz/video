@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { assembleMemory, frameIndex, isEmpty, MEM_DIM, MEM_TOKENS, newBank, pruneBank, storeMemory, type MemEntry } from "../src/pipeline/seg/bank.ts";
 import { denseFlow, warp, type Gray } from "../src/pipeline/seg/flow.ts";
-import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, guidedFilter, iou, nearMap, promptFromMask, sdfFeather } from "../src/pipeline/seg/mask.ts";
+import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, guidedFilter, iou, nearMap, promptFromMask, rleDecode, rleEncode, sdfFeather } from "../src/pipeline/seg/mask.ts";
 import { composeSegStrength } from "../../aqua-fix/src/engine/seg-overlay.ts";
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
@@ -130,7 +130,8 @@ const img = (dx: number, dy: number): Gray => {
   assert.equal(tr.weightAt(2), 0, "outside the pass: the engine's own mask");
   const m = tr.at(0.5 / 6)!;
   assert.ok(m.weight > 0 && m.near.some((x) => x > 0.9 * m.weight) && m.near[0] < 0.05, "near covers the subject, not the far frame");
-  assert.deepEqual(keyTimes(0, 0.5, [0.27]), [0, 1 / 6, 0.27, 2 / 6, 0.5].map((x) => +x.toFixed(6)));
+  assert.deepEqual(keyTimes(0, 0.5, [0.27], 6), [0, 1 / 6, 0.27, 2 / 6, 0.5].map((x) => +x.toFixed(6)));
+  assert.deepEqual(keyTimes(0, 0.5, [], 4), [0, 0.25, 0.5]);
 }
 
 // Prompts: the engine's automatic subjects become ML prompts (points inside, negatives outside, a box when compact);
@@ -247,7 +248,7 @@ const img = (dx: number, dy: number): Gray => {
 {
   const mw = 16, mh = 9, qw = 4, qh = 3, n = 60;
   const live = new SegLive({ mw, mh, i0: 0, n });
-  const frame = (i: number) => ({ i, alpha: new Uint8Array(mw * mh).fill(255), nearQ: new Uint8Array(qw * qh).fill(255), excQ: null, depQ: new Uint8Array(qw * qh) });
+  const frame = (i: number) => ({ i, alpha: rleEncode(new Uint8Array(mw * mh).fill(255)), nearQ: rleEncode(new Uint8Array(qw * qh).fill(255)), excQ: null, depQ: rleEncode(new Uint8Array(qw * qh)) });
   live.put(Array.from({ length: 30 }, (_, i) => frame(i))); // frames 0..29 filled
   live.setConf(keyTimes(0, 2).map((t) => ({ t, conf: 1 })));
   const near = (t: number) => live.at(t)?.near[0] ?? null;
@@ -257,6 +258,18 @@ const img = (dx: number, dy: number): Gray => {
   for (let k = 1; k < ws.length; k++) assert.ok(ws[k] <= ws[k - 1] + 1e-6, `eases out toward the gap (${ws.map((w) => w.toFixed(2))})`);
   assert.ok(ws[ws.length - 1] < 0.05 && ws[0] > 0.95, "reaches nothing at the edge");
   assert.equal(live.coverage, 0.5);
+}
+
+// Run-length coded maps round-trip exactly; a feathered mask codes small.
+{
+  const w = 320, h = 180, m = new Uint8Array(w * h);
+  for (let y = 40; y < 140; y++) for (let x = 60; x < 260; x++) m[y * w + x] = 255;
+  for (let x = 58; x < 62; x++) for (let y = 40; y < 140; y++) m[y * w + x] = 64 * (x - 57); // a ramp
+  const r = rleEncode(m);
+  assert.deepEqual(rleDecode(r, m.length), m);
+  assert.ok(r.length < m.length / 10, `codes small (${r.length} of ${m.length} bytes)`);
+  const noise = Uint8Array.from({ length: 1000 }, (_, i) => (i * 7919) % 251);
+  assert.deepEqual(rleDecode(rleEncode(noise), noise.length), noise);
 }
 
 console.log("seg tests passed");

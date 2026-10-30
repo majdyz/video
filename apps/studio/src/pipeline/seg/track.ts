@@ -26,11 +26,19 @@ import { area, bbox, DEPART_STEP, departMap, guidedFilter, iou, nearMap, promptF
 
 export const SEG = {
   /** Keyframes per clip second. */
-  fps: 6,
+  fps: 4,
   /** Mask grid: longest side (px). */
   maskLong: 320,
-  /** Follow a subject at most this far either side of its prompt (s). */
+  /** Follow a tapped subject at most this far either side of its prompt (s). */
   reachS: 20,
+  /** The engine's own subjects are seeded again every this long (s): a long clip is covered in segments. */
+  segmentS: 8,
+  /** A segment start that finds no subject (and none carried in) looks again this much later (s). */
+  reacquireS: 2,
+  /** At a segment start, an earlier subject carries on unless the new seeds cover this share of it. */
+  carryCover: 0.5,
+  /** Decoded frames the background session keeps (luma + colour cells, ~70 KB each). */
+  frameCache: 240,
   /** Flow guard: re-prompt when the tracker keeps less than this share of the carried mask... */
   guardShare: 0.25,
   /** ...of a carried mask at least this share of the frame. */
@@ -180,7 +188,7 @@ export async function runPass(o: PassOptions): Promise<SegTrack | null> {
         if (fr.rgb) rgbCache.set(t, fr.rgb);
       }
       let encodeMs = performance.now() - t0;
-      const fi = frameIndex(t);
+      const fi = frameIndex(t, SEG.fps);
       const first = t === list[0];
       for (const mb of g.members) {
         const t1 = performance.now();

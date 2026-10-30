@@ -277,3 +277,31 @@ export function departFromCells(cells: Float32Array, inc: Uint8Array, w: number,
   for (let q = 0; q < n; q++) if (wt[q] === 0 && (1 - closed[q]) * 255 > out[q]) out[q] = Math.round((1 - closed[q]) * 255);
   return { width: qw, height: qh, data: out };
 }
+
+/**
+ * Byte run-length code for 8-bit maps: (count 1..255, value) pairs. A feathered mask is long runs of 0 and 255 with a
+ * thin ramp at the edge, so it shrinks ~10–50× (the session keeps every frame's maps this way).
+ */
+export function rleEncode(src: Uint8Array): Uint8Array {
+  const out = new Uint8Array(src.length * 2 + 2);
+  let o = 0;
+  for (let i = 0; i < src.length;) {
+    const v = src[i];
+    let n = 1;
+    while (n < 255 && i + n < src.length && src[i + n] === v) n++;
+    out[o++] = n; out[o++] = v;
+    i += n;
+  }
+  return out.slice(0, o);
+}
+
+/** Inverse of rleEncode (n: the decoded length). */
+export function rleDecode(rle: Uint8Array, n: number, out = new Uint8Array(n)): Uint8Array {
+  let o = 0;
+  for (let i = 0; i + 1 < rle.length && o < n; i += 2) {
+    const c = Math.min(rle[i], n - o);
+    out.fill(rle[i + 1], o, o + c);
+    o += c;
+  }
+  return out;
+}

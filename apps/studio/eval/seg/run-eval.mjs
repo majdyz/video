@@ -108,7 +108,7 @@ try {
     const page = await browser.newPage();
     page.on("console", (m) => { const t = m.text(); if (/pass|PASS|ROBUST|TUNE|track|frame \d|DONE|ERROR|model|engine/.test(t)) console.log(`[${clip}] ${t}`); });
     page.on("pageerror", (e) => console.log(`[${clip}] PAGEERROR ${e.message}`));
-    const url = `${base}?clip=${clip}&w=${W}&h=${H}&frames=${T}&objects=${encodeURIComponent(JSON.stringify(objects))}&prefer=${process.env.PREFER ?? "auto"}&robust=${process.env.ROBUST === "1" ? 1 : 0}&boardf=${process.env.BOARDF ?? (BOARD_FRAMES[clip] ?? [6, 90, 165]).join(",")}&strengths=${process.env.STRENGTHS ?? "0,0.25,0.5,0.75,1"}&sp=${encodeURIComponent(process.env.SP ?? "")}&sc=${encodeURIComponent(process.env.SC ?? "")}`;
+    const url = `${base}?clip=${clip}&w=${W}&h=${H}&frames=${T}&objects=${encodeURIComponent(JSON.stringify(objects))}&prefer=${process.env.PREFER ?? "auto"}${process.env.SEGFPS ? `&segfps=${process.env.SEGFPS}` : ""}&robust=${process.env.ROBUST === "1" ? 1 : 0}&boardf=${process.env.BOARDF ?? (BOARD_FRAMES[clip] ?? [6, 90, 165]).join(",")}&strengths=${process.env.STRENGTHS ?? "0,0.25,0.5,0.75,1"}&sp=${encodeURIComponent(process.env.SP ?? "")}&sc=${encodeURIComponent(process.env.SC ?? "")}`;
     await page.goto(url);
     await page.waitForFunction(() => /DONE|ERROR/.test(document.getElementById("log").textContent), null, { timeout: 3 * 3600_000, polling: 2000 });
     await page.close();

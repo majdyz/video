@@ -106,6 +106,8 @@ export function pruneBank(bank: ObjectBank, t: number, reverse: boolean): void {
 }
 
 /** 30 Hz frame index of clip time `t` (the bank's clock; see the header). */
-export function frameIndex(t: number): number {
-  return Math.round(t * 30);
+export function frameIndex(t: number, fps = 6): number {
+  // The keyframe's ordinal on its grid × 5: at 6 Hz this is the 30 Hz frame number; on a sparser grid the memory
+  // window (t-6 … t-1) still holds the keyframe before, as the tracker was measured with.
+  return Math.round(t * fps) * 5;
 }

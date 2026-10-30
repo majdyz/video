@@ -2,13 +2,15 @@
 // onnxruntime-web, EdgeTAM bank, track pass, per-frame fill and feather) on a prototype clip, with the prototype's
 // prompts. Frames come from the runner (/evaldata); masks, timings and (robust=1) renders go back to it.
 import { WorkerSegModel } from "../../src/pipeline/seg/model.ts";
-import { maskSize, runPass, type Keyframe, type SegObject } from "../../src/pipeline/seg/track.ts";
+import { maskSize, runPass, SEG, type Keyframe, type SegObject } from "../../src/pipeline/seg/track.ts";
 
 const q = new URLSearchParams(location.search);
 const clip = q.get("clip")!;
 const W = +q.get("w")!, H = +q.get("h")!, T = +q.get("frames")!;
 const objects = JSON.parse(q.get("objects")!) as SegObject[];
 const prefer = (q.get("prefer") ?? "auto") as "auto" | "wasm";
+// ?segfps=4: another keyframe rate (speed vs quality).
+if (q.get("segfps")) SEG.fps = +q.get("segfps")!;
 const logEl = document.getElementById("log")!;
 const log = (s: string) => { logEl.textContent += "\n" + s; console.log(s); };
 

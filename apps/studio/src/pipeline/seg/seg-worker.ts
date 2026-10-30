@@ -18,7 +18,8 @@ type Req =
   | { id: number; type: "session-restore"; object: number }
   | { id: number; type: "session-exclude"; object: number; t: number; u: number; v: number }
   | { id: number; type: "session-close" }
-  | { id: number; type: "session-busy" };
+  | { id: number; type: "session-busy" }
+  | { id: number; type: "session-seeds"; k: number; t: number; objects: (SegObject & { id: number })[] };
 
 let model: EdgeTam | null = null;
 let session: SegSession | null = null;
@@ -72,7 +73,8 @@ if (!isPthread) self.onmessage = async (ev: MessageEvent<Req>) => {
         frames: (items) => emit({ ev: "frames", items }, items.flatMap((x) => [x.alpha.buffer, x.nearQ.buffer, x.depQ.buffer, ...(x.excQ ? [x.excQ.buffer] : [])])),
         keys: (conf) => emit({ ev: "keys", conf }),
         progress: (done, total) => emit({ ev: "progress", done, total }),
-        idle: () => emit({ ev: "idle" }),
+        idle: (profile) => emit({ ev: "idle", profile }),
+        needSeeds: (k, t) => emit({ ev: "seeds", k, t }),
         rejected: (id) => emit({ ev: "rejected", id }),
       });
       session = s;
@@ -85,6 +87,9 @@ if (!isPthread) self.onmessage = async (ev: MessageEvent<Req>) => {
       post({ ok: true });
     } else if (!session) {
       throw new Error("no session");
+    } else if (r.type === "session-seeds") {
+      session.seeds(r.k, r.t, r.objects);
+      post({ ok: true });
     } else if (r.type === "session-add") {
       session.add(r.object);
       post({ ok: true, t: session.snap(r.object.t) });

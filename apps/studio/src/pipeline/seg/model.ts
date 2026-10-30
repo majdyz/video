@@ -10,7 +10,8 @@ export type SessionEvent =
   | { ev: "frames"; items: SessionFrameOut[] }
   | { ev: "keys"; conf: { t: number; conf: number }[] }
   | { ev: "progress"; done: number; total: number }
-  | { ev: "idle" }
+  | { ev: "idle"; profile: Record<string, number> }
+  | { ev: "seeds"; k: number; t: number }
   | { ev: "rejected"; id: number };
 export type SessionInfo = { width: number; height: number; mw: number; mh: number; i0: number; n: number };
 
@@ -158,6 +159,11 @@ export class WorkerSegModel implements SegModel {
 
   async sessionAdd(object: SegObject & { id: number }): Promise<number> {
     return Number((await this.call({ type: "session-add", object })).t);
+  }
+
+  /** Segment k's seeds (the engine's own subjects on its canonical frame t; may be none). */
+  async sessionSeeds(k: number, t: number, objects: (SegObject & { id: number })[]): Promise<void> {
+    await this.call({ type: "session-seeds", k, t, objects });
   }
 
   async sessionRemove(object: number): Promise<void> {

@@ -7,7 +7,7 @@ import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts"
 import type { SubjectOverride, SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
 import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
-import { bbox, promptFromMask, resize, smoothstep } from "./mask.ts";
+import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
 import { maskSize, SEG, type SegObject } from "./track.ts";
 import type { SessionFrameOut } from "./session.ts";
 
@@ -177,7 +177,7 @@ export class SegLive {
     this.conf = c;
   }
 
-  /** Bytes held (memory note). */
+  /** Bytes held (the run-length coded maps). */
   get bytes(): number {
     return this.frames.reduce((s, f) => s + (f ? f.alpha.byteLength + f.nearQ.byteLength + f.depQ.byteLength + (f.excQ?.byteLength ?? 0) : 0), 0);
   }
@@ -212,10 +212,11 @@ export class SegLive {
     }
     const w = this.weightAt(t) * smoothstep(0, HAND, gap);
     const { mw, mh } = this, qw = Math.ceil(mw / 4), qh = Math.ceil(mh / 4);
-    const up = (q: Uint8Array) => resize(Float32Array.from(q, (x) => x / 255), qw, qh, mw, mh);
+    // The maps arrive run-length coded (session.ts): decoded here, one frame at a time.
+    const up = (q: Uint8Array) => resize(Float32Array.from(rleDecode(q, qw * qh), (x) => x / 255), qw, qh, mw, mh);
     const near = up(f.nearQ);
     for (let k = 0; k < near.length; k++) near[k] *= w;
-    return { width: mw, height: mh, alpha: Float32Array.from(f.alpha, (x) => x / 255), exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ) };
+    return { width: mw, height: mh, alpha: Float32Array.from(rleDecode(f.alpha, mw * mh), (x) => x / 255), exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ) };
   }
 
   /** Share of the grid filled (0..1). */
@@ -302,18 +303,29 @@ export class SubjectSeg {
     } else if (e.ev === "progress") {
       this.busy = e.done < e.total;
       this.set({ phase: "tracking", progress: e.total ? e.done / e.total : null });
+    } else if (e.ev === "seeds") {
+      segLog(`segment ${e.k} seeds asked for (${e.t.toFixed(2)} s)`);
+      this.onNeedSeeds?.(e.k, e.t);
     } else if (e.ev === "rejected") {
       segLog(`tap ${e.id} came out as the background; dropped`);
       this.onRejected?.();
     } else if (e.ev === "idle") {
       this.busy = false;
       segLog(`session idle: ${live.filled}/${live.n} frames filled, ${(live.bytes / 1e6).toFixed(1)} MB`);
+      this.lastProfile = e.profile;
+      segLog(`pass profile ${JSON.stringify(Object.fromEntries(Object.entries(e.profile).map(([k, v]) => [k, Math.round(v)])))}`);
       this.set({ phase: "ready", progress: null });
       const w = this.idleWaiters;
       this.idleWaiters = [];
       for (const r of w) r();
     }
   }
+
+  /** The session asks for segment k's seeds (the engine's own subjects on its canonical frame t): the studio answers
+   * with seedSegment. */
+  onNeedSeeds: ((k: number, t: number) => void) | null = null;
+  /** The last pass's profile (where its time went; session.ts). */
+  lastProfile: Record<string, number> | null = null;
 
   /** Called when a tapped include was dropped (the tap was on the water). */
   onRejected: (() => void) | null = null;
@@ -349,13 +361,15 @@ export class SubjectSeg {
     return this.opening;
   }
 
-  /** Seeds the engine's own subjects (once per clip). */
-  async seedAutos(objs: SegObject[]): Promise<void> {
-    if (this.autos || !objs.length || !this.live || !this.model) return;
-    this.autos = objs;
-    for (const o of objs) await this.model.sessionAdd({ ...o, id: this.nextId++ });
-    segLog(`seeded ${objs.length} automatic subject(s)`);
+  /** Segment k's seeds: the engine's own subjects on its canonical frame t (none is an answer too). */
+  async seedSegment(k: number, t: number, objs: SegObject[]): Promise<void> {
+    if (!this.live || !this.model || this.seededSegs.has(k)) return;
+    this.seededSegs.add(k);
+    if (k === 0) this.autos = objs;
+    await this.model.sessionSeeds(k, t, objs.map((o) => ({ ...o, id: this.nextId++ })));
+    segLog(`seeded segment ${k} (${t.toFixed(2)} s): ${objs.length} automatic subject(s)`);
   }
+  private seededSegs = new Set<number>();
 
   /** A tap that adds what is missing: a new include object at (t, u, v), followed both ways from the tap. */
   async include(t: number, u: number, v: number, boxes: readonly PersonBox[]): Promise<void> {
@@ -375,6 +389,11 @@ export class SubjectSeg {
     segLog(`exclude tap at ${t.toFixed(2)} s: ${r.action}`);
     this.onChange();
     return r.action;
+  }
+
+  /** Segment k has had its seeds. */
+  hasSegment(k: number): boolean {
+    return this.seededSegs.has(k);
   }
 
   get canUndo(): boolean {
@@ -398,6 +417,7 @@ export class SubjectSeg {
     this.opening = null;
     this.cache = null;
     this.autos = null;
+    this.seededSegs = new Set();
     this.undoOps = [];
     this.busy = false;
     void this.model?.sessionClose().catch(() => undefined);

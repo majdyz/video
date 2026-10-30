@@ -666,53 +666,71 @@ export class Studio {
     });
   }
 
-  private seeding: Promise<void> | null = null;
+  /** Segment seeds run one after another (each its own canonical frame). */
+  private seedChain: Promise<void> = Promise.resolve();
+  private seedVid: { file: File; v: HTMLVideoElement } | null = null;
   /** The canonical seed frame is in the engine: the preview skips its frames. */
   private segSeedBusy = false;
-  /**
-   * Seeds the AI session with the engine's own subjects on one canonical frame: the export range's start (trim start,
-   * else 0), decoded on its own and analysed with fresh tracks. Whenever (and from wherever) the seeding happens, in
-   * the preview or at export, the same frame gives the same subjects, so every export of the clip has the same masks.
-   * The preview's tracks start over once (its next analysis picks up the frame on screen).
-   */
+
+  /** Segment 0's seeds: the engine's own subjects on the export range's start (trim start, else 0). */
   private seedAutosCanonical(): Promise<void> {
-    if (this.seeding) return this.seeding;
-    const run = (async () => {
+    return this.seedSegmentCanonical(0, this.trim?.start ?? 0);
+  }
+
+  /**
+   * Seeds segment k of the AI session (session.ts) with the engine's own subjects on its canonical frame t (segment 0:
+   * the export range's start; then every SEG.segmentS, the session asks), decoded on its own and analysed with fresh
+   * tracks. Whenever and from wherever the seeding happens, in the preview or at export, the same frame gives the same
+   * subjects, so every export of the clip has the same masks. The preview stands still for the analysis and its
+   * tracks start over (its next analysis picks up the frame on screen). A frame that can't be read seeds nothing (the
+   * session goes on; the engine's masks cover that segment).
+   */
+  private seedSegmentCanonical(k: number, t: number): Promise<void> {
+    const run = this.seedChain.then(async () => {
       const e = this.engine, v = this.video, file = this.file;
-      if (!e || !v || !file || this.seg.autos || !this.seg.live) return;
-      const t0 = this.trim?.start ?? 0;
-      const sv = document.createElement("video");
-      sv.muted = true;
-      sv.playsInline = true;
-      sv.preload = "auto";
+      if (!e || !v || !file || !this.seg.live || this.seg.hasSegment(k)) return;
+      let objs: ReturnType<typeof autoObjects> = [];
       try {
-        await new Promise<void>((res, rej) => { sv.onloadeddata = () => res(); sv.onerror = () => rej(new Error("seed frame unreadable")); sv.src = v.currentSrc || v.src; });
-        await new Promise<void>((res) => { sv.onseeked = () => res(); sv.currentTime = t0 + 1e-3; });
-        if (this.file !== file || this.seg.autos) return;
-        // The preview stands still meanwhile (no frame of its own may reach the engine between upload and analysis),
-        // and an analysis already in flight lands first.
+        if (!this.seedVid || this.seedVid.file !== file) {
+          this.dropSeedVideo();
+          const sv = document.createElement("video");
+          sv.muted = true;
+          sv.playsInline = true;
+          sv.preload = "auto";
+          await new Promise<void>((res, rej) => { sv.onloadeddata = () => res(); sv.onerror = () => rej(new Error("seed frame unreadable")); sv.src = v.currentSrc || v.src; });
+          this.seedVid = { file, v: sv };
+        }
+        const sv = this.seedVid.v;
+        await new Promise<void>((res) => { sv.onseeked = () => res(); sv.currentTime = t + 1e-3; });
+        if (this.file !== file) return;
+        // No frame of the preview's may reach the engine between upload and analysis; one in flight lands first.
         this.segSeedBusy = true;
         await this.settleEngine();
         e.resetTracking();
-        e.setTime(t0);
-        this.uploadToEngine(sv, t0, false);
+        e.setTime(t);
+        this.uploadToEngine(sv, t, false);
         await e.analyzeNow(true).catch(() => undefined);
-        const a = autoObjects(this.subjectSelection(), t0, e.personBoxesNow());
+        objs = autoObjects(this.subjectSelection(), t, e.personBoxesNow());
         e.resetTracking();
-        this.segSeedBusy = false;
-        if (a.length) await this.seg.seedAutos(a);
-        console.info(`[seg] seeded on the canonical frame ${t0.toFixed(2)} s: ${a.length} subject(s)`);
       } catch (err) {
-        console.warn("[seg] canonical seed failed", err);
+        console.warn(`[seg] segment ${k} seed frame failed`, err);
       } finally {
         this.segSeedBusy = false;
-        sv.removeAttribute("src");
-        sv.load();
         this.repaint();
       }
-    })();
-    this.seeding = run.finally(() => { if (this.seeding === run) this.seeding = null; });
-    return this.seeding;
+      if (this.file !== file) return;
+      await this.seg.seedSegment(k, t, objs);
+      console.info(`[seg] seeded segment ${k} on the canonical frame ${t.toFixed(2)} s: ${objs.length} subject(s)`);
+    });
+    this.seedChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private dropSeedVideo(): void {
+    if (!this.seedVid) return;
+    this.seedVid.v.removeAttribute("src");
+    this.seedVid.v.load();
+    this.seedVid = null;
   }
   private segKick = 0;
 
@@ -811,6 +829,8 @@ export class Studio {
     // New AI frames: a paused frame shows them (and its outlines) right away.
     let last = 0;
     s.onRejected = () => this.set({ subjectNote: "Nothing found there: tap right on the animal" });
+    // The session asks for the next segment's seeds as its tracking reaches it (long clips).
+    s.onNeedSeeds = (k, t) => { if (k > 0) void this.seedSegmentCanonical(k, t); };
     s.onFrames = () => { const now = performance.now(); if (now - last > 250 && this.paused()) { last = now; this.repaint(); } };
     return s;
   })();
