@@ -1,6 +1,7 @@
 // AI subject detection overlay (Studio seg/): with an overlay on the frame, the per-animal strength texture (data
 // texture 3) the grade reads carries the ML subject in place of the engine's own per-animal strength
 // (composeSegStrength; grade-shader toneWeight). Without an overlay it is the engine's alone (B = A = 0).
+import { SEG_TONE } from "./grade-shader.ts";
 import { linearToOklab } from "./color.ts";
 
 function sstep(lo: number, hi: number, x: number): number {
@@ -77,17 +78,22 @@ function blur(src: Float32Array, W: number, H: number, r: number): Float32Array 
 }
 
 /**
- * The local water and the subject's regional evidence (waterField), on the analysis guide's grid: the water is a
- * normalised blur of the guide texels the ML mask is well clear of (alpha below alphaMax over the whole texel,
- * excluded subjects too) over `blur` of the guide's width, eased (where the subject hides the water that near) into
- * one over `wide`, then the frame's water mean. A texel inside the mask is evidence of the subject as far as its
- * colour departs from that water (Oklab ΔE evLo..evHi, a lower bar than the per-pixel test: a shaded belly still
- * counts); the regional trust is the share of evidence
- * around it (a box of ±`region` of the width) over trustLo..trustHi: deep in an animal, a shaded part that matches
- * the water is toned with the rest; a mask that leaked onto the water (a region of water inside it) is not, nor
- * the water just inside a fat contour.
+ * The local water and the subject's regional evidence (waterField), on the analysis guide's grid.
+ *   water   a normalised blur of the guide texels that are water: clear of the ML mask (alpha below alphaMax over
+ *           the whole texel, excluded subjects too) and, within `nearBand` of the mask, not departing clearly from the
+ *           frame's typical water (a part of the animal the mask missed lies there and must not pass for water), over
+ *           `blur` of the guide's width, eased (where the subject hides the water that near) into one over `wide`.
+ *   ev      a texel departs from that water like an animal (Oklab ΔE evLo..evHi: a low bar, a shaded belly counts).
+ *   trust   the share of animal-like texels among the mask's own around each point (±`region` of the width) over
+ *           trustLo..trustHi, smoothed again: ~1 all over an animal (a shaded part included), ~0 over a region of
+ *           water the mask leaked onto. It scales the tone and varies only over ≥ 2·region (≈ 80 px at 1280): a
+ *           leak is under-popped as a region, never as patches.
+ *   cut     where the mask's contour runs across the animal (a belly or tail the mask missed: animal-like texels
+ *           just outside it), smoothed over ±`region`: there the tone ramps in over rampLong mask px instead of
+ *           SEG_TONE.rampIn, so the cut is a long soft fade, not a step along the body; and an animal whose contour
+ *           is cut along a good share of it (cutShareLo..Hi) is popped more gently as a whole (down to cutKeep).
  */
-export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02, evLo: 0.012, evHi: 0.035, region: 1 / 32, trustLo: 0.25, trustHi: 0.6 };
+export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02, evLo: 0.012, evHi: 0.035, nearBand: 1 / 8, farLo: 0.05, farHi: 0.09, region: 1 / 32, trustLo: 0.15, trustHi: 0.45, cutBand: 3, rampLong: 28, cutShareLo: 0.05, cutShareHi: 0.25, cutKeep: 0.3 };
 
 type Guide = { width: number; height: number; data: Float32Array };
 
@@ -106,15 +112,32 @@ function resample(f: Float32Array, w: number, h: number, W: number, H: number): 
   return out;
 }
 
+/** Chamfer (3-4) distance in px from each set texel of `bin` to the nearest unset one (0 on unset texels). */
+function chamfer(bin: Uint8Array, w: number, h: number): Float32Array {
+  const INF = 1e9, d = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) d[i] = bin[i] ? INF : 0;
+  const at = (x: number, y: number) => (x < 0 || y < 0 || x >= w || y >= h ? INF : d[y * w + x]);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (!d[i]) continue;
+    d[i] = Math.min(d[i], at(x - 1, y) + 3, at(x, y - 1) + 3, at(x - 1, y - 1) + 4, at(x + 1, y - 1) + 4);
+  }
+  for (let y = h - 1; y >= 0; y--) for (let x = w - 1; x >= 0; x--) {
+    const i = y * w + x;
+    if (!d[i]) continue;
+    d[i] = Math.min(d[i], at(x + 1, y) + 3, at(x, y + 1) + 3, at(x + 1, y + 1) + 4, at(x - 1, y + 1) + 4);
+  }
+  for (let i = 0; i < w * h; i++) d[i] = d[i] >= INF ? 1e4 : d[i] / 3;
+  return d;
+}
+
 /**
- * The local water's Oklab L and the regional trust (see SEG_WATER) on the overlay grid, from the analysis guide
- * (linear RGB, RGBA). Null when the frame shows no water clear of the mask (the subject fills it).
+ * The local water's Oklab L, the regional trust and the cut field (see SEG_WATER) on the overlay grid, from the
+ * analysis guide (linear RGB, RGBA). Null when the frame shows no water clear of the mask (the subject fills it).
  */
-export function waterField(g: Guide, o: SegOverlay): { L: Float32Array; trust: Float32Array } | null {
+export function waterField(g: Guide, o: SegOverlay): { L: Float32Array; trust: Float32Array; cut: Float32Array } | null {
   const gw = g.width, gh = g.height, W = o.width, H = o.height, n = gw * gh;
-  const lab = new Float32Array(n * 3), wt = new Float32Array(n), inside = new Uint8Array(n);
-  const sum = [0, 0, 0];
-  let sumW = 0;
+  const lab = new Float32Array(n * 3), clear = new Uint8Array(n), inside = new Float32Array(n);
   for (let y = 0; y < gh; y++) {
     const oy0 = Math.floor((y * H) / gh), oy1 = Math.min(H, Math.max(oy0 + 1, Math.ceil(((y + 1) * H) / gh)));
     for (let x = 0; x < gw; x++) {
@@ -129,52 +152,136 @@ export function waterField(g: Guide, o: SegOverlay): { L: Float32Array; trust: F
       const i = y * gw + x, k = i * 4;
       const v = linearToOklab(Math.max(0, g.data[k]), Math.max(0, g.data[k + 1]), Math.max(0, g.data[k + 2]));
       lab[i * 3] = v[0]; lab[i * 3 + 1] = v[1]; lab[i * 3 + 2] = v[2];
-      wt[i] = m < SEG_WATER.alphaMax ? 1 : 0;
+      clear[i] = m < SEG_WATER.alphaMax ? 1 : 0;
       inside[i] = a / c > 0.5 ? 1 : 0;
-      for (let q = 0; q < 3; q++) sum[q] += v[q] * wt[i];
-      sumW += wt[i];
     }
   }
-  if (sumW < 1) return null;
   const r1 = Math.max(1, Math.round(SEG_WATER.blur * gw)), r2 = Math.max(1, Math.round(SEG_WATER.wide * gw));
-  const w1 = blur(wt, gw, gh, r1), w2 = blur(wt, gw, gh, r2);
-  const water = [0, 1, 2].map((q) => {
-    const f = new Float32Array(n);
-    for (let i = 0; i < n; i++) f[i] = lab[i * 3 + q] * wt[i];
-    const a1 = blur(f, gw, gh, r1), a2 = blur(f, gw, gh, r2), out = new Float32Array(n), mean = sum[q] / sumW;
-    for (let i = 0; i < n; i++) {
-      const wide = w2[i] > 1e-3 ? a2[i] / w2[i] : mean;
-      out[i] = w1[i] > 1e-4 ? wide + (a1[i] / w1[i] - wide) * Math.min(1, w1[i] / 0.15) : wide;
-    }
-    return out;
+  const estimate = (wt: Float32Array): Float32Array[] | null => {
+    let sumW = 0;
+    for (let i = 0; i < n; i++) sumW += wt[i];
+    if (sumW < 1) return null;
+    const w1 = blur(wt, gw, gh, r1), w2 = blur(wt, gw, gh, r2);
+    return [0, 1, 2].map((q) => {
+      const f = new Float32Array(n);
+      let s = 0;
+      for (let i = 0; i < n; i++) { f[i] = lab[i * 3 + q] * wt[i]; s += f[i]; }
+      const a1 = blur(f, gw, gh, r1), a2 = blur(f, gw, gh, r2), out = new Float32Array(n), mean = s / sumW;
+      for (let i = 0; i < n; i++) {
+        const wide = w2[i] > 1e-3 ? a2[i] / w2[i] : mean;
+        out[i] = w1[i] > 1e-4 ? wide + (a1[i] / w1[i] - wide) * Math.min(1, w1[i] / 0.15) : wide;
+      }
+      return out;
+    });
+  };
+  const evOf = (water: Float32Array[]) => {
+    const ev = new Float32Array(n);
+    for (let i = 0; i < n; i++) ev[i] = sstep(SEG_WATER.evLo, SEG_WATER.evHi, Math.hypot(lab[i * 3] - water[0][i], lab[i * 3 + 1] - water[1][i], lab[i * 3 + 2] - water[2][i]));
+    return ev;
+  };
+  // A part of the animal the mask missed lies next to the mask and would pass for water there: the clear texels
+  // within nearBand of the mask that depart clearly from the frame's typical water (the median of the clear texels,
+  // ΔE farLo..farHi) are left out of the water. Farther out every clear texel is water (bright surface water too).
+  const wt0 = Float32Array.from(clear);
+  let sumW = 0;
+  for (let i = 0; i < n; i++) sumW += wt0[i];
+  if (sumW < 1) return null;
+  const med = [0, 1, 2].map((q) => {
+    const v: number[] = [];
+    for (let i = 0; i < n; i++) if (clear[i]) v.push(lab[i * 3 + q]);
+    v.sort((x, y) => x - y);
+    return v[v.length >> 1];
   });
-  const ev = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    if (!inside[i]) continue;
-    const d = Math.hypot(lab[i * 3] - water[0][i], lab[i * 3 + 1] - water[1][i], lab[i * 3 + 2] - water[2][i]);
-    ev[i] = sstep(SEG_WATER.evLo, SEG_WATER.evHi, d);
-  }
-  const dens = blur(ev, gw, gh, Math.max(1, Math.round(SEG_WATER.region * gw)));
-  const trust = dens.map((v) => sstep(SEG_WATER.trustLo, SEG_WATER.trustHi, v));
-  return { L: resample(water[0], gw, gh, W, H), trust: resample(trust, gw, gh, W, H) };
+  const dMask = chamfer(clear, gw, gh);
+  const near = Math.max(2, Math.round(SEG_WATER.nearBand * gw));
+  const wt1 = Float32Array.from(wt0, (v, i) => {
+    if (!v || dMask[i] > near) return v;
+    const dev = Math.hypot(lab[i * 3] - med[0], lab[i * 3 + 1] - med[1], lab[i * 3 + 2] - med[2]);
+    return 1 - sstep(SEG_WATER.farLo, SEG_WATER.farHi, dev);
+  });
+  const water = estimate(wt1) ?? estimate(wt0)!;
+  const ev = evOf(water);
+  // Trust: the share of animal-like texels among the mask's own around each point, smoothed again.
+  const rr = Math.max(1, Math.round(SEG_WATER.region * gw));
+  const evIn = Float32Array.from(ev, (v, i) => v * inside[i]);
+  const num = blur(evIn, gw, gh, rr), den = blur(inside, gw, gh, rr);
+  const share = Float32Array.from(num, (v, i) => (den[i] > 1e-3 ? v / den[i] : 1));
+  const trust = blur(share.map((v) => sstep(SEG_WATER.trustLo, SEG_WATER.trustHi, v)), gw, gh, rr);
+  // Cut: animal-like texels just outside the contour (within cutBand texels of it).
+  const outBin = Uint8Array.from(inside, (v) => (v > 0.5 ? 0 : 1));
+  const dOut = chamfer(outBin, gw, gh);
+  const ring = Float32Array.from(dOut, (d) => (d > 0 && d <= SEG_WATER.cutBand ? 1 : 0));
+  const ringEv = Float32Array.from(ring, (v, i) => v * ev[i]);
+  const cn = blur(ringEv, gw, gh, rr), cd = blur(ring, gw, gh, rr);
+  // Normalised (a point near the contour takes its nearby contour's verdict, not a share diluted by the interior).
+  const has = Float32Array.from(cd, (v) => (v > 1e-3 ? 1 : 0));
+  const cv = Float32Array.from(cn, (v, i) => (has[i] ? sstep(0.2, 0.6, v / cd[i]) : 0));
+  const cvb = blur(cv, gw, gh, rr), hb = blur(has, gw, gh, rr);
+  const cut = Float32Array.from(cvb, (v, i) => (hb[i] > 1e-3 ? v / hb[i] : 0));
+  return { L: resample(water[0], gw, gh, W, H), trust: resample(trust, gw, gh, W, H), cut: resample(cut, gw, gh, W, H) };
 }
 
 /**
  * Overlay (+ the analysis guide) → the RGBA texture the grade reads with an AI overlay on the frame (grade-shader
  * animalStrength / toneWeight, at the overlay's size): R = the local water's Oklab L (−1 without water to compare
- * with, or without a guide: every pixel then counts as the subject), G = the regional trust (waterField: how far the
- * mask is trusted over the pixel's own departure from the water; 1 without a guide), B = the ML alpha (the mask's
- * signed distance, as is), A = the ML weight (near map).
+ * with, or without a guide: every pixel then counts as the subject), G = where the contour is the animal's own
+ * silhouette (1 − waterField cut: the per-pixel water test applies near the contour there, not where the contour
+ * runs across the animal), B = the ML alpha: the mask's signed distance (0.5 on the contour, SEG_TONE.alphaR), its
+ * inside slope eased where the contour cuts across the animal (the tone's ramp-in stretches from SEG_TONE.rampIn to
+ * SEG_WATER.rampLong mask px), A = the ML weight (near map) × the regional trust (waterField; a leak is under-popped
+ * as a region).
  */
 export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): { width: number; height: number; data: Float32Array } {
-  const W = o.width, H = o.height;
+  const W = o.width, H = o.height, R = SEG_TONE.alphaR;
   const out = new Float32Array(W * H * 4);
   const wf = guide ? waterField(guide, o) : null;
+  let dIn: Float32Array | null = null;
+  // Per animal (connected part of the mask): the share of its contour that runs across the animal (cut) scales its
+  // whole tone (SEG_WATER.cutShareLo..Hi → 1..cutKeep): a mask that missed a big part of the animal pops the part it
+  // has gently, as a whole, rather than stamping its own shape onto the animal.
+  const comp = new Float32Array(W * H).fill(1);
+  if (wf) {
+    const bin = Uint8Array.from(o.alpha, (a) => (a > 0.5 ? 1 : 0));
+    dIn = chamfer(bin, W, H);
+    const label = new Int32Array(W * H).fill(-1), stack: number[] = [];
+    let best = 1, bestN = 0;
+    for (let s0 = 0; s0 < W * H; s0++) {
+      if (!bin[s0] || label[s0] >= 0) continue;
+      const id = s0, members: number[] = [];
+      let edge = 0, cutSum = 0;
+      label[s0] = id; stack.push(s0);
+      while (stack.length) {
+        const i = stack.pop()!, x = i % W, y = (i / W) | 0;
+        members.push(i);
+        let border = false;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue; // the frame's edge is not the animal's
+          const j = ny * W + nx;
+          if (!bin[j]) { border = true; continue; }
+          if (label[j] < 0) { label[j] = id; stack.push(j); }
+        }
+        if (border) { edge++; cutSum += wf.cut[i]; }
+      }
+      const k = 1 + (SEG_WATER.cutKeep - 1) * sstep(SEG_WATER.cutShareLo, SEG_WATER.cutShareHi, edge ? cutSum / edge : 0);
+      for (const i of members) comp[i] = k;
+      if (members.length > bestN) { bestN = members.length; best = k; }
+    }
+    // Outside the mask (where the tone is 0 anyway) the largest animal's value, so the bilinear read stays smooth.
+    for (let i = 0; i < W * H; i++) if (!bin[i]) comp[i] = best;
+  }
   for (let i = 0; i < W * H; i++) {
+    let a = o.alpha[i];
+    if (wf && dIn && a > 0.5 && wf.cut[i] > 0) {
+      // The distance the shader reads back, shrunk so its ramp-in (rampIn) spans rampLong here.
+      const k = 1 + (SEG_TONE.rampIn / SEG_WATER.rampLong - 1) * wf.cut[i];
+      const d = Math.max(0, dIn[i] - 0.5);
+      a = Math.min(a, 0.5 + Math.min(R, d * k) / (2 * R));
+    }
     out[i * 4] = wf ? wf.L[i] : -1;
-    out[i * 4 + 1] = wf ? wf.trust[i] : 1;
-    out[i * 4 + 2] = o.alpha[i];
-    out[i * 4 + 3] = o.near[i];
+    out[i * 4 + 1] = wf ? 1 - wf.cut[i] : 1;
+    out[i * 4 + 2] = a;
+    out[i * 4 + 3] = o.near[i] * (wf ? wf.trust[i] * comp[i] : 1);
   }
   return { width: W, height: H, data: out };
 }

@@ -4,13 +4,14 @@ halo.ts: the ML alpha upsampled bilinearly to the frame, subject = alpha > 0.5; 
 halo = mean dL in a ring 2..15 px outside the contour - mean dL in water 30..60 px out (~0 when the pop stays on the
 subject), the water glow (water-coloured pixels within 15 px of the contour on either side, where a slightly fat
 mask puts water inside it, against the far water), the lift on the subject (mean dL >= 3 px inside) and the ring's
-mean dE.
+mean dE; and the pop's uniformity inside the subject (coreStd, dropout share, gradient where the picture is flat).
 Also writes side-by-side native crops (off | on) around the subject to <outdir>/halo-<t>.png.
 usage: halo.py <export dir> [crop.png prefix]"""
 import glob, json, os, re, sys
 import cv2, numpy as np
 
 R = dict(rLo=2, rHi=15, fLo=30, fHi=60, inside=3)
+U = dict(erode=8, sigma=3, dropK=0.4, flat=0.4)
 
 
 def frame(path, t):
@@ -48,6 +49,26 @@ def halo(on, off, alpha):
     wl = band & (np.linalg.norm(lf - wref, axis=2) < 4)
     glow = r2(dl[wl].mean() - dl[far].mean()) if wl.sum() >= 50 else None
     out = dict(halo=r2(dl[ring].mean() - dl[far].mean()), waterGlow=glow, ringDL=r2(dl[ring].mean()), farDL=r2(dl[far].mean()), ringDE=r2(de[ring].mean()), liftDL=r2(dl[inn].mean()))
+    # Uniformity inside the subject (eroded by U["erode"] px): the pop's dL smoothed (sigma U["sigma"]): its std, the
+    # share of the subject where it drops below dropK x its median (dropout), and its gradient where the picture
+    # itself is smooth (|grad L*off| < U["flat"] per px): a patch or a step the image does not explain (p99, max).
+    core = (inside == 1) & (d_in >= U["erode"])
+    if core.sum() >= 200:
+        s = U["sigma"]
+        dls = cv2.GaussianBlur(dl, (0, 0), s)
+        lof = cv2.GaussianBlur(lf[..., 0], (0, 0), s)
+        g = np.hypot(cv2.Sobel(dls, cv2.CV_32F, 1, 0, ksize=3) / 8, cv2.Sobel(dls, cv2.CV_32F, 0, 1, ksize=3) / 8)
+        go = np.hypot(cv2.Sobel(lof, cv2.CV_32F, 1, 0, ksize=3) / 8, cv2.Sobel(lof, cv2.CV_32F, 0, 1, ksize=3) / 8)
+        flat = core & (go < U["flat"])
+        med = float(np.median(dls[core]))
+        out.update(coreStd=r2(dls[core].std()), dropout=r2(float((dls[core] < U["dropK"] * med).mean()) if med > 1 else 0.0),
+                   flatGradP99=round(float(np.percentile(g[flat], 99)), 3) if flat.sum() > 100 else None,
+                   flatGradMax=round(float(g[flat].max()), 3) if flat.sum() > 100 else None)
+        # A step where the contour runs across the animal (a part the mask missed): the same gradient within 40 px
+        # of the contour, either side, where the picture is flat (at a silhouette the picture has its own edge).
+        band = (((inside == 0) & (d_out <= 40)) | ((inside == 1) & (d_in <= 40))) & (go < U["flat"])
+        if band.sum() > 100:
+            out.update(contourFlatGradP99=round(float(np.percentile(g[band], 99)), 3), contourFlatGradMax=round(float(g[band].max()), 3))
     return out, inside
 
 
@@ -72,8 +93,8 @@ def main():
             a, b = off[y0:y1, x0:x1], on[y0:y1, x0:x1]
             sep = np.full((4, a.shape[1], 3), 255, np.uint8) if a.shape[1] > 1.2 * a.shape[0] else np.full((a.shape[0], 4, 3), 255, np.uint8)
             cv2.imwrite(f"{crops}-{t:g}s.png", np.concatenate([a, sep, b], axis=0 if sep.shape[0] == 4 else 1))
-    keys = ["halo", "waterGlow", "ringDL", "farDL", "ringDE", "liftDL"]
-    mean = {k: round(float(np.mean([r[k] for r in rows.values() if r[k] is not None])), 2) for k in keys} if rows else {}
+    keys = ["halo", "waterGlow", "ringDL", "farDL", "ringDE", "liftDL", "coreStd", "dropout", "flatGradP99", "flatGradMax", "contourFlatGradP99", "contourFlatGradMax"]
+    mean = {k: round(float(np.mean([r[k] for r in rows.values() if r.get(k) is not None])), 3) for k in keys if any(r.get(k) is not None for r in rows.values())} if rows else {}
     print(json.dumps({"dir": d, "mean": mean, "frames": rows}))
 
 
