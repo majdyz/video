@@ -40,7 +40,7 @@ import {
   type StreamTargetChunk,
   type VideoCodec,
 } from "mediabunny";
-import { FallbackSink, openOutputSink, type OutputSink } from "./output-sink";
+import { FallbackSink, isStorageLost, openOutputSink, type OutputSink } from "./output-sink";
 import { encoderConfig, planEncoder, type EncoderCodec, type EncoderPlan } from "./encoder-plan";
 import { checkStorage, estimateOutputBytes, MEMORY_FALLBACK_BYTES, StorageSpaceError } from "./storage";
 import {
@@ -228,6 +228,8 @@ const MAX_STORAGE_BACKLOG = 48 * 1024 * 1024;
 const KEY_INTERVAL_SEC = 2;
 /** A pass that fails with a codec error (e.g. reclaimed while the page was hidden) restarts from its last chunk this often. */
 const MAX_PASS_RETRIES = 3;
+/** The export's storage vanishing under it (cleared or evicted by the browser) is recovered from this often. */
+const MAX_STORAGE_RECOVERIES = 3;
 
 class ParamSetChanged extends Error {}
 
@@ -568,131 +570,161 @@ export async function exportWithCodec(
       }
     };
 
-    // Codec failures (lost in the background, reclaimed, a GPU reset) restart the pass from the last chunk.
-    // The retry budget refills whenever a pass got further than the last one.
-    for (let attempt = 0, resets = 0, lastChunks = -1; ; ) {
-      hiddenDuringPass = false;
+    // The browser may clear or evict the origin's storage under a running export (storage pressure, an
+    // in-memory private-window store, "clear site data"): writes then fail with "not found" and the chunk
+    // files read back as NotFoundError. The chunks still readable are kept and the rest is encoded again.
+    let storageLosses = 0;
+    const recoverStorage = async (e: unknown, stage: string): Promise<boolean> => {
+      if (!isStorageLost(e) || signal?.aborted || storageLosses++ >= MAX_STORAGE_RECOVERIES) return false;
+      const had = st.manifest.chunks.length;
+      const kept = await st.recover();
+      log(`storage lost ${stage} (${(e as Error)?.message ?? e}); ${kept} of ${had} chunks still readable, encoding again from there`);
+      return true;
+    };
+    let frames = 0;
+    let blob: Blob | null = null;
+    let audioIncluded = true;
+    let muxStarted = 0;
+    for (;;) {
+      // Codec failures (lost in the background, reclaimed, a GPU reset) restart the pass from the last chunk.
+      // The retry budget refills whenever a pass got further than the last one.
+      for (let attempt = 0, resets = 0, lastChunks = -1; ; ) {
+        hiddenDuringPass = false;
+        try {
+          await encodePass();
+          break;
+        } catch (e) {
+          if (e instanceof ParamSetChanged && resets++ === 0) {
+            log("encoder parameter sets differ from the journal: starting over");
+            await st.reset(jp);
+            continue;
+          }
+          if (isAbort(e) || signal?.aborted) throw e;
+          if (await recoverStorage(e, "while encoding")) continue;
+          if (st.manifest.chunks.length > lastChunks) attempt = 0;
+          lastChunks = st.manifest.chunks.length;
+          if ((isCodecFailure(e) || hiddenDuringPass) && attempt++ < MAX_PASS_RETRIES) {
+            log(`pass failed (${(e as Error)?.message ?? e}); retrying from chunk ${st.manifest.chunks.length}`);
+            await waitUnlessAborted(gate.wait(), signal);
+            throwIfAborted(signal);
+            continue;
+          }
+          throw e;
+        }
+      }
+      throwIfAborted(signal);
+      const chunks = st.manifest.chunks;
+      frames = chunks.reduce((n, c) => n + c.frames, 0);
+      if (frames === 0) throw new Error("Decoder produced no frames");
+      if (!st.manifest.decoderConfig) throw new Error("Encoder produced no decoder configuration");
+
       try {
-        await encodePass();
+        // 4. Mux: the chunks' packets + the source audio.
+        muxStarted = performance.now();
+        keepJournal = resumable && keepChunks;
+        sink = memoryOnly ? new FallbackSink(null) : await openOutputSink(opts.opfsPrefix, { expectedBytes: expected, log });
+        log(`output → ${sink.kind === "file" ? "private on-device storage" : "memory"}`);
+        const out = sink;
+        const writable = new WritableStream<StreamTargetChunk>({
+          write: (chunk) => out.write(chunk.data, chunk.position),
+        });
+        output = new Output({
+          // moov at the end: sequential writes into storage, no in-memory buffering.
+          format: new Mp4OutputFormat({ fastStart: false }),
+          target: new StreamTarget(writable, { chunked: true, chunkSize: 4 * 1024 * 1024 }),
+        });
+        const videoSource = new EncodedVideoPacketSource(plan.codec);
+        output.addVideoTrack(videoSource, { frameRate: fps });
+
+        // Audio plan: copy the source packets verbatim (zero generation loss, no
+        // decode cost); fall back to AAC re-encode for codecs mp4 can't carry;
+        // otherwise ship video-only.
+        const audioTrack = await input.getPrimaryAudioTrack();
+        let audioMode: "passthrough" | "reencode" | null = null;
+        let packetSource: EncodedAudioPacketSource | null = null;
+        let audioSampleSource: AudioSampleSource | null = null;
+        if (audioTrack) {
+          const aCodec = await audioTrack.getCodec();
+          const decoderConfig = await audioTrack.getDecoderConfig();
+          if (aCodec && decoderConfig && output.format.getSupportedCodecs().includes(aCodec)) {
+            packetSource = new EncodedAudioPacketSource(aCodec);
+            output.addAudioTrack(packetSource);
+            audioMode = "passthrough";
+          } else if ((await audioTrack.canDecode()) && (await canEncodeAudio("aac"))) {
+            audioSampleSource = new AudioSampleSource({ codec: "aac", bitrate: 192_000 });
+            output.addAudioTrack(audioSampleSource);
+            audioMode = "reencode";
+          }
+          log(`audio ${aCodec ?? "?"} → ${audioMode ?? "dropped"}`);
+        }
+
+        await output.start();
+
+        // Audio first: packets are tiny next to 4K video frames, and the muxer
+        // interleaves by timestamp at finalize anyway.
+        if (audioMode === "passthrough" && packetSource && audioTrack) {
+          const decoderConfig = await audioTrack.getDecoderConfig();
+          const packetSink = new EncodedPacketSink(audioTrack);
+          let first = true;
+          // Trimmed: start reading at the packet covering the cut, stop past the end.
+          const startPacket = range ? await packetSink.getPacket(t0 + range.start).catch(() => null) : null;
+          for await (const packet of packetSink.packets(startPacket ?? undefined)) {
+            throwIfAborted(signal);
+            const clip = packet.timestamp - t0;
+            if (range && clip >= range.end) break;
+            if (range && clip + packet.duration <= range.start) continue;
+            const ts = clip - offset;
+            if (ts + packet.duration <= 0) continue;
+            // iPhone .mov files carry audio priming: the first packet sits a few
+            // ms before zero even when the video starts at 0 — always clamp.
+            const shifted = ts === packet.timestamp && ts >= 0 ? packet : new EncodedPacket(packet.data, packet.type, Math.max(0, ts), packet.duration, packet.sequenceNumber);
+            await packetSource.add(shifted, first && decoderConfig ? { decoderConfig } : undefined);
+            first = false;
+          }
+          packetSource.close();
+        } else if (audioMode === "reencode" && audioSampleSource && audioTrack) {
+          await writeReencodedAudio(audioTrack, audioSampleSource, signal, range, t0, offset);
+        }
+
+        const decoderConfig = loadDecoderConfig(st.manifest.decoderConfig);
+        let firstPacket = true;
+        let muxed = 0;
+        for (const rec of chunks) {
+          throwIfAborted(signal);
+          const { packets, data } = await st.readChunk(rec.index);
+          const reader = new WindowReader(data);
+          for (const [ts, dur, key, off, size] of packets as PacketEntry[]) {
+            const bytes = await reader.read(off, size);
+            await videoSource.add(new EncodedPacket(bytes, key ? "key" : "delta", ts / 1e6, dur / 1e6), firstPacket ? { decoderConfig } : undefined);
+            firstPacket = false;
+          }
+          if (!keepChunks) await st.dropChunk(rec.index);
+          muxed++;
+          onProgress(0.97 + 0.03 * (muxed / chunks.length));
+        }
+        videoSource.close();
+        throwIfAborted(signal);
+        await output.finalize();
+        blob = await sink.finish("video/mp4");
+        audioIncluded = !audioTrack || audioMode !== null;
         break;
       } catch (e) {
-        if (e instanceof ParamSetChanged && resets++ === 0) {
-          log("encoder parameter sets differ from the journal: starting over");
-          await st.reset(jp);
-          continue;
-        }
-        if (isAbort(e) || signal?.aborted) throw e;
-        if (st.manifest.chunks.length > lastChunks) attempt = 0;
-        lastChunks = st.manifest.chunks.length;
-        if ((isCodecFailure(e) || hiddenDuringPass) && attempt++ < MAX_PASS_RETRIES) {
-          log(`pass failed (${(e as Error)?.message ?? e}); retrying from chunk ${st.manifest.chunks.length}`);
-          await waitUnlessAborted(gate.wait(), signal);
-          throwIfAborted(signal);
-          continue;
-        }
-        throw e;
+        // A chunk (or the output file) gone from storage: drop this mux, encode what is missing, mux again.
+        if (isAbort(e) || signal?.aborted || !isStorageLost(e)) throw e;
+        if (output?.state === "started") await output.cancel().catch(() => undefined);
+        await sink?.discard().catch(() => undefined);
+        sink = null;
+        output = null;
+        if (!(await recoverStorage(e, "while saving"))) throw e;
       }
     }
-    throwIfAborted(signal);
-    const chunks = st.manifest.chunks;
-    const frames = chunks.reduce((n, c) => n + c.frames, 0);
-    if (frames === 0) throw new Error("Decoder produced no frames");
-    if (!st.manifest.decoderConfig) throw new Error("Encoder produced no decoder configuration");
-
-    // 4. Mux: the chunks' packets + the source audio.
-    const muxStarted = performance.now();
-    keepJournal = resumable && keepChunks;
-    sink = memoryOnly ? new FallbackSink(null) : await openOutputSink(opts.opfsPrefix, { expectedBytes: expected, log });
-    log(`output → ${sink.kind === "file" ? "private on-device storage" : "memory"}`);
-    const out = sink;
-    const writable = new WritableStream<StreamTargetChunk>({
-      write: (chunk) => out.write(chunk.data, chunk.position),
-    });
-    output = new Output({
-      // moov at the end: sequential writes into storage, no in-memory buffering.
-      format: new Mp4OutputFormat({ fastStart: false }),
-      target: new StreamTarget(writable, { chunked: true, chunkSize: 4 * 1024 * 1024 }),
-    });
-    const videoSource = new EncodedVideoPacketSource(plan.codec);
-    output.addVideoTrack(videoSource, { frameRate: fps });
-
-    // Audio plan: copy the source packets verbatim (zero generation loss, no
-    // decode cost); fall back to AAC re-encode for codecs mp4 can't carry;
-    // otherwise ship video-only.
-    const audioTrack = await input.getPrimaryAudioTrack();
-    let audioMode: "passthrough" | "reencode" | null = null;
-    let packetSource: EncodedAudioPacketSource | null = null;
-    let audioSampleSource: AudioSampleSource | null = null;
-    if (audioTrack) {
-      const aCodec = await audioTrack.getCodec();
-      const decoderConfig = await audioTrack.getDecoderConfig();
-      if (aCodec && decoderConfig && output.format.getSupportedCodecs().includes(aCodec)) {
-        packetSource = new EncodedAudioPacketSource(aCodec);
-        output.addAudioTrack(packetSource);
-        audioMode = "passthrough";
-      } else if ((await audioTrack.canDecode()) && (await canEncodeAudio("aac"))) {
-        audioSampleSource = new AudioSampleSource({ codec: "aac", bitrate: 192_000 });
-        output.addAudioTrack(audioSampleSource);
-        audioMode = "reencode";
-      }
-      log(`audio ${aCodec ?? "?"} → ${audioMode ?? "dropped"}`);
-    }
-
-    await output.start();
-
-    // Audio first: packets are tiny next to 4K video frames, and the muxer
-    // interleaves by timestamp at finalize anyway.
-    if (audioMode === "passthrough" && packetSource && audioTrack) {
-      const decoderConfig = await audioTrack.getDecoderConfig();
-      const packetSink = new EncodedPacketSink(audioTrack);
-      let first = true;
-      // Trimmed: start reading at the packet covering the cut, stop past the end.
-      const startPacket = range ? await packetSink.getPacket(t0 + range.start).catch(() => null) : null;
-      for await (const packet of packetSink.packets(startPacket ?? undefined)) {
-        throwIfAborted(signal);
-        const clip = packet.timestamp - t0;
-        if (range && clip >= range.end) break;
-        if (range && clip + packet.duration <= range.start) continue;
-        const ts = clip - offset;
-        if (ts + packet.duration <= 0) continue;
-        // iPhone .mov files carry audio priming: the first packet sits a few
-        // ms before zero even when the video starts at 0 — always clamp.
-        const shifted = ts === packet.timestamp && ts >= 0 ? packet : new EncodedPacket(packet.data, packet.type, Math.max(0, ts), packet.duration, packet.sequenceNumber);
-        await packetSource.add(shifted, first && decoderConfig ? { decoderConfig } : undefined);
-        first = false;
-      }
-      packetSource.close();
-    } else if (audioMode === "reencode" && audioSampleSource && audioTrack) {
-      await writeReencodedAudio(audioTrack, audioSampleSource, signal, range, t0, offset);
-    }
-
-    const decoderConfig = loadDecoderConfig(st.manifest.decoderConfig);
-    let firstPacket = true;
-    let muxed = 0;
-    for (const rec of chunks) {
-      throwIfAborted(signal);
-      const { packets, data } = await st.readChunk(rec.index);
-      const reader = new WindowReader(data);
-      for (const [ts, dur, key, off, size] of packets as PacketEntry[]) {
-        const bytes = await reader.read(off, size);
-        await videoSource.add(new EncodedPacket(bytes, key ? "key" : "delta", ts / 1e6, dur / 1e6), firstPacket ? { decoderConfig } : undefined);
-        firstPacket = false;
-      }
-      if (!keepChunks) await st.dropChunk(rec.index);
-      muxed++;
-      onProgress(0.97 + 0.03 * (muxed / chunks.length));
-    }
-    videoSource.close();
-    throwIfAborted(signal);
-    await output.finalize();
-    const blob = await sink.finish("video/mp4");
     await st.destroy();
     prof?.add("mux", performance.now() - muxStarted);
     store = null;
     onProgress(1);
     return {
-      blob,
-      audioIncluded: !audioTrack || audioMode !== null,
+      blob: blob!,
+      audioIncluded,
       codec: plan.codec,
       frames,
       elapsedMs: performance.now() - started,

@@ -45,6 +45,41 @@ export class MemorySink implements OutputSink {
   }
 }
 
+/**
+ * The export's file vanished from private storage while in use: the browser
+ * cleared or evicted the origin's storage (storage pressure, a private
+ * window's in-memory store, "clear site data"). Writes to the open handle
+ * then fail with "not found" (error code -4) and the file reads back as
+ * NotFoundError. The bytes are gone; the exporter encodes them again.
+ */
+export class StorageLostError extends Error {
+  constructor(message = "the export's temporary file was removed from this device's storage while in use") {
+    super(message);
+    this.name = "StorageLostError";
+  }
+}
+
+/** True for a storage loss (StorageLostError, a NotFoundError from storage, or a write that failed with "not found"). */
+export function isStorageLost(e: unknown): boolean {
+  for (let x = e, depth = 0; x && depth < 4; x = (x as { cause?: unknown }).cause, depth++) {
+    if (x instanceof StorageLostError) return true;
+    const name = (x as { name?: string }).name ?? "";
+    const msg = String((x as { message?: string }).message ?? "");
+    if (name === "NotFoundError" || /error code -4\b/.test(msg)) return true;
+  }
+  return false;
+}
+
+/** readOpfsFile, with a missing file reported as a StorageLostError. */
+async function readStored(path: string[]): Promise<File> {
+  try {
+    return await readOpfsFile(path);
+  } catch (e) {
+    if (isStorageLost(e)) throw Object.assign(new StorageLostError(), { cause: e });
+    throw e;
+  }
+}
+
 /** A sink write that failed; `posted` = the bytes reached the worker (they come back through `salvage`). */
 export class SinkWriteError extends Error {
   readonly posted: boolean;
@@ -87,6 +122,8 @@ export class FileSink implements RecoverableSink {
   private pendingWrites = 0;
   private waiters: (() => void)[] = [];
   private returned: { position: number; data: Uint8Array }[] = [];
+  /** The worker closed the file and was terminated (finish ran): nothing answers messages any more. */
+  private closed = false;
   highWater = 0;
 
   private constructor(worker: Worker, path: string[]) {
@@ -161,7 +198,8 @@ export class FileSink implements RecoverableSink {
     if (this.failure) throw new SinkWriteError(this.failure.message, true);
     await this.call({ type: "close" }, "closed");
     this.worker.terminate();
-    const file = await readOpfsFile(this.path);
+    this.closed = true;
+    const file = await readStored(this.path);
     // The file stays until the page releases the result (releaseExportBlob) or a later export's sweep finds it stale:
     // the share sheet / download anchor streams from it.
     const blob = file.slice(0, file.size, mimeType);
@@ -170,13 +208,19 @@ export class FileSink implements RecoverableSink {
   }
 
   async salvage(): Promise<{ base: Uint8Array; rest: { position: number; data: Uint8Array }[] }> {
-    await this.drain();
-    await this.call({ type: "close" }, "closed").catch(() => undefined);
-    this.worker.terminate();
+    // After finish() the worker is gone: a close sent to it would never be answered.
+    if (!this.closed) {
+      await this.drain();
+      await this.call({ type: "close" }, "closed").catch(() => undefined);
+      this.worker.terminate();
+      this.closed = true;
+    }
     let base: Uint8Array = new Uint8Array(0);
     try {
-      const file = await readOpfsFile(this.path);
-      base = new Uint8Array(await file.arrayBuffer());
+      const file = await readStored(this.path);
+      base = new Uint8Array(await file.arrayBuffer().catch((e) => {
+        throw isStorageLost(e) ? Object.assign(new StorageLostError(), { cause: e }) : e;
+      }));
     } finally {
       await removeFile(this.path);
     }
@@ -324,6 +368,7 @@ export class FallbackSink implements OutputSink {
         if (!this.canFallBack()) {
           await p.discard().catch(() => undefined);
           this.primary = null;
+          if (isStorageLost(cause)) throw Object.assign(new StorageLostError(), { cause });
           throw storageFailure(cause, Math.max(this.expected, p.highWater));
         }
         this.log(`storage failed (${cause.message}); continuing in memory`);

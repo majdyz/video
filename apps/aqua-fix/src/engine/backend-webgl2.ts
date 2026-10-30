@@ -14,7 +14,7 @@ export class WebGL2Backend implements GpuBackend {
   lastDrawMs = 0;
   lastCaptureMs = 0;
   private readonly gl: WebGL2RenderingContext;
-  private readonly grade: Program;
+  private grade: Program;
   private readonly down: Program;
   private readonly comp: Program;
   private readonly vao: WebGLVertexArrayObject;
@@ -56,6 +56,10 @@ export class WebGL2Backend implements GpuBackend {
   private beforeTex: WebGLTexture | null = null;
   private wipe: { tex: WebGLTexture; fbo: WebGLFramebuffer; w: number; h: number } | null = null;
   private lastGraded: WebGLTexture | null = null;
+  // A source drawn in this context by another stage (beginSourceDraw / endSourceDraw): its
+  // target, and a framebuffer on the source texture the target is blitted into.
+  private drawTarget: { tex: WebGLTexture; fbo: WebGLFramebuffer; w: number; h: number } | null = null;
+  private sourceFbo: WebGLFramebuffer | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -312,6 +316,94 @@ export class WebGL2Backend implements GpuBackend {
       // Same size as last upload: texSubImage2D re-uses the GPU storage.
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, source);
     }
+  }
+
+  /** Shader benchmarks (debug): the grade's fragment source in use. */
+  gradeSource = GLSL_FRAGMENT;
+
+  private gradePrograms = new Map<string, Program>();
+  /** Shader benchmarks (debug): grade with another fragment source (null: the built-in one); variants stay compiled. Throws on a compile error. */
+  setGradeSource(fs: string | null): void {
+    const gl = this.gl;
+    const src = fs ?? GLSL_FRAGMENT;
+    if (!this.gradePrograms.size) this.gradePrograms.set(GLSL_FRAGMENT, this.grade);
+    let next = this.gradePrograms.get(src);
+    if (!next) {
+      next = this.link(VS, src, ["u_source", "u_data0", "u_data1", "u_data2", "u_data3", "u_tpF0", "u_tpF1", "u_tpFlow", "u_tpPrev"]);
+      gl.uniformBlockBinding(next.prog, gl.getUniformBlockIndex(next.prog, "Params"), 0);
+      this.gradePrograms.set(src, next);
+    }
+    this.grade = next;
+    this.gradeSource = src;
+    this.lastGraded = null;
+  }
+
+  /** This backend's context: a stage drawing the source itself (the studio's geometry pass) renders in it. */
+  get context(): WebGL2RenderingContext {
+    return this.gl;
+  }
+
+  /**
+   * Binds a width×height RGBA8 framebuffer for another stage to draw the
+   * next source frame into, exactly as it would draw a canvas of that size
+   * (row 0 at the bottom). endSourceDraw then makes it the source.
+   */
+  beginSourceDraw(width: number, height: number): void {
+    const gl = this.gl;
+    let t = this.drawTarget;
+    if (!t || t.w !== width || t.h !== height) {
+      if (t) {
+        gl.deleteTexture(t.tex);
+        gl.deleteFramebuffer(t.fbo);
+      }
+      const tex = this.tpTarget(width, height, "rgba8");
+      t = this.drawTarget = { tex, fbo: this.tpFramebuffer(tex), w: width, h: height };
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
+    gl.viewport(0, 0, width, height);
+  }
+
+  /**
+   * The frame drawn since beginSourceDraw becomes the source: the same
+   * texels upload() of a canvas holding that picture stores (a canvas
+   * uploads top row first, so the copy flips rows), without the copy
+   * between contexts. Same bookkeeping as upload().
+   */
+  endSourceDraw(width: number, height: number, rotation: Rotation): void {
+    const t0 = this.syncProfile ? performance.now() : 0;
+    const gl = this.gl;
+    const t = this.drawTarget;
+    if (!t || t.w !== width || t.h !== height) throw new Error("endSourceDraw without a matching beginSourceDraw");
+    this.lastGraded = null;
+    this.rotation = rotation;
+    const [ow, oh] = uprightSize(width, height, rotation);
+    this.outputWidth = ow;
+    this.outputHeight = oh;
+    this.sizeCanvas(this.previewScale);
+    if (width !== this.srcW || height !== this.srcH || this.srcKind !== "drawn" || !this.sourceFbo) {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.source);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      if (!this.sourceFbo) this.sourceFbo = this.tpFramebuffer(this.source);
+      this.srcW = width;
+      this.srcH = height;
+      // The next upload() of a real source re-probes its size and kind.
+      this.srcKind = "drawn";
+      this.viaCanvas = false;
+    }
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, t.fbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.sourceFbo);
+    gl.blitFramebuffer(0, 0, width, height, 0, height, width, 0, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (this.syncProfile) {
+      this.gpuSync();
+      this.stageMs.upload += performance.now() - t0;
+    }
+  }
+
+  /** Profiling (?profile=sync): waits for the GPU (the work of a stage drawing in this context lands in its own time). */
+  syncIfProfiling(): void {
+    if (this.syncProfile) this.gpuSync();
   }
 
   private throughCanvas(src: SourceInput, width: number, height: number): OffscreenCanvas {
@@ -576,6 +668,11 @@ export class WebGL2Backend implements GpuBackend {
       gl.deleteFramebuffer(this.wipe.fbo);
     }
     this.tpRelease();
+    if (this.drawTarget) {
+      gl.deleteTexture(this.drawTarget.tex);
+      gl.deleteFramebuffer(this.drawTarget.fbo);
+    }
+    if (this.sourceFbo) gl.deleteFramebuffer(this.sourceFbo);
     gl.deleteTexture(this.source);
     for (const t of this.data) gl.deleteTexture(t);
     gl.deleteBuffer(this.uniformBuf);

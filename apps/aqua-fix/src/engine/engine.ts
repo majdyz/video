@@ -13,6 +13,7 @@ import { ANALYSIS_H, ANALYSIS_W } from "./analyze.ts";
 import type { AnalysisPacket, AnalysisRequest, TargetsReply, TargetsRequest } from "./analysis-worker.ts";
 import type { PersonPacket, PersonRequest } from "./person-worker.ts";
 import { boxGate, PERSON_BOX_MIN_SCORE, type PersonBox } from "./person-gate.ts";
+import { PERSON_DETECT_EVERY, personCountersAt, personPassOf, samePersonCounters, type PersonCounters } from "./person-plan.ts";
 import { ANALYSIS_SLOT_S, analysisSlot, inCutWindow as lockInCutWindow, lockParams, noteCut as lockNoteCut, segmentAt, type LockSegment } from "./lock.ts";
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
 import { linearToOklab, oklabToLinear } from "./color.ts";
@@ -71,7 +72,6 @@ const PERSON_GROW_WATER_CHROMA = 0.02;
 // CPU) whether anybody is there at all; the selfie mask counts only inside
 // its boxes. A verdict older than this is dropped (a starved worker must not
 // keep a stale person alive).
-const PERSON_DETECT_EVERY = 3;
 const PERSON_BOX_HOLD_S = 8;
 const PERSON_RECTS: Rect[] = [
   FULL_RECT,
@@ -118,7 +118,7 @@ export class GradeEngine {
   /** Debug: read every precomputed thumbnail back again at render time and use the live one on a mismatch. */
   verifyPrecomputed = false;
   /** Analyse-first: render-time analyses served from the cache / analysed live; thumbnails that differed (verifyPrecomputed). */
-  readonly precomputeStats = { hits: 0, misses: 0, mismatches: 0 };
+  readonly precomputeStats = { hits: 0, misses: 0, mismatches: 0, personHits: 0, personMisses: 0 };
   private worker: Worker | null = null;
   private inflight = false;
   private reqId = 0;
@@ -179,6 +179,11 @@ export class GradeEngine {
   private personDetectInflight = false;
   private personDetectWarned = false;
   private personWaiters: (() => void)[] = [];
+  /** Person counters right after the last reset (the analyse-first plan counts from them). */
+  private personBase: PersonCounters = { count: 0, passes: 0, rectIdx: 0 };
+  /** Analyse-first person passes (precompute): replies by request id (negative, apart from the live ones). */
+  private prePersonId = 0;
+  private prePersonWaiters = new Map<number, (p: PersonPacket | null) => void>();
   /** Clip-time analysis slot of the last analysis started by tick / analyzeDue. */
   private lastSlot = Number.NaN;
   private current: GradeParams = IDENTITY_PARAMS;
@@ -375,8 +380,19 @@ export class GradeEngine {
   private ensurePersonWorker(): Worker {
     if (this.personWorker) return this.personWorker;
     const w = new Worker(new URL("./person-worker.ts", import.meta.url), { type: "module" });
-    w.onmessage = (e: MessageEvent<PersonPacket>) => this.onPersonPacket(e.data);
+    w.onmessage = (e: MessageEvent<PersonPacket>) => {
+      const p = e.data;
+      if (p.id < 0) {
+        const pre = this.prePersonWaiters.get(p.id);
+        this.prePersonWaiters.delete(p.id);
+        pre?.(p);
+        return;
+      }
+      this.onPersonPacket(p);
+    };
     w.onerror = (e) => {
+      for (const r of this.prePersonWaiters.values()) r(null);
+      this.prePersonWaiters.clear();
       this.personInflight = false;
       this.personFailed = true;
       this.stats.person = "failed";
@@ -621,11 +637,15 @@ export class GradeEngine {
       // quadrant at 2× detail, cycling through PERSON_RECTS. Both readbacks
       // finish before anything is posted: once the analysis reply lands,
       // `inflight` clears and the next tick may start a new readback.
+      const counters: PersonCounters = { count: this.personCount, passes: this.personPasses, rectIdx: this.personRectIdx };
       const wantPerson = this.personEnabled && !this.personFailed && !this.personInflight && this.personCount++ % this.personEvery === 0;
       // The first pass (and every PERSON_DETECT_EVERY-th) is a detection on the full frame.
       const detect = wantPerson && this.personPasses++ % PERSON_DETECT_EVERY === 0;
       const rect = detect ? FULL_RECT : PERSON_RECTS[this.personRectIdx % PERSON_RECTS.length];
-      const px = !wantPerson ? null : rect === FULL_RECT ? rgba.slice() : await this.readback(ANALYSIS_W, ANALYSIS_H, rect);
+      // Analyse-first ran this very pass (same counters: same kind and rect, same thumbnail): its reply is used.
+      const pre = wantPerson && cached?.person && samePersonCounters(cached.person, counters) && cached.person.detect === detect ? cached.person : null;
+      if (cached?.person) this.precomputeStats[pre ? "personHits" : "personMisses"]++;
+      const px = !wantPerson ? null : pre ? pre.rgba : rect === FULL_RECT ? rgba.slice() : await this.readback(ANALYSIS_W, ANALYSIS_H, rect);
       // The anchor (follow.ts) needs the lock in force and its shot's target.
       const { lock, target } = this.anchorAt(this.lastTickSec);
       this.reqLock = lock;
@@ -654,7 +674,22 @@ export class GradeEngine {
         this.personInflight = true;
         this.personDetectInflight = detect;
         this.personRectInflight = rect;
-        this.ensurePersonWorker().postMessage(preq, [preq.rgba]);
+        if (pre) {
+          // Delivered once this analysis's packet is in, as the worker's reply to this request would be;
+          // a pass that failed ahead runs live now, on the same thumbnail.
+          const id = preq.id;
+          const analysed = new Promise<void>((r) => {
+            this.resolveWaiters.push(() => r());
+            this.rejectWaiters.push(() => r());
+          });
+          void Promise.all([pre.packet, analysed]).then(([pk]) => {
+            if (id !== this.personReqId) return;
+            if (pk && !pk.error) this.onPersonPacket({ ...pk, id });
+            else this.ensurePersonWorker().postMessage(preq, [preq.rgba]);
+          });
+        } else {
+          this.ensurePersonWorker().postMessage(preq, [preq.rgba]);
+        }
       }
     } catch (e) {
       this.inflight = false;
@@ -953,6 +988,7 @@ export class GradeEngine {
     this.personBoxesAt = verdict ? 0 : -Infinity;
     // With a verdict in hand the first pass segments; detection follows on the third.
     this.personPasses = verdict ? 1 : 0;
+    this.personBase = { count: 0, passes: this.personPasses, rectIdx: 0 };
     this.personDetectInflight = false;
     this.stats.personCoverage = 0;
     this.stats.personBoxes = verdict ? verdict.length : -1;
@@ -1024,10 +1060,12 @@ export class GradeEngine {
    * same grade, without the render waiting for a worker. A lock that changed
    * meanwhile (a cut seen in a cut window) sends it to the engine's worker.
    */
-  async precompute(timeSec: number, prevSec: number): Promise<void> {
+  async precompute(timeSec: number, prevSec: number, personOrdinal?: number): Promise<void> {
     if (this.pre.has(timeSec)) return;
     const tr = performance.now();
     const rgba = await this.readback(ANALYSIS_W, ANALYSIS_H);
+    // The person pass this analysis will run (the caller knows it is the export's n-th analysis), from this upload.
+    const person = personOrdinal !== undefined ? await this.prePerson(rgba, prevSec, personOrdinal) : undefined;
     this.workerMs.readback += performance.now() - tr;
     const { lock, target } = this.anchorAt(prevSec);
     const w = this.poolWorker();
@@ -1035,14 +1073,47 @@ export class GradeEngine {
     const copy = rgba.slice();
     // Every pool worker failed: the thumbnail is still reused, the analysis runs in the engine's worker.
     if (this.poolLoad[w] === Infinity) {
-      this.pre.set(timeSec, { rgba, lock, target, packet: Promise.resolve(null) });
+      this.pre.set(timeSec, { rgba, lock, target, packet: Promise.resolve(null), person });
       return;
     }
     const packet = new Promise<AnalysisPacket | null>((resolve) => this.preWaiters.set(id, { resolve, worker: w }));
     this.poolLoad[w]++;
     const req: AnalysisRequest = { id, rgba: copy.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, ...(lock && target ? { lock, target } : {}) };
     this.pool[w].postMessage(req, [req.rgba]);
-    this.pre.set(timeSec, { rgba, lock, target, packet });
+    this.pre.set(timeSec, { rgba, lock, target, packet, person });
+  }
+
+  /**
+   * Analyse-first person pass: when the export's `ordinal`-th analysis runs
+   * one (personCountersAt), reads its thumbnail (the frame or a quadrant)
+   * from the current upload and sends it to the person worker now, with the
+   * timestamp the render would send (`prevSec`, the engine clock then).
+   * startAnalysis uses the reply when its counters match.
+   */
+  private async prePerson(rgba: Uint8ClampedArray, prevSec: number, ordinal: number): Promise<PrePerson | undefined> {
+    if (!this.personEnabled || this.personFailed) return undefined;
+    const c = this.personPlanAt(ordinal);
+    const { want, detect } = personPassOf(c, this.personEvery);
+    if (!want) return undefined;
+    const rect = detect ? FULL_RECT : PERSON_RECTS[c.rectIdx % PERSON_RECTS.length];
+    const px = rect === FULL_RECT ? rgba.slice() : await this.readback(ANALYSIS_W, ANALYSIS_H, rect);
+    const id = -++this.prePersonId;
+    const copy = px.slice();
+    const packet = new Promise<PersonPacket | null>((resolve) => this.prePersonWaiters.set(id, resolve));
+    const req: PersonRequest = { id, rgba: copy.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H, timestampMs: Math.round(prevSec * 1000), detect };
+    this.ensurePersonWorker().postMessage(req, [req.rgba]);
+    return { ...c, rgba: px, detect, packet };
+  }
+
+  private planCache: { n: number; c: PersonCounters; base: PersonCounters; every: number } | null = null;
+  /** personCountersAt from the last reset, stepping on from the last call (ordinals only grow within an export). */
+  private personPlanAt(n: number): PersonCounters {
+    const pc = this.planCache;
+    const c = pc && pc.base === this.personBase && pc.every === this.personEvery && n >= pc.n
+      ? personCountersAt(pc.c, n - pc.n, this.personEvery)
+      : personCountersAt(this.personBase, n, this.personEvery);
+    this.planCache = { n, c, base: this.personBase, every: this.personEvery };
+    return c;
   }
 
   /** The anchor's inputs at engine clock `timeSec`: the lock in force and its shot's target (both null without). */
@@ -1211,7 +1282,9 @@ function meanDiff(a: Vec3, b: Vec3): number {
   return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
 }
 
-type Precomputed = { rgba: Uint8ClampedArray; lock: GradeParams | null; target: [number, number] | null; packet: Promise<AnalysisPacket | null> };
+type Precomputed = { rgba: Uint8ClampedArray; lock: GradeParams | null; target: [number, number] | null; packet: Promise<AnalysisPacket | null>; person?: PrePerson };
+/** A person pass run ahead for one analysis: the counters it assumed, its thumbnail and its reply. */
+type PrePerson = PersonCounters & { rgba: Uint8ClampedArray; detect: boolean; packet: Promise<PersonPacket | null> };
 
 function sameBytes(a: Uint8ClampedArray, b: Uint8ClampedArray): boolean {
   if (a.length !== b.length) return false;
