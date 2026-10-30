@@ -1,7 +1,6 @@
 // AI subject detection overlay (Studio seg/): with an overlay on the frame, the per-animal strength texture (data
 // texture 3) the grade reads carries the ML subject in place of the engine's own per-animal strength
 // (composeSegStrength; grade-shader toneWeight). Without an overlay it is the engine's alone (B = A = 0).
-import { SEG_TONE } from "./grade-shader.ts";
 import { linearToOklab } from "./color.ts";
 
 function sstep(lo: number, hi: number, x: number): number {
@@ -18,7 +17,8 @@ export type SegOverlay = {
   exclude: Float32Array | null;
   /** ML weight per texel 0..1 (the confidence weight times the region near the ML subject). */
   near: Float32Array;
-  /** How far each texel departs from the water around it (0..1), or null. */
+  /** How far each texel departs from the water around it (0..1), or null (studio seg/; the grade tells water from
+   * the subject with composeSegStrength's own water field). */
   depart?: Float32Array | null;
 };
 
@@ -76,58 +76,30 @@ function blur(src: Float32Array, W: number, H: number, r: number): Float32Array 
   return out;
 }
 
-/** The ML water cap reads the departure map blurred over this share of the overlay's width (a region, not a pixel). */
-export const SEG_CAP_BLUR = 1 / 30;
-
-/** The local water around the subject (waterL): a normalised blur of the guide's water texels over `blur` of its
- * width, eased (where the subject hides the water that near) into one over `wide`, then the frame's water mean. */
-export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02 };
+/**
+ * The local water and the subject's regional evidence (waterField), on the analysis guide's grid: the water is a
+ * normalised blur of the guide texels the ML mask is well clear of (alpha below alphaMax over the whole texel,
+ * excluded subjects too) over `blur` of the guide's width, eased (where the subject hides the water that near) into
+ * one over `wide`, then the frame's water mean. A texel inside the mask is evidence of the subject as far as its
+ * colour departs from that water (Oklab ΔE evLo..evHi, a lower bar than the per-pixel test: a shaded belly still
+ * counts); the regional trust is the share of evidence
+ * around it (a box of ±`region` of the width) over trustLo..trustHi: deep in an animal, a shaded part that matches
+ * the water is toned with the rest; a mask that leaked onto the water (a region of water inside it) is not, nor
+ * the water just inside a fat contour.
+ */
+export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02, evLo: 0.012, evHi: 0.035, region: 1 / 32, trustLo: 0.25, trustHi: 0.6 };
 
 type Guide = { width: number; height: number; data: Float32Array };
 
-/**
- * The local water's Oklab L on the overlay grid, from the analysis guide (linear RGB, RGBA): the guide texels the
- * ML mask is well clear of (alpha below SEG_WATER.alphaMax over the whole texel, excluded subjects too), averaged
- * over a region around each point. Null when the frame shows no such water (the subject fills it).
- */
-export function waterL(g: Guide, o: SegOverlay): Float32Array | null {
-  const gw = g.width, gh = g.height, W = o.width, H = o.height, n = gw * gh;
-  const L = new Float32Array(n), wt = new Float32Array(n);
-  let sumL = 0, sumW = 0;
-  for (let y = 0; y < gh; y++) {
-    const oy0 = Math.floor((y * H) / gh), oy1 = Math.min(H, Math.max(oy0 + 1, Math.ceil(((y + 1) * H) / gh)));
-    for (let x = 0; x < gw; x++) {
-      const ox0 = Math.floor((x * W) / gw), ox1 = Math.min(W, Math.max(ox0 + 1, Math.ceil(((x + 1) * W) / gw)));
-      let m = 0;
-      for (let oy = oy0; oy < oy1; oy++) for (let ox = ox0; ox < ox1; ox++) {
-        const k = oy * W + ox;
-        m = Math.max(m, o.alpha[k], o.exclude ? o.exclude[k] : 0);
-      }
-      const i = y * gw + x, k = i * 4;
-      L[i] = linearToOklab(Math.max(0, g.data[k]), Math.max(0, g.data[k + 1]), Math.max(0, g.data[k + 2]))[0];
-      wt[i] = m < SEG_WATER.alphaMax ? 1 : 0;
-      sumL += L[i] * wt[i];
-      sumW += wt[i];
-    }
-  }
-  if (sumW < 1) return null;
-  const meanL = sumL / sumW;
-  const LW = L.map((v, i) => v * wt[i]);
-  const r1 = Math.max(1, Math.round(SEG_WATER.blur * gw)), r2 = Math.max(1, Math.round(SEG_WATER.wide * gw));
-  const a1 = blur(LW, gw, gh, r1), w1 = blur(wt, gw, gh, r1), a2 = blur(LW, gw, gh, r2), w2 = blur(wt, gw, gh, r2);
-  const field = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const wide = w2[i] > 1e-3 ? a2[i] / w2[i] : meanL;
-    field[i] = w1[i] > 1e-4 ? wide + (a1[i] / w1[i] - wide) * Math.min(1, w1[i] / 0.15) : wide;
-  }
-  // Bilinear onto the overlay grid.
+/** Bilinear resize of a w × h map to W × H (pixel centres aligned). */
+function resample(f: Float32Array, w: number, h: number, W: number, H: number): Float32Array {
   const out = new Float32Array(W * H);
   for (let y = 0; y < H; y++) {
-    const fy = Math.min(gh - 1, Math.max(0, ((y + 0.5) / H) * gh - 0.5)), y0 = Math.floor(fy), y1 = Math.min(gh - 1, y0 + 1), ty = fy - y0;
+    const fy = Math.min(h - 1, Math.max(0, ((y + 0.5) / H) * h - 0.5)), y0 = Math.floor(fy), y1 = Math.min(h - 1, y0 + 1), ty = fy - y0;
     for (let x = 0; x < W; x++) {
-      const fx = Math.min(gw - 1, Math.max(0, ((x + 0.5) / W) * gw - 0.5)), x0 = Math.floor(fx), x1 = Math.min(gw - 1, x0 + 1), tx = fx - x0;
-      const a = field[y0 * gw + x0] + (field[y0 * gw + x1] - field[y0 * gw + x0]) * tx;
-      const b = field[y1 * gw + x0] + (field[y1 * gw + x1] - field[y1 * gw + x0]) * tx;
+      const fx = Math.min(w - 1, Math.max(0, ((x + 0.5) / W) * w - 0.5)), x0 = Math.floor(fx), x1 = Math.min(w - 1, x0 + 1), tx = fx - x0;
+      const a = f[y0 * w + x0] + (f[y0 * w + x1] - f[y0 * w + x0]) * tx;
+      const b = f[y1 * w + x0] + (f[y1 * w + x1] - f[y1 * w + x0]) * tx;
       out[y * W + x] = a + (b - a) * ty;
     }
   }
@@ -135,34 +107,73 @@ export function waterL(g: Guide, o: SegOverlay): Float32Array | null {
 }
 
 /**
- * Overlay (+ the analysis guide) → the RGBA texture the grade reads with an AI overlay on the frame (grade-shader
- * animalStrength / toneWeight, at the overlay's size): R = the local water's Oklab L (waterL; −1 without water to
- * compare with, or without a guide), G = the ML's regional leak cap, B = the ML alpha (the mask's signed distance,
- * as is), A = the ML weight (near map).
- * The cap follows the rule of SEG_TONE, from the overlay's own water-departure map blurred over a region
- * (SEG_CAP_BLUR): water-like regions keep at most waterFloor of the tone unless the ML is sure, the texel well inside
- * the mask and its region departing at least a little from the water. Regional, so a subject whose shaded side
- * happens to match the water is toned whole (no patches), while a leak onto open water (a region of water) stays
- * capped. Without a departure map: in a close-up (`closeUp`, no backdrop) every texel counts as water (the cap
- * holds); in open water nothing is capped here.
+ * The local water's Oklab L and the regional trust (see SEG_WATER) on the overlay grid, from the analysis guide
+ * (linear RGB, RGBA). Null when the frame shows no water clear of the mask (the subject fills it).
  */
-export function composeSegStrength(o: SegOverlay, closeUp = false, guide: Guide | null = null): { width: number; height: number; data: Float32Array } {
+export function waterField(g: Guide, o: SegOverlay): { L: Float32Array; trust: Float32Array } | null {
+  const gw = g.width, gh = g.height, W = o.width, H = o.height, n = gw * gh;
+  const lab = new Float32Array(n * 3), wt = new Float32Array(n), inside = new Uint8Array(n);
+  const sum = [0, 0, 0];
+  let sumW = 0;
+  for (let y = 0; y < gh; y++) {
+    const oy0 = Math.floor((y * H) / gh), oy1 = Math.min(H, Math.max(oy0 + 1, Math.ceil(((y + 1) * H) / gh)));
+    for (let x = 0; x < gw; x++) {
+      const ox0 = Math.floor((x * W) / gw), ox1 = Math.min(W, Math.max(ox0 + 1, Math.ceil(((x + 1) * W) / gw)));
+      let m = 0, a = 0, c = 0;
+      for (let oy = oy0; oy < oy1; oy++) for (let ox = ox0; ox < ox1; ox++) {
+        const k = oy * W + ox;
+        m = Math.max(m, o.alpha[k], o.exclude ? o.exclude[k] : 0);
+        a += o.alpha[k];
+        c++;
+      }
+      const i = y * gw + x, k = i * 4;
+      const v = linearToOklab(Math.max(0, g.data[k]), Math.max(0, g.data[k + 1]), Math.max(0, g.data[k + 2]));
+      lab[i * 3] = v[0]; lab[i * 3 + 1] = v[1]; lab[i * 3 + 2] = v[2];
+      wt[i] = m < SEG_WATER.alphaMax ? 1 : 0;
+      inside[i] = a / c > 0.5 ? 1 : 0;
+      for (let q = 0; q < 3; q++) sum[q] += v[q] * wt[i];
+      sumW += wt[i];
+    }
+  }
+  if (sumW < 1) return null;
+  const r1 = Math.max(1, Math.round(SEG_WATER.blur * gw)), r2 = Math.max(1, Math.round(SEG_WATER.wide * gw));
+  const w1 = blur(wt, gw, gh, r1), w2 = blur(wt, gw, gh, r2);
+  const water = [0, 1, 2].map((q) => {
+    const f = new Float32Array(n);
+    for (let i = 0; i < n; i++) f[i] = lab[i * 3 + q] * wt[i];
+    const a1 = blur(f, gw, gh, r1), a2 = blur(f, gw, gh, r2), out = new Float32Array(n), mean = sum[q] / sumW;
+    for (let i = 0; i < n; i++) {
+      const wide = w2[i] > 1e-3 ? a2[i] / w2[i] : mean;
+      out[i] = w1[i] > 1e-4 ? wide + (a1[i] / w1[i] - wide) * Math.min(1, w1[i] / 0.15) : wide;
+    }
+    return out;
+  });
+  const ev = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    if (!inside[i]) continue;
+    const d = Math.hypot(lab[i * 3] - water[0][i], lab[i * 3 + 1] - water[1][i], lab[i * 3 + 2] - water[2][i]);
+    ev[i] = sstep(SEG_WATER.evLo, SEG_WATER.evHi, d);
+  }
+  const dens = blur(ev, gw, gh, Math.max(1, Math.round(SEG_WATER.region * gw)));
+  const trust = dens.map((v) => sstep(SEG_WATER.trustLo, SEG_WATER.trustHi, v));
+  return { L: resample(water[0], gw, gh, W, H), trust: resample(trust, gw, gh, W, H) };
+}
+
+/**
+ * Overlay (+ the analysis guide) → the RGBA texture the grade reads with an AI overlay on the frame (grade-shader
+ * animalStrength / toneWeight, at the overlay's size): R = the local water's Oklab L (−1 without water to compare
+ * with, or without a guide: every pixel then counts as the subject), G = the regional trust (waterField: how far the
+ * mask is trusted over the pixel's own departure from the water; 1 without a guide), B = the ML alpha (the mask's
+ * signed distance, as is), A = the ML weight (near map).
+ */
+export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): { width: number; height: number; data: Float32Array } {
   const W = o.width, H = o.height;
   const out = new Float32Array(W * H * 4);
-  const depB = o.depart ? blur(o.depart, W, H, Math.max(1, Math.round(SEG_CAP_BLUR * W))) : null;
-  const wl = guide ? waterL(guide, o) : null;
+  const wf = guide ? waterField(guide, o) : null;
   for (let i = 0; i < W * H; i++) {
-    const a = o.alpha[i];
-    let cap = 1;
-    if (depB || closeUp) {
-      const dep = depB ? depB[i] : 0;
-      const sure = sstep(SEG_TONE.confLo, SEG_TONE.confHi, o.near[i]);
-      const floorW = SEG_TONE.waterFloor + (1 - SEG_TONE.waterFloor) * sure * sstep(SEG_TONE.insideLo, SEG_TONE.insideHi, a) * sstep(SEG_TONE.departLo, SEG_TONE.departHi, dep);
-      cap = floorW + (1 - floorW) * dep;
-    }
-    out[i * 4] = wl ? wl[i] : -1;
-    out[i * 4 + 1] = cap;
-    out[i * 4 + 2] = a;
+    out[i * 4] = wf ? wf.L[i] : -1;
+    out[i * 4 + 1] = wf ? wf.trust[i] : 1;
+    out[i * 4 + 2] = o.alpha[i];
     out[i * 4 + 3] = o.near[i];
   }
   return { width: W, height: H, data: out };

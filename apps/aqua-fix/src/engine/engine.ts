@@ -838,7 +838,7 @@ export class GradeEngine {
     }
     // Per-animal Subject pop strength (data texture 3); none without Subject pop.
     if (this.settings.subjectPop) {
-      this.backend.setData(3, this.seg ? composeSegStrength(this.seg, (this.current.backdrop ?? 0) <= 0, g) : this.animals.strength(this.lastTickSec));
+      this.backend.setData(3, this.seg ? composeSegStrength(this.seg, g) : this.animals.strength(this.lastTickSec));
       const c = this.seg ? popContrast(g, this.seg) : null;
       if (c !== null) { this.popC.sum += c; this.popC.n++; }
       this.popDir = this.popC.n ? popDirection(this.popC.sum / this.popC.n) : 1;

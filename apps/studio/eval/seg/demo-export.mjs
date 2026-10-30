@@ -1,7 +1,8 @@
 // Subject pop demo exports (headless, against a preview build): one clip, Vivid on (the default), Subject pop on with
 // AI subject detection, the AI pass left to cover the whole clip, then Export (pop-on.mp4); Subject pop off, Export
 // again (pop-off.mp4). Same session, same grade otherwise.
-// Usage: node apps/studio/eval/seg/demo-export.mjs <base url> <outdir> <clip.mp4>    (env EXTRA: more query, T: seed time)
+// Usage: node apps/studio/eval/seg/demo-export.mjs <base url> <outdir> <clip.mp4>    (env EXTRA: more query, T: seed time,
+//        TAP=u,v: tap the subject when the engine seeds none (a close-up), OFF_ONLY=1: only pop-off.mp4)
 import fs from "node:fs";
 import path from "node:path";
 const { chromium } = await import(path.join(process.env.HOME, "browser/node_modules/playwright/index.mjs"));
@@ -20,6 +21,8 @@ await p.waitForLoadState("load");
 await p.setInputFiles("input[type=file]", clip);
 await p.waitForFunction(() => window.studio?.getSnapshot().phase === "ready" && window.studio.getSnapshot().colourProfiled && !window.studio.getSnapshot().busy, null, { timeout: 300000 });
 console.log(ts(), "ready", JSON.stringify(await p.evaluate(() => ({ coi: crossOriginIsolated, engine: window.studio.engine?.stats?.backend }))));
+// OFF_ONLY=1: just the pop-off export (no AI pass needed for it).
+if (process.env.OFF_ONLY === "1") { await exportTo("pop-off"); await b.close(); process.exit(0); }
 await p.getByRole("button", { name: /Advanced/ }).first().click(); await p.waitForTimeout(800);
 const pop = p.getByRole("switch", { name: /Subject pop/ });
 if ((await pop.getAttribute("aria-checked")) !== "true") { await pop.click(); await p.waitForTimeout(1500); }
@@ -48,7 +51,7 @@ for (const t of (process.env.MASKT ?? "1,2,3,4,5").split(",").map(Number)) {
   const m = await p.evaluate((t) => { const o = window.studio.seg.overlayAt(t); return o ? { w: o.width, h: o.height, a: Array.from(o.alpha, (x) => Math.round(255 * x)) } : null; }, t);
   if (m) fs.writeFileSync(`${out}/mask-${t}.pgm`, Buffer.concat([Buffer.from(`P5\n${m.w} ${m.h}\n255\n`), Buffer.from(m.a)]));
 }
-const exportTo = async (name) => {
+async function exportTo(name) {
   const dl = p.waitForEvent("download", { timeout: 3600000 }).catch(() => null);
   await p.getByRole("button", { name: /^Export$/ }).first().click(); await p.waitForTimeout(1500);
   const go = p.getByRole("button", { name: /^(Export|Save|Start|Export video).*/ }).last(); if (await go.count()) await go.click();
@@ -59,10 +62,10 @@ const exportTo = async (name) => {
   await p.keyboard.press("Escape").catch(() => undefined); await p.waitForTimeout(1500);
   const done = p.getByRole("button", { name: /^(Done|Close|Back to edit)/ }); if (await done.count() && await done.first().isVisible()) await done.first().click().catch(() => undefined);
   await p.waitForTimeout(1500);
-};
+}
 await exportTo("pop-on");
 // Subject pop off: same clip, same grade.
-if (!(await pop.isVisible().catch(() => false))) { await p.getByRole("button", { name: /Advanced/ }).first().click().catch(() => undefined); await p.waitForTimeout(800); }
+for (let k = 0; k < 3 && !(await pop.isVisible().catch(() => false)); k++) { await p.getByRole("button", { name: /Advanced/ }).first().click().catch(() => undefined); await p.waitForTimeout(1200); }
 if ((await pop.getAttribute("aria-checked")) === "true") { await pop.click(); await p.waitForTimeout(2000); }
 console.log(ts(), "pop off", JSON.stringify(await snap()));
 await exportTo("pop-off");

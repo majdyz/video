@@ -195,41 +195,36 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(at(30, 16) > 0.9, "the grey subject: 1");
   assert.ok(at(21, 16) < 0.2, "the leak onto water reads as water");
   assert.ok(at(31, 16) > 0.8, `a small water-coloured spot inside the subject is the subject (${at(31, 16)})`);
-  // The cap is regional (the departure map blurred): a leak region on water keeps it, the subject is toned whole,
-  // including a water-coloured patch on it (a shaded flank) narrower than the blur.
-  const n = 120, dep = new Float32Array(n);
-  for (let x = 60; x < n; x++) dep[x] = x >= 88 && x < 90 ? 0 : 1; // water | subject with a 2-texel water-coloured patch
-  const ov = { width: n, height: 1, alpha: new Float32Array(n).fill(1), exclude: null, near: new Float32Array(n).fill(1), depart: dep };
-  for (const closeUp of [true, false]) {
-    const c = composeSegStrength(ov, closeUp).data;
-    assert.ok(c[10 * 4 + 1] <= SEG_TONE.waterFloor + 1e-6, `a sure leak on water keeps the cap (${c[10 * 4 + 1]})`);
-    assert.ok(c[110 * 4 + 1] > 0.99, "the subject is toned in full");
-    assert.ok(c[88 * 4 + 1] > 0.8, `a water-coloured patch on the subject is toned with it (${c[88 * 4 + 1].toFixed(2)})`);
-    assert.equal(c[10 * 4 + 2], 1, "the alpha (the mask's distance) passes as is");
-    assert.equal(c[10 * 4], -1, "no guide: no water to compare with");
-  }
-  const noDep = { ...ov, depart: null };
-  assert.equal(composeSegStrength(noDep, false).data[10 * 4 + 1], 1, "open water without a departure map: no cap here");
-  assert.equal(composeSegStrength(noDep, true).data[10 * 4 + 1], SEG_TONE.waterFloor, "a close-up without one: the cap holds");
 }
 
-// The tone stays inside the subject: the alpha is the mask's signed distance at the grade's own scale, and the local
-// water L (R) is read from the guide's water only, not the subject.
+// The tone stays inside the subject: the alpha is the mask's signed distance at the grade's own scale; the local
+// water L (R) is read from the guide's water only; the regional trust (G) holds deep in the subject, a water-coloured
+// patch on it included, and not on water the mask leaked onto.
 {
   assert.equal(SEG.alphaR, SEG_TONE.alphaR, "studio feather and grade read the same distance scale");
-  const W = 40, H = 20, m = new Float32Array(W * H);
-  for (let y = 5; y < 15; y++) for (let x = 15; x < 25; x++) m[y * W + x] = 1;
+  const W = 160, H = 60, m = new Float32Array(W * H);
+  // Mask: the subject (x 40..99) plus a leak onto the water to its right (x 100..139).
+  for (let y = 10; y < 50; y++) for (let x = 40; x < 140; x++) m[y * W + x] = 1;
   const a = sdfFeather(m, W, H, SEG.alphaR);
-  assert.ok(Math.abs(a[10 * W + 15] - (0.5 + 0.5 / (2 * SEG.alphaR))) < 1e-6 && Math.abs(a[10 * W + 14] - (0.5 - 0.5 / (2 * SEG.alphaR))) < 1e-6, "0.5 on the contour");
-  // Guide at half the overlay grid: bright subject (linear 0.5) in darker water (0.05).
-  const gw = 20, gh = 10, g = new Float32Array(gw * gh * 4);
-  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) { const s = x >= 7 && x < 13 && y >= 2 && y < 8; g.fill(s ? 0.5 : 0.05, (y * gw + x) * 4, (y * gw + x) * 4 + 3); }
+  assert.ok(Math.abs(a[30 * W + 40] - (0.5 + 0.5 / (2 * SEG.alphaR))) < 1e-6 && Math.abs(a[30 * W + 39] - (0.5 - 0.5 / (2 * SEG.alphaR))) < 1e-6, "0.5 on the contour");
+  // Guide at half the overlay grid: a bright subject (linear 0.5) with a water-coloured patch, in darker water (0.05).
+  const gw = 80, gh = 30, g = new Float32Array(gw * gh * 4);
+  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
+    const sub = x >= 20 && x < 50 && y >= 5 && y < 25 && !(x >= 34 && x < 36 && y >= 14 && y < 16);
+    g.fill(sub ? 0.5 : 0.05, (y * gw + x) * 4, (y * gw + x) * 4 + 3);
+  }
   const ov = { width: W, height: H, alpha: a, exclude: null, near: new Float32Array(W * H).fill(1), depart: null };
-  const c = composeSegStrength(ov, false, { width: gw, height: gh, data: g }).data;
+  const c = composeSegStrength(ov, { width: gw, height: gh, data: g }).data;
   const Lw = linearToOklab(0.05, 0.05, 0.05)[0];
-  for (const [x, y] of [[20, 10], [2, 2], [14, 4]]) assert.ok(Math.abs(c[(y * W + x) * 4] - Lw) < 0.01, `water L everywhere, under the subject too (${c[(y * W + x) * 4].toFixed(3)} vs ${Lw.toFixed(3)})`);
+  for (const [x, y] of [[150, 30], [10, 5], [70, 30]]) assert.ok(Math.abs(c[(y * W + x) * 4] - Lw) < 0.01, `water L everywhere, under the subject too (${c[(y * W + x) * 4].toFixed(3)} vs ${Lw.toFixed(3)})`);
+  const G = (x: number, y: number) => c[(y * W + x) * 4 + 1];
+  assert.ok(G(70, 30) > 0.95, `deep in the subject the mask rules, its water-coloured patch too (${G(70, 30).toFixed(2)})`);
+  assert.ok(G(125, 30) < 0.05, `the leak onto the water is not trusted (${G(125, 30).toFixed(2)})`);
+  assert.equal(c[(30 * W + 70) * 4 + 2], a[30 * W + 70], "the alpha (the mask's distance) passes as is");
+  const noGuide = composeSegStrength(ov).data;
+  assert.ok(noGuide[0] === -1 && noGuide[1] === 1, "no guide: no water to compare with, the mask rules");
   const full = { width: W, height: H, alpha: new Float32Array(W * H).fill(1), exclude: null, near: ov.near, depart: null };
-  assert.equal(composeSegStrength(full, false, { width: gw, height: gh, data: g }).data[0], -1, "no water in the frame: -1");
+  assert.equal(composeSegStrength(full, { width: gw, height: gh, data: g }).data[0], -1, "no water in the frame: -1");
 }
 
 // The pop tone (subject clearing): shrinks the water cast along the pixel's own hue, bounded, never a fixed target.
