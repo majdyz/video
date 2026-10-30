@@ -33,7 +33,7 @@ function leaked(K: Keyframe[], mw: number, mh: number, share: number): Keyframe[
   });
 }
 
-function lab(r8: number, g8: number, b8: number): [number, number, number] {
+export function lab(r8: number, g8: number, b8: number): [number, number, number] {
   const lin = (c: number) => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
   const r = lin(r8), g = lin(g8), b = lin(b8);
   const X = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047, Y = 0.2126 * r + 0.7152 * g + 0.0722 * b, Z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
@@ -41,7 +41,7 @@ function lab(r8: number, g8: number, b8: number): [number, number, number] {
   return [116 * f(Y) - 16, 500 * (f(X) - f(Y)), 200 * (f(Y) - f(Z))];
 }
 
-function deltaE(a: Uint8ClampedArray, b: Uint8ClampedArray, n: number): Float32Array {
+export function deltaE(a: Uint8ClampedArray, b: Uint8ClampedArray, n: number): Float32Array {
   const d = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const p = lab(a[i * 4], a[i * 4 + 1], a[i * 4 + 2]), q = lab(b[i * 4], b[i * 4 + 1], b[i * 4 + 2]);
@@ -50,7 +50,7 @@ function deltaE(a: Uint8ClampedArray, b: Uint8ClampedArray, n: number): Float32A
   return d;
 }
 
-function stats(d: Float32Array, w: number, h: number) {
+export function stats(d: Float32Array, w: number, h: number) {
   const s = Float32Array.from(d).sort();
   let step = 0;
   const steps: number[] = [];
@@ -70,7 +70,7 @@ function stats(d: Float32Array, w: number, h: number) {
  * |L - 3×3 mean|) and chroma spread (std of a, b) as ratios to the source's. Flattening shows as L / high-pass ratios
  * below 1, a pasted single colour as a chroma ratio near 0.
  */
-function guard(src: Uint8ClampedArray, px: Uint8ClampedArray, mask: Float32Array, W: number, H: number) {
+export function guard(src: Uint8ClampedArray, px: Uint8ClampedArray, mask: Float32Array, W: number, H: number) {
   const stats1 = (p: Uint8ClampedArray) => {
     const L = new Float32Array(W * H), A = new Float32Array(W * H), B = new Float32Array(W * H);
     for (let i = 0; i < W * H; i++) { const l = lab(p[i * 4], p[i * 4 + 1], p[i * 4 + 2]); L[i] = l[0]; A[i] = l[1]; B[i] = l[2]; }

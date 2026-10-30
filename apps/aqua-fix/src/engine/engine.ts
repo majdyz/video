@@ -19,7 +19,7 @@ import { linearToOklab, oklabToLinear } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
 import { BalanceFollow } from "./follow.ts";
 import { AnimalTracker, type AnimalMap, type SubjectOverride, type SubjectSelection } from "./animals.ts";
-import { composeSegStrength, type SegOverlay } from "./seg-overlay.ts";
+import { composeSegStrength, popContrast, popDirection, type SegOverlay } from "./seg-overlay.ts";
 import {
   CLAHE_BINS,
   CLAHE_TILES_X,
@@ -154,6 +154,11 @@ export class GradeEngine {
   private strengthOn = false;
   /** AI subject detection overlay (Studio seg/) for the frame being drawn; null = the engine's masks alone. */
   private seg: SegOverlay | null = null;
+  /** Subject pop lift direction (uniform p24.x, seg-overlay.ts popDirection): +1 lifts the ML subject, −1 deepens
+   * it (a subject darker than the water around it). Decided from the subject/water contrast averaged over the clip
+   * (popC), so the subject keeps one look as it swims off; reset with the clip. */
+  private popDir = 1;
+  private popC = { sum: 0, n: 0 };
   private personWorker: Worker | null = null;
   private personInflight = false;
   private personReqId = 0;
@@ -800,6 +805,9 @@ export class GradeEngine {
     if (this.settings.subjectPop) {
       const st = this.animals.strength(this.lastTickSec);
       this.backend.setData(3, this.seg ? composeSegStrength(st, this.seg, (this.current.backdrop ?? 0) <= 0) : st);
+      const c = this.seg ? popContrast(g, this.seg) : null;
+      if (c !== null) { this.popC.sum += c; this.popC.n++; }
+      this.popDir = this.popC.n ? popDirection(this.popC.sum / this.popC.n) : 1;
       this.strengthOn = true;
     } else if (this.strengthOn) {
       this.backend.setData(3, { width: 1, height: 1, data: new Float32Array(4) });
@@ -953,6 +961,8 @@ export class GradeEngine {
     this.backend.resetTemporal?.();
     this.animals.reset();
     this.leadBase = null;
+    this.popC = { sum: 0, n: 0 };
+    this.popDir = 1;
   }
 
   private pack(): Float32Array {
@@ -961,6 +971,7 @@ export class GradeEngine {
     const settings = this.hasAnalysis ? this.settings : { ...this.settings, intensity: 0 };
     const u = packUniforms(this.current, settings, depth, clahe, 0, this.split);
     u[93] = this.temporalEnabled ? 1 : 0;
+    u[96] = this.popDir;
     this.checkJump();
     return u;
   }

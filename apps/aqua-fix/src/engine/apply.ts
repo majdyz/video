@@ -4,7 +4,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, boostParams, vividAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, boostParams, vividAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -223,11 +223,15 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   for (let c = 0; c < 3; c++) out[c] *= ratio;
   Y = Math.max(0, Ylv);
 
-  // Local contrast on encoded luminance (CLAHE), mixed by clarity.
+  // Subject pop weight (grade-shader popP): the engine-mask tone weight × pop strength × the user's Strength.
+  // The pop fades out as the graded lightness drops (SUBJECT_POP.darkLo..Hi): dark parts keep the plain grade.
+  const toneW = objectWeight(subj) * (SUBJECT_CLEAR.edgeFloor + (1 - SUBJECT_CLEAR.edgeFloor) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) * smoothstep(SUBJECT_POP.darkLo, SUBJECT_POP.darkHi, Math.cbrt(Math.max(0, Y)));
+  const popP = toneW * objectNeutralOf(p) * (ctx.settings.subjectPop ? popStrengthK(ctx.settings) : 0);
+  // Local contrast on encoded luminance (CLAHE), mixed by clarity (the subject takes more: SUBJECT_POP.clarity).
   if (s.clarity > 0) {
     const encY = linearToSrgb(clamp(Y, 0, 1));
     const eq = sampleClahe(ctx.clahe, u, v, encY);
-    const encNew = encY + (eq - encY) * s.clarity;
+    const encNew = encY + (eq - encY) * (s.clarity + SUBJECT_POP.clarity * popP);
     const Ynew = srgbToLinear(clamp(encNew, 0, 1));
     ratio = Y > 1e-5 ? Ynew / Y : 1;
     for (let c = 0; c < 3; c++) out[c] *= ratio;
@@ -278,7 +282,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // Green water (red.ts): the cast the balance could not remove goes to a muted blue-grey.
   [a, b] = greenNeutral(L, a, b, greenWeight(p) * (1 - RED.gnObjKeep * conf));
   // Engine-mask weight, softened where the subject's colour fades into the water's (grade-shader toneWeight).
-  const tN = objectNeutral(L, a, b, r0, g0, b0, onFar, objectWeight(subj) * (SUBJECT_CLEAR.edgeFloor + (1 - SUBJECT_CLEAR.edgeFloor) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)), objectNeutralOf(p));
+  const tN = objectNeutral(L, a, b, r0, g0, b0, onFar, toneW, objectNeutralOf(p));
   // In open blue water the person detector also fires on sharks and big
   // fish: skin colour only where the source has red left to be skin.
   const personS = person * (1 - objectNeutralOf(p) * redDeficit(r0, g0, b0));
@@ -295,8 +299,16 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const guarded0 = redGuard(looked[0], looked[1], looked[2], a0, bb0, person, onFar);
   const guarded = warmMaterial(looked[0], guarded0[0], guarded0[1], greenWeight(p), onFar);
   // Vivid look (opt-in), then the near-white pink guard (always).
+  // The subject keeps Vivid's colour but is spared most of its water darkening, and is lifted a little
+  // (SUBJECT_POP; no ML ring on the CPU).
   const vv = vividLook(looked[0], guarded[0], guarded[1], s.vivid ?? 0, greenWeight(p));
-  const hn = highlightPink(vv[0], vv[1], vv[2]);
+  const Lv = popP > 0 ? vividLook(looked[0], guarded[0], guarded[1], (s.vivid ?? 0) * (1 - SUBJECT_POP.vividKeep * Math.min(1, popP)), greenWeight(p))[0] : vv[0];
+  const Lp = Lv + SUBJECT_POP.lift * popP * 4 * Lv * Math.max(0, 1 - Lv);
+  // The chroma follows the lift (saturation kept): a lifted blue-grey stays blue-grey.
+  const kc = Lp / Math.max(1e-4, vv[0]);
+  vv[0] = Lp; vv[1] *= kc; vv[2] *= kc;
+  const hn0 = highlightPink(vv[0], vv[1], vv[2]);
+  const hn = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * objectNeutralOf(p), 0, 1));
   const capped = capChroma(vv[0], hn[0], hn[1], cSrc);
   const [r1, g1, b1] = oklabToLinear(vv[0], capped[0], capped[1]);
   void C;
@@ -314,6 +326,19 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
     sg + (gs - sg) * s.strength,
     sb + (bs - sb) * s.strength,
   ];
+}
+
+/** Hue guard (grade-shader popHue): on the subject (weight w) the hue stays within SUBJECT_POP.hueMax of the source's. */
+function popHue(a: number, b: number, as: number, bs: number, w: number): [number, number] {
+  const C = Math.hypot(a, b), Cs = Math.hypot(as, bs);
+  if (w <= 0 || C < 1e-4 || Cs < 0.02) return [a, b];
+  const ux = a / C, uy = b / C, sx = as / Cs, sy = bs / Cs;
+  const cm = Math.cos(SUBJECT_POP.hueMax), sm = Math.sin(SUBJECT_POP.hueMax);
+  if (ux * sx + uy * sy >= cm) return [a, b];
+  const side = Math.sign(sx * uy - sy * ux);
+  const lx = sx * cm - side * sy * sm, ly = sy * cm + side * sx * sm;
+  const mx = ux + (lx - ux) * w, my = uy + (ly - uy) * w, n = Math.hypot(mx, my) || 1;
+  return [(C * mx) / n, (C * my) / n];
 }
 
 function clamp(x: number, lo: number, hi: number): number {

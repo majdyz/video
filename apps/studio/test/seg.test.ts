@@ -193,12 +193,21 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(at(30, 16) > 0.9, "the grey subject: 1");
   assert.ok(at(21, 16) < 0.2, "the leak onto water reads as water");
   assert.ok(at(31, 16) > 0.8, `a small water-coloured spot inside the subject is the subject (${at(31, 16)})`);
-  const ov = { width: 2, height: 1, alpha: Float32Array.from([1, 1]), exclude: null, near: Float32Array.from([1, 1]), depart: Float32Array.from([0, 1]) };
+  // The cap is regional (the departure map blurred): a leak region on water keeps it, the subject is toned whole,
+  // including a water-coloured patch on it (a shaded flank) narrower than the blur.
+  const n = 120, dep = new Float32Array(n);
+  for (let x = 60; x < n; x++) dep[x] = x >= 88 && x < 90 ? 0 : 1; // water | subject with a 2-texel water-coloured patch
+  const ov = { width: n, height: 1, alpha: new Float32Array(n).fill(1), exclude: null, near: new Float32Array(n).fill(1), depart: dep };
   const st = { width: 1, height: 1, data: new Float32Array(4) };
-  const c = composeSegStrength(st, ov, true).data;
-  assert.ok(c[2] <= SEG_TONE.waterFloor + 1e-6, `a sure leak on water keeps the cap (${c[2]})`);
-  assert.equal(c[6], 1, "the subject keeps the full alpha");
-  assert.equal(composeSegStrength(st, ov, false).data[2], 1, "open water: the shader caps it instead");
+  for (const closeUp of [true, false]) {
+    const c = composeSegStrength(st, ov, closeUp).data;
+    assert.ok(c[10 * 4 + 2] <= SEG_TONE.waterFloor + 1e-6, `a sure leak on water keeps the cap (${c[10 * 4 + 2]})`);
+    assert.ok(c[110 * 4 + 2] > 0.99, "the subject keeps the full alpha");
+    assert.ok(c[88 * 4 + 2] > 0.8, `a water-coloured patch on the subject is toned with it (${c[88 * 4 + 2].toFixed(2)})`);
+  }
+  const noDep = { ...ov, depart: null };
+  assert.equal(composeSegStrength(st, noDep, false).data[10 * 4 + 2], 1, "open water without a departure map: no cap here");
+  assert.equal(composeSegStrength(st, noDep, true).data[10 * 4 + 2], SEG_TONE.waterFloor, "a close-up without one: the cap holds");
 }
 
 // The pop tone (subject clearing): shrinks the water cast along the pixel's own hue, bounded, never a fixed target.

@@ -28,6 +28,8 @@ export type ColourState = {
   veil: number;
   /** Advanced: "Subject pop" (opt-in): subjects in open blue water toned silver and lifted. */
   subjectPop?: boolean;
+  /** Subject pop Strength, 0..100 (50 = the tuned default; 0 = colour clearing only, 100 = strong). */
+  popStrength?: number;
   /** "Vivid" look (on by default): deep muted navy water, darker water, black shadows, the sun kept bright (VIVID_LOOK in the engine; it stands down by itself on graded, topside, night and ROV footage). */
   vivid?: boolean;
 };
@@ -51,6 +53,7 @@ export const DEFAULT_COLOUR: ColourState = {
   clarity: DEFAULT_SETTINGS.clarity,
   veil: DEFAULT_SETTINGS.veil,
   subjectPop: false,
+  popStrength: 50,
   vivid: true,
 };
 
@@ -96,6 +99,7 @@ export function colourSettings(c: ColourLook): UserSettings {
     clarity: c.clarity,
     veil: c.veil,
     subjectPop: !!c.subjectPop,
+    subjectPopStrength: Math.min(100, Math.max(0, c.popStrength ?? DEFAULT_COLOUR.popStrength ?? 50)) / 100,
     vivid: c.vivid ? 1 : 0,
   };
 }

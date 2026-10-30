@@ -72,7 +72,7 @@ const HEAD_GLSL = `#version 300 es
 precision highp float;
 precision highp int;
 precision highp sampler2D;
-layout(std140) uniform Params { vec4 p[24]; };`;
+layout(std140) uniform Params { vec4 p[25]; };`;
 
 // ---------------------------------------------------------------- pass 1: lum
 export const GLSL_TP_LUM = `${HEAD_GLSL}
@@ -93,7 +93,7 @@ void main() {
   o_color = vec4(c, dot(c, vec3(0.2126, 0.7152, 0.0722)));
 }`;
 export const WGSL_TP_LUM = `
-struct Params { p: array<vec4<f32>, 24> };
+struct Params { p: array<vec4<f32>, 25> };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var u_source: texture_2d<f32>;
@@ -208,7 +208,7 @@ void main() {
   o_f1 = vec4(stab / cur, g_subjOut);
 }`;
 export const WGSL_TP_FIELD = `
-struct Params { p: array<vec4<f32>, 24> };
+struct Params { p: array<vec4<f32>, 25> };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(3) var u_data0: texture_2d<f32>;
 @group(0) @binding(4) var u_data1: texture_2d<f32>;

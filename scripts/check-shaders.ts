@@ -131,8 +131,8 @@ try {
       const src = tex("rgba8unorm", new Uint8Array([200, 120, 40, 255]), 4);
       const data = () => tex("rgba32float", new Float32Array([1, 1, 1, 1]));
       const half = () => tex("rgba16float", new Uint16Array(4), 8);
-      const ubuf = device.createBuffer({ size: 96 * 4, usage: B.UNIFORM | B.COPY_DST });
-      const u = new Float32Array(96);
+      const ubuf = device.createBuffer({ size: 100 * 4, usage: B.UNIFORM | B.COPY_DST });
+      const u = new Float32Array(100);
       u[2] = 0; // p[0].z strength
       device.queue.writeBuffer(ubuf, 0, u);
       const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });

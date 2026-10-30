@@ -181,6 +181,10 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, sub
             <Switch checked={!!c.subjectPop} onChange={(v) => up({ subjectPop: v })} label="Subject pop" />
           </div>
         )}
+        {subjectPopVisible() && c.subjectPop && (
+          <Slider label="Pop strength" value={c.popStrength ?? DEFAULT_COLOUR.popStrength ?? 50} min={0} max={100} defaultValue={DEFAULT_COLOUR.popStrength}
+            format={(v) => (v < 25 ? "Subtle" : v > 75 ? "Strong" : String(Math.round(v)))} onChange={(v) => up({ popStrength: v })} />
+        )}
         {subjectPopVisible() && c.subjectPop && subjects && (
           <div className="adv__field">
             <span className="adv__label">Subjects <small>{subjects.corrections ? `${subjects.corrections} ${subjects.corrections === 1 ? "change" : "changes"} to the automatic choice` : "chosen automatically; tap one in the picture to leave it out, or tap anything else to add it"}</small></span>

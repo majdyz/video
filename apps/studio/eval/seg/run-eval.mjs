@@ -5,6 +5,8 @@
 //   node apps/studio/eval/seg/run-eval.mjs [clip ...]     (default: the six prototype clips)
 //   env: SEG_DATA (~/video-data/sam), OUT (<SEG_DATA>/app-eval), COI=0 (single-thread WASM), PORT,
 //        ROBUST=1 (also grade frames through the colour engine: engine vs ML vs corrupted ML masks, robust.ts)
+//        TUNE=1 (Subject pop tuning, tune.ts: no segmentation pass; the masks of an earlier run in MASKS, default
+//        <SEG_DATA>/app-eval-tone, graded Vivid on, pop off vs on at STRENGTHS, frames BOARDF; OUT gets <clip>.tune.json)
 // Needs the model files (apps/studio/scripts/seg-models.py) and Playwright in ~/browser.
 import { createServer } from "vite";
 import fs from "node:fs";
@@ -18,6 +20,8 @@ const DATA = process.env.SEG_DATA ?? path.join(HOME, "video-data/sam");
 const OUT = process.env.OUT ?? path.join(DATA, "app-eval");
 const PORT = +(process.env.PORT ?? 8931);
 const COI = process.env.COI !== "0";
+const TUNE = process.env.TUNE === "1";
+const MASKS = process.env.MASKS ?? path.join(DATA, "app-eval-tone");
 const { chromium } = await import(path.join(HOME, "browser/node_modules/playwright/index.mjs"));
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -69,12 +73,18 @@ const server = await createServer({
           res.setHeader("content-type", "application/octet-stream");
           return res.end(buf);
         }
+        if (u.pathname === "/evaldata/file") {
+          const f = path.join(MASKS, path.basename(u.searchParams.get("name")));
+          if (!fs.existsSync(f)) { res.statusCode = 404; return res.end(); }
+          res.setHeader("content-type", "application/octet-stream");
+          return res.end(fs.readFileSync(f));
+        }
         if (u.pathname === "/evaldata/out" && req.method === "POST") {
           const parts = [];
           req.on("data", (d) => parts.push(d));
           req.on("end", () => {
             const name = u.searchParams.get("name"), clip = u.searchParams.get("clip");
-            const ext = name === "meta" || name === "robust" ? ".json" : name === "alpha" || name === "raw" ? ".u8" : ".png";
+            const ext = name === "meta" || name === "robust" || name === "tune" ? ".json" : name === "alpha" || name === "raw" ? ".u8" : ".png";
             if (ext === ".png") fs.mkdirSync(path.join(OUT, "frames"), { recursive: true });
             fs.writeFileSync(path.join(OUT, ext === ".png" ? `frames/${clip}_${name}${ext}` : `${clip}.${name}${ext}`), Buffer.concat(parts));
             res.end("ok");
@@ -87,7 +97,7 @@ const server = await createServer({
   }],
 });
 await server.listen();
-const base = `http://127.0.0.1:${PORT}/video/studio/eval/seg/index.html`;
+const base = `http://127.0.0.1:${PORT}/video/studio/eval/seg/${TUNE ? "tune" : "index"}.html`;
 // WebGL2 through SwiftShader for the colour engine (ROBUST=1 renders); the segmenter itself is WASM.
 const gpuArgs = process.env.GPU === "1" ? ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"] : []; // GPU=1: WebGPU (SwiftShader) for the ORT WebGPU EP
 const browser = await chromium.launch({ headless: true, args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist", ...gpuArgs] });
@@ -96,9 +106,9 @@ try {
     const [T0, H, W] = arr(clip).shape, T = Math.min(T0, +(process.env.MAXF ?? T0)); // MAXF: a short smoke run
     const objects = TAPS[clip].map(([f, pts], i) => ({ kind: "include", t: f / 30, prompt: { points: pts.map(([x, y]) => [x / W, y / H]), labels: pts.map(() => 1) }, id: i }));
     const page = await browser.newPage();
-    page.on("console", (m) => { const t = m.text(); if (/pass|PASS|ROBUST|DONE|ERROR|model|engine/.test(t)) console.log(`[${clip}] ${t}`); });
+    page.on("console", (m) => { const t = m.text(); if (/pass|PASS|ROBUST|TUNE|track|frame \d|DONE|ERROR|model|engine/.test(t)) console.log(`[${clip}] ${t}`); });
     page.on("pageerror", (e) => console.log(`[${clip}] PAGEERROR ${e.message}`));
-    const url = `${base}?clip=${clip}&w=${W}&h=${H}&frames=${T}&objects=${encodeURIComponent(JSON.stringify(objects))}&prefer=${process.env.PREFER ?? "auto"}&robust=${process.env.ROBUST === "1" ? 1 : 0}&boardf=${(BOARD_FRAMES[clip] ?? [6, 90, 165]).join(",")}`;
+    const url = `${base}?clip=${clip}&w=${W}&h=${H}&frames=${T}&objects=${encodeURIComponent(JSON.stringify(objects))}&prefer=${process.env.PREFER ?? "auto"}&robust=${process.env.ROBUST === "1" ? 1 : 0}&boardf=${process.env.BOARDF ?? (BOARD_FRAMES[clip] ?? [6, 90, 165]).join(",")}&strengths=${process.env.STRENGTHS ?? "0,0.25,0.5,0.75,1"}&sp=${encodeURIComponent(process.env.SP ?? "")}&sc=${encodeURIComponent(process.env.SC ?? "")}`;
     await page.goto(url);
     await page.waitForFunction(() => /DONE|ERROR/.test(document.getElementById("log").textContent), null, { timeout: 3 * 3600_000, polling: 2000 });
     await page.close();
@@ -108,4 +118,4 @@ try {
   await server.close();
 }
 const py = process.env.PYTHON ?? path.join(HOME, ".venvs/video/bin/python");
-console.log(execFileSync(py, [path.join(here, "metrics.py"), OUT, ...clips], { encoding: "utf8" }));
+if (!TUNE) console.log(execFileSync(py, [path.join(here, "metrics.py"), OUT, ...clips], { encoding: "utf8" }));

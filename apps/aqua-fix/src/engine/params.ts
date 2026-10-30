@@ -48,6 +48,8 @@ export type UserSettings = {
    * water (OBJECT_NEUTRAL, backdrop.ts, tracked by the temporal layer).
    */
   subjectPop?: boolean;
+  /** Subject pop Strength, 0..1 (0.5 = the tuned default; 0 keeps only the subject's colour clearing). */
+  subjectPopStrength?: number;
 };
 
 /**
@@ -71,7 +73,7 @@ export const PRESET_ADJUST: Record<ScenePreset, { red: number; blue: number; red
   reef: { red: 1, blue: 1, redMax: 1.6, dehaze: 0, clarity: -0.1, exposure: 0.97, hazeLift: 0 },
 };
 
-export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto", subjectPop: false, vivid: 0 };
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto", subjectPop: false, subjectPopStrength: 0.5, vivid: 0 };
 export const INTENSITY_MAX = 2;
 
 /** Internal controls the shader reads, derived from the intensity. */
@@ -100,6 +102,8 @@ export type GradeSettings = {
   hazeLift: number;
   /** Open-water subject tone on (UserSettings.subjectPop). */
   subjectPop?: boolean;
+  /** Subject pop Strength, 0..1 (UserSettings.subjectPopStrength). */
+  subjectPopStrength?: number;
   /** Vivid look amount after the do-no-harm gate (vividAmountOf; CPU reference). */
   vivid?: number;
 };
@@ -218,7 +222,29 @@ export const DETAIL_TAPS: readonly (readonly [number, number, number])[] = [
  * (red-starved, lit pixels of the subject). The engine-mask weight softens where the subject's colour fades into
  * the water's (edgeFloor at no departure).
  */
-export const SUBJECT_CLEAR = { k: 0.6, cMax: 0.05, desat: 0.15, edgeFloor: 0.3 };
+export const SUBJECT_CLEAR = { k: 0.4, cMax: 0.05, desat: 0.06, edgeFloor: 0.3 };
+
+/**
+ * Subject pop separation (on top of SUBJECT_CLEAR), per unit of the pop weight P = subject tone weight × pop
+ * strength × the user's Strength (uniform p23.w, 1 = default): all of it rides the feathered mask, so the edges
+ * stay soft, and none of it invents colour or structure.
+ *   vividKeep  the share of the Vivid look's water darkening the subject is spared (its colour stays Vivid's);
+ *              Vivid tells water by hue, so a blue-grey animal would otherwise darken with the water.
+ *   clarity    extra local contrast (the frame's own CLAHE) on the subject: its own texture, more of it.
+ *   lift       a midtone lift of the subject's Oklab L (4·L·(1 − L): blacks and highlights stay).
+ *   ring       ML only: the water right around the subject (the ML near map outside its mask, a wide soft ramp)
+ *              darkened by this share of L; only what matches the water (an animal part the mask missed is not).
+ *   darkLo/Hi  the whole pop (clearing included) fades out as the graded lightness (Oklab L) drops through
+ *              lo..hi: a dark, low-chroma part (a thresher's long tail) keeps the plain grade's colour.
+ *   hueMax     on the subject, the output hue stays within this angle (radians) of the source pixel's own hue:
+ *              the tone never rotates a dark blue toward magenta or brown.
+ */
+export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.3, lift: 0.09, ring: 0.035, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
+
+/** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
+export function popStrengthK(s: { subjectPopStrength?: number }): number {
+  return 2 * Math.min(1, Math.max(0, s.subjectPopStrength ?? 0.5));
+}
 
 export const OBJECT_NEUTRAL = { hue: (195 * Math.PI) / 180, bandIn: (45 * Math.PI) / 180, bandOut: (85 * Math.PI) / 180, rLo: 0.08, rHi: 0.3, mix: 0.92, silver: 0.022, lLo: 0.12, lHi: 0.32, farLo: (30 * Math.PI) / 180, farHi: (60 * Math.PI) / 180, lift: 0.05, confLo: 0.05, confHi: 0.5, warmHue: (50 * Math.PI) / 180, warmLo: 0.1, warmHi: 0.5 };
 /**
@@ -472,6 +498,7 @@ export function resolveSettings(s: UserSettings): GradeSettings {
     dehaze: 0.6 * t,
     hazeLift: 0,
     subjectPop: !!s.subjectPop,
+    subjectPopStrength: s.subjectPopStrength,
   };
 }
 
@@ -822,6 +849,8 @@ export function packUniforms(
   // p23: history valid (set by the backend per frame), temporal layer on, Vivid amount, 0
   u[93] = 1;
   u[94] = vividAmountOf(params, settings);
+  u[95] = popStrengthK(settings); // p23.w: Subject pop Strength multiplier
+  u[96] = 1; // p24.x: Subject pop lift direction (set per frame by the engine, seg-overlay.ts popDirection)
   return u;
 }
 
