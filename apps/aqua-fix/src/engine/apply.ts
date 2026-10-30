@@ -331,7 +331,9 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
 /** Hue guard (grade-shader popHue): on the subject (weight w) the hue stays within SUBJECT_POP.hueMax of the source's. */
 function popHue(a: number, b: number, as: number, bs: number, w: number): [number, number] {
   const C = Math.hypot(a, b), Cs = Math.hypot(as, bs);
-  if (w <= 0 || C < 1e-4 || Cs < 0.02) return [a, b];
+  // Faded in with the source chroma: a near-white source hue is noise (a hard cut there leaves patches).
+  w *= smoothstep(0.01, 0.04, Cs);
+  if (w <= 0 || C < 1e-4) return [a, b];
   const ux = a / C, uy = b / C, sx = as / Cs, sy = bs / Cs;
   const cm = Math.cos(SUBJECT_POP.hueMax), sm = Math.sin(SUBJECT_POP.hueMax);
   if (ux * sx + uy * sy >= cm) return [a, b];

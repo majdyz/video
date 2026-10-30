@@ -494,7 +494,9 @@ float popLift(float L, float P) { return L + SP_LIFT * P * p[24].x * 4.0 * L * m
 // Hue guard: on the subject (weight w) the output hue stays within SUBJECT_POP.hueMax of the source pixel's hue.
 vec2 popHue(vec2 ab, vec2 abSrc, float w) {
   float C = length(ab), Cs = length(abSrc);
-  if (w <= 0.0 || C < 1e-4 || Cs < 0.02) return ab;
+  // Faded in with the source chroma: a near-white source hue is noise (a hard cut there leaves patches).
+  w *= smoothstepf(0.01, 0.04, Cs);
+  if (w <= 0.0 || C < 1e-4) return ab;
   vec2 u = ab / C, s = abSrc / Cs;
   float cs = dot(u, s);
   if (cs >= SP_HUE_COS) return ab;
@@ -997,12 +999,13 @@ fn popStrength(an: vec4<f32>) -> f32 { return max(params.p[16].w, segPop(an)); }
 fn popLift(L: f32, P: f32) -> f32 { return L + SP_LIFT * P * params.p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
 fn popHue(ab: vec2<f32>, abSrc: vec2<f32>, w: f32) -> vec2<f32> {
   let C = length(ab); let Cs = length(abSrc);
-  if (w <= 0.0 || C < 1e-4 || Cs < 0.02) { return ab; }
+  let wc = w * smoothstepf(0.01, 0.04, Cs);
+  if (wc <= 0.0 || C < 1e-4) { return ab; }
   let u = ab / C; let s = abSrc / Cs;
   if (dot(u, s) >= SP_HUE_COS) { return ab; }
   let side = sign(s.x * u.y - s.y * u.x);
   let lim = vec2(s.x * SP_HUE_COS - side * s.y * SP_HUE_SIN, s.y * SP_HUE_COS + side * s.x * SP_HUE_SIN);
-  return C * normalize(mix(u, lim, w));
+  return C * normalize(mix(u, lim, wc));
 }
 fn clearCast(ab: vec2<f32>, vh: vec2<f32>, g: f32) -> vec2<f32> {
   let C = length(ab);
