@@ -851,6 +851,7 @@ export function packUniforms(
   u[94] = vividAmountOf(params, settings);
   u[95] = popStrengthK(settings); // p23.w: Subject pop Strength multiplier
   u[96] = 1; // p24.x: Subject pop lift direction (set per frame by the engine, seg-overlay.ts popDirection)
+  // p24.y: an AI subject overlay is on this frame (set by the engine): the AI alone weights the pop (grade-shader toneWeight)
   return u;
 }
 

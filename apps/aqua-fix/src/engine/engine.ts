@@ -972,6 +972,7 @@ export class GradeEngine {
     const u = packUniforms(this.current, settings, depth, clahe, 0, this.split);
     u[93] = this.temporalEnabled ? 1 : 0;
     u[96] = this.popDir;
+    u[97] = this.seg && this.settings.subjectPop ? 1 : 0;
     this.checkJump();
     return u;
   }

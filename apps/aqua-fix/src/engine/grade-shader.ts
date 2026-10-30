@@ -20,6 +20,10 @@ export const SEG_TONE = {
    * ML subject is popped even where the engine sees no open water (a close-up), and its water cap relaxes. */
   confLo: 0.5,
   confHi: 0.9,
+  /** The ML weight over which a tracked ML subject is popped at all (pop strength and its tone weight): a normal track
+   * (keyframe confidence ≈ 0.6–0.7) pops fully; the stricter conf range above only relaxes the water cap. */
+  popLo: 0.2,
+  popHi: 0.6,
   /** ...only well inside the ML mask (alpha lo..hi): the feathered edge and stray low-alpha pixels keep the cap. */
   insideLo: 0.7,
   insideHi: 0.98,
@@ -138,6 +142,8 @@ const float ON_CONF_HI = ${OBJECT_NEUTRAL.confHi.toFixed(4)};
 const float SEG_WATER_FLOOR = ${SEG_TONE.waterFloor.toFixed(4)};
 const float SEG_CONF_LO = ${SEG_TONE.confLo.toFixed(4)};
 const float SEG_CONF_HI = ${SEG_TONE.confHi.toFixed(4)};
+const float SEG_POP_LO = ${SEG_TONE.popLo.toFixed(4)};
+const float SEG_POP_HI = ${SEG_TONE.popHi.toFixed(4)};
 const float SEG_IN_LO = ${SEG_TONE.insideLo.toFixed(4)};
 const float SEG_IN_HI = ${SEG_TONE.insideHi.toFixed(4)};
 const float SEG_DEP_LO = ${SEG_TONE.departLo.toFixed(4)};
@@ -456,10 +462,10 @@ vec4 animalStrength(vec2 uv) {
 }
 // Object weight and warm clamp (see apply.ts objectWeight / warmClamp).
 float objectWeight(float conf) { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
-// AI subject detection (SEG_TONE): how sure the ML is here (confident, stable over time); 0 without it.
-float segSure(vec4 an) { return an.w > 0.0 ? smoothstepf(SEG_CONF_LO, SEG_CONF_HI, an.w) : 0.0; }
 // The pop strength: the engine's open-water amount, or a sure ML subject's own (a close-up has no open water).
-float popStrength(vec4 an) { return max(p[16].w, segSure(an)); }
+// How much a tracked ML subject is popped (its ML weight over SEG_TONE.popLo..popHi); 0 without one.
+float segPop(vec4 an) { return an.w > 0.0 ? smoothstepf(SEG_POP_LO, SEG_POP_HI, an.w) : 0.0; }
+float popStrength(vec4 an) { return max(p[16].w, segPop(an)); }
 // Subject pop separation (SUBJECT_POP; mirrors apply.ts): P = tone weight × pop strength × the user's Strength.
 // A midtone lift of the subject's L, and (ML only) the water right around it darkened along the near map's ramp;
 // both reverse for a subject darker than the water (p24.x, seg-overlay.ts popDirection).
@@ -481,13 +487,14 @@ float popRing(vec4 an, float popS) { return an.w > 0.0 ? SP_RING * popS * p[23].
 // it), or the ML alpha, which carries its own regional water cap (seg-overlay.ts composeSegStrength: a leak onto
 // open water only tints; a sure subject is toned whole).
 float toneWeight(float subj, vec4 an, float depart) {
-  float ow = objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
+  // With an AI overlay on the frame (p24.y) the AI alone decides: the engine's coarse per-animal map would show its
+  // blocks once the pop lifts (the subject's tone is the AI's, faded out along its near map).
+  float ow = p[24].y > 0.5 ? 0.0 : objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
   if (an.w <= 0.0) return ow;
-  float sure = segSure(an);
   // The ML alpha (B) already carries its regional water cap (seg-overlay.ts composeSegStrength): no per-pixel test
-  // here, so a subject is toned whole.
-  float ml = smoothstepf(SEG_A_LO, SEG_A_HI, an.z) * max(p[22].z, sure);
-  return mix(ow, ml, clamp(an.w, 0.0, 1.0));
+  // here, so a subject is toned whole; it fades out along the near map (A) with segPop.
+  float ml = smoothstepf(SEG_A_LO, SEG_A_HI, an.z) * max(p[22].z, segPop(an));
+  return p[24].y > 0.5 ? ml : mix(ow, ml, clamp(an.w, 0.0, 1.0));
 }
 float warmClamp(vec2 ab, vec3 lin, float srcFar, float person, float strength) {
   if (strength <= 0.0) return 1.0;
@@ -954,8 +961,8 @@ fn animalStrength(uv: vec2<f32>) -> vec4<f32> {
   return vec4<f32>(textureLoad(u_data3, i, 0).r, c.g, c.b, c.a);
 }
 fn objectWeight(conf: f32) -> f32 { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
-fn segSure(an: vec4<f32>) -> f32 { return select(0.0, smoothstepf(SEG_CONF_LO, SEG_CONF_HI, an.w), an.w > 0.0); }
-fn popStrength(an: vec4<f32>) -> f32 { return max(params.p[16].w, segSure(an)); }
+fn segPop(an: vec4<f32>) -> f32 { return select(0.0, smoothstepf(SEG_POP_LO, SEG_POP_HI, an.w), an.w > 0.0); }
+fn popStrength(an: vec4<f32>) -> f32 { return max(params.p[16].w, segPop(an)); }
 fn popLift(L: f32, P: f32) -> f32 { return L + SP_LIFT * P * params.p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
 fn popHue(ab: vec2<f32>, abSrc: vec2<f32>, w: f32) -> vec2<f32> {
   let C = length(ab); let Cs = length(abSrc);
@@ -975,11 +982,10 @@ fn clearCast(ab: vec2<f32>, vh: vec2<f32>, g: f32) -> vec2<f32> {
   return ab * (max(0.0, c1) / C);
 }
 fn toneWeight(subj: f32, an: vec4<f32>, depart: f32) -> f32 {
-  let ow = objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
+  let ow = select(objectWeight(subj) * mix(SC_EDGE, 1.0, depart), 0.0, params.p[24].y > 0.5);
   if (an.w <= 0.0) { return ow; }
-  let sure = segSure(an);
-  let ml = smoothstepf(SEG_A_LO, SEG_A_HI, an.z) * max(params.p[22].z, sure);
-  return mix(ow, ml, clamp(an.w, 0.0, 1.0));
+  let ml = smoothstepf(SEG_A_LO, SEG_A_HI, an.z) * max(params.p[22].z, segPop(an));
+  return select(mix(ow, ml, clamp(an.w, 0.0, 1.0)), ml, params.p[24].y > 0.5);
 }
 fn warmClamp(ab: vec2<f32>, lin: vec3<f32>, srcFar: f32, person: f32, strength: f32) -> f32 {
   if (strength <= 0.0) { return 1.0; }
