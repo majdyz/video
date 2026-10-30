@@ -24,11 +24,12 @@ export const SEG_TONE = {
   /** The ML alpha is the mask's signed distance: 0.5 on its contour, ramping linearly to 1 (0) this many mask-grid
    * px inside (outside) it (studio seg/track.ts SEG.alphaR feathers it so; the shader reads the distance back). */
   alphaR: 6,
-  /** The tone never reaches past the contour: it ramps in over this many mask px inside it (where the contour runs
-   * across the animal, a belly or tail the mask missed, seg-overlay.ts stretches the ramp to SEG_WATER.rampLong)... */
+  /** The tone never reaches past the contour: it ramps in over this many mask px of the read-back distance (seg-overlay.ts
+   * stretches it with the part's thickness: a big body fades in over up to SEG_WATER.rampLong, a fin is toned to its
+   * edge)... */
   rampIn: 2.5,
-  /** ...and where the contour is the animal's silhouette (G), within trustLo..trustHi mask px of it (where a mask is
-   * often a little fat: motion blur) it follows the pixel itself: tone only as far as the pixel departs from the
+  /** ...and on thin parts (G, where the ramp stays short), within trustLo..trustHi mask px of the contour (where a mask
+   * is often a little fat: motion blur) it follows the pixel itself: tone only as far as the pixel departs from the
    * local water (Oklab ΔL and chroma off the water's hue, evLo..evHi), so the glow never lands on water inside the
    * mask. Deeper in, the mask rules (a shaded flank that matches the water is toned with the rest); a leak onto the
    * water is under-popped as a whole region (A × the regional trust), never in patches. */
@@ -451,8 +452,8 @@ float subjectWeight(vec2 uv, float coreJbu, float dev) {
 // Per-animal tone strength (animals.ts: whole-or-nothing, decided per tracked animal on the CPU; one value per
 // map texel, dilated past the animal so the outline comes from the per-pixel test above). Mirrors apply.ts.
 // With an AI subject overlay (studio seg/, p24.y; seg-overlay.ts composeSegStrength) the channels are instead
-// R = the local water's Oklab L (< 0: no water to compare with), G = silhouette (the per-pixel water test applies
-// near the contour), B = the ML alpha (the mask's signed distance, SEG_TONE.alphaR), A = the ML weight (near map x
+// R = the local water's Oklab L (< 0: no water to compare with), G = where the per-pixel water test applies near the
+// contour (thin parts), B = the ML alpha (the mask's signed distance, SEG_TONE.alphaR), A = the ML weight (near map x
 // confidence x regional trust); all bilinear.
 vec4 animalStrength(vec2 uv) {
   ivec2 size = textureSize(u_data3, 0);
@@ -499,9 +500,9 @@ float segEvidence(vec4 an, vec3 lab0) {
 }
 // The subject weight the tone uses: the engine's (depart, 0..1: how far the pixel departs from the water, softens
 // it), or with an AI overlay on the frame (p24.y) the AI's alone (the engine's coarse per-animal map would show its
-// blocks once the pop lifts): 0 on and outside the mask's contour, ramping in over SEG_TONE.rampIn (longer where the
-// contour runs across the animal); near a silhouette (G) only as far as the pixel departs from the water, deeper in
-// the whole subject; times the ML weight (A: near map x regional trust, segPop).
+// blocks once the pop lifts): 0 on and outside the mask's contour, ramping in over SEG_TONE.rampIn of the read-back
+// distance (stretched on a big body); on thin parts (G) near the contour only as far as the pixel departs from the
+// water, elsewhere the whole subject; times the ML weight (A: near map x regional trust, segPop).
 float toneWeight(float subj, vec4 an, float depart, vec3 lab0) {
   if (p[24].y <= 0.5) return objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
   if (an.w <= 0.0) return 0.0;

@@ -224,29 +224,29 @@ const img = (dx: number, dy: number): Gray => {
   let step = 0;
   for (let y = 12; y < 48; y++) for (let x = 42; x < 138; x++) step = Math.max(step, Math.abs(T(x + 1, y) - T(x, y)), Math.abs(T(x, y + 1) - T(x, y)));
   assert.ok(step < 0.08, `the trust varies slowly, never in patches (max step ${step.toFixed(3)} per texel)`);
-  assert.equal(c[(30 * W + 70) * 4 + 2], a[30 * W + 70], "the alpha (the mask's distance) passes as is deep inside");
+  assert.ok((c[(30 * W + 70) * 4 + 2] - 0.5) * 2 * SEG_TONE.alphaR >= SEG_TONE.rampIn, "deep inside the tone is full");
   const noGuide = composeSegStrength(ov).data;
   assert.ok(noGuide[0] === -1 && noGuide[1] === 1 && noGuide[(30 * W + 70) * 4 + 3] === 1, "no guide: no water to compare with, the mask rules");
   const full = { width: W, height: H, alpha: new Float32Array(W * H).fill(1), exclude: null, near: ov.near, depart: null };
   assert.equal(composeSegStrength(full, { width: gw, height: gh, data: g }).data[0], -1, "no water in the frame: -1");
 }
 
-// A contour that runs across the animal (the mask missed its lower half) ramps in slowly; a silhouette keeps its
-// short ramp and the per-pixel water test (G).
+// The ramp-in follows the part's thickness: a big body fades in gently from its contour (a contour that runs
+// across the animal is no step), a thin fin is toned nearly to its edge and keeps the per-pixel water test (G).
 {
   const W = 160, H = 80, m = new Float32Array(W * H);
-  for (let y = 10; y < 40; y++) for (let x = 40; x < 120; x++) m[y * W + x] = 1; // the mask: the animal's upper half
+  for (let y = 10; y < 70; y++) for (let x = 20; x < 100; x++) m[y * W + x] = 1; // a body 60 px tall
+  for (let y = 38; y < 41; y++) for (let x = 100; x < 150; x++) m[y * W + x] = 1; // a fin 3 px thick
   const a = sdfFeather(m, W, H, SEG.alphaR);
-  const gw = 80, gh = 40, g = new Float32Array(gw * gh * 4);
-  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) g.fill(x >= 20 && x < 60 && y >= 5 && y < 35 ? 0.5 : 0.05, (y * gw + x) * 4, (y * gw + x) * 4 + 3); // the animal: y 10..69
-  const c = composeSegStrength({ width: W, height: H, alpha: a, exclude: null, near: new Float32Array(W * H).fill(1), depart: null }, { width: gw, height: gh, data: g }).data;
+  const c = composeSegStrength({ width: W, height: H, alpha: a, exclude: null, near: new Float32Array(W * H).fill(1), depart: null }).data;
   const dOf = (x: number, y: number) => (c[(y * W + x) * 4 + 2] - 0.5) * 2 * SEG_TONE.alphaR;
-  // 4 px inside the cut (bottom, y = 39 is the last row) vs 4 px inside the silhouette (top, y = 10 the first).
-  assert.ok(dOf(80, 35) < 0.5 * SEG_TONE.rampIn, `across the animal the ramp is long (${dOf(80, 35).toFixed(2)} mask px read back)`);
-  assert.ok(dOf(80, 14) > SEG_TONE.rampIn, `at the silhouette it stays short (${dOf(80, 14).toFixed(2)})`);
-  assert.ok(c[(35 * W + 80) * 4 + 1] < 0.2 && c[(14 * W + 80) * 4 + 1] > 0.8, "the per-pixel water test at the silhouette only");
-  const A = (x: number, y: number) => c[(y * W + x) * 4 + 3];
-  assert.ok(A(80, 14) < 0.9 && Math.abs(A(80, 14) - A(80, 35)) < 0.02 && Math.abs(A(50, 25) - A(110, 25)) < 0.02, `a mask that missed part of the animal pops the rest more gently, as a whole (${A(80, 14).toFixed(2)}, ${A(80, 35).toFixed(2)})`);
+  assert.ok(dOf(60, 14) < 0.5 * SEG_TONE.rampIn, `a big body ramps in slowly (${dOf(60, 14).toFixed(2)} mask px read back 4 px in)`);
+  assert.ok(dOf(60, 40) >= SEG_TONE.rampIn, `its middle is toned in full (${dOf(60, 40).toFixed(2)})`);
+  assert.ok(dOf(130, 39) > 0.5 && dOf(130, 39) > 0.9 * Math.max(0, (a[39 * W + 130] - 0.5) * 2 * SEG_TONE.alphaR), `a thin fin keeps its short ramp (${dOf(130, 39).toFixed(2)})`);
+  assert.ok(c[(39 * W + 130) * 4 + 1] > 0.8 && c[(14 * W + 60) * 4 + 1] < 0.2, "the per-pixel water test on thin parts only");
+  let step = 0;
+  for (let y = 11; y < 69; y++) for (let x = 21; x < 99; x++) step = Math.max(step, Math.abs(dOf(x + 1, y) - dOf(x, y)), Math.abs(dOf(x, y + 1) - dOf(x, y)));
+  assert.ok(step < 0.5, `the ramp varies smoothly (max ${step.toFixed(2)} per texel)`);
 }
 
 // The pop tone (subject clearing): shrinks the water cast along the pixel's own hue, bounded, never a fixed target.
