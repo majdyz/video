@@ -270,6 +270,8 @@ export class Studio {
   private enginePromise: Promise<Engine | null> | null = null;
   private geo: GeometryRenderer | null = null;
   /** The geometry pass in the colour engine's own GL context (WebGL2 backend): draws straight into its source. */
+  /** Bumped whenever the profile samples go stale (a framing change): a profile run in flight retakes them. */
+  private profileEpoch = 0;
   private geoShared: { geo: GeometryRenderer; gl: WebGL2RenderingContext } | null = null;
   /** The geometry pass on the colour engine's WebGPU device (geometry-gpu.ts): renders into its source. */
   private geoGpu: { geo: GpuGeometryRenderer; device: GPUDevice } | null = null;
@@ -791,7 +793,7 @@ export class Studio {
     const e = this.engine;
     if (e) e.settings = this.settingsAt(this.video?.currentTime ?? 0);
     // The profile samples what the colour engine is fed: a new framing makes them stale for later top-ups.
-    if (next.dewarp !== prev.dewarp || next.stabilise.enabled !== prev.stabilise.enabled) { this.sampleCache = []; this.engine?.forgetProfile(); }
+    if (next.dewarp !== prev.dewarp || next.stabilise.enabled !== prev.stabilise.enabled) { this.sampleCache = []; this.profileEpoch++; this.engine?.forgetProfile(); }
     const info = this.snap.info;
     if (info && (next.dewarp !== prev.dewarp || !this.dewarpU)) void this.updateDewarp();
     const video = this.snap.kind === "video";
@@ -985,6 +987,7 @@ export class Studio {
     if (this.snap.kind !== "video" || this.snap.phase !== "ready") return;
     this.dropStill();
     this.sampleCache = [];
+    this.profileEpoch++;
     this.engine?.forgetProfile();
     if (this.tools.colour.enabled && this.engine && !this.exporting) {
       this.engine.lockGlobals(null);
@@ -1152,6 +1155,7 @@ export class Studio {
     this.trim = null;
     this.segs = NO_SEGMENTS;
     this.sampleCache = [];
+    this.profileEpoch++;
     this.engine?.forgetProfile();
     this.autoLock = null;
     this.lastLook = -1;
@@ -1638,24 +1642,32 @@ export class Studio {
       }
       // Split: every segment gets frames of its own for its lock (the base spacing may miss a short one).
       const extra = topUpTimes(times, visibleSegments(this.segs.cuts, span, v.duration));
-      const needed = [...times, ...extra].filter((t) => !this.cachedSample(t));
+      const all = [...times, ...extra];
       const wasPaused = v.paused;
       const resumeAt = v.currentTime;
       this.previewOn = false;
       v.pause();
       this.set({ busy: "Profiling colour…" });
       try {
-        for (const t of needed) {
-          // An export started meanwhile waits for this profile (exportVideo): stopping here would export without the lock.
-          if (gen !== this.gen) return;
-          // A sample that fails or runs out of time (a loaded device) is retried with a longer budget
-          // (profile-retry.ts): dropping it could leave the clip without a scene lock.
-          const r = await withRetries(async (budget) => {
-            await seekVideo(v, t);
-            this.uploadToEngine(v, t, false);
-            return e.analyzeRaw(budget, t);
-          }, PROFILE_SAMPLE_BUDGETS_MS, () => gen === this.gen, (n, err) => console.info(`[profile] sample at ${t.toFixed(2)} s: retry ${n} (${err instanceof Error ? err.message : err})`));
-          if (r) this.sampleCache.push({ t, params: r.params, mean: r.mean });
+        // Rounds: a framing change (Dewarp / Stabilise toggled) empties the cache mid-run; the samples it threw away
+        // are taken again with the new framing, so the lock never comes from fewer frames than planned.
+        for (let round = 0; round < 3; round++) {
+          const needed = all.filter((t) => !this.cachedSample(t));
+          if (!needed.length) break;
+          for (const t of needed) {
+            // An export started meanwhile waits for this profile (exportVideo): stopping here would export without the lock.
+            if (gen !== this.gen) return;
+            const epoch = this.profileEpoch;
+            // A sample that fails or runs out of time (a loaded device) is retried with a longer budget
+            // (profile-retry.ts): dropping it could leave the clip without a scene lock.
+            const r = await withRetries(async (budget) => {
+              await seekVideo(v, t);
+              this.uploadToEngine(v, t, false);
+              return e.analyzeRaw(budget, t);
+            }, PROFILE_SAMPLE_BUDGETS_MS, () => gen === this.gen, (n, err) => console.info(`[profile] sample at ${t.toFixed(2)} s: retry ${n} (${err instanceof Error ? err.message : err})`));
+            // A sample taken before a framing change is stale: dropped (the next round takes it again).
+            if (r && epoch === this.profileEpoch) this.sampleCache.push({ t, params: r.params, mean: r.mean });
+          }
         }
         if (gen !== this.gen) return;
         const samples = times.map((t) => this.cachedSample(t)).filter((x) => x !== null);
