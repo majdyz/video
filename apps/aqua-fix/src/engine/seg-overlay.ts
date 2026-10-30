@@ -93,6 +93,9 @@ export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02, evLo: 0.01
 
 type Guide = { width: number; height: number; data: Float32Array };
 
+/** R value of composeSegStrength on thick parts (the grade skips its per-pixel water test above 2). */
+export const SEG_THICK = 9;
+
 /** Bilinear resize of a w × h map to W × H (pixel centres aligned). */
 function resample(f: Float32Array, w: number, h: number, W: number, H: number): Float32Array {
   const out = new Float32Array(W * H);
@@ -225,15 +228,15 @@ function maxFilter(src: Float32Array, w: number, h: number, r: number): Float32A
 /**
  * Overlay (+ the analysis guide) → the RGBA texture the grade reads with an AI overlay on the frame (grade-shader
  * animalStrength / toneWeight, at the overlay's size):
- *   R  the local water's Oklab L (waterField; −1 without water to compare with, or without a guide);
- *   G  where the per-pixel water test applies near the contour: thin parts only (a short ramp-in, see B);
+ *   R  the local water's Oklab L (waterField; −1 without water to compare with, or without a guide), on thin parts
+ *      (a short ramp-in, see B) only: thick parts carry SEG_THICK (no per-pixel water test);
+ *   G  the regional trust (waterField: a leak onto the water is under-popped as a region; 1 without a guide);
  *   B  the ML alpha as the mask's signed distance (0.5 on the contour, SEG_TONE.alphaR), its inside slope eased by
  *      the local thickness: the tone ramps in over rampK × the part's half-width, between SEG_TONE.rampIn and
  *      SEG_WATER.rampLong mask px. A thin tail or fin is toned nearly to its edge; a big body fades in gently from
  *      its contour, so a contour that runs across the animal (a belly the mask missed) is a long soft fade, not a
  *      step, and a fat contour's water band gets next to nothing. No guess of which edge is which: nothing flips;
- *   A  the ML weight (near map) × the regional trust (waterField: a leak onto the water is under-popped as a
- *      region).
+ *   A  the ML weight (near map).
  */
 export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): { width: number; height: number; data: Float32Array } {
   const W = o.width, H = o.height, R = SEG_TONE.alphaR;
@@ -250,10 +253,11 @@ export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): {
       // The distance the shader reads back, shrunk so its ramp-in (rampIn) spans `ramp` here.
       a = Math.min(a, 0.5 + Math.min(R, Math.max(0, dIn[i] - 0.5) * (SEG_TONE.rampIn / ramp)) / (2 * R));
     }
-    out[i * 4] = wf ? wf.L[i] : -1;
-    out[i * 4 + 1] = 1 - sstep(SEG_TONE.rampIn, 2 * SEG_TONE.rampIn, ramp);
+    // Thick parts carry R = SEG_THICK (no per-pixel test: their ramp is long, the contour's water gets next to nothing).
+    out[i * 4] = !wf ? -1 : ramp > 1.5 * SEG_TONE.rampIn ? SEG_THICK : wf.L[i];
+    out[i * 4 + 1] = wf ? wf.trust[i] : 1;
     out[i * 4 + 2] = a;
-    out[i * 4 + 3] = o.near[i] * (wf ? wf.trust[i] : 1);
+    out[i * 4 + 3] = o.near[i];
   }
   return { width: W, height: H, data: out };
 }

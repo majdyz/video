@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { assembleMemory, frameIndex, isEmpty, MEM_DIM, MEM_TOKENS, newBank, pruneBank, storeMemory, type MemEntry } from "../src/pipeline/seg/bank.ts";
 import { denseFlow, warp, type Gray } from "../src/pipeline/seg/flow.ts";
 import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, guidedFilter, iou, nearMap, promptFromMask, rleDecode, rleEncode, sdfFeather } from "../src/pipeline/seg/mask.ts";
-import { composeSegStrength } from "../../aqua-fix/src/engine/seg-overlay.ts";
+import { composeSegStrength, SEG_THICK, waterField } from "../../aqua-fix/src/engine/seg-overlay.ts";
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
 import { SUBJECT_CLEAR } from "../../aqua-fix/src/engine/params.ts";
@@ -216,9 +216,10 @@ const img = (dx: number, dy: number): Gray => {
   const ov = { width: W, height: H, alpha: a, exclude: null, near: new Float32Array(W * H).fill(1), depart: null };
   const c = composeSegStrength(ov, { width: gw, height: gh, data: g }).data;
   const Lw = linearToOklab(0.05, 0.05, 0.05)[0];
-  for (const [x, y] of [[150, 30], [10, 5], [70, 30]]) assert.ok(Math.abs(c[(y * W + x) * 4] - Lw) < 0.01, `water L everywhere, under the subject too (${c[(y * W + x) * 4].toFixed(3)} vs ${Lw.toFixed(3)})`);
-  // The regional trust rides the ML weight (A).
-  const T = (x: number, y: number) => c[(y * W + x) * 4 + 3];
+  const wfL = waterField({ width: gw, height: gh, data: g }, ov)!.L;
+  for (const [x, y] of [[150, 30], [10, 5], [70, 30]]) assert.ok(Math.abs(wfL[y * W + x] - Lw) < 0.01, `water L everywhere, under the subject too (${wfL[y * W + x].toFixed(3)} vs ${Lw.toFixed(3)})`);
+  // The regional trust (G).
+  const T = (x: number, y: number) => c[(y * W + x) * 4 + 1];
   assert.ok(T(70, 30) > 0.95, `deep in the subject the mask rules, its water-coloured patch too (${T(70, 30).toFixed(2)})`);
   assert.ok(T(130, 30) < 0.1, `the leak onto the water is not trusted (${T(130, 30).toFixed(2)})`);
   let step = 0;
@@ -227,6 +228,7 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok((c[(30 * W + 70) * 4 + 2] - 0.5) * 2 * SEG_TONE.alphaR >= SEG_TONE.rampIn, "deep inside the tone is full");
   const noGuide = composeSegStrength(ov).data;
   assert.ok(noGuide[0] === -1 && noGuide[1] === 1 && noGuide[(30 * W + 70) * 4 + 3] === 1, "no guide: no water to compare with, the mask rules");
+  assert.equal(c[(30 * W + 70) * 4 + 3], 1, "the ML weight (A) passes as is");
   const full = { width: W, height: H, alpha: new Float32Array(W * H).fill(1), exclude: null, near: ov.near, depart: null };
   assert.equal(composeSegStrength(full, { width: gw, height: gh, data: g }).data[0], -1, "no water in the frame: -1");
 }
@@ -238,12 +240,14 @@ const img = (dx: number, dy: number): Gray => {
   for (let y = 10; y < 70; y++) for (let x = 20; x < 100; x++) m[y * W + x] = 1; // a body 60 px tall
   for (let y = 38; y < 41; y++) for (let x = 100; x < 150; x++) m[y * W + x] = 1; // a fin 3 px thick
   const a = sdfFeather(m, W, H, SEG.alphaR);
-  const c = composeSegStrength({ width: W, height: H, alpha: a, exclude: null, near: new Float32Array(W * H).fill(1), depart: null }).data;
+  const gw = 80, gh = 40, g = new Float32Array(gw * gh * 4);
+  for (let i = 0; i < gw * gh; i++) g.fill(0.05, i * 4, i * 4 + 3);
+  const c = composeSegStrength({ width: W, height: H, alpha: a, exclude: null, near: new Float32Array(W * H).fill(1), depart: null }, { width: gw, height: gh, data: g }).data;
   const dOf = (x: number, y: number) => (c[(y * W + x) * 4 + 2] - 0.5) * 2 * SEG_TONE.alphaR;
   assert.ok(dOf(60, 14) < 0.5 * SEG_TONE.rampIn, `a big body ramps in slowly (${dOf(60, 14).toFixed(2)} mask px read back 4 px in)`);
   assert.ok(dOf(60, 40) >= SEG_TONE.rampIn, `its middle is toned in full (${dOf(60, 40).toFixed(2)})`);
   assert.ok(dOf(130, 39) > 0.5 && dOf(130, 39) > 0.9 * Math.max(0, (a[39 * W + 130] - 0.5) * 2 * SEG_TONE.alphaR), `a thin fin keeps its short ramp (${dOf(130, 39).toFixed(2)})`);
-  assert.ok(c[(39 * W + 130) * 4 + 1] > 0.8 && c[(14 * W + 60) * 4 + 1] < 0.2, "the per-pixel water test on thin parts only");
+  assert.ok(c[(39 * W + 130) * 4] < 2 && c[(14 * W + 60) * 4] === SEG_THICK, "the per-pixel water test on thin parts only (R)");
   let step = 0;
   for (let y = 11; y < 69; y++) for (let x = 21; x < 99; x++) step = Math.max(step, Math.abs(dOf(x + 1, y) - dOf(x, y)), Math.abs(dOf(x, y + 1) - dOf(x, y)));
   assert.ok(step < 0.5, `the ramp varies smoothly (max ${step.toFixed(2)} per texel)`);

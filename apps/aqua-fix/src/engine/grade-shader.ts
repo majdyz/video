@@ -28,11 +28,11 @@ export const SEG_TONE = {
    * stretches it with the part's thickness: a big body fades in over up to SEG_WATER.rampLong, a fin is toned to its
    * edge)... */
   rampIn: 2.5,
-  /** ...and on thin parts (G, where the ramp stays short), within trustLo..trustHi mask px of the contour (where a mask
+  /** ...and on thin parts (where the ramp stays short), within trustLo..trustHi mask px of the contour (where a mask
    * is often a little fat: motion blur) it follows the pixel itself: tone only as far as the pixel departs from the
    * local water (Oklab ΔL and chroma off the water's hue, evLo..evHi), so the glow never lands on water inside the
    * mask. Deeper in, the mask rules (a shaded flank that matches the water is toned with the rest); a leak onto the
-   * water is under-popped as a whole region (A × the regional trust), never in patches. */
+   * water is under-popped as a whole region (G, the regional trust), never in patches. */
   trustLo: 2,
   trustHi: 4.5,
   evLo: 0.025,
@@ -452,8 +452,8 @@ float subjectWeight(vec2 uv, float coreJbu, float dev) {
 // Per-animal tone strength (animals.ts: whole-or-nothing, decided per tracked animal on the CPU; one value per
 // map texel, dilated past the animal so the outline comes from the per-pixel test above). Mirrors apply.ts.
 // With an AI subject overlay (studio seg/, p24.y; seg-overlay.ts composeSegStrength) the channels are instead
-// R = the local water's Oklab L (< 0: no water to compare with), G = where the per-pixel water test applies near the
-// contour (thin parts), B = the ML alpha (the mask's signed distance, SEG_TONE.alphaR), A = the ML weight (near map x
+// R = the local water's Oklab L (< 0: no water to compare with; > 2: a thick part, no per-pixel test), G = the
+// regional trust, B = the ML alpha (the mask's signed distance, SEG_TONE.alphaR), A = the ML weight (near map x
 // confidence x regional trust); all bilinear.
 vec4 animalStrength(vec2 uv) {
   ivec2 size = textureSize(u_data3, 0);
@@ -494,23 +494,24 @@ vec2 popHue(vec2 ab, vec2 abSrc, float w) {
 // How far the source pixel (Oklab lab0) departs from the local water (an.x: its L; its hue is the veil's, p14.xy):
 // 0 on water, 1 on a clear subject; 1 where there is no water to compare with.
 float segEvidence(vec4 an, vec3 lab0) {
-  if (an.x < 0.0) return 1.0;
+  if (an.x < 0.0 || an.x > 2.0) return 1.0;
   float perp = lab0.y * p[14].y - lab0.z * p[14].x;
   return smoothstepf(SEG_EV_LO, SEG_EV_HI, length(vec2(lab0.x - an.x, perp)));
 }
 // The subject weight the tone uses: the engine's (depart, 0..1: how far the pixel departs from the water, softens
 // it), or with an AI overlay on the frame (p24.y) the AI's alone (the engine's coarse per-animal map would show its
 // blocks once the pop lifts): 0 on and outside the mask's contour, ramping in over SEG_TONE.rampIn of the read-back
-// distance (stretched on a big body); on thin parts (G) near the contour only as far as the pixel departs from the
-// water, elsewhere the whole subject; times the ML weight (A: near map x regional trust, segPop).
+// distance (stretched on a big body); on thin parts near the contour only as far as the pixel departs from the
+// water (R > 2 marks the thick parts: no test there), elsewhere the whole subject; times the ML weight (A, segPop)
+// and the regional trust (G).
 float toneWeight(float subj, vec4 an, float depart, vec3 lab0) {
   if (p[24].y <= 0.5) return objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
   if (an.w <= 0.0) return 0.0;
   float d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
-  float inner = mix(segEvidence(an, lab0), 1.0, 1.0 - an.y * (1.0 - smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d)));
-  // A also carries the regional trust and the per-animal cut share (seg-overlay.ts): they scale the tone even where
-  // the open-water amount (p22.z) would pop it in full.
-  return smoothstepf(0.0, SEG_RAMP_IN, d) * inner * max(p[22].z, segPop(an)) * min(1.0, an.w / SEG_POP_HI);
+  float inner = mix(segEvidence(an, lab0), 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));
+  // G: the regional trust (seg-overlay.ts waterField) scales the tone, even where the open-water amount (p22.z)
+  // would pop it in full.
+  return smoothstepf(0.0, SEG_RAMP_IN, d) * inner * max(p[22].z, segPop(an)) * an.y;
 }
 float warmClamp(vec2 ab, vec3 lin, float srcFar, float person, float strength) {
   if (strength <= 0.0) return 1.0;
@@ -1004,7 +1005,7 @@ fn clearCast(ab: vec2<f32>, vh: vec2<f32>, g: f32) -> vec2<f32> {
   return ab * (max(0.0, c1) / C);
 }
 fn segEvidence(an: vec4<f32>, lab0: vec3<f32>) -> f32 {
-  if (an.x < 0.0) { return 1.0; }
+  if (an.x < 0.0 || an.x > 2.0) { return 1.0; }
   let perp = lab0.y * params.p[14].y - lab0.z * params.p[14].x;
   return smoothstepf(SEG_EV_LO, SEG_EV_HI, length(vec2<f32>(lab0.x - an.x, perp)));
 }
@@ -1012,8 +1013,8 @@ fn toneWeight(subj: f32, an: vec4<f32>, depart: f32, lab0: vec3<f32>) -> f32 {
   if (params.p[24].y <= 0.5) { return objectWeight(subj) * mix(SC_EDGE, 1.0, depart); }
   if (an.w <= 0.0) { return 0.0; }
   let d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
-  let inner = mix(segEvidence(an, lab0), 1.0, 1.0 - an.y * (1.0 - smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d)));
-  return smoothstepf(0.0, SEG_RAMP_IN, d) * inner * max(params.p[22].z, segPop(an)) * min(1.0, an.w / SEG_POP_HI);
+  let inner = mix(segEvidence(an, lab0), 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));
+  return smoothstepf(0.0, SEG_RAMP_IN, d) * inner * max(params.p[22].z, segPop(an)) * an.y;
 }
 fn warmClamp(ab: vec2<f32>, lin: vec3<f32>, srcFar: f32, person: f32, strength: f32) -> f32 {
   if (strength <= 0.0) { return 1.0; }
