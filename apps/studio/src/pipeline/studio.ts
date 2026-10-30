@@ -39,7 +39,7 @@ import { releaseExportBlob } from "@dive-tools/shared/output-sink.ts";
 import { exportSettingsKey } from "./export-key.ts";
 import { ExportProfile } from "@dive-tools/shared/export-profile.ts";
 import { AnalysisLookahead } from "./lookahead.ts";
-import { PROFILE_SAMPLE_BUDGETS_MS, withRetries } from "./profile-retry.ts";
+import { PROFILE_MAX_ROUNDS, PROFILE_SAMPLE_BUDGETS_MS, withRetries } from "./profile-retry.ts";
 import { detectFootage, FOOTAGE_LABEL, FOOTAGE_MODE, isHdrProfile, parseCodec, resolveFootage, type FootageChoice, type FootageInfo, type FootageProfile } from "./footage.ts";
 import type { CalibKind, SignalCalibration } from "./signal-probe.ts";
 import { isNativeShell, nativeFileOf, type NativeFileRef } from "../native/registry.ts";
@@ -1649,11 +1649,13 @@ export class Studio {
       v.pause();
       this.set({ busy: "Profiling colour…" });
       try {
-        // Rounds: a framing change (Dewarp / Stabilise toggled) empties the cache mid-run; the samples it threw away
-        // are taken again with the new framing, so the lock never comes from fewer frames than planned.
-        for (let round = 0; round < 3; round++) {
+        // Rounds: a framing change (Dewarp / Stabilise toggled, a lens picked) empties the cache mid-run; the samples it
+        // threw away are taken again with the new framing, so the lock never comes from fewer frames than planned.
+        // A round only re-takes what is missing; the cap guards against a framing that keeps changing.
+        for (let round = 0; round < PROFILE_MAX_ROUNDS; round++) {
           const needed = all.filter((t) => !this.cachedSample(t));
           if (!needed.length) break;
+          if (round > 0) console.info(`[profile] round ${round + 1}: ${needed.length} sample(s) to take again after a framing change`);
           for (const t of needed) {
             // An export started meanwhile waits for this profile (exportVideo): stopping here would export without the lock.
             if (gen !== this.gen) return;

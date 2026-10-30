@@ -5,6 +5,9 @@
 // differed). A sample is now retried with a longer budget each time; only a
 // sample that fails every attempt is left out.
 
+/** Sampling rounds per profile run: each re-takes only the samples a framing change threw away. */
+export const PROFILE_MAX_ROUNDS = 8;
+
 /** Analysis budgets (ms) per attempt: a slow device gets more time, not fewer samples. */
 export const PROFILE_SAMPLE_BUDGETS_MS = [10_000, 20_000, 40_000] as const;
 
