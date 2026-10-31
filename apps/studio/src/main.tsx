@@ -1,4 +1,8 @@
 import { createRoot } from "react-dom/client";
+import { startCrumbs } from "./pipeline/crumbs.ts";
+
+declare const __BUILD_ID__: string;
+startCrumbs(__BUILD_ID__);
 // Self-hosted variable fonts (bundled by Vite; the browser fetches only the subsets it renders).
 import "@fontsource-variable/inter/wght.css";
 import "@fontsource-variable/space-grotesk/wght.css";

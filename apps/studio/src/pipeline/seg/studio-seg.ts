@@ -6,6 +6,7 @@
 import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts";
 import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
+import { crumb } from "../crumbs.ts";
 import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
 import { confWeight, maskSize, SEG, type SegObject } from "./track.ts";
@@ -429,17 +430,20 @@ export class SubjectSeg {
     if (this.model) return Promise.resolve(this.model);
     if (this.loading) return this.loading;
     this.set({ phase: "download", progress: 0 });
+    crumb("ai: model load");
     this.loading = (async () => {
       const m = new WorkerSegModel();
       try {
         await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }));
         m.onEvent = (e) => this.onEvent(e);
         this.model = m;
+        crumb(`ai: model ready (${m.info?.ep ?? "?"}, ${m.info?.threads ?? "?"} threads)`);
         this.set({ phase: "ready", progress: null });
         return m;
       } catch (e) {
         m.dispose();
         segLog("model failed to load; using the engine's masks", e);
+        crumb(`ai: model failed: ${errText(e)}`);
         // The reason rides along (shown in Subjects): a phone can't be debugged from here otherwise.
         this.set({ phase: "unavailable", progress: null, note: `Not available on this device; using standard detection (${errText(e)})` });
         return null;
@@ -450,6 +454,7 @@ export class SubjectSeg {
     return this.loading;
   }
 
+  private crumbTens = -1;
   private onEvent(e: SessionEvent): void {
     const live = this.live;
     if (!live) return;
@@ -462,6 +467,8 @@ export class SubjectSeg {
       this.cache = null;
     } else if (e.ev === "progress") {
       this.busy = e.done < e.total;
+      const tens = e.total ? Math.floor((10 * e.done) / e.total) : 0;
+      if (tens !== this.crumbTens) { this.crumbTens = tens; crumb(`ai: pass ${tens * 10}% (${e.done}/${e.total})`); }
       this.set({ phase: "tracking", progress: e.total ? e.done / e.total : null });
     } else if (e.ev === "seeds") {
       segLog(`segment ${e.k} seeds asked for (${e.t.toFixed(2)} s)`);
@@ -491,6 +498,7 @@ export class SubjectSeg {
     if (!this.replayable || !this.live) return;
     this.hibTimer = window.setTimeout(() => {
       if (this.busy || !this.model || !this.live || !this.replayable || this.waking) return;
+      crumb("ai: hibernate");
       segLog(`pass done: shutting the model down (masks kept, ${(this.live.bytes / 1e6).toFixed(1)} MB)`);
       this.model.dispose();
       this.model = null;
@@ -549,7 +557,9 @@ export class SubjectSeg {
       const model = await this.ensureModel();
       if (!model || this.file !== file) return null;
       try {
+        crumb("ai: session open");
         const info = await model.sessionOpen(file, 0, Math.max(0, duration));
+        crumb(`ai: session ${info.width}x${info.height}, ${info.n} frames`);
         if (this.file !== file) return null;
         this.live = new SegLive(info);
         segLog(`session open: ${info.width}×${info.height}, masks ${info.mw}×${info.mh}, ${info.n} frames`);
@@ -581,6 +591,7 @@ export class SubjectSeg {
   async include(t: number, u: number, v: number, boxes: readonly PersonBox[]): Promise<void> {
     if (!this.live || !(await this.wake()) || !this.model) return;
     const id = this.nextId++;
+    crumb(`ai: include ${t.toFixed(2)}s`);
     const object: SegObject & { id: number } = { id, kind: "include", t, prompt: promptFor({ u, v }, boxes) };
     this.log.push({ op: "add", object });
     await this.model.sessionAdd(object);
@@ -595,7 +606,9 @@ export class SubjectSeg {
     // Its outcome depends on the masks tracked so far: a replay could differ, so this session stays awake from now on.
     this.replayable = false;
     clearTimeout(this.hibTimer);
+    crumb(`ai: exclude ${t.toFixed(2)}s`);
     const r = await this.model.sessionExclude(id, t, u, v);
+    crumb(`ai: exclude -> ${r.action}`);
     this.undoOps.push(r.action === "removed" ? { kind: "removed", id: r.removed } : { kind: "added", id });
     segLog(`exclude tap at ${t.toFixed(2)} s: ${r.action}`);
     this.onChange();

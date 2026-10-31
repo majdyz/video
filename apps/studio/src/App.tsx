@@ -7,6 +7,7 @@ import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
 import { AdvancedControls, SubjectsPanel, TOOL_ICON, ToolPanel, toolStatus } from "./ui/panels";
 import { ToolDock } from "./ui/tool-dock";
+import { lastCrash } from "./pipeline/crumbs.ts";
 import { SubjectOutlines } from "./ui/subjects";
 import { ExportSheet } from "./ui/export-sheet";
 import { EmptyState } from "./ui/empty";
@@ -81,6 +82,9 @@ export default function App() {
   const [tapPulse, setTapPulse] = useState<{ u: number; v: number; t: number } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  /** The last session crashed (crumbs.ts): its steps, offered once at start-up and kept in About. */
+  const crash = useMemo(() => lastCrash(), []);
+  const [crashToast, setCrashToast] = useState(!!crash);
   const [hasLive, setHasLive] = useState(false);
   const [theme, setTheme] = useState<Theme>(() => (document.documentElement.dataset.theme === "light" ? "light" : "abyss"));
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -480,6 +484,14 @@ export default function App() {
         )}
       </main>
 
+      {crashToast && !s.error && (
+        <div className="toast" role="status">
+          <IconWarning size={18} />
+          <span>The page crashed last time.</span>
+          <button type="button" className="link-btn" onClick={() => { setCrashToast(false); setAboutOpen(true); }}>Details</button>
+          <button type="button" className="icon-btn icon-btn--quiet" aria-label="Dismiss" onClick={() => setCrashToast(false)}><IconClose size={16} /></button>
+        </div>
+      )}
       {s.error && (
         <div className="toast" role="alert">
           <IconWarning size={18} />
@@ -514,6 +526,14 @@ export default function App() {
             {s.exportMode === "realtime" ? "real-time export (plays the clip through once)" : s.exportMode === "native" ? "native hardware encoder" : "WebCodecs export"}
             {" · build "}{__BUILD_ID__}
           </p>
+          {crash && (
+            <div className="about__credit">
+              <h3>Last session crashed</h3>
+              <p>Its last steps (send them to the developer):</p>
+              <pre className="crash-log">{crash.join("\n")}</pre>
+              <button type="button" className="btn btn--ghost" onClick={() => void navigator.clipboard?.writeText(crash.join("\n")).catch(() => undefined)}>Copy</button>
+            </div>
+          )}
           <div className="about__credit">
             <h3>Sample clip</h3>
             <p>

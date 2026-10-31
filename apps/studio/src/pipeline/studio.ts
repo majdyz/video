@@ -14,6 +14,7 @@
 // (colour right after first paint, mediabunny when a clip opens, motion when
 // Stabilise is switched on, the lens maths when Dewarp is).
 
+import { crumb } from "./crumbs.ts";
 import { isRealtimeExportSupported, isWebCodecsSupported, isWebKit } from "./env.ts";
 import { bitrateFromSource, pickBitrate } from "@dive-tools/shared/recorder.ts";
 import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validate.ts";
@@ -523,6 +524,7 @@ export class Studio {
    * id (0 = none: a seed).
    */
   async toggleSubjectAt(u: number, v: number): Promise<number> {
+    crumb(`tap ${u.toFixed(2)},${v.toFixed(2)} ai=${this.seg.live ? "live" : this.seg.on ? this.seg.status.phase : "off"}`);
     if (this.snap.subjectTracking !== null || this.exporting) return 0;
     if (!this.paused()) {
       this.pause();
@@ -603,7 +605,9 @@ export class Studio {
     const gen = this.gen;
     const span = this.trim ?? { start: 0, end: v.duration || 0 };
     const include = o0.action === "include";
+    crumb(`follow ${o0.action} from ${o0.t.toFixed(2)}s`);
     const sample = (t: number, seed: { u: number; v: number }) => this.workFrame(t, async (wv) => {
+      crumb(`follow step ${t.toFixed(2)}s`);
       this.uploadToEngine(wv, t, false);
       const r = await e.analyzeRaw(10_000, undefined, include ? [seed] : []);
       if (t === o0.t) this.openWater = (r.params.backdrop ?? 0) > 0;
@@ -796,6 +800,7 @@ export class Studio {
     const job = this.workChain.then(async () => {
       if (!file || this.file !== file) throw new Error("clip changed");
       let wv: HTMLVideoElement;
+      if (!this.workVid) crumb("work video: create");
       if (this.workVidFailed === file) wv = this.video!;
       else {
         try {
@@ -1099,6 +1104,7 @@ export class Studio {
     if (isPhotoFile(file)) return this.openPhoto(file, e);
     this.teardown();
     const gen = ++this.gen;
+    crumb(`open ${file.type || "?"} ${(file.size / 1e6).toFixed(1)} MB`);
     this.file = file;
     this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [] });
     try {
@@ -1268,6 +1274,7 @@ export class Studio {
   private async openPhoto(file: File, e: Engine): Promise<void> {
     this.teardown();
     const gen = ++this.gen;
+    crumb(`open ${file.type || "?"} ${(file.size / 1e6).toFixed(1)} MB`);
     this.file = file;
     this.signal = null;
     this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [] });
@@ -1897,6 +1904,7 @@ export class Studio {
       } finally {
         if (gen === this.gen) {
           this.set({ busy: null });
+          crumb("profile done");
           if (!this.exporting) this.repaint();
         }
       }
@@ -2140,6 +2148,7 @@ export class Studio {
   }
 
   async exportVideo(req: ExportRequest = {}): Promise<void> {
+    crumb(`export start (${this.snap.exportMode})`);
     if (this.snap.kind === "photo") return this.exportPhoto();
     const e = this.engine, file = this.file, v = this.video, info = this.snap.info;
     if (!file || !v || !info || this.exporting) return;
