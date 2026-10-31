@@ -103,7 +103,7 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
             <label className={`lookrow${tools.colour.vivid ? " is-on" : ""}`}>
               <span className="lookrow__text">
                 <span className="lookrow__name">Vivid</span>
-                <small>{tools.colour.vivid ? "Deep blue water, rich blacks, bright sun" : "Off: natural correction only"}</small>
+                <small>{tools.colour.vivid ? "Deep blue water, white sand, rich blacks, bright sun" : "Off: natural correction only"}</small>
               </span>
               <Switch checked={!!tools.colour.vivid} label="Vivid" disabled={disabled}
                 onChange={(v) => { saveVivid(v); setTools((t) => ({ ...t, colour: { ...t.colour, vivid: v, enabled: true } })); }} />
@@ -228,8 +228,6 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog }: {
       <div className="adv">
         <Slider label="Deep-blue look" value={c.look * 100} min={0} max={100} defaultValue={0} onChange={(v) => up({ look: v / 100 })} />
         <p className="adv__hint">A creative grade on top of the correction: darker, water tinted toward deep blue, subjects keep their colour.</p>
-        <Slider label="Seabed" value={c.seabed ?? DEFAULT_COLOUR.seabed ?? 0} min={0} max={100} defaultValue={DEFAULT_COLOUR.seabed} format={(v) => (v < 1 ? "Off" : String(Math.round(v)))} onChange={(v) => up({ seabed: v })} />
-        <p className="adv__hint">Sand and reef back to white where the water took all the red; open blue water keeps its colour.</p>
         <Slider label="Saturation" value={c.saturation * 100} min={0} max={200} defaultValue={100} format={(v) => `${Math.round(v)}%`} onChange={(v) => up({ saturation: v / 100 })} />
         <Slider label="Clarity" value={c.clarity * 100} min={0} max={100} defaultValue={DEFAULT_COLOUR.clarity * 100} onChange={(v) => up({ clarity: v / 100 })} />
         <Slider label="Haze removal" value={c.veil * 100} min={0} max={120} defaultValue={DEFAULT_COLOUR.veil * 100} onChange={(v) => up({ veil: v / 100 })} />

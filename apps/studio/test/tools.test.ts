@@ -28,7 +28,7 @@ import { IDENTITY_PARAMS } from "../../aqua-fix/src/engine/params.ts";
 
 // Colour: strength 50 is exactly the engine's own estimate (intensity 1), defaults pass through — with Vivid on.
 assert.deepEqual(colourSettings(DEFAULT_TOOLS.colour), { ...DEFAULT_SETTINGS, vivid: 1 });
-assert.deepEqual(colourSettings({ ...DEFAULT_TOOLS.colour, vivid: false }), { ...DEFAULT_SETTINGS });
+assert.deepEqual(colourSettings({ ...DEFAULT_TOOLS.colour, vivid: false }), { ...DEFAULT_SETTINGS, seabed: 0 });
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 100 }).intensity, 2);
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 0 }).intensity, 0);
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 140 }).intensity, 2, "clamped");

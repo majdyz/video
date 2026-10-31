@@ -107,7 +107,8 @@ export function colourSettings(c: ColourLook): UserSettings {
     subjectPop: !!c.subjectPop,
     subjectPopStrength: Math.min(100, Math.max(0, c.popStrength ?? DEFAULT_COLOUR.popStrength ?? 50)) / 100,
     subjectPopWarmth: Math.min(100, Math.max(0, c.popWarmth ?? DEFAULT_COLOUR.popWarmth ?? 0)) / 100,
-    seabed: Math.min(100, Math.max(0, c.seabed ?? DEFAULT_COLOUR.seabed ?? 0)) / 100,
+    // Seabed recovery rides on Vivid (one look: deep blue water, white sand), no control of its own.
+    seabed: c.vivid ? Math.min(100, Math.max(0, c.seabed ?? DEFAULT_COLOUR.seabed ?? 0)) / 100 : 0,
     vivid: c.vivid ? 1 : 0,
   };
 }
