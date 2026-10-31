@@ -79,6 +79,8 @@ const SUBJECT_STEP_S = 0.25;
 const SUBJECT_REACH_S = 20;
 /** A paused seek re-analyses its frame once the seeking settles (ms). */
 const PAUSED_ANALYSIS_MS = 120;
+/** Seeding the AI waits until the user has not scrubbed for this long (ms): its own <video> seeks too. */
+const SCRUB_IDLE_MS = 700;
 
 export type MediaKind = "video" | "photo";
 /**
@@ -302,6 +304,12 @@ export class Studio {
   private sourceUrl: string | null = null;
   private gen = 0;
   private still: ImageBitmap | null = null;
+  /**
+   * Scrubbing: one seek in flight on the <video>; a newer target waits here and goes when it lands. Dozens of seeks a
+   * second, each a decode plus a full-size still, crashed iPhone Safari's page (31 Oct).
+   */
+  private pendingSeek: number | null = null;
+  private lastSeekAt = 0;
   private previewOn = false;
   private exporting = false;
   private exportAbort: AbortController | null = null;
@@ -386,6 +394,14 @@ export class Studio {
     });
     video.addEventListener("seeked", () => {
       if (this.snap.kind !== "video") return;
+      if (this.pendingSeek !== null) {
+        // Still scrubbing: show this frame, then on to the latest target (no still or analysis for a passing frame).
+        const t = this.pendingSeek;
+        this.pendingSeek = null;
+        if (!this.exporting && this.snap.phase === "ready") { this.dropStill(); this.drawLive(video.currentTime, false); }
+        try { video.currentTime = t; } catch { /* ignore */ }
+        return;
+      }
       this.set({ currentTime: video.currentTime });
       if (!this.exporting && this.snap.phase === "ready") {
         this.dropStill();
@@ -701,6 +717,9 @@ export class Studio {
           this.seedVid = { file, v: sv };
         }
         const sv = this.seedVid.v;
+        // Not while the user scrubs: two <video>s seeking at once (plus the analysis) is what phones fall over on.
+        await this.scrubIdle();
+        if (this.file !== file) return;
         await new Promise<void>((res) => { sv.onseeked = () => res(); sv.currentTime = t + 1e-3; });
         if (this.file !== file) return;
         // No frame of the preview's may reach the engine between upload and analysis; one in flight lands first.
@@ -844,6 +863,8 @@ export class Studio {
   private schedulePausedAnalysis(): void {
     clearTimeout(this.pausedTimer);
     this.pausedTimer = window.setTimeout(() => {
+      // Mid-scrub: wait for the finger to rest (each analysis is a full engine pass).
+      if (performance.now() - this.lastSeekAt < 300) return this.schedulePausedAnalysis();
       if (this.profiling || this.snap.subjectTracking !== null || this.exporting || !this.paused()) return;
       void this.refreshSubjects();
     }, PAUSED_ANALYSIS_MS);
@@ -1235,6 +1256,7 @@ export class Studio {
 
   private teardown(): void {
     this.gen++;
+    this.pendingSeek = null;
     this.seg.reset();
     this.subjectUndo = [];
     this.snap = { ...this.snap, subjectUndo: 0 };
@@ -1549,12 +1571,27 @@ export class Studio {
   seek(t: number): void {
     const v = this.video;
     if (!v || this.exporting || this.snap.phase !== "ready" || this.snap.kind !== "video") return;
+    const to = clampToRange(t, this.trim, v.duration || 0);
+    this.lastSeekAt = performance.now();
+    this.set({ currentTime: to });
+    if (v.seeking) {
+      this.pendingSeek = to;
+      return;
+    }
     try {
-      v.currentTime = clampToRange(t, this.trim, v.duration || 0);
+      v.currentTime = to;
     } catch {
       // ignore
     }
-    this.set({ currentTime: v.currentTime });
+  }
+
+  /** Resolves once the user has not scrubbed for SCRUB_IDLE_MS. */
+  private async scrubIdle(): Promise<void> {
+    for (;;) {
+      const left = SCRUB_IDLE_MS - (performance.now() - this.lastSeekAt);
+      if (left <= 0 && !this.video?.seeking) return;
+      await new Promise((r) => setTimeout(r, Math.max(50, left)));
+    }
   }
 
   // ------------------------------------------------------------ segments

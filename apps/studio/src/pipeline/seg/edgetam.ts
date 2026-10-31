@@ -40,7 +40,9 @@ export class EdgeTam {
     for (const ep of eps) {
       try {
         const s = {} as Record<GraphName, Sess>;
-        for (const g of GRAPHS) s[g] = await ort.InferenceSession.create(models[g], { executionProviders: [ep], graphOptimizationLevel: "all" });
+        // No CPU arena / memory pattern: both keep each graph's peak activations reserved for good (the encoder's at
+        // 1024² are hundreds of MB), and a phone tab that holds four graphs' peaks next to the video decoders is killed.
+        for (const g of GRAPHS) s[g] = await ort.InferenceSession.create(models[g], { executionProviders: [ep], graphOptimizationLevel: "disabled", enableCpuMemArena: false, enableMemPattern: false });
         return new EdgeTam(ort, s, bank, ep);
       } catch (e) {
         lastErr = e;
