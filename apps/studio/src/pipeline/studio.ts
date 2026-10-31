@@ -106,10 +106,14 @@ export type StabStatus = {
   motionLog: string | null;
 };
 /** Export waits for the AI pass; with no progress for this long it exports with the engine's masks instead. */
-const SEG_EXPORT_STALL_MS = 180_000;
+const SEG_EXPORT_STALL_MS = 60_000;
+/** The background passes' own <video> must have its first frame within this long (ms), else they use the preview's. */
+const WORK_VIDEO_LOAD_MS = 8000;
 
 export type ExportStatus = {
   state: "idle" | "preparing" | "running" | "done" | "error";
+  /** Waiting for the AI subject pass: the sheet offers to export without it. */
+  canSkipSeg?: boolean;
   progress: number;
   frames: number;
   fps: number;
@@ -599,15 +603,12 @@ export class Studio {
     const gen = this.gen;
     const span = this.trim ?? { start: 0, end: v.duration || 0 };
     const include = o0.action === "include";
-    const wasPreview = this.previewOn;
-    this.previewOn = false;
-    const sample = async (t: number, seed: { u: number; v: number }) => {
-      await seekVideo(v, t);
-      this.uploadToEngine(v, t, false);
+    const sample = (t: number, seed: { u: number; v: number }) => this.workFrame(t, async (wv) => {
+      this.uploadToEngine(wv, t, false);
       const r = await e.analyzeRaw(10_000, undefined, include ? [seed] : []);
       if (t === o0.t) this.openWater = (r.params.backdrop ?? 0) > 0;
       return (r.params.backdrop ?? 0) > 0 ? r.animals ?? null : null;
-    };
+    });
     const total = Math.max(1, Math.ceil((span.end - span.start) / SUBJECT_STEP_S));
     let done = 0;
     this.set({ subjectTracking: 0 });
@@ -652,11 +653,7 @@ export class Studio {
         console.info(`[subjects] ${o0.action} at ${o0.t.toFixed(2)} s: followed ${path.length ? `${path[0].t.toFixed(2)}–${path[path.length - 1].t.toFixed(2)} s (${path.length} samples)` : "nothing"}`);
         this.engine?.setSubjectOverrides(list);
         this.set({ subjectOverrides: list });
-        if (!this.exporting) {
-          await seekVideo(v, o0.t).catch(() => undefined);
-          if (wasPreview) this.startPreview();
-          await this.refreshSubjects();
-        }
+        if (!this.exporting) await this.refreshSubjects();
       }
     }
   }
@@ -685,9 +682,19 @@ export class Studio {
 
   /** Segment seeds run one after another (each its own canonical frame). */
   private seedChain: Promise<void> = Promise.resolve();
-  private seedVid: { file: File; v: HTMLVideoElement } | null = null;
+  /**
+   * The background passes' own <video> (colour profile, a tapped subject's track pass, the AI's seed frames): they
+   * never seek the one the user watches and scrubs (that fought the user's scrubbing, and the profile seeked back to
+   * where it began). One frame job at a time (workFrame).
+   */
+  private workVid: { file: File; v: HTMLVideoElement } | null = null;
+  private workChain: Promise<unknown> = Promise.resolve();
+  /** A background frame is in the engine (upload → analysis): the preview paints nothing over it meanwhile. */
+  private engineHold = 0;
   /** The canonical seed frame is in the engine: the preview skips its frames. */
-  private segSeedBusy = false;
+  private get segSeedBusy(): boolean {
+    return this.engineHold > 0;
+  }
 
   /** Segment 0's seeds: the engine's own subjects on the export range's start (trim start, else 0). */
   private seedAutosCanonical(): Promise<void> {
@@ -708,37 +715,23 @@ export class Studio {
       if (!e || !v || !file || !this.seg.live || this.seg.hasSegment(k)) return;
       let objs: ReturnType<typeof seedObjects> = [];
       try {
-        if (!this.seedVid || this.seedVid.file !== file) {
-          this.dropSeedVideo();
-          const sv = document.createElement("video");
-          sv.muted = true;
-          sv.playsInline = true;
-          sv.preload = "auto";
-          await new Promise<void>((res, rej) => { sv.onloadeddata = () => res(); sv.onerror = () => rej(new Error("seed frame unreadable")); sv.src = v.currentSrc || v.src; });
-          this.seedVid = { file, v: sv };
-        }
-        const sv = this.seedVid.v;
         // Not while the user scrubs: two <video>s seeking at once (plus the analysis) is what phones fall over on.
         await this.scrubIdle();
         if (this.file !== file) return;
-        await new Promise<void>((res) => { sv.onseeked = () => res(); sv.currentTime = t + 1e-3; });
-        if (this.file !== file) return;
         // No frame of the preview's may reach the engine between upload and analysis; one in flight lands first.
-        this.segSeedBusy = true;
-        await this.settleEngine();
-        e.resetTracking();
-        e.setTime(t);
-        this.uploadToEngine(sv, t, false);
-        await e.analyzeNow(true).catch(() => undefined);
-        // From this one analysis's own animals (deterministic for the frame), not the tracker's confidence (which
-        // depends on how many analyses happened to run since the reset).
-        objs = seedObjects(e.animalMap(), t, e.personBoxesNow());
-        e.resetTracking();
+        objs = await this.workFrame(t + 1e-3, async (sv) => {
+          e.resetTracking();
+          e.setTime(t);
+          this.uploadToEngine(sv, t, false);
+          await e.analyzeNow(true).catch(() => undefined);
+          // From this one analysis's own animals (deterministic for the frame), not the tracker's confidence (which
+          // depends on how many analyses happened to run since the reset).
+          const found = seedObjects(e.animalMap(), t, e.personBoxesNow());
+          e.resetTracking();
+          return found;
+        }, true);
       } catch (err) {
         console.warn(`[seg] segment ${k} seed frame failed`, err);
-      } finally {
-        this.segSeedBusy = false;
-        this.repaint();
       }
       if (this.file !== file) return;
       await this.seg.seedSegment(k, t, objs);
@@ -750,10 +743,83 @@ export class Studio {
   }
 
   private dropSeedVideo(): void {
-    if (!this.seedVid) return;
-    this.seedVid.v.removeAttribute("src");
-    this.seedVid.v.load();
-    this.seedVid = null;
+    if (!this.workVid) return;
+    this.workVid.v.removeAttribute("src");
+    this.workVid.v.load();
+    this.workVid.v.remove();
+    this.workVid = null;
+  }
+  /** The work video could not load on this device: background passes fall back to the visible one (as before). */
+  private workVidFailed: File | null = null;
+
+  /** The work video for the open clip (made on first use). */
+  private async workVideo(file: File): Promise<HTMLVideoElement> {
+    const v = this.video;
+    if (!v) throw new Error("no clip");
+    if (!this.workVid || this.workVid.file !== file) {
+      this.dropSeedVideo();
+      const wv = document.createElement("video");
+      wv.muted = true;
+      wv.playsInline = true;
+      wv.setAttribute("playsinline", "");
+      wv.preload = "auto";
+      wv.className = "source-video";
+      wv.setAttribute("aria-hidden", "true");
+      // In the document and loaded explicitly: iPhone Safari never loads a detached <video>'s data (its loadeddata
+      // never came, and the AI seeds and so the export waited for ever).
+      document.body.appendChild(wv);
+      const drop = () => { wv.removeAttribute("src"); wv.load(); wv.remove(); };
+      try {
+        await new Promise<void>((res, rej) => {
+          const timer = setTimeout(() => rej(new Error("work video did not load")), WORK_VIDEO_LOAD_MS);
+          wv.onloadeddata = () => { clearTimeout(timer); res(); };
+          wv.onerror = () => { clearTimeout(timer); rej(new Error("frame unreadable")); };
+          wv.src = v.currentSrc || v.src;
+          wv.load();
+        });
+      } catch (err) {
+        drop();
+        throw err;
+      }
+      if (this.file !== file) { drop(); throw new Error("clip changed"); }
+      this.workVid = { file, v: wv };
+    }
+    return this.workVid.v;
+  }
+
+  /**
+   * One background frame job: the work video at t, then `fn` with the engine held (the preview's frames wait; it
+   * repaints after). Jobs queue one after another whoever asks (profile, track pass, seeds).
+   */
+  private workFrame<T>(t: number, fn: (wv: HTMLVideoElement) => Promise<T>, settle = false): Promise<T> {
+    const file = this.file;
+    const job = this.workChain.then(async () => {
+      if (!file || this.file !== file) throw new Error("clip changed");
+      let wv: HTMLVideoElement;
+      if (this.workVidFailed === file) wv = this.video!;
+      else {
+        try {
+          wv = await this.workVideo(file);
+        } catch (err) {
+          if (this.file !== file) throw err;
+          console.warn("[work] background video unavailable; using the preview's", err);
+          this.workVidFailed = file;
+          wv = this.video!;
+        }
+      }
+      await seekVideo(wv, t);
+      if (this.file !== file) throw new Error("clip changed");
+      this.engineHold++;
+      try {
+        if (settle) await this.settleEngine();
+        return await fn(wv);
+      } finally {
+        this.engineHold--;
+        this.repaint();
+      }
+    });
+    this.workChain = job.catch(() => undefined);
+    return job;
   }
   private segKick = 0;
 
@@ -766,6 +832,12 @@ export class Studio {
    * has not, the engine's own subjects are seeded on the current frame if they are not yet, and the pass runs to idle
    * ("Finding subjects 40%… then exporting"). "engine" when the AI is unavailable, stalls, or has nothing to follow.
    */
+  private segSkip: AbortController | null = null;
+  /** Export sheet: stop waiting for the AI pass and export with the standard subject masks. */
+  skipSegWait(): void {
+    this.segSkip?.abort();
+  }
+
   private async segForExport(signal: AbortSignal): Promise<"ai" | "engine"> {
     const v = this.video, file = this.file;
     if (!v || !file) return "engine";
@@ -776,7 +848,14 @@ export class Studio {
     if (!live) return "engine";
     // The engine's own subjects on the canonical frame (as the preview seeds them).
     if (!this.seg.autos) await this.seedAutosCanonical();
-    const r = await this.seg.settle({ signal, stallMs: SEG_EXPORT_STALL_MS, onProgress: label });
+    // "Export without AI" in the sheet ends the wait (skipSegWait).
+    const skip = new AbortController();
+    this.segSkip = skip;
+    this.setExp({ canSkipSeg: true });
+    const r = await Promise.race([
+      this.seg.settle({ signal, stallMs: SEG_EXPORT_STALL_MS, onProgress: label }),
+      new Promise<"engine">((res) => skip.signal.addEventListener("abort", () => res("engine"))),
+    ]).finally(() => { this.segSkip = null; this.setExp({ canSkipSeg: false }); });
     console.info(`[export] AI subjects: ${r === "ai" ? `pass complete (${Math.round(live.coverage * 100)}% of the clip filled)` : "engine masks"}`);
     return r;
   }
@@ -1590,9 +1669,11 @@ export class Studio {
 
   /** Resolves once the user has not scrubbed for SCRUB_IDLE_MS. */
   private async scrubIdle(): Promise<void> {
+    const t0 = performance.now();
     for (;;) {
       const left = SCRUB_IDLE_MS - (performance.now() - this.lastSeekAt);
-      if (left <= 0 && !this.video?.seeking) return;
+      // Never for long: a <video> that keeps saying "seeking" (seen on Safari) must not hold the AI up.
+      if (this.exporting || performance.now() - t0 > 4000 || (left <= 0 && !this.video?.seeking)) return;
       await new Promise((r) => setTimeout(r, Math.max(50, left)));
     }
   }
@@ -1781,10 +1862,6 @@ export class Studio {
       // Split: every segment gets frames of its own for its lock (the base spacing may miss a short one).
       const extra = topUpTimes(times, visibleSegments(this.segs.cuts, span, v.duration));
       const all = [...times, ...extra];
-      const wasPaused = v.paused;
-      const resumeAt = v.currentTime;
-      this.previewOn = false;
-      v.pause();
       this.set({ busy: "Profiling colour…" });
       try {
         // Rounds: a framing change (Dewarp / Stabilise toggled, a lens picked) empties the cache mid-run; the samples it
@@ -1800,11 +1877,10 @@ export class Studio {
             const epoch = this.profileEpoch;
             // A sample that fails or runs out of time (a loaded device) is retried with a longer budget
             // (profile-retry.ts): dropping it could leave the clip without a scene lock.
-            const r = await withRetries(async (budget) => {
-              await seekVideo(v, t);
-              this.uploadToEngine(v, t, false);
+            const r = await withRetries((budget) => this.workFrame(t, async (wv) => {
+              this.uploadToEngine(wv, t, false);
               return e.analyzeRaw(budget, t);
-            }, PROFILE_SAMPLE_BUDGETS_MS, () => gen === this.gen, (n, err) => console.info(`[profile] sample at ${t.toFixed(2)} s: retry ${n} (${err instanceof Error ? err.message : err})`));
+            }), PROFILE_SAMPLE_BUDGETS_MS, () => gen === this.gen, (n, err) => console.info(`[profile] sample at ${t.toFixed(2)} s: retry ${n} (${err instanceof Error ? err.message : err})`));
             // A sample taken before a framing change is stale: dropped (the next round takes it again).
             if (r && epoch === this.profileEpoch) this.sampleCache.push({ t, params: r.params, mean: r.mean });
           }
@@ -1821,12 +1897,7 @@ export class Studio {
       } finally {
         if (gen === this.gen) {
           this.set({ busy: null });
-          if (!this.exporting) {
-            await seekVideo(v, clampToRange(resumeAt, this.trim, v.duration)).catch(() => undefined);
-            this.drawLive(v.currentTime, false);
-            if (!wasPaused) await v.play().catch(() => undefined);
-            this.startPreview();
-          }
+          if (!this.exporting) this.repaint();
         }
       }
     };

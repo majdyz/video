@@ -18,7 +18,7 @@ import type { FootageStatus, StabStatus } from "../pipeline/studio.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import type { SubjectControls } from "./panels";
 import { Chips, Slider } from "./controls";
-import { IconCheck, IconChevron, IconPause, IconPlay, IconReset } from "./icons";
+import { IconCheck, IconPause, IconPlay, IconReset } from "./icons";
 
 /**
  * One adjustable thing of a tool, as a bubble in the phone's option row. A bubble with a slider or choices opens
@@ -29,7 +29,7 @@ type Param = {
   label: string;
   /** Short state under the label ("50", "Auto", "On"). */
   value?: string;
-  /** Behind the "More" bubble. */
+  /** One of the rarer options (after the main ones in the row). */
   more?: boolean;
   slider?: { value: number; min: number; max: number; def?: number; format?: (v: number) => string; onChange: (v: number) => void };
   choices?: { items: { id: string; label: string; hint?: string }[]; value: string; onChange: (id: string) => void; note?: string };
@@ -116,8 +116,7 @@ function subjectParams(tools: ToolsState, set: Setter, subjects: SubjectControls
 
 /**
  * The phone's tool controls, floating over the picture: the selected option's one bar (a slider or a row of
- * choices), the tool's options as bubbles (the rarer ones behind "More", which opens with an animation), and the
- * tool's on/off. Nothing here takes picture space: it sits on a soft scrim at the bottom of the full-screen preview.
+ * choices) and the tool's options as one scrolling row of bubbles (on/off first, the rarer ones last). Nothing here takes picture space: it sits on a soft scrim at the bottom of the full-screen preview.
  */
 export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, onFootage, onMotionLog, subjects, disabled, status, onClose, playback }: {
   onClose: () => void;
@@ -144,10 +143,9 @@ export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, 
   const enabled = pane === "subjects" ? !!tools.colour.subjectPop && tools.colour.enabled : tools[pane].enabled;
   const setEnabled = (v: boolean) => setTools((t) => (pane === "subjects" ? { ...t, colour: { ...t.colour, subjectPop: v, enabled: v || t.colour.enabled } } : { ...t, [pane]: { ...t[pane], enabled: v } }));
   const [sel, setSel] = useState<string>("strength");
-  const [more, setMore] = useState(false);
   const rowRef = useRef<HTMLDivElement>(null);
-  // A new tool: its first bar (Strength / Pop), "More" folded.
-  useEffect(() => { setSel(params[0]?.id ?? ""); setMore(false); rowRef.current?.scrollTo({ left: 0 }); }, [pane]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A new tool: its first bar (Strength / Pop), the row scrolled back to its start.
+  useEffect(() => { setSel(params[0]?.id ?? ""); rowRef.current?.scrollTo({ left: 0 }); }, [pane]); // eslint-disable-line react-hooks/exhaustive-deps
   const current = params.find((p) => p.id === sel && (p.slider || p.choices));
   const main = params.filter((p) => !p.more), extra = params.filter((p) => p.more);
 
@@ -195,15 +193,7 @@ export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, 
           <span className="bubble__label">{enabled ? "On" : "Off"}</span>
         </button>
         {main.map(bubble)}
-        {extra.length > 0 && (
-          <>
-            <button type="button" className={`bubble bubble--toggle${more ? " is-open" : ""}`} onClick={() => setMore((m) => !m)} aria-expanded={more} disabled={disabled}>
-              <span className="bubble__label">{more ? "Less" : "More"}</span>
-              <span className="bubble__chev" aria-hidden="true"><IconChevron size={14} /></span>
-            </button>
-            {more && extra.map((p, i) => <span key={p.id} className="bubbles__item" style={{ ["--i" as string]: i }}>{bubble(p)}</span>)}
-          </>
-        )}
+        {extra.map(bubble)}
       </div>
     </div>
   );
