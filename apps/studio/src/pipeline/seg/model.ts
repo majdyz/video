@@ -112,27 +112,30 @@ export class WorkerSegModel implements SegModel {
   }
 
   /** Downloads (or reads from the cache) and starts the model. `onProgress` gets 0..1 of the download. */
-  async load(onProgress?: (p: number) => void, opts: { prefer?: "auto" | "wasm"; base?: string } = {}): Promise<SegLoadInfo> {
+  async load(onProgress?: (p: number) => void, opts: { prefer?: "auto" | "wasm"; base?: string; lite?: boolean } = {}): Promise<SegLoadInfo> {
     const t0 = performance.now();
     const base = opts.base ?? segBase();
     const man = await (await fetch(`${base}manifest.json`, { cache: "no-cache" })).json() as SegManifest;
-    const total = GRAPH_FILES.reduce((s, g) => s + (man.files[`${g}.onnx`]?.bytes ?? 0), 0) || 1;
+    // Lite: the 512-px vision encoder (a quarter of the activation memory; iPhone WebKit ran out with the 1024 one).
+    const lite = !!opts.lite && !!man.files["vision_encoder_lite.onnx"];
+    const fileOf = (g: GraphName) => (lite && g === "vision_encoder" ? "vision_encoder_lite" : g);
+    const total = GRAPH_FILES.reduce((s, g) => s + (man.files[`${fileOf(g)}.onnx`]?.bytes ?? 0), 0) || 1;
     let got = 0;
     const keys = new Set<string>();
     const tick = (n: number) => { got += n; onProgress?.(Math.min(1, got / total)); };
     const models = {} as Record<GraphName, ArrayBuffer>;
     for (const g of GRAPH_FILES) {
-      const f = man.files[`${g}.onnx`];
+      const f = man.files[`${fileOf(g)}.onnx`];
       if (!f) throw new Error(`manifest has no ${g}`);
-      const url = new URL(`${base}${g}.onnx?v=${f.sha256.slice(0, 16)}`, location.href).href;
+      const url = new URL(`${base}${fileOf(g)}.onnx?v=${f.sha256.slice(0, 16)}`, location.href).href;
       keys.add(url);
       models[g] = await fetchCached(url, url, tick);
     }
     void pruneCache(keys);
     const bank = await (await fetch(`${base}bank.json?v=${man.files["bank.json"]?.sha256.slice(0, 16) ?? "0"}`)).json();
     const threads = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
-    const r = await this.call({ type: "init", models, bank, threads, prefer: opts.prefer ?? "auto" }, Object.values(models));
-    this.info = { ep: String(r.ep), f16: !!r.f16, threads: Number(r.threads), loadMs: performance.now() - t0, bytes: total };
+    const r = await this.call({ type: "init", models, bank, threads, prefer: opts.prefer ?? "auto", lite }, Object.values(models));
+    this.info = { ep: String(r.ep) + (lite ? " lite" : ""), f16: !!r.f16, threads: Number(r.threads), loadMs: performance.now() - t0, bytes: total };
     segLog(`model ready on ${this.info.ep} (tried ${(r.tried as string[]).join(", ")}; WebGPU adapter ${r.webgpu ? "yes" : "no"}, shader-f16 ${r.f16 ? "yes" : "no"}; WASM threads ${this.info.threads}, cross-origin isolated ${r.coi ? "yes" : "no"})`, this.info);
     for (const f of r.failed as string[]) segLog("execution provider skipped:", f);
     return this.info;

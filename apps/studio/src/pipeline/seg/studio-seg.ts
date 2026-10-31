@@ -442,7 +442,7 @@ export class SubjectSeg {
       try {
         // WebGPU in iPhone Safari crashed the page on the first frames (crash log, 31 Oct, iOS 18.7): WebKit runs
         // the model on WASM.
-        await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: isWebKit() ? "wasm" : "auto" });
+        await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: isWebKit() ? "wasm" : "auto", lite: isWebKit() || new URLSearchParams(location.search).get("seglite") === "1" });
         m.onEvent = (e) => this.onEvent(e);
         this.model = m;
         crumb(`ai: model ready (${m.info?.ep ?? "?"}, ${m.info?.threads ?? "?"} threads)`);

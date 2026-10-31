@@ -7,7 +7,7 @@ import { openSessionFrames } from "./frames.ts";
 import type { SegObject } from "./track.ts";
 
 type Req =
-  | { id: number; type: "init"; models: Record<GraphName, ArrayBuffer>; bank: BankParams; threads: number; prefer: "auto" | "wasm" }
+  | { id: number; type: "init"; models: Record<GraphName, ArrayBuffer>; bank: BankParams; threads: number; prefer: "auto" | "wasm"; lite?: boolean }
   | { id: number; type: "encode"; rgba: ArrayBuffer }
   | { id: number; type: "step"; key: string; frame: number; points: [number, number][] | null; labels: number[] | null; reverse: boolean }
   | { id: number; type: "drop"; key: string }
@@ -54,7 +54,7 @@ if (!isPthread) self.onmessage = async (ev: MessageEvent<Req>) => {
       const eps = gpu.ok ? ["webgpu", "wasm"] : ["wasm"];
       const m = Object.fromEntries(Object.entries(r.models).map(([k, v]) => [k, new Uint8Array(v)])) as Record<GraphName, Uint8Array>;
       const failed: string[] = [];
-      model = await EdgeTam.create(ort, m, r.bank, eps, failed);
+      model = await EdgeTam.create(ort, m, r.bank, eps, failed, !!r.lite);
       post({ ok: true, ep: model.ep, tried: eps, failed, webgpu: gpu.ok, f16: gpu.f16, threads: ort.env.wasm.numThreads, coi: typeof crossOriginIsolated !== "undefined" && crossOriginIsolated });
     } else if (!model) {
       throw new Error("not initialised");

@@ -35,7 +35,7 @@ export class EdgeTam {
   }
 
   /** Tries the execution providers in order (WebGPU first when the device has it); `failed` records why one was skipped. */
-  static async create(ort: Ort, models: Record<GraphName, Uint8Array>, bank: BankParams, eps: string[], failed: string[] = []): Promise<EdgeTam> {
+  static async create(ort: Ort, models: Record<GraphName, Uint8Array>, bank: BankParams, eps: string[], failed: string[] = [], lite = false): Promise<EdgeTam> {
     let lastErr: unknown = null;
     for (const ep of eps) {
       try {
@@ -43,7 +43,9 @@ export class EdgeTam {
         // No CPU arena / memory pattern: both keep each graph's peak activations reserved for good (the encoder's at
         // 1024² are hundreds of MB), and a phone tab that holds four graphs' peaks next to the video decoders is killed.
         for (const g of GRAPHS) s[g] = await ort.InferenceSession.create(models[g], { executionProviders: [ep], graphOptimizationLevel: "disabled", enableCpuMemArena: false, enableMemPattern: false });
-        return new EdgeTam(ort, s, bank, ep);
+        const m = new EdgeTam(ort, s, bank, ep);
+        m.lite = lite;
+        return m;
       } catch (e) {
         lastErr = e;
         failed.push(`${ep}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300));
@@ -52,17 +54,25 @@ export class EdgeTam {
     throw lastErr ?? new Error("no execution provider");
   }
 
+  /** The 512-px encoder (vision_encoder_lite): the 1024 frame is averaged 2×2 first; its features come out at the 1024 shapes. */
+  lite = false;
+
   /** RGBA 1024×1024 (the upright frame stretched) → features of the frame the next steps run on. */
   async encode(rgba: Uint8ClampedArray): Promise<void> {
-    const n = 1024 * 1024, px = this.pixels;
-    for (let i = 0; i < n; i++) {
+    const S = this.lite ? 512 : 1024, n = S * S, px = this.pixels;
+    if (this.lite) {
+      for (let y = 0; y < 512; y++) for (let x = 0; x < 512; x++) {
+        const a = (2 * y * 1024 + 2 * x) * 4, b = a + 4, c = a + 4096, d = c + 4, i = y * 512 + x;
+        for (let k = 0; k < 3; k++) px[k * n + i] = ((rgba[a + k] + rgba[b + k] + rgba[c + k] + rgba[d + k]) / 1020 - MEAN[k]) / STD[k];
+      }
+    } else for (let i = 0; i < n; i++) {
       px[i] = (rgba[i * 4] / 255 - MEAN[0]) / STD[0];
       px[n + i] = (rgba[i * 4 + 1] / 255 - MEAN[1]) / STD[1];
       px[2 * n + i] = (rgba[i * 4 + 2] / 255 - MEAN[2]) / STD[2];
     }
     this.dispose();
     const t0 = performance.now();
-    const o = await this.s.vision_encoder.run({ pixel_values: new this.ort.Tensor("float32", px, [1, 3, 1024, 1024]) });
+    const o = await this.s.vision_encoder.run({ pixel_values: new this.ort.Tensor("float32", px.subarray(0, 3 * n), [1, 3, S, S]) });
     this.timing.encode += performance.now() - t0;
     this.timing.encodes++;
     this.feats = { f0: o.feats0, f1: o.feats1, f2: o.feats2, p2: o.pos2 };
