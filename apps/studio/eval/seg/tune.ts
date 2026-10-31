@@ -123,6 +123,8 @@ function separation(px: Uint8ClampedArray, mk: Float32Array) {
       const so = separation(off, mk);
       if (so) rows.push({ f, s: "off", ...so, ...(guard(sc, off, mk, W, H) ?? {}) });
       for (const st of strengths) {
+        // ?engine=1: also the engine's own Subject pop (no AI overlay), for its halo check (tune-eng<st>_<f>.png).
+        if (q.get("engine") === "1") await png(`tune-eng${st}_${f}`, await render(t, { ...base, subjectPop: true, subjectPopStrength: st }, false));
         const on = await render(t, { ...base, subjectPop: true, subjectPopStrength: st }, true);
         await png(`tune-on${st}_${f}`, on);
         const sp = separation(on, mk);

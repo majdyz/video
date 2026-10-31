@@ -225,7 +225,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
 
   // Subject pop weight (grade-shader popP): the engine-mask tone weight × pop strength × the user's Strength.
   // The pop fades out as the graded lightness drops (SUBJECT_POP.darkLo..Hi): dark parts keep the plain grade.
-  const toneW = objectWeight(subj) * (SUBJECT_CLEAR.edgeFloor + (1 - SUBJECT_CLEAR.edgeFloor) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) * smoothstep(SUBJECT_POP.darkLo, SUBJECT_POP.darkHi, Math.cbrt(Math.max(0, Y)));
+  const toneW = SUBJECT_POP.engineKeep * objectWeight(subj) * (SUBJECT_CLEAR.edgeFloor + (1 - SUBJECT_CLEAR.edgeFloor) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) * smoothstep(SUBJECT_POP.darkLo, SUBJECT_POP.darkHi, Math.cbrt(Math.max(0, Y)));
   const popP = toneW * objectNeutralOf(p) * (ctx.settings.subjectPop ? popStrengthK(ctx.settings) : 0);
   // Local contrast on encoded luminance (CLAHE), mixed by clarity (the subject takes more: SUBJECT_POP.clarity).
   if (s.clarity > 0) {

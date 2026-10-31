@@ -123,6 +123,7 @@ const float SP_VIVID = ${SUBJECT_POP.vividKeep.toFixed(4)};
 const float SP_CLARITY = ${SUBJECT_POP.clarity.toFixed(4)};
 const float SP_LIFT = ${SUBJECT_POP.lift.toFixed(4)};
 const float SP_CHROMA = ${SUBJECT_POP.chromaFollow.toFixed(4)};
+const float SP_ENGINE = ${SUBJECT_POP.engineKeep.toFixed(4)};
 const float SP_DARK_LO = ${SUBJECT_POP.darkLo.toFixed(4)};
 const float SP_DARK_HI = ${SUBJECT_POP.darkHi.toFixed(4)};
 const float SP_HUE_COS = ${Math.cos(SUBJECT_POP.hueMax).toFixed(6)};
@@ -505,7 +506,8 @@ float segEvidence(vec4 an, vec3 lab0) {
 // water (R > 2 marks the thick parts: no test there), elsewhere the whole subject; times the ML weight (A, segPop)
 // and the regional trust (G).
 float toneWeight(float subj, vec4 an, float depart, vec3 lab0) {
-  if (p[24].y <= 0.5) return objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
+  // The engine's own masks (no AI overlay) reach past the animal: their tone is kept at SUBJECT_POP.engineKeep.
+  if (p[24].y <= 0.5) return SP_ENGINE * objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
   if (an.w <= 0.0) return 0.0;
   float d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
   float inner = mix(segEvidence(an, lab0), 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));
@@ -1010,7 +1012,7 @@ fn segEvidence(an: vec4<f32>, lab0: vec3<f32>) -> f32 {
   return smoothstepf(SEG_EV_LO, SEG_EV_HI, length(vec2<f32>(lab0.x - an.x, perp)));
 }
 fn toneWeight(subj: f32, an: vec4<f32>, depart: f32, lab0: vec3<f32>) -> f32 {
-  if (params.p[24].y <= 0.5) { return objectWeight(subj) * mix(SC_EDGE, 1.0, depart); }
+  if (params.p[24].y <= 0.5) { return SP_ENGINE * objectWeight(subj) * mix(SC_EDGE, 1.0, depart); }
   if (an.w <= 0.0) { return 0.0; }
   let d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
   let inner = mix(segEvidence(an, lab0), 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));

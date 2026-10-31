@@ -231,7 +231,7 @@ export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.
  * Subject pop separation (on top of SUBJECT_CLEAR), per unit of the pop weight P = subject tone weight × pop
  * strength × the user's Strength (uniform p23.w, 1 = default): all of it stays on the subject (with an AI mask,
  * inside its contour: grade-shader toneWeight), nothing outside it changes, and none of it invents colour or
- * structure. At the default Strength: about +8 L* on a lit subject, most of the separation from local contrast and
+ * structure. At the default Strength: about +10 L* on a lit subject, most of the separation from local contrast and
  * colour (the cast cleared, the animal's own chroma kept) rather than a white lift; a diver should see it at once.
  *   vividKeep  the share of the Vivid look's water darkening the subject is spared (its colour stays Vivid's);
  *              Vivid tells water by hue, so a blue-grey animal would otherwise darken with the water.
@@ -239,12 +239,14 @@ export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.
  *   lift       a midtone lift of the subject's Oklab L (4·L·(1 − L): blacks and highlights stay).
  *   chromaFollow  the share of the lift's L ratio the chroma follows (1 = saturation kept; less, so a lifted
  *              cast-blue belly does not turn more cyan, and the lift reads as clearer water)
+ *   engineKeep  the share of all this the engine's own subject masks get (no AI detection): they reach past
+ *              the animal, so their tone stays at about the previous default (no stronger glow)
  *   darkLo/Hi  the whole pop (clearing included) fades out as the graded lightness (Oklab L) drops through
  *              lo..hi: a dark, low-chroma part (a thresher's long tail) keeps the plain grade's colour.
  *   hueMax     on the subject, the output hue stays within this angle (radians) of the source pixel's own hue:
  *              the tone never rotates a dark blue toward magenta or brown.
  */
-export const SUBJECT_POP = { vividKeep: 0.6, clarity: 0.35, lift: 0.06, chromaFollow: 0.3, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
+export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.42, lift: 0.085, chromaFollow: 0.3, engineKeep: 0.5, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
 
 /** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
 export function popStrengthK(s: { subjectPopStrength?: number }): number {
