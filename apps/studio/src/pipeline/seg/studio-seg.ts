@@ -362,6 +362,16 @@ export class SegLive {
 
 type UndoOp = { kind: "added"; id: number } | { kind: "removed"; id: number };
 
+/** The session's inputs, in order: replayed into a fresh worker after a hibernation (SubjectSeg.wake). */
+type LogOp =
+  | { op: "seeds"; k: number; t: number; objects: (SegObject & { id: number })[] }
+  | { op: "add"; object: SegObject & { id: number } }
+  | { op: "remove"; id: number }
+  | { op: "restore"; id: number };
+
+/** A finished pass's worker (the model's ~800 MB of WASM heap) is shut down after this long idle (ms). */
+export const SEG_HIBERNATE_MS = 15000;
+
 export class SubjectSeg {
   status: SegStatus;
   private model: WorkerSegModel | null = null;
@@ -377,6 +387,16 @@ export class SubjectSeg {
   /** The engine's automatic subjects, seeded once per clip (autoObjects); null = not yet. */
   autos: SegObject[] | null = null;
   private onChange: () => void;
+  /** Everything the session was given (replayable: no exclude taps, whose outcome depends on the masks so far). */
+  private log: LogOp[] = [];
+  private replayable = true;
+  private duration = 0;
+  /** The pass finished and its worker was shut down; the masks stay in `live`. */
+  private hibernated = false;
+  private hibTimer = 0;
+  private waking: Promise<boolean> | null = null;
+  /** Called when the worker is shut down (the studio drops its seed-frame video too). */
+  onHibernate: (() => void) | null = null;
 
   constructor(onChange: () => void) {
     this.onChange = onChange;
@@ -398,7 +418,7 @@ export class SubjectSeg {
   setOn(on: boolean): void {
     writePref(on);
     this.set({ on, phase: on ? (this.model ? "ready" : "download") : "off", progress: null, note: null });
-    if (on) void this.ensureModel();
+    if (on && !this.hibernated) void this.ensureModel();
   }
 
   ensureModel(): Promise<WorkerSegModel | null> {
@@ -450,10 +470,53 @@ export class SubjectSeg {
       this.lastProfile = e.profile;
       segLog(`pass profile ${JSON.stringify(Object.fromEntries(Object.entries(e.profile).map(([k, v]) => [k, Math.round(v)])))}`);
       this.set({ phase: "ready", progress: null });
+      this.scheduleHibernate();
       const w = this.idleWaiters;
       this.idleWaiters = [];
       for (const r of w) r();
     }
+  }
+
+  /**
+   * Phones kill a tab that holds too much: once the pass is done and nothing has asked the model for a while, the
+   * worker goes (the masks are a few hundred KB on this side and keep popping). A later tap wakes it (wake).
+   */
+  private scheduleHibernate(): void {
+    clearTimeout(this.hibTimer);
+    if (!this.replayable || !this.live) return;
+    this.hibTimer = window.setTimeout(() => {
+      if (this.busy || !this.model || !this.live || !this.replayable || this.waking) return;
+      segLog(`pass done: shutting the model down (masks kept, ${(this.live.bytes / 1e6).toFixed(1)} MB)`);
+      this.model.dispose();
+      this.model = null;
+      this.hibernated = true;
+      this.onHibernate?.();
+    }, SEG_HIBERNATE_MS);
+  }
+
+  /** After a hibernation: a fresh worker, the clip's session again and every input replayed (it re-tracks; the masks
+   * it posts are the same, so the preview keeps popping meanwhile). False when the model can't come back. */
+  private wake(): Promise<boolean> {
+    clearTimeout(this.hibTimer);
+    if (!this.hibernated) return Promise.resolve(!!this.model);
+    if (this.waking) return this.waking;
+    const file = this.file;
+    this.waking = (async () => {
+      const model = await this.ensureModel();
+      if (!model || !file || this.file !== file) return false;
+      await model.sessionOpen(file, 0, Math.max(0, this.duration));
+      if (this.file !== file) return false;
+      this.hibernated = false;
+      for (const l of this.log) {
+        if (l.op === "seeds") await model.sessionSeeds(l.k, l.t, l.objects);
+        else if (l.op === "add") await model.sessionAdd(l.object);
+        else if (l.op === "remove") await model.sessionRemove(l.id);
+        else await model.sessionRestore(l.id);
+      }
+      segLog(`model back: ${this.log.length} input(s) replayed`);
+      return true;
+    })().catch((e) => { segLog("model failed to come back", e); return false; }).finally(() => { this.waking = null; });
+    return this.waking;
   }
 
   /** The session asks for segment k's seeds (the engine's own subjects on its canonical frame t): the studio answers
@@ -476,6 +539,7 @@ export class SubjectSeg {
     if (!this.on) return Promise.resolve(null);
     if (this.file === file && (this.live || this.opening)) return this.opening ?? Promise.resolve(this.live);
     this.file = file;
+    this.duration = duration;
     this.opening = (async () => {
       const model = await this.ensureModel();
       if (!model || this.file !== file) return null;
@@ -498,27 +562,34 @@ export class SubjectSeg {
 
   /** Segment k's seeds: the engine's own subjects on its canonical frame t (none is an answer too). */
   async seedSegment(k: number, t: number, objs: SegObject[]): Promise<void> {
-    if (!this.live || !this.model || this.seededSegs.has(k)) return;
+    if (!this.live || this.seededSegs.has(k) || !(await this.wake()) || !this.model) return;
     this.seededSegs.add(k);
     if (k === 0) this.autos = objs;
-    await this.model.sessionSeeds(k, t, objs.map((o) => ({ ...o, id: this.nextId++ })));
+    const objects = objs.map((o) => ({ ...o, id: this.nextId++ }));
+    this.log.push({ op: "seeds", k, t, objects });
+    await this.model.sessionSeeds(k, t, objects);
     segLog(`seeded segment ${k} (${t.toFixed(2)} s): ${objs.length} automatic subject(s)`);
   }
   private seededSegs = new Set<number>();
 
   /** A tap that adds what is missing: a new include object at (t, u, v), followed both ways from the tap. */
   async include(t: number, u: number, v: number, boxes: readonly PersonBox[]): Promise<void> {
-    if (!this.live || !this.model) return;
+    if (!this.live || !(await this.wake()) || !this.model) return;
     const id = this.nextId++;
-    await this.model.sessionAdd({ id, kind: "include", t, prompt: promptFor({ u, v }, boxes) });
+    const object: SegObject & { id: number } = { id, kind: "include", t, prompt: promptFor({ u, v }, boxes) };
+    this.log.push({ op: "add", object });
+    await this.model.sessionAdd(object);
     this.undoOps.push({ kind: "added", id });
     this.onChange();
   }
 
   /** A tap on what the ML pops: removes that subject (most of it under the tap) or just the tapped part. */
   async exclude(t: number, u: number, v: number): Promise<"removed" | "part" | "exclude" | null> {
-    if (!this.live || !this.model) return null;
+    if (!this.live || !(await this.wake()) || !this.model) return null;
     const id = this.nextId++;
+    // Its outcome depends on the masks tracked so far: a replay could differ, so this session stays awake from now on.
+    this.replayable = false;
+    clearTimeout(this.hibTimer);
     const r = await this.model.sessionExclude(id, t, u, v);
     this.undoOps.push(r.action === "removed" ? { kind: "removed", id: r.removed } : { kind: "added", id });
     segLog(`exclude tap at ${t.toFixed(2)} s: ${r.action}`);
@@ -538,7 +609,8 @@ export class SubjectSeg {
   /** Undoes the last AI tap (an added object goes, a removed one comes back). */
   async undo(): Promise<boolean> {
     const op = this.undoOps.pop();
-    if (!op || !this.model) return false;
+    if (!op || !(await this.wake()) || !this.model) return false;
+    this.log.push(op.kind === "added" ? { op: "remove", id: op.id } : { op: "restore", id: op.id });
     if (op.kind === "added") await this.model.sessionRemove(op.id);
     else await this.model.sessionRestore(op.id);
     this.onChange();
@@ -555,6 +627,10 @@ export class SubjectSeg {
     this.seededSegs = new Set();
     this.undoOps = [];
     this.busy = false;
+    this.log = [];
+    this.replayable = true;
+    this.hibernated = false;
+    clearTimeout(this.hibTimer);
     void this.model?.sessionClose().catch(() => undefined);
     for (const r of this.idleWaiters) r();
     this.idleWaiters = [];
@@ -567,6 +643,8 @@ export class SubjectSeg {
    * unavailable, the pass makes no progress for stallMs, or there is nothing for it to follow. Rejects on abort.
    */
   async settle(o: { signal: AbortSignal; stallMs: number; onProgress: (p: number | null) => void }): Promise<"ai" | "engine"> {
+    // A hibernated session finished its pass: its masks are complete.
+    if (this.hibernated && this.live) return this.live.filled > 0 ? "ai" : "engine";
     if (!this.live || !this.model) return "engine";
     let last = -1, lastAt = performance.now();
     for (;;) {

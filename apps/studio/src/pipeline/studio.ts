@@ -854,6 +854,8 @@ export class Studio {
     // The session asks for the next segment's seeds as its tracking reaches it (long clips).
     s.onNeedSeeds = (k, t) => { if (k > 0) void this.seedSegmentCanonical(k, t); };
     s.onFrames = () => { const now = performance.now(); if (now - last > 250 && this.paused()) { last = now; this.repaint(); } };
+    // The pass is done and its worker shut down: the seed-frame <video> (a decoder of its own) goes too.
+    s.onHibernate = () => this.dropSeedVideo();
     return s;
   })();
   /**
