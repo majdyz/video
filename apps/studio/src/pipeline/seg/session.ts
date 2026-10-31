@@ -35,7 +35,7 @@ export type SessionFrames = {
 };
 
 /** autoSeeds: the point grid and what counts as a subject. */
-export const AUTO = { cols: 4, rows: 6, iou: 0.8, areaLo: 0.004, areaHi: 0.3, span: 0.9, contrast: 0.05, max: 2 };
+export const AUTO = { cols: 4, rows: 6, liteCols: 3, liteRows: 4, iou: 0.8, areaLo: 0.004, areaHi: 0.3, span: 0.9, contrast: 0.05, max: 2 };
 
 /** How far a mask's colour stands out from a ring around it (mean cell-colour distance; cells: cellLab, 3 per px). */
 function ringContrast(m: Float32Array, cells: Float32Array, w: number, h: number): number {
@@ -348,9 +348,14 @@ export class SegSession {
     this.lastEncoded = NaN;
     const cands: { m: Float32Array; q: number }[] = [];
     const stats: string[] = [];
-    for (let gy = 0; gy < A.rows; gy++) for (let gx = 0; gx < A.cols; gx++) {
-      const u = (gx + 0.5) / A.cols, v = (gy + 0.5) / A.rows;
+    // The lite (phone) model probes a coarser grid: each probe is a full decoder run, and the phone's memory is tight.
+    const cols = this.model.lite ? A.liteCols : A.cols, rows = this.model.lite ? A.liteRows : A.rows;
+    let probes = 0;
+    for (let gy = 0; gy < rows; gy++) for (let gx = 0; gx < cols; gx++) {
+      const u = (gx + 0.5) / cols, v = (gy + 0.5) / rows;
+      if (probes < 2) this.ev.trace?.(`auto: probe ${probes + 1}/${cols * rows}`);
       const r = await this.model.probe([[u * 1024, v * 1024]], [1]);
+      if (probes++ < 2) this.ev.trace?.("auto: probed");
       const m = sigmoidResize(r.logits, r.lw, r.lh, w, h);
       const a = area(m) / (w * h);
       stats.push(`${r.score.toFixed(1)}/${r.iou.toFixed(2)}/${(a * 100).toFixed(1)}%`);
@@ -363,7 +368,7 @@ export class SegSession {
       cands.push({ m, q: r.iou + c });
     }
     cands.sort((x, y) => y.q - x.q);
-    console.info(`[seg] auto seeds at ${t.toFixed(2)} s: ${cands.length} candidate(s) of ${A.cols * A.rows} points (${stats.join(" ")})`);
+    console.info(`[seg] auto seeds at ${t.toFixed(2)} s: ${cands.length} candidate(s) of ${cols * rows} points (${stats.join(" ")})`);
     const keep: Float32Array[] = [];
     for (const c of cands) {
       if (keep.length >= A.max) break;
