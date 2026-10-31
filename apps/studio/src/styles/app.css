@@ -2756,3 +2756,23 @@ a {
   max-width: calc(100% - 96px);
   transform: translateX(-50%);
 }
+
+/* Subject pill on phones: between the left edge and the rail, the text wraps (never runs under the rail). */
+.is-narrow .select-bar {
+  left: var(--s-3);
+  right: 84px;
+  max-width: none;
+  width: auto;
+  transform: none;
+  justify-content: space-between;
+  border-radius: 18px;
+}
+.is-narrow .select-bar span {
+  white-space: normal;
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.25;
+}
+.is-narrow .select-bar .link-btn {
+  flex: none;
+}

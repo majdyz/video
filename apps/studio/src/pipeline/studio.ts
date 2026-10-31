@@ -537,7 +537,7 @@ export class Studio {
     // AI on but its model / session still starting: the tap waits for it (else it ran the engine's track pass, heavy,
     // right next to the model starting up: the iPhone page crashed there, 31 Oct).
     if (this.snap.kind === "video" && this.seg.on && !this.seg.live) {
-      this.set({ subjectNote: "AI is still starting: tap again in a moment" });
+      this.set({ subjectNote: "AI starting, tap again soon" });
       this.runSeg();
       return 0;
     }
@@ -562,10 +562,10 @@ export class Studio {
       if (action === "exclude") this.setSubjectOverrides(list);
       if (action === "include") {
         await this.seg.include(t, u, v, this.engine?.personBoxesNow() ?? []);
-        this.set({ subjectNote: "Adding it: AI is following it both ways from here" });
+        this.set({ subjectNote: "Added" });
       } else {
         const r = await this.seg.exclude(t, u, v);
-        this.set({ subjectNote: r === "removed" ? "Taken out" : "Taking that part out" });
+        this.set({ subjectNote: r === "removed" ? "Taken out" : "Part taken out" });
         // A whole subject out: the engine's own selection drops the animal along its path too (else it would tone
         // it where the ML no longer covers it). A part out leaves the engine's animal in.
         if (r !== "removed") this.setSubjectOverrides(before);
@@ -953,7 +953,7 @@ export class Studio {
     const s = new SubjectSeg(() => this.set({ seg: this.seg.status }));
     // New AI frames: a paused frame shows them (and its outlines) right away.
     let last = 0;
-    s.onRejected = () => this.set({ subjectNote: "Nothing found there: tap right on the animal" });
+    s.onRejected = () => this.set({ subjectNote: "Nothing there: tap the animal" });
     // The session asks for the next segment's seeds as its tracking reaches it (long clips).
     s.onNeedSeeds = (k, t) => { if (k > 0) void this.seedSegmentCanonical(k, t); };
     s.onFrames = () => { const now = performance.now(); if (now - last > 250 && this.paused()) { last = now; this.repaint(); } };
