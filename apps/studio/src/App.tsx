@@ -427,7 +427,7 @@ export default function App() {
               <ToolDock pane={pane} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} camera={s.camera} photo={photo} disabled={exporting || !ready}
                 footage={s.kind === "video" ? s.footage : null} onFootage={s.kind === "video" ? (c) => studio.setFootage(c) : null}
                 onMotionLog={s.kind === "video" ? () => motionLogRef.current?.click() : null}
-                subjects={subjectControls} onClose={closeSheet}
+                subjects={subjectControls} onClose={closeSheet} playback={photo ? null : { playing: s.playing, toggle: () => studio.togglePlay() }}
                 status={pane === "subjects" ? (selectActive ? null : "Tap ✨ Subjects to pick animals") : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
             ) : bar}
           </aside>

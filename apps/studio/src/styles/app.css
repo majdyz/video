@@ -2710,3 +2710,7 @@ a {
   background: #fff;
   color: #0a0c10;
 }
+.bubble--play {
+  background: rgba(255, 255, 255, 0.13);
+  color: #fff;
+}

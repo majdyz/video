@@ -18,7 +18,7 @@ import type { FootageStatus, StabStatus } from "../pipeline/studio.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import type { SubjectControls } from "./panels";
 import { Chips, Slider } from "./controls";
-import { IconCheck, IconChevron, IconReset } from "./icons";
+import { IconCheck, IconChevron, IconPause, IconPlay, IconReset } from "./icons";
 
 /**
  * One adjustable thing of a tool, as a bubble in the phone's option row. A bubble with a slider or choices opens
@@ -119,8 +119,10 @@ function subjectParams(tools: ToolsState, set: Setter, subjects: SubjectControls
  * choices), the tool's options as bubbles (the rarer ones behind "More", which opens with an animation), and the
  * tool's on/off. Nothing here takes picture space: it sits on a soft scrim at the bottom of the full-screen preview.
  */
-export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, onFootage, onMotionLog, subjects, disabled, status, onClose }: {
+export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, onFootage, onMotionLog, subjects, disabled, status, onClose, playback }: {
   onClose: () => void;
+  /** Video: play / pause from the bubbles (the timeline steps aside while a tool is open; a tap on the picture may pick subjects). */
+  playback?: { playing: boolean; toggle: () => void } | null;
   pane: ToolId | "subjects";
   tools: ToolsState;
   setTools: Setter;
@@ -184,6 +186,11 @@ export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, 
         <button type="button" className="bubble bubble--done" onClick={onClose} aria-label="Done">
           <span className="bubble__label"><IconCheck size={16} /></span>
         </button>
+        {playback && (
+          <button type="button" className="bubble bubble--done bubble--play" onClick={playback.toggle} aria-label={playback.playing ? "Pause" : "Play"}>
+            <span className="bubble__label">{playback.playing ? <IconPause size={16} /> : <IconPlay size={16} />}</span>
+          </button>
+        )}
         <button type="button" role="switch" aria-checked={enabled} aria-label={`${pane === "subjects" ? "Subject pop" : pane === "colour" ? "Colour" : pane === "stabilise" ? "Stabilise" : "Dewarp"} on`} className={`bubble bubble--power${enabled ? " is-lit" : ""}`} onClick={() => setEnabled(!enabled)} disabled={disabled}>
           <span className="bubble__label">{enabled ? "On" : "Off"}</span>
         </button>
