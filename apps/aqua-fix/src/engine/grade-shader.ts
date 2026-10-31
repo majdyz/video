@@ -131,6 +131,8 @@ const float SB_RING = ${SEABED.ring.toFixed(4)};
 const float SB_REGION = ${SEABED.regionK.toFixed(4)};
 const float SB_LO = ${SEABED.lo.toFixed(4)};
 const float SB_SPAN = ${SEABED.span.toFixed(4)};
+const float SB_Y0 = ${SEABED.y0.toFixed(4)};
+const float SB_Y1 = ${SEABED.y1.toFixed(4)};
 const float WP_CMIN = ${WARM_POP.cMin.toFixed(4)};
 const float WP_CMAX = ${WARM_POP.cMax.toFixed(4)};
 const float WP_KEEP = ${WARM_POP.keep.toFixed(4)};
@@ -516,7 +518,8 @@ float seabedW(vec2 uv, float L) {
     ivec2 ij = min(ivec2(q * vec2(sz)), sz - 1);
     acc += seabedT(linearToOklab(max(texelFetch(u_data2, ij, 0).xyz, vec3(0.0))).x);
   }
-  return max(seabedT(L), min(1.0, SB_REGION * acc / 8.0));
+  // The seabed lies below: the top of the frame (bright water toward the surface) is spared, softly.
+  return max(seabedT(L), min(1.0, SB_REGION * acc / 8.0)) * smoothstepf(SB_Y0, SB_Y1, uv.y);
 }
 float popLift(float L, float P) { return L + SP_LIFT * P * p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
 // Hue guard: on the subject (weight w) the output hue stays within SUBJECT_POP.hueMax of the source pixel's hue.
@@ -1060,7 +1063,8 @@ fn seabedW(uv: vec2<f32>, L: f32) -> f32 {
     let ij = min(vec2<i32>(q * vec2<f32>(sz)), sz - vec2<i32>(1));
     acc += seabedT(linearToOklab(max(textureLoad(u_data2, ij, 0).xyz, vec3<f32>(0.0))).x);
   }
-  return max(seabedT(L), min(1.0, SB_REGION * acc / 8.0));
+  // The seabed lies below: the top of the frame (bright water toward the surface) is spared, softly.
+  return max(seabedT(L), min(1.0, SB_REGION * acc / 8.0)) * smoothstepf(SB_Y0, SB_Y1, uv.y);
 }
 fn popLift(L: f32, P: f32) -> f32 { return L + SP_LIFT * P * params.p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
 fn popHue(ab: vec2<f32>, abSrc: vec2<f32>, w: f32) -> vec2<f32> {

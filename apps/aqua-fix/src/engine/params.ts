@@ -275,7 +275,7 @@ export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.
  *               how strongly a bright region carries its dark parts; lo/span: the brightness ramp between water and
  *               bright (shares of Lb − Lw).
  */
-export const SEABED = { hue: (75 * Math.PI) / 180, chroma: 0.02, keep: 0.15, lift: 0.06, ring: 0.06, regionK: 1.6, lo: 0.25, span: 0.5, redLo: 0.12, redHi: 0.35, bandLo: 0.0, bandHi: 0.06 };
+export const SEABED = { hue: (75 * Math.PI) / 180, chroma: 0.02, keep: 0.15, lift: 0.06, ring: 0.06, regionK: 1.6, lo: 0.25, span: 0.5, redLo: 0.12, redHi: 0.35, bandLo: -0.1, bandHi: -0.02, y0: 0.2, y1: 0.5 };
 
 export const WARM_POP = { hue: (78 * Math.PI) / 180, cMin: 0.05, cMax: 0.075, keep: 0.4, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3 };
 

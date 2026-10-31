@@ -39,6 +39,8 @@ import {
 /** Lower bound on the analysis slot (ms); the slot itself is clip time (ANALYSIS_SLOT_S, see tick). */
 export const ANALYSIS_INTERVAL_MS = 70;
 const TAU_PARAMS_S = 0.6;
+/** Seabed recovery lets go over this long (s) when a frame stops asking for it (engine smooth). */
+const SEABED_HOLD_S = 3;
 // Spatial maps ease over a short window: snapping them pulsed brightness and
 // local contrast on every analysis; easing is safe now because a pixel that
 // no longer matches the map's guide colour is classified on its own in the
@@ -775,8 +777,12 @@ export class GradeEngine {
     if (dt <= 0) return;
     if (this.target) {
       const a = 1 - Math.exp(-dt / TAU_PARAMS_S);
-      const fit0 = this.current.backdropFit;
+      const fit0 = this.current.backdropFit, sb0 = this.current.seabedNeed ?? 0;
       this.current = lerpParams(this.current, this.target, a);
+      // Seabed recovery comes on with the grade but lets go slowly (SEABED_HOLD_S): a pan that tips bright surface
+      // water into the top of the frame switched it off for a moment and the sand flashed back to blue.
+      const sbT = this.target.seabedNeed ?? 0;
+      if (sbT < sb0) this.current = { ...this.current, seabedNeed: sb0 + (sbT - sb0) * (1 - Math.exp(-dt / SEABED_HOLD_S)) };
       // Subject pop: the water surface the subject test measures against follows the frame as fast as the subject
       // map does; a lagging surface makes the water beside a moving animal "depart" and tone as a grey patch.
       const ft = this.target.backdropFit;
