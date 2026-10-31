@@ -180,8 +180,11 @@ export function promptFor(o: Pick<SubjectOverride, "u" | "v">, boxes: readonly P
  * engine overlay; frames not filled yet are null, and the ML weight eases to nothing over ~0.3 s toward them, so the
  * preview hands over to the engine's mask smoothly.
  */
+/** SegLive.at: the alpha is averaged over ±alphaFrames filled frames. */
+export const SEG_LIVE = { alphaFrames: 2 };
+
 /** SegLive.qualityAt: the mask consistency check (see there). */
-export const SEG_QUALITY = { jumpS: 0.2, dropLo: 0.5, dropHi: 0.72, holdS: 2.0, recover: 0.85, partMin: 0.04, partKeep: 0.5, partPersistS: 0.25, partShare: 0.7, easeS: 0.5 };
+export const SEG_QUALITY = { glitchS: 0.15, jumpS: 0.2, dropLo: 0.5, dropHi: 0.72, holdS: 2.0, recover: 0.85, partMin: 0.04, easeS: 0.5 };
 
 /** A mask's area (alpha over 0.5, 0..255) and its significant parts (4-connected, at least partMin of the area). */
 export function maskStats(alpha: Uint8Array, w: number, h: number): { area: number; parts: number } {
@@ -243,16 +246,24 @@ export class SegLive {
    *   a drop   the area falls to under dropLo..dropHi of its level jumpS earlier (the mask lost the body: the head
    *            alone); held until it recovers to `recover` of that level, at most holdS. The same backwards in time
    *            for a sudden gain (a fragment before the whole animal);
-   *   parts    more significant parts than usual (the median over ±holdS) in at least partShare of the frames within
-   *            ±partPersistS (a tail cut off), not a part that blinks for a frame where a thin tail crosses itself.
+   * (The number of parts alone is no sign: a thresher's long thin tail parts from its body at the mask grid's
+   * resolution for whole seconds, and penalising that dimmed a good mask. A head-only mask is a sudden area drop.)
    * The raw value is averaged over ±easeS (raised cosine): a fragment is popped less, as a whole and smoothly.
    */
   qualityAt(i: number): number {
     const hit = this.qCache.get(i);
     if (hit !== undefined) return hit;
     const Q = SEG_QUALITY, hz = SEG.sampleHz;
-    const J = Math.max(1, Math.round(Q.jumpS * hz)), Hd = Math.round(Q.holdS * hz), P = Math.round(Q.partPersistS * hz);
-    const areaOf = (k: number) => (k >= 0 && k < this.n ? this.stats[k]?.area ?? 0 : 0);
+    const J = Math.max(1, Math.round(Q.jumpS * hz)), Hd = Math.round(Q.holdS * hz);
+    // The area with single-frame glitches removed (a median over ±glitchS): a drop must last to count.
+    const G = Math.max(1, Math.round(Q.glitchS * hz));
+    const areaOf = (k: number): number => {
+      if (k < 0 || k >= this.n || !this.stats[k]?.area) return 0;
+      const v: number[] = [];
+      for (let m = k - G; m <= k + G; m++) { const a = m >= 0 && m < this.n ? this.stats[m]?.area ?? 0 : 0; if (a) v.push(a); }
+      v.sort((x, y) => x - y);
+      return v[v.length >> 1];
+    };
     // The level the area dropped from (looking `dir` = −1 back, +1 forward): the largest jump within holdS whose
     // level the mask has not recovered to since, as a ratio; 1 when none.
     const dropRatio = (j: number, dir: number): number => {
@@ -278,15 +289,7 @@ export class SegLive {
       const st = this.stats[j];
       if (!st || st.area === 0) return null;
       const ra = Math.min(dropRatio(j, -1), dropRatio(j, 1));
-      const qa = smoothstep(Q.dropLo, Q.dropHi, ra);
-      const parts: number[] = [];
-      for (let k = Math.max(0, j - Hd); k <= Math.min(this.n - 1, j + Hd); k++) { const o = this.stats[k]; if (o && o.area > 0) parts.push(o.parts); }
-      parts.sort((x, y) => x - y);
-      const usual = parts[parts.length >> 1];
-      let more = 0, cnt = 0;
-      for (let k = Math.max(0, j - P); k <= Math.min(this.n - 1, j + P); k++) { const o = this.stats[k]; if (o && o.area > 0) { cnt++; if (o.parts > usual) more++; } }
-      const qp = cnt && more / cnt >= Q.partShare && st.parts > usual ? Math.pow(Q.partKeep, st.parts - usual) : 1;
-      return Math.min(qa, qp);
+      return smoothstep(Q.dropLo, Q.dropHi, ra);
     };
     const A = Math.round(Q.easeS * hz);
     let num = 0, den = 0;
@@ -336,7 +339,19 @@ export class SegLive {
     const up = (q: Uint8Array) => resize(Float32Array.from(rleDecode(q, qw * qh), (x) => x / 255), qw, qh, mw, mh);
     const near = up(f.nearQ);
     for (let k = 0; k < near.length; k++) near[k] *= w;
-    return { width: mw, height: mh, alpha: Float32Array.from(rleDecode(f.alpha, mw * mh), (x) => x / 255), exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ), quality: this.qualityAt(i) };
+    // The alpha averaged over ±SEG_LIVE.alphaFrames filled frames (triangular weights): a mask that wobbles by a few
+    // pixels frame to frame (the tracker's own jitter) would make the pop's edge and ramp shimmer.
+    const R = SEG_LIVE.alphaFrames, alpha = new Float32Array(mw * mh);
+    let wsum = 0;
+    for (let d = -R; d <= R; d++) {
+      const g = this.frames[i + d];
+      if (!g) continue;
+      const wk = R + 1 - Math.abs(d), a = rleDecode(g.alpha, mw * mh);
+      for (let k = 0; k < a.length; k++) alpha[k] += wk * a[k];
+      wsum += wk;
+    }
+    for (let k = 0; k < alpha.length; k++) alpha[k] /= 255 * wsum;
+    return { width: mw, height: mh, alpha, exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ), quality: this.qualityAt(i) };
   }
 
   /** Share of the grid filled (0..1). */

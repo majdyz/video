@@ -76,8 +76,10 @@ def main():
     d = sys.argv[1]
     crops = sys.argv[2] if len(sys.argv) > 2 else None
     rows = {}
-    for m in sorted(glob.glob(os.path.join(d, "mask-*.pgm")), key=lambda p: float(re.findall(r"mask-([\d.]+)", p)[0])):
-        t = float(re.findall(r"mask-([\d.]+)", m)[0])
+    tof = lambda p: float(re.findall(r"mask-(\d+(?:\.\d+)?)\.pgm", p)[0])
+    # Whole seconds only (a run may dump a mask for every frame).
+    for m in sorted([p for p in glob.glob(os.path.join(d, "mask-*.pgm")) if tof(p) == int(tof(p))], key=tof):
+        t = tof(m)
         on, off = frame(os.path.join(d, "pop-on.mp4"), t), frame(os.path.join(d, "pop-off.mp4"), t)
         if on is None or off is None:
             continue
