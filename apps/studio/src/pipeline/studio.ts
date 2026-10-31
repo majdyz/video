@@ -526,6 +526,13 @@ export class Studio {
   async toggleSubjectAt(u: number, v: number): Promise<number> {
     crumb(`tap ${u.toFixed(2)},${v.toFixed(2)} ai=${this.seg.live ? "live" : this.seg.on ? this.seg.status.phase : "off"}`);
     if (this.snap.subjectTracking !== null || this.exporting) return 0;
+    // AI on but its model / session still starting: the tap waits for it (else it ran the engine's track pass, heavy,
+    // right next to the model starting up: the iPhone page crashed there, 31 Oct).
+    if (this.snap.kind === "video" && this.seg.on && !this.seg.live) {
+      this.set({ subjectNote: "AI is still starting: tap again in a moment" });
+      this.runSeg();
+      return 0;
+    }
     if (!this.paused()) {
       this.pause();
       await this.refreshSubjects();
@@ -737,6 +744,9 @@ export class Studio {
       } catch (err) {
         console.warn(`[seg] segment ${k} seed frame failed`, err);
       }
+      if (this.file !== file) return;
+      // The engine found nothing (it only looks in open blue water: a manta over a reef): the model looks itself.
+      if (!objs.length) objs = await this.seg.autoSeeds(t);
       if (this.file !== file) return;
       await this.seg.seedSegment(k, t, objs);
       console.info(`[seg] seeded segment ${k} on the canonical frame ${t.toFixed(2)} s: ${objs.length} subject(s)`);

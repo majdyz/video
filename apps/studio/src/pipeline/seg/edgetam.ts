@@ -134,6 +134,30 @@ export class EdgeTam {
     return { logits, lw: d[d.length - 1], lh: d[d.length - 2], score, iou: Math.max(...ious) };
   }
 
+  /**
+   * The mask a prompt gives on the encoded frame alone (no memory read or written): the decoder only, for scoring
+   * candidate points (SegSession.autoSeeds).
+   */
+  async probe(points: [number, number][], labels: number[]): Promise<{ logits: Float32Array; lw: number; lh: number; score: number; iou: number }> {
+    const F = this.feats;
+    if (!F) throw new Error("encode first");
+    const ort = this.ort;
+    const f2 = await F.f2.getData() as Float32Array;
+    const pix = new Float32Array(f2.length);
+    for (let c = 0; c < HIDDEN; c++) for (let i = 0; i < 4096; i++) pix[c * 4096 + i] = f2[c * 4096 + i] + this.noMem[c];
+    const dec = await this.s.mask_decoder.run({
+      feats0: F.f0, feats1: F.f1, feats2: new ort.Tensor("float32", pix, [1, 256, 64, 64]),
+      input_points: new ort.Tensor("float32", Float32Array.from(points.flat()), [1, 1, points.length, 2]),
+      input_labels: new ort.Tensor("int32", Int32Array.from(labels), [1, 1, labels.length]),
+    });
+    const score = (await dec.object_score_logits.getData() as Float32Array)[0];
+    const ious = await dec.iou_scores.getData() as Float32Array;
+    const d = dec.pred_masks.dims;
+    const logits = (await dec.pred_masks.getData() as Float32Array).slice(0, d[d.length - 1] * d[d.length - 2]);
+    for (const t of Object.values(dec)) t.dispose?.();
+    return { logits, lw: d[d.length - 1], lh: d[d.length - 2], score, iou: Math.max(...ious) };
+  }
+
   private async attend(f2: Float32Array, p2: Float32Array, m: { spatial: Float32Array; spatialPos: Float32Array; spatialLen: number; pointer: Float32Array; pointerPos: Float32Array; pointerLen: number }): Promise<Float32Array> {
     const ort = this.ort;
     // (1, 256, 64, 64) → (4096, 1, 256)

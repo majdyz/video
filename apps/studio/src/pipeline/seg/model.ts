@@ -166,6 +166,11 @@ export class WorkerSegModel implements SegModel {
     await this.call({ type: "session-seeds", k, t, objects });
   }
 
+  /** Subjects the model finds by itself on frame t (session.ts autoSeeds). */
+  async sessionAutoSeeds(t: number): Promise<SegObject[]> {
+    return ((await this.call({ type: "session-autoseeds", t })).objects as SegObject[]) ?? [];
+  }
+
   async sessionRemove(object: number): Promise<void> {
     await this.call({ type: "session-remove", object });
   }

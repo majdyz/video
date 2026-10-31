@@ -373,6 +373,12 @@ type LogOp =
 /** A finished pass's worker (the model's ~800 MB of WASM heap) is shut down after this long idle (ms). */
 export const SEG_HIBERNATE_MS = 15000;
 
+/** Safari / any WebKit browser (iPhone browsers all are). */
+function isWebKit(): boolean {
+  const ua = navigator.userAgent;
+  return /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg|Android/.test(ua);
+}
+
 function errText(e: unknown): string {
   return (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 120);
 }
@@ -434,7 +440,9 @@ export class SubjectSeg {
     this.loading = (async () => {
       const m = new WorkerSegModel();
       try {
-        await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }));
+        // WebGPU in iPhone Safari crashed the page on the first frames (crash log, 31 Oct, iOS 18.7): WebKit runs
+        // the model on WASM.
+        await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: isWebKit() ? "wasm" : "auto" });
         m.onEvent = (e) => this.onEvent(e);
         this.model = m;
         crumb(`ai: model ready (${m.info?.ep ?? "?"}, ${m.info?.threads ?? "?"} threads)`);
@@ -613,6 +621,15 @@ export class SubjectSeg {
     segLog(`exclude tap at ${t.toFixed(2)} s: ${r.action}`);
     this.onChange();
     return r.action;
+  }
+
+  /** Subjects the model finds by itself on frame t (for a segment the engine found none in); [] without a session. */
+  async autoSeeds(t: number): Promise<SegObject[]> {
+    if (!this.live || !(await this.wake()) || !this.model) return [];
+    crumb(`ai: auto seeds ${t.toFixed(2)}s`);
+    const objs = await this.model.sessionAutoSeeds(t).catch((e) => { segLog("auto seeds failed", e); return [] as SegObject[]; });
+    crumb(`ai: auto seeds -> ${objs.length}`);
+    return objs;
   }
 
   /** Segment k has had its seeds. */

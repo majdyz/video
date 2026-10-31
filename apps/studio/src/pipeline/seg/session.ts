@@ -34,6 +34,29 @@ export type SessionFrames = {
   dispose(): void;
 };
 
+/** autoSeeds: the point grid and what counts as a subject. */
+export const AUTO = { cols: 4, rows: 6, iou: 0.8, areaLo: 0.004, areaHi: 0.3, span: 0.9, contrast: 0.05, max: 2 };
+
+/** How far a mask's colour stands out from a ring around it (mean cell-colour distance; cells: cellLab, 3 per px). */
+function ringContrast(m: Float32Array, cells: Float32Array, w: number, h: number): number {
+  const n = w * h, ch = cells.length / n;
+  if (ch < 3 || !Number.isInteger(ch)) return 1;
+  const inner = new Float64Array(3), ring = new Float64Array(3);
+  let ni = 0, nr = 0;
+  const R = Math.max(2, Math.round(w / 40));
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (m[i] > 0.5) { for (let c = 0; c < 3; c++) inner[c] += cells[i * ch + c]; ni++; continue; }
+    let near = false;
+    for (let d = 1; d <= R && !near; d++) {
+      if ((x >= d && m[i - d] > 0.5) || (x + d < w && m[i + d] > 0.5) || (y >= d && m[i - d * w] > 0.5) || (y + d < h && m[i + d * w] > 0.5)) near = true;
+    }
+    if (near) { for (let c = 0; c < 3; c++) ring[c] += cells[i * ch + c]; nr++; }
+  }
+  if (!ni || !nr) return 0;
+  return Math.hypot(inner[0] / ni - ring[0] / nr, inner[1] / ni - ring[1] / nr, inner[2] / ni - ring[2] / nr);
+}
+
 export type SessionObjectInfo = { id: number; kind: "include" | "exclude"; t: number };
 /** One filled frame's maps, run-length coded (mask.ts rleEncode): alpha on the mask grid, the rest at quarter size. */
 export type SessionFrameOut = { i: number; alpha: Uint8Array; nearQ: Uint8Array; excQ: Uint8Array | null; depQ: Uint8Array };
@@ -294,6 +317,62 @@ export class SegSession {
     this.model.drop("oneshot");
     this.lastEncoded = NaN;
     return sigmoidResize(r.logits, r.lw, r.lh, this.mw, this.mh);
+  }
+
+  /**
+   * Subjects on frame t found by the model itself, for a segment the engine found none in (it only looks in open
+   * blue water: a manta over a reef got nothing, and the AI then had nothing to follow). A grid of single points,
+   * each decoded alone (no memory); a candidate is an object (object score > 0, the model's own IoU estimate over
+   * AUTO.iou), neither speck nor background (AUTO.areaLo..Hi of the frame, not spanning it), and stands out from the
+   * ring around it (AUTO.contrast in Oklab-ish cell colour). Duplicates merge; the best AUTO.max become prompts.
+   * Deterministic for the frame (same seeds whenever and wherever the clip is seeded).
+   */
+  autoSeeds(t: number): Promise<SegObject[]> {
+    return new Promise((resolve, reject) => {
+      this.ops.push(() => this.autoSeedsNow(t).then(resolve, reject));
+      void this.run();
+    });
+  }
+
+  private async autoSeedsNow(t0: number): Promise<SegObject[]> {
+    const t = this.snap(t0), A = AUTO, { mw: w, mh: h } = this;
+    const { rgba1024 } = await this.pixels(t, true);
+    const cells = this.cellCache.get(Math.round(t * SEG.sampleHz) - this.grid.i0);
+    await this.model.encode(rgba1024!);
+    this.lastEncoded = NaN;
+    const cands: { m: Float32Array; q: number }[] = [];
+    for (let gy = 0; gy < A.rows; gy++) for (let gx = 0; gx < A.cols; gx++) {
+      const u = (gx + 0.5) / A.cols, v = (gy + 0.5) / A.rows;
+      const r = await this.model.probe([[u * 1024, v * 1024]], [1]);
+      if (r.score <= 0 || r.iou < A.iou) continue;
+      const m = sigmoidResize(r.logits, r.lw, r.lh, w, h);
+      const a = area(m) / (w * h);
+      if (a < A.areaLo || a > A.areaHi) continue;
+      const b = bbox(m, w, h);
+      if (!b || b.x1 - b.x0 > A.span * w || b.y1 - b.y0 > A.span * h) continue;
+      const c = cells ? ringContrast(m, cells, w, h) : A.contrast;
+      if (c < A.contrast) continue;
+      cands.push({ m, q: r.iou + c });
+    }
+    cands.sort((x, y) => y.q - x.q);
+    const keep: Float32Array[] = [];
+    for (const c of cands) {
+      if (keep.length >= A.max) break;
+      if (keep.some((k) => iou(k, c.m) > 0.4)) continue;
+      keep.push(c.m);
+    }
+    const out: SegObject[] = [];
+    for (const m of keep) {
+      const pr = promptFromMask(m, w, h, w / 640);
+      if (!pr) continue;
+      const b = bbox(m, w, h)!;
+      out.push({ kind: "include", t, prompt: {
+        points: [...pr.pos, ...pr.neg].map(([x, y]) => [(x + 0.5) / w, (y + 0.5) / h] as [number, number]),
+        labels: [...pr.pos.map(() => 1), ...pr.neg.map(() => 0)],
+        box: { x0: b.x0 / w, y0: b.y0 / h, x1: (b.x1 + 1) / w, y1: (b.y1 + 1) / h },
+      } });
+    }
+    return out;
   }
 
   // ------------------------------------------------------------------ the loop
