@@ -49,6 +49,7 @@ function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | n
   const ps: Param[] = [
     { id: "strength", label: "Strength", value: pct(c.strength), slider: { value: c.strength, min: 0, max: 100, def: DEFAULT_COLOUR.strength, onChange: (v) => up({ strength: v }) } },
     { id: "scene", label: "Scene", value: scene?.label ?? "Auto", choices: { items: COLOUR_PRESETS, value: c.preset, onChange: (id) => up({ preset: id as typeof c.preset }) } },
+    { id: "seabed", label: "Seabed", value: (c.seabed ?? DEFAULT_COLOUR.seabed ?? 0) ? pct(c.seabed ?? DEFAULT_COLOUR.seabed ?? 0) : "Off", slider: { value: c.seabed ?? DEFAULT_COLOUR.seabed ?? 0, min: 0, max: 100, def: DEFAULT_COLOUR.seabed, format: (v) => (v < 1 ? "Off" : String(Math.round(v))), onChange: (v) => up({ seabed: v }) } },
     { id: "vivid", label: "Vivid", value: c.vivid ? "On" : "Off", toggle: { on: !!c.vivid, onChange: (v) => { saveVivid(v); up({ vivid: v }); } } },
     { id: "look", label: "Deep blue", more: true, value: pct(c.look * 100), slider: { value: c.look * 100, min: 0, max: 100, def: 0, onChange: (v) => up({ look: v / 100 }) } },
     { id: "sat", label: "Saturation", more: true, value: `${Math.round(c.saturation * 100)}%`, slider: { value: c.saturation * 100, min: 0, max: 200, def: 100, format: (v) => `${Math.round(v)}%`, onChange: (v) => up({ saturation: v / 100 }) } },

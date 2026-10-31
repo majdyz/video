@@ -30,7 +30,7 @@ import {
   type FrameAnalysis,
   type GradeParams,
   type Vec3,
- CONF_BRIGHT, DEFAULT_SETTINGS, HAZE_AUTO, hazeLiftRatio, hazeWeightOf, vividGateOf } from "./params.ts";
+ CONF_BRIGHT, DEFAULT_SETTINGS, HAZE_AUTO, hazeLiftRatio, hazeWeightOf, SEABED, vividGateOf } from "./params.ts";
 
 /** Thumbnail size the engine analyses at (upright, 16:9 box). */
 export const ANALYSIS_W = 256;
@@ -589,7 +589,25 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
   }
   const veilLab = linearToOklab(binf[0], binf[1], binf[2]);
   const vividGate = vividGateOf(veilLab[0], Math.hypot(veilLab[1], veilLab[2]), topN > 0 && botN > 0 ? botL / botN - topL / topN : 0);
+  // Seabed recovery (SEABED): the frame's water and bright lightness, and how little red its bright pixels have.
+  let seabedLw = 0, seabedLb = 1, seabedNeed = 0;
+  {
+    const sorted = Float32Array.from(okL).sort();
+    seabedLw = sorted[Math.floor(0.25 * (n - 1))];
+    seabedLb = sorted[Math.floor(0.97 * (n - 1))];
+    const l80 = sorted[Math.floor(0.8 * (n - 1))];
+    let rs = 0, gs = 0;
+    for (let i = 0; i < n; i++) if (okL[i] >= l80) { rs += lin[i * 3]; gs += lin[i * 3 + 1]; }
+    seabedNeed = 1 - smoothstep(SEABED.redLo, SEABED.redHi, rs / Math.max(1e-5, gs));
+    // A seabed lies below, lit: the frame's bottom third brighter than its top (open water is the reverse: light
+    // from the surface above; a hammerhead school in the blue lost its colour to it).
+    const tb = topN > 0 && botN > 0 ? botL / botN - topL / topN : 0;
+    seabedNeed *= smoothstep(SEABED.bandLo, SEABED.bandHi, tb);
+  }
   const params: GradeParams = {
+    seabedNeed,
+    seabedLw,
+    seabedLb,
     binf,
     betaB,
     cB,

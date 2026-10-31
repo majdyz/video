@@ -32,6 +32,8 @@ export type ColourState = {
   popStrength?: number;
   /** Warm pop on the subjects, 0..100 (0 = off): a red push on the subject only, the water keeps its colour. */
   popWarmth?: number;
+  /** Seabed recovery, 0..100 (0 = off): sand and reef to a warm neutral where the water left no red; open water kept. */
+  seabed?: number;
   /** "Vivid" look (on by default): deep muted navy water, darker water, black shadows, the sun kept bright (VIVID_LOOK in the engine; it stands down by itself on graded, topside, night and ROV footage). */
   vivid?: boolean;
 };
@@ -57,6 +59,7 @@ export const DEFAULT_COLOUR: ColourState = {
   subjectPop: false,
   popStrength: 50,
   popWarmth: 50,
+  seabed: 60,
   vivid: true,
 };
 
@@ -104,6 +107,7 @@ export function colourSettings(c: ColourLook): UserSettings {
     subjectPop: !!c.subjectPop,
     subjectPopStrength: Math.min(100, Math.max(0, c.popStrength ?? DEFAULT_COLOUR.popStrength ?? 50)) / 100,
     subjectPopWarmth: Math.min(100, Math.max(0, c.popWarmth ?? DEFAULT_COLOUR.popWarmth ?? 0)) / 100,
+    seabed: Math.min(100, Math.max(0, c.seabed ?? DEFAULT_COLOUR.seabed ?? 0)) / 100,
     vivid: c.vivid ? 1 : 0,
   };
 }

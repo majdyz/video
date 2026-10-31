@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, VIVID, VIVID_LOOK, WARM_POP } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, VIVID, VIVID_LOOK, WARM_POP, SEABED } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 import { BACKDROP } from "./backdrop.ts";
 import { RED_GLSL, RED_WGSL } from "./red.ts";
@@ -123,6 +123,14 @@ const float SP_VIVID = ${SUBJECT_POP.vividKeep.toFixed(4)};
 const float SP_CLARITY = ${SUBJECT_POP.clarity.toFixed(4)};
 const float SP_LIFT = ${SUBJECT_POP.lift.toFixed(4)};
 const float WP_HUE = ${WARM_POP.hue.toFixed(4)};
+const float SB_HUE = ${SEABED.hue.toFixed(4)};
+const float SB_CHROMA = ${SEABED.chroma.toFixed(4)};
+const float SB_KEEP = ${SEABED.keep.toFixed(4)};
+const float SB_LIFT = ${SEABED.lift.toFixed(4)};
+const float SB_RING = ${SEABED.ring.toFixed(4)};
+const float SB_REGION = ${SEABED.regionK.toFixed(4)};
+const float SB_LO = ${SEABED.lo.toFixed(4)};
+const float SB_SPAN = ${SEABED.span.toFixed(4)};
 const float WP_CMIN = ${WARM_POP.cMin.toFixed(4)};
 const float WP_CMAX = ${WARM_POP.cMax.toFixed(4)};
 const float WP_KEEP = ${WARM_POP.keep.toFixed(4)};
@@ -493,6 +501,23 @@ vec2 warmPop(float L, vec2 ab, float k) {
   float Ct = min(WP_CMAX, max(WP_KEEP * length(ab), WP_CMIN * smoothstepf(WP_LLO, WP_LHI, L)));
   return mix(ab, vec2(cos(WP_HUE), sin(WP_HUE)) * Ct, k);
 }
+// Seabed recovery (SEABED, params.ts): how much a pixel is sand / reef (brightness over the water level, its own or
+// its region's from a ring of the low-res guide) rather than open water.
+float seabedT(float L) {
+  float lw = p[25].y, lb = max(p[25].z, p[25].y + 0.05);
+  return smoothstepf(lw + SB_LO * (lb - lw), lw + (SB_LO + SB_SPAN) * (lb - lw), L);
+}
+float seabedW(vec2 uv, float L) {
+  ivec2 sz = textureSize(u_data2, 0);
+  float acc = 0.0;
+  for (int k = 0; k < 8; k++) {
+    float a = float(k) * 0.7853982;
+    vec2 q = clamp(uv + SB_RING * vec2(cos(a), sin(a)), vec2(0.0), vec2(1.0));
+    ivec2 ij = min(ivec2(q * vec2(sz)), sz - 1);
+    acc += seabedT(linearToOklab(max(texelFetch(u_data2, ij, 0).xyz, vec3(0.0))).x);
+  }
+  return max(seabedT(L), min(1.0, SB_REGION * acc / 8.0));
+}
 float popLift(float L, float P) { return L + SP_LIFT * P * p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
 // Hue guard: on the subject (weight w) the output hue stays within SUBJECT_POP.hueMax of the source pixel's hue.
 vec2 popHue(vec2 ab, vec2 abSrc, float w) {
@@ -724,6 +749,11 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // from the water (it hugs the animal's outline); an AI mask is the outline already.
   float wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * (p[24].y > 0.5 ? 1.0 : depart);
   lk.yz = warmPop(lk.x, lk.yz, wk);
+  // Seabed recovery: sand and reef to a warm neutral (and a little lighter) where the water left no red.
+  if (p[25].x > 0.0) {
+    float sb = seabedW(uv, lab0.x) * p[25].x;
+    lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
+  }
   // The warm chroma may exceed the source-relative cap (a cyan shark has little to start from).
   vec3 o1 = oklabToLinear(capChroma(lk, max(cSrc, wk * WP_CMIN * 1.5)));
   vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
@@ -1016,6 +1046,22 @@ fn warmPop(L: f32, ab: vec2<f32>, k: f32) -> vec2<f32> {
   let Ct = min(WP_CMAX, max(WP_KEEP * length(ab), WP_CMIN * smoothstepf(WP_LLO, WP_LHI, L)));
   return mix(ab, vec2<f32>(cos(WP_HUE), sin(WP_HUE)) * Ct, k);
 }
+fn seabedT(L: f32) -> f32 {
+  let lw = params.p[25].y;
+  let lb = max(params.p[25].z, params.p[25].y + 0.05);
+  return smoothstepf(lw + SB_LO * (lb - lw), lw + (SB_LO + SB_SPAN) * (lb - lw), L);
+}
+fn seabedW(uv: vec2<f32>, L: f32) -> f32 {
+  let sz = vec2<i32>(textureDimensions(u_data2, 0));
+  var acc = 0.0;
+  for (var k = 0; k < 8; k++) {
+    let a = f32(k) * 0.7853982;
+    let q = clamp(uv + SB_RING * vec2<f32>(cos(a), sin(a)), vec2<f32>(0.0), vec2<f32>(1.0));
+    let ij = min(vec2<i32>(q * vec2<f32>(sz)), sz - vec2<i32>(1));
+    acc += seabedT(linearToOklab(max(textureLoad(u_data2, ij, 0).xyz, vec3<f32>(0.0))).x);
+  }
+  return max(seabedT(L), min(1.0, SB_REGION * acc / 8.0));
+}
 fn popLift(L: f32, P: f32) -> f32 { return L + SP_LIFT * P * params.p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
 fn popHue(ab: vec2<f32>, abSrc: vec2<f32>, w: f32) -> vec2<f32> {
   let C = length(ab); let Cs = length(abSrc);
@@ -1204,6 +1250,10 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0)));
   let wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * select(depart, 1.0, p[24].y > 0.5);
   lk = vec3(lk.x, warmPop(lk.x, lk.yz, wk));
+  if (params.p[25].x > 0.0) {
+    let sb = seabedW(uv, lab0.x) * params.p[25].x;
+    lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2<f32>(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
+  }
   let o1 = oklabToLinear(capChroma(lk, max(cSrc, wk * WP_CMIN * 1.5)));
   let o2 = fitToGamut(o1 * detailRatio(src, lin));
   let outS = linearToSrgb(o2);

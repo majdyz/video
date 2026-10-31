@@ -52,6 +52,8 @@ export type UserSettings = {
   subjectPopStrength?: number;
   /** Warm pop on the subject, 0..1 (0 = off). */
   subjectPopWarmth?: number;
+  /** Seabed recovery, 0..1 (SEABED): sand and reef turned neutral where the water left no red at all; open water kept. */
+  seabed?: number;
 };
 
 /**
@@ -75,7 +77,7 @@ export const PRESET_ADJUST: Record<ScenePreset, { red: number; blue: number; red
   reef: { red: 1, blue: 1, redMax: 1.6, dehaze: 0, clarity: -0.1, exposure: 0.97, hazeLift: 0 },
 };
 
-export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto", subjectPop: false, subjectPopStrength: 0.5, subjectPopWarmth: 0.5, vivid: 0 };
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto", subjectPop: false, subjectPopStrength: 0.5, subjectPopWarmth: 0.5, seabed: 0.6, vivid: 0 };
 export const INTENSITY_MAX = 2;
 
 /** Internal controls the shader reads, derived from the intensity. */
@@ -261,6 +263,20 @@ export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.
  * weight is the subject mask's own (tone weight over wLo..wHi), not the pop's strength: the engine's masks pop at half
  * strength and a murky backdrop lowers it further, which left the warmth invisible.
  */
+/**
+ * Seabed recovery: under water that has taken all the red (8-bit red ~0 even on white sand), no gain can bring the
+ * colour back; the sand and reef are given a warm neutral instead (the way a dive colour fixer synthesises red),
+ * while open water keeps its blue. A pixel counts as seabed by brightness over the frame's water level (its own and
+ * its region's: a ring of the low-res guide, so dark rocks inside bright sand go too); `need` comes from how little
+ * red the bright pixels have (redLo..redHi of green), only when the frame's bottom third is brighter than its top
+ * (bandLo..bandHi of Oklab L: a seabed below; open water is lit from above); open water (backdrop validity) is spared.
+ *   hue/chroma  the neutral's tint (Oklab, warm sand); keep: share of the pixel's own chroma kept at full strength;
+ *   lift        Oklab L added at full strength (sand reads white, not grey); ring: guide ring radius (uv); regionK:
+ *               how strongly a bright region carries its dark parts; lo/span: the brightness ramp between water and
+ *               bright (shares of Lb − Lw).
+ */
+export const SEABED = { hue: (75 * Math.PI) / 180, chroma: 0.02, keep: 0.15, lift: 0.06, ring: 0.06, regionK: 1.6, lo: 0.25, span: 0.5, redLo: 0.12, redHi: 0.35, bandLo: 0.0, bandHi: 0.06 };
+
 export const WARM_POP = { hue: (78 * Math.PI) / 180, cMin: 0.05, cMax: 0.075, keep: 0.4, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3 };
 
 export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
@@ -709,6 +725,10 @@ export type GradeParams = {
   subjectTone?: number;
   /** Vivid gate from the frame (vividGateOf: night / torch / ROV evidence), 0..1; clip-locked. Absent = 1. */
   vividGate?: number;
+  /** Seabed recovery (SEABED): how much red is missing (0..1), and the frame's water / bright Oklab L. */
+  seabedNeed?: number;
+  seabedLw?: number;
+  seabedLb?: number;
 };
 
 export const IDENTITY_PARAMS: GradeParams = {
@@ -876,6 +896,10 @@ export function packUniforms(
   u[94] = vividAmountOf(params, settings);
   u[95] = popStrengthK(settings); // p23.w: Subject pop Strength multiplier
   u[98] = settings.subjectPop ? Math.min(1, Math.max(0, settings.subjectPopWarmth ?? 0)) : 0; // p24.z: Warm pop amount
+  // p25: Seabed recovery amount (setting × missing red × not open water), water L, bright L.
+  u[100] = Math.min(1, Math.max(0, settings.seabed ?? 0)) * Math.min(1, Math.max(0, params.seabedNeed ?? 0)) * (1 - Math.min(1, Math.max(0, params.backdrop ?? 0)));
+  u[101] = params.seabedLw ?? 0;
+  u[102] = params.seabedLb ?? 1;
   u[96] = 1; // p24.x: Subject pop lift direction (set per frame by the engine, seg-overlay.ts popDirection)
   // p24.y: an AI subject overlay is on this frame (set by the engine): the AI alone weights the pop (grade-shader toneWeight)
   return u;
@@ -968,6 +992,9 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     backdrop: m(a.backdrop ?? 0, b.backdrop ?? 0),
     subjectTone: m(a.subjectTone ?? 0, b.subjectTone ?? 0),
     vividGate: m(a.vividGate ?? 1, b.vividGate ?? 1),
+    seabedNeed: m(a.seabedNeed ?? 0, b.seabedNeed ?? 0),
+    seabedLw: m(a.seabedLw ?? 0, b.seabedLw ?? 0),
+    seabedLb: m(a.seabedLb ?? 1, b.seabedLb ?? 1),
     backdropFit: a.backdropFit && b.backdropFit && a.backdropFit.length === b.backdropFit.length ? a.backdropFit.map((x, i) => m(x, b.backdropFit![i])) : b.backdropFit,
   };
 }
