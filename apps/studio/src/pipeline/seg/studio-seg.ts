@@ -463,7 +463,10 @@ export class SubjectSeg {
   }
 
   private crumbTens = -1;
+  /** Last sign of the pass working (any session event, seeding): the export's stall clock (settle). */
+  private lastActivity = 0;
   private onEvent(e: SessionEvent): void {
+    this.lastActivity = performance.now();
     const live = this.live;
     if (!live) return;
     if (e.ev === "frames") {
@@ -587,6 +590,7 @@ export class SubjectSeg {
   async seedSegment(k: number, t: number, objs: SegObject[]): Promise<void> {
     if (!this.live || this.seededSegs.has(k) || !(await this.wake()) || !this.model) return;
     this.seededSegs.add(k);
+    this.lastActivity = performance.now();
     if (k === 0) this.autos = objs;
     const objects = objs.map((o) => ({ ...o, id: this.nextId++ }));
     this.log.push({ op: "seeds", k, t, objects });
@@ -627,8 +631,10 @@ export class SubjectSeg {
   async autoSeeds(t: number): Promise<SegObject[]> {
     if (!this.live || !(await this.wake()) || !this.model) return [];
     crumb(`ai: auto seeds ${t.toFixed(2)}s`);
+    this.lastActivity = performance.now();
     const objs = await this.model.sessionAutoSeeds(t).catch((e) => { segLog("auto seeds failed", e); return [] as SegObject[]; });
     crumb(`ai: auto seeds -> ${objs.length}`);
+    this.lastActivity = performance.now();
     return objs;
   }
 
@@ -690,6 +696,8 @@ export class SubjectSeg {
       const p = this.status.progress;
       o.onProgress(p ?? null);
       if (p !== null && p !== undefined && p > last + 1e-6) { last = p; lastAt = performance.now(); }
+      // Seeding a segment (the engine's analysis, or the model's own search) shows no progress but is work.
+      lastAt = Math.max(lastAt, this.lastActivity);
       if (performance.now() - lastAt > o.stallMs) { segLog(`export: the AI pass made no progress for ${Math.round(o.stallMs / 1000)} s; exporting with the engine's masks`); return "engine"; }
     }
     return this.live.filled > 0 ? "ai" : "engine";
