@@ -341,12 +341,14 @@ export class SegSession {
     await this.model.encode(rgba1024!);
     this.lastEncoded = NaN;
     const cands: { m: Float32Array; q: number }[] = [];
+    const stats: string[] = [];
     for (let gy = 0; gy < A.rows; gy++) for (let gx = 0; gx < A.cols; gx++) {
       const u = (gx + 0.5) / A.cols, v = (gy + 0.5) / A.rows;
       const r = await this.model.probe([[u * 1024, v * 1024]], [1]);
-      if (r.score <= 0 || r.iou < A.iou) continue;
       const m = sigmoidResize(r.logits, r.lw, r.lh, w, h);
       const a = area(m) / (w * h);
+      stats.push(`${r.score.toFixed(1)}/${r.iou.toFixed(2)}/${(a * 100).toFixed(1)}%`);
+      if (r.score <= 0 || r.iou < A.iou) continue;
       if (a < A.areaLo || a > A.areaHi) continue;
       const b = bbox(m, w, h);
       if (!b || b.x1 - b.x0 > A.span * w || b.y1 - b.y0 > A.span * h) continue;
@@ -355,6 +357,7 @@ export class SegSession {
       cands.push({ m, q: r.iou + c });
     }
     cands.sort((x, y) => y.q - x.q);
+    console.info(`[seg] auto seeds at ${t.toFixed(2)} s: ${cands.length} candidate(s) of ${A.cols * A.rows} points (${stats.join(" ")})`);
     const keep: Float32Array[] = [];
     for (const c of cands) {
       if (keep.length >= A.max) break;
