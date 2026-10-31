@@ -305,7 +305,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const Lv = popP > 0 ? vividLook(looked[0], guarded[0], guarded[1], (s.vivid ?? 0) * (1 - SUBJECT_POP.vividKeep * Math.min(1, popP)), greenWeight(p))[0] : vv[0];
   const Lp = Lv + SUBJECT_POP.lift * popP * 4 * Lv * Math.max(0, 1 - Lv);
   // The chroma follows part of the lift: a lifted blue-grey stays blue-grey.
-  const cf = 1 + (SUBJECT_POP.chromaFollow - 1) * smoothstep(SUBJECT_POP.keepDarkLo, SUBJECT_POP.keepDarkHi, Lv);
+  const cf = SUBJECT_POP.chromaFollowDark + (SUBJECT_POP.chromaFollow - SUBJECT_POP.chromaFollowDark) * smoothstep(SUBJECT_POP.keepDarkLo, SUBJECT_POP.keepDarkHi, Lv);
   const kc = 1 + cf * (Lp / Math.max(1e-4, Lv) - 1);
   vv[0] = Lp; vv[1] *= kc; vv[2] *= kc;
   const hn0 = highlightPink(vv[0], vv[1], vv[2]);

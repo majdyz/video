@@ -241,14 +241,15 @@ export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.
  *              cast-blue belly does not turn more cyan, and the lift reads as clearer water)
  *   engineKeep  the share of all this the engine's own subject masks get (no AI detection): they reach past
  *              the animal, so their tone stays at about the previous default (no stronger glow)
- *   keepDarkLo/Hi  below this graded Oklab L a part keeps its colour: no cast clearing, chroma follows the lift in
- *              full (a thin dark tail would otherwise turn grey-mauve / brownish next to the saturated water)
+ *   keepDarkLo/Hi  below this graded Oklab L a part keeps its colour: no cast clearing, and its chroma follows the
+ *              lift by chromaFollowDark (a thin dark tail would otherwise turn grey-mauve / brownish next to the
+ *              saturated water); kept low so a body's shaded side is toned like the rest (one colour, no patch)
  *   darkLo/Hi  the whole pop (clearing included) fades out as the graded lightness (Oklab L) drops through
  *              lo..hi: a dark, low-chroma part (a thresher's long tail) keeps the plain grade's colour.
  *   hueMax     on the subject, the output hue stays within this angle (radians) of the source pixel's own hue:
  *              the tone never rotates a dark blue toward magenta or brown.
  */
-export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.42, lift: 0.085, chromaFollow: 0.3, engineKeep: 0.5, keepDarkLo: 0.35, keepDarkHi: 0.55, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
+export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
 
 /** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
 export function popStrengthK(s: { subjectPopStrength?: number }): number {
