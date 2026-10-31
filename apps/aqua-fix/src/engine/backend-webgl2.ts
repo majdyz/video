@@ -4,6 +4,9 @@ import { GLSL_TP_FIELD, GLSL_TP_FLOW, GLSL_TP_LUM } from "./temporal.ts";
 import { TEMPORAL } from "./params.ts";
 
 
+/** Export readbacks kept in flight (the exporter overlaps up to three frames). */
+const READBACK_SLOTS = 3;
+
 type Program = { prog: WebGLProgram; loc: Map<string, WebGLUniformLocation | null> };
 
 export class WebGL2Backend implements GpuBackend {
@@ -578,19 +581,186 @@ export class WebGL2Backend implements GpuBackend {
     }
   }
 
+  /**
+   * Export capture: how a rendered frame becomes a VideoFrame. "canvas" wraps the canvas (free on Chrome, but
+   * 60–80 ms per frame on Safari, which pinned its offline export near 10 fps); "readback" reads the pixels into a
+   * pixel-pack buffer (a flipped blit, so the rows come out top-down; asynchronous, several frames in flight) and
+   * builds the frame from the bytes. Both carry the same RGBA8 pixels. null = time both on the first export frame
+   * and keep the faster; `?capture=canvas|readback` (or setCaptureMode) forces one.
+   */
+  capture: "canvas" | "readback" | null = null;
+  private forceCapture: "canvas" | "readback" | null = null;
+  /** Human-readable result of the capture benchmark (diagnostics). */
+  captureBench = "";
+  private readbackRing: { pbo: WebGLBuffer; busy: boolean }[] = [];
+  private flipTarget: { rb: WebGLRenderbuffer; fbo: WebGLFramebuffer; w: number; h: number } | null = null;
+
+  /** Sets the capture path for the next export: "auto" re-benchmarks; "bitmap" (a WebGPU path) means "canvas" here. */
+  setCaptureMode(mode: "auto" | "canvas" | "bitmap" | "readback"): void {
+    this.forceCapture = mode === "auto" ? null : mode === "readback" ? "readback" : "canvas";
+    this.capture = null;
+  }
+
   async renderToFrame(timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
-    // Exports render at full size: the canvas is the only render surface
-    // this context can hand to a VideoFrame, so it is sized up for the
-    // duration (callers set the preview scale to 1 around an export).
+    // Exports render at full size: the canvas is the render surface (callers
+    // set the preview scale to 1 around an export).
     this.sizeCanvas(1);
     const t0 = performance.now();
     this.render();
     const t1 = performance.now();
-    const f = new VideoFrame(this.canvas, { timestamp: timestampUs, duration: durationUs });
     this.lastDrawMs = t1 - t0;
+    if (this.capture === null) {
+      const forced = this.forceCapture ?? (typeof location !== "undefined" ? new URLSearchParams(location.search).get("capture") : null);
+      if (forced === "canvas" || forced === "readback") {
+        this.capture = forced;
+        this.captureBench = `forced ${forced}`;
+      } else {
+        const f = await this.benchmarkCapture(timestampUs, durationUs);
+        this.lastCaptureMs = performance.now() - t1;
+        this.stageMs.capture += this.lastCaptureMs;
+        return f;
+      }
+    }
+    const f = this.capture === "readback" ? await this.captureReadback(timestampUs, durationUs) : new VideoFrame(this.canvas, { timestamp: timestampUs, duration: durationUs });
     this.lastCaptureMs = performance.now() - t1;
     this.stageMs.capture += this.lastCaptureMs;
     return f;
+  }
+
+  /**
+   * Times both capture paths on the frame just drawn (a few captures each; the readbacks overlapped as the
+   * exporter overlaps them), keeps the faster, and returns this frame. Every capture of the canvas is issued
+   * before the first await: another frame may draw into the canvas once this call yields.
+   */
+  private async benchmarkCapture(timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
+    const N = 3;
+    const results: string[] = [];
+    let canvasMs = Infinity, readbackMs = Infinity;
+    let frame: VideoFrame | null = null;
+    // The render finished first, so neither path is charged the GPU time of the draw (the first capture would be).
+    this.gpuSync();
+    try {
+      const t0 = performance.now();
+      for (let i = 0; i < N; i++) {
+        const f = new VideoFrame(this.canvas, { timestamp: timestampUs, duration: durationUs });
+        frame?.close();
+        frame = f;
+      }
+      canvasMs = (performance.now() - t0) / N;
+      results.push(`canvas ${canvasMs.toFixed(1)} ms`);
+    } catch (e) {
+      results.push(`canvas failed (${(e as Error).message.split("\n")[0].slice(0, 50)})`);
+    }
+    const t0 = performance.now();
+    const reads = Array.from({ length: N }, () => this.captureReadback(timestampUs, durationUs));
+    const done = await Promise.allSettled(reads);
+    const ok = done.filter((r): r is PromiseFulfilledResult<VideoFrame> => r.status === "fulfilled").map((r) => r.value);
+    if (ok.length === N) {
+      readbackMs = (performance.now() - t0) / N;
+      results.push(`readback ${readbackMs.toFixed(1)} ms`);
+    } else {
+      const err = done.find((r): r is PromiseRejectedResult => r.status === "rejected")?.reason as Error | undefined;
+      results.push(`readback failed (${(err?.message ?? "?").split("\n")[0].slice(0, 50)})`);
+    }
+    this.capture = readbackMs < canvasMs ? "readback" : "canvas";
+    this.captureBench = results.join(", ");
+    console.info(`WebGL2 capture bench: ${this.captureBench} → ${this.capture}`);
+    // The frame itself: both paths hold the same pixels of this one picture.
+    const keep = this.capture === "readback" ? ok.shift()! : frame;
+    for (const f of ok) f.close();
+    if (keep !== frame) frame?.close();
+    if (!keep) throw new Error("export capture failed");
+    return keep;
+  }
+
+  /**
+   * Resolves once a readback slot is free (the exporter calls this before uploading a frame, so the
+   * renderToFrame that follows issues its read at once, before any other frame draws into the canvas).
+   */
+  async readbackSlotFree(): Promise<void> {
+    if (this.capture !== "readback") return;
+    while (this.readbackRing.length >= READBACK_SLOTS && !this.readbackRing.some((r) => !r.busy)) await new Promise<void>((r) => setTimeout(r, 1));
+  }
+
+  /** Frees the export readback buffers (end of an export: at 4K they hold ~100 MB). */
+  releaseCapture(): void {
+    const gl = this.gl;
+    for (const r of this.readbackRing) if (!r.busy) gl.deleteBuffer(r.pbo);
+    this.readbackRing = this.readbackRing.filter((r) => r.busy);
+    if (this.flipTarget && !this.readbackRing.length) {
+      gl.deleteRenderbuffer(this.flipTarget.rb);
+      gl.deleteFramebuffer(this.flipTarget.fbo);
+      this.flipTarget = null;
+    }
+  }
+
+  /** Reads the canvas (drawn just now) into a free pixel-pack buffer at once, then waits for the GPU and wraps the bytes. */
+  private async captureReadback(timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
+    const gl = this.gl;
+    const w = this.canvas.width, h = this.canvas.height;
+    let slot = this.readbackRing.find((r) => !r.busy);
+    if (!slot) {
+      // The read must be issued before anything else draws: a slot more rather than a wait.
+      slot = { pbo: gl.createBuffer()!, busy: false };
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
+      gl.bufferData(gl.PIXEL_PACK_BUFFER, w * h * 4, gl.STREAM_READ);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      this.readbackRing.push(slot);
+    }
+    slot.busy = true;
+    try {
+      // GL rows run bottom-up: a flipped blit into a same-size target makes them top-down for the frame.
+      let ft = this.flipTarget;
+      if (!ft || ft.w !== w || ft.h !== h) {
+        if (ft) {
+          gl.deleteRenderbuffer(ft.rb);
+          gl.deleteFramebuffer(ft.fbo);
+        }
+        const rb = gl.createRenderbuffer()!;
+        gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, w, h);
+        gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+        const fbo = gl.createFramebuffer()!;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rb);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        ft = this.flipTarget = { rb, fbo, w, h };
+        for (const r of this.readbackRing) {
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, r.pbo);
+          gl.bufferData(gl.PIXEL_PACK_BUFFER, w * h * 4, gl.STREAM_READ);
+        }
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      }
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, ft.fbo);
+      gl.blitFramebuffer(0, 0, w, h, 0, h, w, 0, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, ft.fbo);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)!;
+      gl.flush();
+      await new Promise<void>((resolve, reject) => {
+        let tries = 0;
+        const poll = () => {
+          const status = gl.clientWaitSync(sync, 0, 0);
+          if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return resolve();
+          if (status === gl.WAIT_FAILED || ++tries > 15000) return reject(new Error("GPU readback timed out"));
+          setTimeout(poll, 1);
+        };
+        poll();
+      });
+      gl.deleteSync(sync);
+      const px = new Uint8Array(w * h * 4);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
+      gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, px);
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      // RGBA (alpha is opaque: the canvas has none): WebKit can't copyTo an RGBX frame ("Unable to copy data").
+      return new VideoFrame(px, { format: "RGBA", codedWidth: w, codedHeight: h, timestamp: timestampUs, duration: durationUs });
+    } finally {
+      slot.busy = false;
+    }
   }
 
   private ensureAnalysisTargets(w: number, h: number) {
@@ -662,6 +832,13 @@ export class WebGL2Backend implements GpuBackend {
     gl.deleteProgram(this.grade.prog);
     gl.deleteProgram(this.down.prog);
     gl.deleteProgram(this.comp.prog);
+    for (const r of this.readbackRing) gl.deleteBuffer(r.pbo);
+    this.readbackRing = [];
+    if (this.flipTarget) {
+      gl.deleteRenderbuffer(this.flipTarget.rb);
+      gl.deleteFramebuffer(this.flipTarget.fbo);
+      this.flipTarget = null;
+    }
     if (this.beforeTex) gl.deleteTexture(this.beforeTex);
     if (this.wipe) {
       gl.deleteTexture(this.wipe.tex);

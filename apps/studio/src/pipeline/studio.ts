@@ -70,6 +70,8 @@ const PHOTO_PREVIEW_PX = 2048;
 const OPFS_PREFIX = "studio-export-";
 /** Live export frames for the stage / sheet: a few a second. */
 const LIVE_EVERY_MS = 250;
+/** WebKit's offline export measures its speed over this long (after a warm-up) before committing to it. */
+const REALTIME_CHECK_MS = 3000;
 /** Filmstrip under the trim handles: this many thumbnails, this tall (px), decoded once per clip. */
 const FILMSTRIP_COUNT = 10;
 const FILMSTRIP_PX = 80;
@@ -232,7 +234,11 @@ export function codecHelp(codecString: string | null | undefined): string | null
 const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null, note: null, paused: false, profile: null };
 const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null, refine: "idle", refineProgress: 0, bobbing: null, motionLog: null };
 
-/** Real-time recorder default: WebKit (offline capture is ~10 fps there); `?rt=1` / `?rt=0` force it. */
+/**
+ * `?rt=1` / `?rt=0` force the real-time recorder / the offline exporter. Unforced, WebKit runs offline and falls
+ * back to the recorder when offline turns out slower than real time (its canvas capture was ~10 fps there before
+ * the WebGL2 buffer readback).
+ */
 function wantRealtime(): boolean | null {
   const q = new URLSearchParams(location.search).get("rt");
   if (q === "1") return true;
@@ -279,6 +285,8 @@ export class Studio {
   private engine: Engine | null = null;
   private enginePromise: Promise<Engine | null> | null = null;
   private geo: GeometryRenderer | null = null;
+  /** WebKit: this clip's offline export falls back to the real-time recorder when it runs slower than real time. */
+  private rtFallback = false;
   /** The geometry pass in the colour engine's own GL context (WebGL2 backend): draws straight into its source. */
   /** Bumped whenever the profile samples go stale (a framing change): a profile run in flight retakes them. */
   private profileEpoch = 0;
@@ -1171,9 +1179,14 @@ export class Studio {
       const fallback: ClipInfo = { rot: 0, displayW: v.videoWidth, displayH: v.videoHeight, codedW: v.videoWidth, codedH: v.videoHeight, fps: 30, duration: v.duration, codec: null, hasAudio: false };
       const clip = info ?? fallback;
       e.lockGlobals(null);
-      const mode = this.pickExportMode(e, file);
+      let mode = this.pickExportMode(e, file);
       // The offline exporter decodes with WebCodecs; a clip the <video> element plays may still be beyond it.
       const decodable = isWebCodecsSupported() && clip.canDecode !== false;
+      // WebKit tries offline first only when it can decode the clip; else straight to the recorder.
+      if (this.rtFallback && !decodable) {
+        this.rtFallback = false;
+        mode = "realtime";
+      }
       const canExport = mode === "realtime" || ((mode === "native" || mode === "offline") && decodable);
       if (mode !== "realtime" && clip.canDecode === false) console.info("[export] WebCodecs can't decode this clip here; export disabled");
       this.set({ info: clip, duration: v.duration || clip.duration, phase: "ready", currentTime: 0, exportMode: mode, canExport });
@@ -1276,8 +1289,15 @@ export class Studio {
     if (isNativeShell() && nativeFileOf(file) && typeof VideoDecoder !== "undefined" && new URLSearchParams(location.search).get("native") !== "0") return "native";
     const forced = wantRealtime();
     const canRt = isRealtimeExportSupported(e.backend.canvas);
+    this.rtFallback = false;
     if (forced !== null) return forced && canRt ? "realtime" : "offline";
-    if (isWebKit() && canRt) return "realtime";
+    // `?rtprobe=1`: the same on any engine (tests the handover off WebKit).
+    if ((isWebKit() || new URLSearchParams(location.search).get("rtprobe") === "1") && canRt) {
+      // Offline first (every frame, resumable, faster than the clip once the capture is a buffer readback), and the
+      // real-time recorder when its first seconds run slower than real time (runOffline's speed check).
+      if (!isWebCodecsSupported()) return "realtime";
+      this.rtFallback = true;
+    }
     return isWebCodecsSupported() || !canRt ? "offline" : "realtime";
   }
 
@@ -2215,10 +2235,20 @@ export class Studio {
         console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (native), audio ${res.audioIncluded ? "kept" : "dropped"}`);
         this.setExp({ state: "done", progress: 1, etaSec: 0, frames: res.frames, detail: "", result: res });
       } else {
-        const res = mode === "realtime"
+        let used = mode;
+        let res = mode === "realtime"
           ? await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl, trim)
-          : await this.runOffline(media, file, bitrate, total, colourOn, ctrl, trim, req);
-        console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (${mode}), ${res.blob.type}, audio ${res.audioIncluded ? "kept" : "dropped"}`);
+          : await this.runOffline(media, file, bitrate, total, colourOn, ctrl, trim, req, this.rtFallback);
+        if (!res) {
+          // Offline ran slower than real time here: the recorder takes this export and the clip's next ones.
+          this.rtFallback = false;
+          used = "realtime";
+          this.engine?.clearPrecomputed(false);
+          this.set({ exportMode: "realtime" });
+          this.setExp({ progress: 0, frames: 0, fps: 0, etaSec: null, note: null, profile: null });
+          res = await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl, trim);
+        }
+        console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (${used}), ${res.blob.type}, audio ${res.audioIncluded ? "kept" : "dropped"}`);
         this.setExp({
           state: "done",
           progress: 1,
@@ -2237,6 +2267,7 @@ export class Studio {
         // The export's last analysis may still be reading back.
         await this.settleEngine();
         e.clearPrecomputed(true);
+        (e.backend as unknown as { releaseCapture?: () => void }).releaseCapture?.();
         const clocks = this.backendClocks();
         if (clocks) clocks.syncProfile = false;
         if (this.geo) this.geo.syncProfile = false;
@@ -2287,7 +2318,9 @@ export class Studio {
     const reader = await media.openSampleReader(file).catch(() => null);
     if (!reader) return null;
     const pool = Number(q.get("pool"));
-    e.analysisPoolSize = Number.isFinite(pool) && pool >= 1 ? Math.min(4, Math.floor(pool)) : 2;
+    // Default: the cores beside the main thread and the engine's own worker, 2–4 (any worker gives the same packet).
+    const cores = typeof navigator !== "undefined" && navigator.hardwareConcurrency > 0 ? navigator.hardwareConcurrency : 4;
+    e.analysisPoolSize = Number.isFinite(pool) && pool >= 1 ? Math.min(4, Math.floor(pool)) : Math.min(4, Math.max(2, cores - 2));
     e.verifyPrecomputed = q.get("precheck") === "1";
     Object.assign(e.precomputeStats, { hits: 0, misses: 0, mismatches: 0, personHits: 0, personMisses: 0 });
     const fps = this.snap.info?.fps || 30;
@@ -2365,8 +2398,10 @@ export class Studio {
    * every frame decoded, rendered once, encoded with its own timestamp.
    * The stage shows bitmaps of the encoded frames (never the full-size
    * render canvas, see ARCHITECTURE.md).
+   * `bailBelowRealtime` (WebKit): once the first seconds show the render running slower than the clip plays,
+   * stops and resolves null so the real-time recorder takes the export.
    */
-  private async runOffline(media: MediaMod, file: File, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null, req: ExportRequest = {}) {
+  private async runOffline(media: MediaMod, file: File, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null, req: ExportRequest = {}, bailBelowRealtime = false) {
     const e = this.engine, geo = this.geo;
     const geoOn = this.geometryActive();
     // Geometry drawn in the colour engine's context (no canvas copy), when it can share it.
@@ -2378,6 +2413,10 @@ export class Studio {
     if (footage) console.info(`[export] footage ${this.snap.footage.active} (mode ${footage}${retag ? ", frames re-tagged" : ""}${hp ? ", half-float" : ""})`);
     // Playwright's WebKit encodes canvas-wrapped frames upside down (frame-orientation.ts measures it end to end).
     const fixFrame = await canvasFrameFix((line) => console.info("[export]", line));
+    // A canvas frame would need that re-wrap (a copy more per frame): the WebGL2 backend reads back instead.
+    if (colourOn && fixFrame && e?.backend.kind === "webgl2" && !new URLSearchParams(location.search).get("capture")) {
+      (e.backend as unknown as { setCaptureMode?: (m: "readback") => void }).setCaptureMode?.("readback");
+    }
     await this.engineForExport();
     this.setExp({ state: "running", detail: "Rendering" });
     const prof = this.startProfile();
@@ -2390,12 +2429,18 @@ export class Studio {
       prof.thumbReadbackMs = e.workerMs.readback - worker0.readback;
       prof.extra = { poolWait: e.workerMs.poolWait - worker0.poolWait, personWait: e.workerMs.personWait - worker0.personWait };
     };
-    const look = colourOn ? await this.lookaheadFor(media, file, "clip", { geoOn, footage, hp, retag, prof, signal: ctrl.signal, endSec: trim?.end }) : null;
+    // The run's own abort: the user's cancel, or the speed check handing over to the real-time recorder.
+    const run = new AbortController();
+    const onCancel = () => run.abort();
+    ctrl.signal.addEventListener("abort", onCancel, { once: true });
+    let bailed = false;
+    let speedFrom: { wall: number; out: number; paused: number } | null = null;
+    const look = colourOn ? await this.lookaheadFor(media, file, "clip", { geoOn, footage, hp, retag, prof, signal: run.signal, endSec: trim?.end }) : null;
     // ?framehash=1 (determinism checks): a hash of every encoded frame's pixels, before the encoder.
     const hashes: string[] | null = new URLSearchParams(location.search).get("framehash") === "1" ? [] : null;
     const started = performance.now();
     let frames = 0;
-    let lastUi = 0, lastLive = 0;
+    let lastUi = 0, lastLive = 0, liveBusy = false;
     // ETA from the work done in this run: a resumed export starts part-way, and paused time doesn't count.
     let startProgress = 0, pausedMs = 0, pausedAt = 0;
     // One frame at a time whenever a canvas is shared between stages (the
@@ -2496,16 +2541,22 @@ export class Studio {
               prof.add("readback", performance.now() - tp);
             }
             tp = performance.now();
-            // Frames wrapped from a canvas (not the WebGPU backend's buffer readback).
-            if (fixFrame && (!colourOn || e?.backend.kind === "webgl2" || (e?.backend as unknown as { capture?: string | null }).capture !== "readback")) out = await fixFrame(out);
+            // Frames wrapped from a canvas (not a backend's buffer readback: those are built from top-down rows).
+            if (fixFrame && (!colourOn || (e?.backend as unknown as { capture?: string | null }).capture !== "readback")) out = await fixFrame(out);
             out = media.evenFrame(out);
             prof.add("readback", performance.now() - tp);
             if (hashes && !fi.prime) hashes.push(await frameHash(out));
             frames++;
             const now = performance.now();
-            if (now - lastLive > LIVE_EVERY_MS) {
+            if (now - lastLive > LIVE_EVERY_MS && !liveBusy) {
+              // The stage's picture of the export, off the frame's path: a clone is drawn while the frame encodes.
               lastLive = now;
-              await prof.time("ui", () => this.emitFrame(out));
+              liveBusy = true;
+              const copy = out.clone();
+              void prof.time("ui", () => this.emitFrame(copy)).catch(() => undefined).finally(() => {
+                copy.close();
+                liveBusy = false;
+              });
             }
             if (now - lastUi > 250 && !fi.prime) {
               lastUi = now;
@@ -2517,6 +2568,22 @@ export class Studio {
               workerTimes();
               prof.pausedMs = pausedMs;
               this.setExp({ frames, fps, progress, etaSec: eta, detail: `${fi.displayWidth}×${fi.displayHeight} · ${fps.toFixed(1)} fps`, profile: prof.summary() });
+              // Speed check (WebKit): clip seconds per wall second over ~3 s after a warm-up (first analyses, the
+              // capture benchmark, the person model loading), once; slower than real time hands over.
+              if (bailBelowRealtime && !bailed) {
+                if (!speedFrom) {
+                  if (frames >= 15) speedFrom = { wall: now, out: fi.outTimeSec, paused: pausedMs };
+                } else if (now - speedFrom.wall - (pausedMs - speedFrom.paused) >= REALTIME_CHECK_MS) {
+                  const speed = (fi.outTimeSec - speedFrom.out) / ((now - speedFrom.wall - (pausedMs - speedFrom.paused)) / 1000);
+                  bailBelowRealtime = false;
+                  console.info(`[export] offline runs at ${speed.toFixed(2)}× real time`);
+                  if (speed < 1 && total - fi.outTimeSec > 2) {
+                    console.info("[export] slower than real time: handing over to the real-time recorder");
+                    bailed = true;
+                    run.abort();
+                  }
+                }
+              }
             }
             return out;
           } finally {
@@ -2530,7 +2597,7 @@ export class Studio {
         bitrate,
         opfsPrefix: OPFS_PREFIX,
         pipelineDepth: geoOn || !colourOn ? 1 : 3,
-        signal: ctrl.signal,
+        signal: run.signal,
         log: (line) => console.info("[export]", line),
         onProgress: (p) => this.setExp({ progress: p }),
         profile: prof,
@@ -2549,7 +2616,14 @@ export class Studio {
           this.setExp({ paused });
         },
       },
-    ).finally(() => look?.dispose());
+    ).catch((err: unknown) => {
+      if (bailed && !ctrl.signal.aborted) return null;
+      throw err;
+    }).finally(() => {
+      look?.dispose();
+      ctrl.signal.removeEventListener("abort", onCancel);
+    });
+    if (!result) return null;
     prof.end();
     prof.pausedMs = pausedMs;
     workerTimes();
@@ -2643,7 +2717,7 @@ export class Studio {
     let t0: number | null = null;
     let width = info.displayW, height = info.displayH;
     const started = performance.now();
-    let frames = 0, lastUi = 0, lastLive = 0;
+    let frames = 0, lastUi = 0, lastLive = 0, liveBusy = false;
     const onAbort = () => { if (session) void nat.DiveNative.cancelExport({ id: session.id }).catch(() => undefined); };
     ctrl.signal.addEventListener("abort", onAbort, { once: true });
     // The user can stop the export from the iOS Live Activity; the system can expire it.
@@ -2749,9 +2823,15 @@ export class Studio {
             frames++;
             prof.frames = frames;
             const now = performance.now();
-            if (now - lastLive > LIVE_EVERY_MS) {
+            if (now - lastLive > LIVE_EVERY_MS && !liveBusy) {
+              // The stage's picture of the export, off the frame's path: a clone is drawn while the frame encodes.
               lastLive = now;
-              await prof.time("ui", () => this.emitFrame(out));
+              liveBusy = true;
+              const copy = out.clone();
+              void prof.time("ui", () => this.emitFrame(copy)).catch(() => undefined).finally(() => {
+                copy.close();
+                liveBusy = false;
+              });
             }
             if (now - lastUi > 250) {
               lastUi = now;
@@ -2929,7 +3009,14 @@ export class Studio {
         e!.split = 0;
         this.uploadToEngine(bmp, 0, false, [W, H]);
         e!.setPreviewScale(1);
-        src = await e!.renderToFrame(0, 0, undefined);
+        // WebGL2: the canvas itself is drawn below, so no capture (nor its benchmark) at photo size.
+        const be = e!.backend as unknown as { setCaptureMode?: (m: "auto" | "canvas") => void };
+        if (e!.backend.kind === "webgl2") be.setCaptureMode?.("canvas");
+        try {
+          src = await e!.renderToFrame(0, 0, undefined);
+        } finally {
+          if (e!.backend.kind === "webgl2") be.setCaptureMode?.("auto");
+        }
         // WebGL2 backend: draw the canvas itself (it holds the full-size render); WebKit draws
         // a VideoFrame wrapped from a WebGL canvas upside down.
         if (e!.backend.kind === "webgl2") {
