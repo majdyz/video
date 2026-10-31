@@ -23,8 +23,13 @@
    "sha256": "5baf96f839a386b94b3e83941ca6845df218ef3189b434b64975bb2caf82bc61"
   },
   "vision_encoder.onnx": {
-   "bytes": 10052627,
-   "sha256": "bc93c159afc061be18cef400b6cec5aa2cd6cf0b3bcc68f0070ce428bf626332"
+   "bytes": 10075042,
+   "sha256": "b000cee69f380bd33e9a2ed738fe54bd593454d4a8759d677ac5c2aaffeec353"
+  },
+  "vision_encoder_lite.onnx": {
+   "bytes": 10006375,
+   "sha256": "6d19efc84f4389eddd02e6b69798a9f0ba7788feb26e05087116472fc279be3a"
   }
- }
+ },
+ "notes": "vision_encoder: pos0/pos1 outputs pruned (unused). vision_encoder_lite: 512-px input, feature maps resized x2 to the 1024 shapes (iPhone WebKit WASM memory)."
 }

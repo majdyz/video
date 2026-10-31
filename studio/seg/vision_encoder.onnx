@@ -1,4 +1,4 @@
-pytorch2.12.0:÷Çå
+onnx.utils.extract_model:ıöæ
 ú
 Mmodel.vision_encoder.backbone.timm_model.stages_0.blocks.0.se.fc1.weight__f16Hmodel.vision_encoder.backbone.timm_model.stages_0.blocks.0.se.fc1.weightNmodel.vision_encoder.backbone.timm_model.stages_0.blocks.0.se.fc1.weight__cast"Cast*	
 to 
@@ -3056,280 +3056,6 @@ $/vision_encoder/neck/Cast_5_output_0
 kernel_shape@@ *
 pads@ @ @ @  *
 strides@@ 
-Ğ
-?/vision_encoder/neck/position_encoding_1/Constant_output_0__f16:/vision_encoder/neck/position_encoding_1/Constant_output_0@/vision_encoder/neck/position_encoding_1/Constant_output_0__cast"Cast*	
-to 
-©</vision_encoder/neck/position_encoding_1/Constant_1_output_03/vision_encoder/neck/position_encoding_1/Constant_1"Constant**
-value*J       €       €        
-™</vision_encoder/neck/position_encoding_1/Constant_2_output_03/vision_encoder/neck/position_encoding_1/Constant_2"Constant*
-value*J        
-è
-</vision_encoder/neck/position_encoding_1/Constant_2_output_0A/vision_encoder/neck/position_encoding_1/ConstantOfShape_output_08/vision_encoder/neck/position_encoding_1/ConstantOfShape"ConstantOfShape*
-value*J        
-—</vision_encoder/neck/position_encoding_1/Constant_3_output_03/vision_encoder/neck/position_encoding_1/Constant_3"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-ë
-A/vision_encoder/neck/position_encoding_1/ConstantOfShape_output_0
-</vision_encoder/neck/position_encoding_1/Constant_3_output_05/vision_encoder/neck/position_encoding_1/Mul_output_0,/vision_encoder/neck/position_encoding_1/Mul"Mul
-å
-</vision_encoder/neck/position_encoding_1/Constant_1_output_0
-5/vision_encoder/neck/position_encoding_1/Mul_output_07/vision_encoder/neck/position_encoding_1/Equal_output_0./vision_encoder/neck/position_encoding_1/Equal"Equal
-ª
-7/vision_encoder/neck/position_encoding_1/Equal_output_0
-A/vision_encoder/neck/position_encoding_1/ConstantOfShape_output_0
-</vision_encoder/neck/position_encoding_1/Constant_1_output_07/vision_encoder/neck/position_encoding_1/Where_output_0./vision_encoder/neck/position_encoding_1/Where"Where
-è
-:/vision_encoder/neck/position_encoding_1/Constant_output_0
-7/vision_encoder/neck/position_encoding_1/Where_output_08/vision_encoder/neck/position_encoding_1/Expand_output_0//vision_encoder/neck/position_encoding_1/Expand"Expand
-Ö
-A/vision_encoder/neck/position_encoding_1/Constant_4_output_0__f16</vision_encoder/neck/position_encoding_1/Constant_4_output_0B/vision_encoder/neck/position_encoding_1/Constant_4_output_0__cast"Cast*	
-to 
-©</vision_encoder/neck/position_encoding_1/Constant_5_output_03/vision_encoder/neck/position_encoding_1/Constant_5"Constant**
-value*J       €       €        
-™</vision_encoder/neck/position_encoding_1/Constant_6_output_03/vision_encoder/neck/position_encoding_1/Constant_6"Constant*
-value*J        
-ì
-</vision_encoder/neck/position_encoding_1/Constant_6_output_0C/vision_encoder/neck/position_encoding_1/ConstantOfShape_1_output_0:/vision_encoder/neck/position_encoding_1/ConstantOfShape_1"ConstantOfShape*
-value*J        
-—</vision_encoder/neck/position_encoding_1/Constant_7_output_03/vision_encoder/neck/position_encoding_1/Constant_7"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-ñ
-C/vision_encoder/neck/position_encoding_1/ConstantOfShape_1_output_0
-</vision_encoder/neck/position_encoding_1/Constant_7_output_07/vision_encoder/neck/position_encoding_1/Mul_1_output_0./vision_encoder/neck/position_encoding_1/Mul_1"Mul
-ë
-</vision_encoder/neck/position_encoding_1/Constant_5_output_0
-7/vision_encoder/neck/position_encoding_1/Mul_1_output_09/vision_encoder/neck/position_encoding_1/Equal_1_output_00/vision_encoder/neck/position_encoding_1/Equal_1"Equal
-²
-9/vision_encoder/neck/position_encoding_1/Equal_1_output_0
-C/vision_encoder/neck/position_encoding_1/ConstantOfShape_1_output_0
-</vision_encoder/neck/position_encoding_1/Constant_5_output_09/vision_encoder/neck/position_encoding_1/Where_1_output_00/vision_encoder/neck/position_encoding_1/Where_1"Where
-ğ
-</vision_encoder/neck/position_encoding_1/Constant_4_output_0
-9/vision_encoder/neck/position_encoding_1/Where_1_output_0:/vision_encoder/neck/position_encoding_1/Expand_1_output_01/vision_encoder/neck/position_encoding_1/Expand_1"Expand
-™</vision_encoder/neck/position_encoding_1/Constant_8_output_03/vision_encoder/neck/position_encoding_1/Constant_8"Constant*
-value*J        
-™</vision_encoder/neck/position_encoding_1/Constant_9_output_03/vision_encoder/neck/position_encoding_1/Constant_9"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_1/Constant_10_output_04/vision_encoder/neck/position_encoding_1/Constant_10"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_1/Constant_11_output_04/vision_encoder/neck/position_encoding_1/Constant_11"Constant*
-value*J        
-¤
-8/vision_encoder/neck/position_encoding_1/Expand_output_0
-</vision_encoder/neck/position_encoding_1/Constant_9_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_10_output_0
-</vision_encoder/neck/position_encoding_1/Constant_8_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_11_output_07/vision_encoder/neck/position_encoding_1/Slice_output_0./vision_encoder/neck/position_encoding_1/Slice"Slice
-•=/vision_encoder/neck/position_encoding_1/Constant_12_output_04/vision_encoder/neck/position_encoding_1/Constant_12"Constant*
-value*J½7†5 
-â
-7/vision_encoder/neck/position_encoding_1/Slice_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_12_output_05/vision_encoder/neck/position_encoding_1/Add_output_0,/vision_encoder/neck/position_encoding_1/Add"Add
-Û
-8/vision_encoder/neck/position_encoding_1/Expand_output_0
-5/vision_encoder/neck/position_encoding_1/Add_output_05/vision_encoder/neck/position_encoding_1/Div_output_0,/vision_encoder/neck/position_encoding_1/Div"Div
-•=/vision_encoder/neck/position_encoding_1/Constant_13_output_04/vision_encoder/neck/position_encoding_1/Constant_13"Constant*
-value*JÛÉ@ 
-ä
-5/vision_encoder/neck/position_encoding_1/Div_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_13_output_07/vision_encoder/neck/position_encoding_1/Mul_2_output_0./vision_encoder/neck/position_encoding_1/Mul_2"Mul
-›=/vision_encoder/neck/position_encoding_1/Constant_14_output_04/vision_encoder/neck/position_encoding_1/Constant_14"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_1/Constant_15_output_04/vision_encoder/neck/position_encoding_1/Constant_15"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_1/Constant_16_output_04/vision_encoder/neck/position_encoding_1/Constant_16"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_1/Constant_17_output_04/vision_encoder/neck/position_encoding_1/Constant_17"Constant*
-value*J        
-¬
-:/vision_encoder/neck/position_encoding_1/Expand_1_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_15_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_16_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_14_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_17_output_09/vision_encoder/neck/position_encoding_1/Slice_1_output_00/vision_encoder/neck/position_encoding_1/Slice_1"Slice
-•=/vision_encoder/neck/position_encoding_1/Constant_18_output_04/vision_encoder/neck/position_encoding_1/Constant_18"Constant*
-value*J½7†5 
-è
-9/vision_encoder/neck/position_encoding_1/Slice_1_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_18_output_07/vision_encoder/neck/position_encoding_1/Add_1_output_0./vision_encoder/neck/position_encoding_1/Add_1"Add
-ã
-:/vision_encoder/neck/position_encoding_1/Expand_1_output_0
-7/vision_encoder/neck/position_encoding_1/Add_1_output_07/vision_encoder/neck/position_encoding_1/Div_1_output_0./vision_encoder/neck/position_encoding_1/Div_1"Div
-•=/vision_encoder/neck/position_encoding_1/Constant_19_output_04/vision_encoder/neck/position_encoding_1/Constant_19"Constant*
-value*JÛÉ@ 
-æ
-7/vision_encoder/neck/position_encoding_1/Div_1_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_19_output_07/vision_encoder/neck/position_encoding_1/Mul_3_output_0./vision_encoder/neck/position_encoding_1/Mul_3"Mul
-›=/vision_encoder/neck/position_encoding_1/Constant_20_output_04/vision_encoder/neck/position_encoding_1/Constant_20"Constant*
-value*J        
-ô
-7/vision_encoder/neck/position_encoding_1/Mul_3_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_20_output_0;/vision_encoder/neck/position_encoding_1/Unsqueeze_output_02/vision_encoder/neck/position_encoding_1/Unsqueeze"	Unsqueeze
-Ù
-B/vision_encoder/neck/position_encoding_1/Constant_21_output_0__f16=/vision_encoder/neck/position_encoding_1/Constant_21_output_0C/vision_encoder/neck/position_encoding_1/Constant_21_output_0__cast"Cast*	
-to 
-ê
-;/vision_encoder/neck/position_encoding_1/Unsqueeze_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_21_output_07/vision_encoder/neck/position_encoding_1/Div_2_output_0./vision_encoder/neck/position_encoding_1/Div_2"Div
-›=/vision_encoder/neck/position_encoding_1/Constant_22_output_04/vision_encoder/neck/position_encoding_1/Constant_22"Constant*
-value*J        
-ø
-7/vision_encoder/neck/position_encoding_1/Mul_2_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_22_output_0=/vision_encoder/neck/position_encoding_1/Unsqueeze_1_output_04/vision_encoder/neck/position_encoding_1/Unsqueeze_1"	Unsqueeze
-Ù
-B/vision_encoder/neck/position_encoding_1/Constant_23_output_0__f16=/vision_encoder/neck/position_encoding_1/Constant_23_output_0C/vision_encoder/neck/position_encoding_1/Constant_23_output_0__cast"Cast*	
-to 
-ì
-=/vision_encoder/neck/position_encoding_1/Unsqueeze_1_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_23_output_07/vision_encoder/neck/position_encoding_1/Div_3_output_0./vision_encoder/neck/position_encoding_1/Div_3"Div
-›=/vision_encoder/neck/position_encoding_1/Constant_24_output_04/vision_encoder/neck/position_encoding_1/Constant_24"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_1/Constant_25_output_04/vision_encoder/neck/position_encoding_1/Constant_25"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_1/Constant_26_output_04/vision_encoder/neck/position_encoding_1/Constant_26"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_1/Constant_27_output_04/vision_encoder/neck/position_encoding_1/Constant_27"Constant*
-value*J        
-©
-7/vision_encoder/neck/position_encoding_1/Div_2_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_25_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_26_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_24_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_27_output_09/vision_encoder/neck/position_encoding_1/Slice_2_output_00/vision_encoder/neck/position_encoding_1/Slice_2"Slice
-¥
-9/vision_encoder/neck/position_encoding_1/Slice_2_output_05/vision_encoder/neck/position_encoding_1/Sin_output_0,/vision_encoder/neck/position_encoding_1/Sin"Sin
-›=/vision_encoder/neck/position_encoding_1/Constant_28_output_04/vision_encoder/neck/position_encoding_1/Constant_28"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_1/Constant_29_output_04/vision_encoder/neck/position_encoding_1/Constant_29"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_1/Constant_30_output_04/vision_encoder/neck/position_encoding_1/Constant_30"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_1/Constant_31_output_04/vision_encoder/neck/position_encoding_1/Constant_31"Constant*
-value*J        
-©
-7/vision_encoder/neck/position_encoding_1/Div_2_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_29_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_30_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_28_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_31_output_09/vision_encoder/neck/position_encoding_1/Slice_3_output_00/vision_encoder/neck/position_encoding_1/Slice_3"Slice
-¥
-9/vision_encoder/neck/position_encoding_1/Slice_3_output_05/vision_encoder/neck/position_encoding_1/Cos_output_0,/vision_encoder/neck/position_encoding_1/Cos"Cos
-›=/vision_encoder/neck/position_encoding_1/Constant_32_output_04/vision_encoder/neck/position_encoding_1/Constant_32"Constant*
-value*J        
-ö
-5/vision_encoder/neck/position_encoding_1/Sin_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_32_output_0=/vision_encoder/neck/position_encoding_1/Unsqueeze_2_output_04/vision_encoder/neck/position_encoding_1/Unsqueeze_2"	Unsqueeze
-›=/vision_encoder/neck/position_encoding_1/Constant_33_output_04/vision_encoder/neck/position_encoding_1/Constant_33"Constant*
-value*J        
-ö
-5/vision_encoder/neck/position_encoding_1/Cos_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_33_output_0=/vision_encoder/neck/position_encoding_1/Unsqueeze_3_output_04/vision_encoder/neck/position_encoding_1/Unsqueeze_3"	Unsqueeze
-ş
-=/vision_encoder/neck/position_encoding_1/Unsqueeze_2_output_0
-=/vision_encoder/neck/position_encoding_1/Unsqueeze_3_output_08/vision_encoder/neck/position_encoding_1/Concat_output_0//vision_encoder/neck/position_encoding_1/Concat"Concat*
-axis 
-ª
-8/vision_encoder/neck/position_encoding_1/Concat_output_07/vision_encoder/neck/position_encoding_1/Shape_output_0./vision_encoder/neck/position_encoding_1/Shape"Shape
-›=/vision_encoder/neck/position_encoding_1/Constant_34_output_04/vision_encoder/neck/position_encoding_1/Constant_34"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_1/Constant_35_output_04/vision_encoder/neck/position_encoding_1/Constant_35"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_1/Constant_36_output_04/vision_encoder/neck/position_encoding_1/Constant_36"Constant*
-value*J        
-ê
-7/vision_encoder/neck/position_encoding_1/Shape_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_35_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_36_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_34_output_09/vision_encoder/neck/position_encoding_1/Slice_4_output_00/vision_encoder/neck/position_encoding_1/Slice_4"Slice
-›=/vision_encoder/neck/position_encoding_1/Constant_37_output_04/vision_encoder/neck/position_encoding_1/Constant_37"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-ş
-9/vision_encoder/neck/position_encoding_1/Slice_4_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_37_output_0:/vision_encoder/neck/position_encoding_1/Concat_1_output_01/vision_encoder/neck/position_encoding_1/Concat_1"Concat*
-axis  
-ş
-8/vision_encoder/neck/position_encoding_1/Concat_output_0
-:/vision_encoder/neck/position_encoding_1/Concat_1_output_09/vision_encoder/neck/position_encoding_1/Reshape_output_00/vision_encoder/neck/position_encoding_1/Reshape"Reshape*
-	allowzero  
-›=/vision_encoder/neck/position_encoding_1/Constant_38_output_04/vision_encoder/neck/position_encoding_1/Constant_38"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_1/Constant_39_output_04/vision_encoder/neck/position_encoding_1/Constant_39"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_1/Constant_40_output_04/vision_encoder/neck/position_encoding_1/Constant_40"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_1/Constant_41_output_04/vision_encoder/neck/position_encoding_1/Constant_41"Constant*
-value*J        
-©
-7/vision_encoder/neck/position_encoding_1/Div_3_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_39_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_40_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_38_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_41_output_09/vision_encoder/neck/position_encoding_1/Slice_5_output_00/vision_encoder/neck/position_encoding_1/Slice_5"Slice
-©
-9/vision_encoder/neck/position_encoding_1/Slice_5_output_07/vision_encoder/neck/position_encoding_1/Sin_1_output_0./vision_encoder/neck/position_encoding_1/Sin_1"Sin
-›=/vision_encoder/neck/position_encoding_1/Constant_42_output_04/vision_encoder/neck/position_encoding_1/Constant_42"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_1/Constant_43_output_04/vision_encoder/neck/position_encoding_1/Constant_43"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_1/Constant_44_output_04/vision_encoder/neck/position_encoding_1/Constant_44"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_1/Constant_45_output_04/vision_encoder/neck/position_encoding_1/Constant_45"Constant*
-value*J        
-©
-7/vision_encoder/neck/position_encoding_1/Div_3_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_43_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_44_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_42_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_45_output_09/vision_encoder/neck/position_encoding_1/Slice_6_output_00/vision_encoder/neck/position_encoding_1/Slice_6"Slice
-©
-9/vision_encoder/neck/position_encoding_1/Slice_6_output_07/vision_encoder/neck/position_encoding_1/Cos_1_output_0./vision_encoder/neck/position_encoding_1/Cos_1"Cos
-›=/vision_encoder/neck/position_encoding_1/Constant_46_output_04/vision_encoder/neck/position_encoding_1/Constant_46"Constant*
-value*J        
-ø
-7/vision_encoder/neck/position_encoding_1/Sin_1_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_46_output_0=/vision_encoder/neck/position_encoding_1/Unsqueeze_4_output_04/vision_encoder/neck/position_encoding_1/Unsqueeze_4"	Unsqueeze
-›=/vision_encoder/neck/position_encoding_1/Constant_47_output_04/vision_encoder/neck/position_encoding_1/Constant_47"Constant*
-value*J        
-ø
-7/vision_encoder/neck/position_encoding_1/Cos_1_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_47_output_0=/vision_encoder/neck/position_encoding_1/Unsqueeze_5_output_04/vision_encoder/neck/position_encoding_1/Unsqueeze_5"	Unsqueeze
-‚
-=/vision_encoder/neck/position_encoding_1/Unsqueeze_4_output_0
-=/vision_encoder/neck/position_encoding_1/Unsqueeze_5_output_0:/vision_encoder/neck/position_encoding_1/Concat_2_output_01/vision_encoder/neck/position_encoding_1/Concat_2"Concat*
-axis 
-°
-:/vision_encoder/neck/position_encoding_1/Concat_2_output_09/vision_encoder/neck/position_encoding_1/Shape_1_output_00/vision_encoder/neck/position_encoding_1/Shape_1"Shape
-›=/vision_encoder/neck/position_encoding_1/Constant_48_output_04/vision_encoder/neck/position_encoding_1/Constant_48"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_1/Constant_49_output_04/vision_encoder/neck/position_encoding_1/Constant_49"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_1/Constant_50_output_04/vision_encoder/neck/position_encoding_1/Constant_50"Constant*
-value*J        
-ì
-9/vision_encoder/neck/position_encoding_1/Shape_1_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_49_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_50_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_48_output_09/vision_encoder/neck/position_encoding_1/Slice_7_output_00/vision_encoder/neck/position_encoding_1/Slice_7"Slice
-›=/vision_encoder/neck/position_encoding_1/Constant_51_output_04/vision_encoder/neck/position_encoding_1/Constant_51"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-ş
-9/vision_encoder/neck/position_encoding_1/Slice_7_output_0
-=/vision_encoder/neck/position_encoding_1/Constant_51_output_0:/vision_encoder/neck/position_encoding_1/Concat_3_output_01/vision_encoder/neck/position_encoding_1/Concat_3"Concat*
-axis  
-„
-:/vision_encoder/neck/position_encoding_1/Concat_2_output_0
-:/vision_encoder/neck/position_encoding_1/Concat_3_output_0;/vision_encoder/neck/position_encoding_1/Reshape_1_output_02/vision_encoder/neck/position_encoding_1/Reshape_1"Reshape*
-	allowzero  
-ü
-;/vision_encoder/neck/position_encoding_1/Reshape_1_output_0
-9/vision_encoder/neck/position_encoding_1/Reshape_output_0:/vision_encoder/neck/position_encoding_1/Concat_4_output_01/vision_encoder/neck/position_encoding_1/Concat_4"Concat*
-axis 
-Ë
-:/vision_encoder/neck/position_encoding_1/Concat_4_output_0;/vision_encoder/neck/position_encoding_1/Transpose_output_02/vision_encoder/neck/position_encoding_1/Transpose"	Transpose*
-perm@ @@@ 
-‘
-;/vision_encoder/neck/position_encoding_1/Transpose_output_0$/vision_encoder/neck/Cast_6_output_0/vision_encoder/neck/Cast_6"Cast*	
-to 
 ”
 >/vision_encoder/backbone/stages_0/blocks/blocks.1/Add_output_0$/vision_encoder/neck/Cast_7_output_0/vision_encoder/neck/Cast_7"Cast*	
 to 
@@ -3342,280 +3068,6 @@ $/vision_encoder/neck/Cast_7_output_0
 kernel_shape@@ *
 pads@ @ @ @  *
 strides@@ 
-Ğ
-?/vision_encoder/neck/position_encoding_2/Constant_output_0__f16:/vision_encoder/neck/position_encoding_2/Constant_output_0@/vision_encoder/neck/position_encoding_2/Constant_output_0__cast"Cast*	
-to 
-©</vision_encoder/neck/position_encoding_2/Constant_1_output_03/vision_encoder/neck/position_encoding_2/Constant_1"Constant**
-value*J                      
-™</vision_encoder/neck/position_encoding_2/Constant_2_output_03/vision_encoder/neck/position_encoding_2/Constant_2"Constant*
-value*J        
-è
-</vision_encoder/neck/position_encoding_2/Constant_2_output_0A/vision_encoder/neck/position_encoding_2/ConstantOfShape_output_08/vision_encoder/neck/position_encoding_2/ConstantOfShape"ConstantOfShape*
-value*J        
-—</vision_encoder/neck/position_encoding_2/Constant_3_output_03/vision_encoder/neck/position_encoding_2/Constant_3"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-ë
-A/vision_encoder/neck/position_encoding_2/ConstantOfShape_output_0
-</vision_encoder/neck/position_encoding_2/Constant_3_output_05/vision_encoder/neck/position_encoding_2/Mul_output_0,/vision_encoder/neck/position_encoding_2/Mul"Mul
-å
-</vision_encoder/neck/position_encoding_2/Constant_1_output_0
-5/vision_encoder/neck/position_encoding_2/Mul_output_07/vision_encoder/neck/position_encoding_2/Equal_output_0./vision_encoder/neck/position_encoding_2/Equal"Equal
-ª
-7/vision_encoder/neck/position_encoding_2/Equal_output_0
-A/vision_encoder/neck/position_encoding_2/ConstantOfShape_output_0
-</vision_encoder/neck/position_encoding_2/Constant_1_output_07/vision_encoder/neck/position_encoding_2/Where_output_0./vision_encoder/neck/position_encoding_2/Where"Where
-è
-:/vision_encoder/neck/position_encoding_2/Constant_output_0
-7/vision_encoder/neck/position_encoding_2/Where_output_08/vision_encoder/neck/position_encoding_2/Expand_output_0//vision_encoder/neck/position_encoding_2/Expand"Expand
-Ö
-A/vision_encoder/neck/position_encoding_2/Constant_4_output_0__f16</vision_encoder/neck/position_encoding_2/Constant_4_output_0B/vision_encoder/neck/position_encoding_2/Constant_4_output_0__cast"Cast*	
-to 
-©</vision_encoder/neck/position_encoding_2/Constant_5_output_03/vision_encoder/neck/position_encoding_2/Constant_5"Constant**
-value*J                      
-™</vision_encoder/neck/position_encoding_2/Constant_6_output_03/vision_encoder/neck/position_encoding_2/Constant_6"Constant*
-value*J        
-ì
-</vision_encoder/neck/position_encoding_2/Constant_6_output_0C/vision_encoder/neck/position_encoding_2/ConstantOfShape_1_output_0:/vision_encoder/neck/position_encoding_2/ConstantOfShape_1"ConstantOfShape*
-value*J        
-—</vision_encoder/neck/position_encoding_2/Constant_7_output_03/vision_encoder/neck/position_encoding_2/Constant_7"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-ñ
-C/vision_encoder/neck/position_encoding_2/ConstantOfShape_1_output_0
-</vision_encoder/neck/position_encoding_2/Constant_7_output_07/vision_encoder/neck/position_encoding_2/Mul_1_output_0./vision_encoder/neck/position_encoding_2/Mul_1"Mul
-ë
-</vision_encoder/neck/position_encoding_2/Constant_5_output_0
-7/vision_encoder/neck/position_encoding_2/Mul_1_output_09/vision_encoder/neck/position_encoding_2/Equal_1_output_00/vision_encoder/neck/position_encoding_2/Equal_1"Equal
-²
-9/vision_encoder/neck/position_encoding_2/Equal_1_output_0
-C/vision_encoder/neck/position_encoding_2/ConstantOfShape_1_output_0
-</vision_encoder/neck/position_encoding_2/Constant_5_output_09/vision_encoder/neck/position_encoding_2/Where_1_output_00/vision_encoder/neck/position_encoding_2/Where_1"Where
-ğ
-</vision_encoder/neck/position_encoding_2/Constant_4_output_0
-9/vision_encoder/neck/position_encoding_2/Where_1_output_0:/vision_encoder/neck/position_encoding_2/Expand_1_output_01/vision_encoder/neck/position_encoding_2/Expand_1"Expand
-™</vision_encoder/neck/position_encoding_2/Constant_8_output_03/vision_encoder/neck/position_encoding_2/Constant_8"Constant*
-value*J        
-™</vision_encoder/neck/position_encoding_2/Constant_9_output_03/vision_encoder/neck/position_encoding_2/Constant_9"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_2/Constant_10_output_04/vision_encoder/neck/position_encoding_2/Constant_10"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_2/Constant_11_output_04/vision_encoder/neck/position_encoding_2/Constant_11"Constant*
-value*J        
-¤
-8/vision_encoder/neck/position_encoding_2/Expand_output_0
-</vision_encoder/neck/position_encoding_2/Constant_9_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_10_output_0
-</vision_encoder/neck/position_encoding_2/Constant_8_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_11_output_07/vision_encoder/neck/position_encoding_2/Slice_output_0./vision_encoder/neck/position_encoding_2/Slice"Slice
-•=/vision_encoder/neck/position_encoding_2/Constant_12_output_04/vision_encoder/neck/position_encoding_2/Constant_12"Constant*
-value*J½7†5 
-â
-7/vision_encoder/neck/position_encoding_2/Slice_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_12_output_05/vision_encoder/neck/position_encoding_2/Add_output_0,/vision_encoder/neck/position_encoding_2/Add"Add
-Û
-8/vision_encoder/neck/position_encoding_2/Expand_output_0
-5/vision_encoder/neck/position_encoding_2/Add_output_05/vision_encoder/neck/position_encoding_2/Div_output_0,/vision_encoder/neck/position_encoding_2/Div"Div
-•=/vision_encoder/neck/position_encoding_2/Constant_13_output_04/vision_encoder/neck/position_encoding_2/Constant_13"Constant*
-value*JÛÉ@ 
-ä
-5/vision_encoder/neck/position_encoding_2/Div_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_13_output_07/vision_encoder/neck/position_encoding_2/Mul_2_output_0./vision_encoder/neck/position_encoding_2/Mul_2"Mul
-›=/vision_encoder/neck/position_encoding_2/Constant_14_output_04/vision_encoder/neck/position_encoding_2/Constant_14"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_2/Constant_15_output_04/vision_encoder/neck/position_encoding_2/Constant_15"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_2/Constant_16_output_04/vision_encoder/neck/position_encoding_2/Constant_16"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_2/Constant_17_output_04/vision_encoder/neck/position_encoding_2/Constant_17"Constant*
-value*J        
-¬
-:/vision_encoder/neck/position_encoding_2/Expand_1_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_15_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_16_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_14_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_17_output_09/vision_encoder/neck/position_encoding_2/Slice_1_output_00/vision_encoder/neck/position_encoding_2/Slice_1"Slice
-•=/vision_encoder/neck/position_encoding_2/Constant_18_output_04/vision_encoder/neck/position_encoding_2/Constant_18"Constant*
-value*J½7†5 
-è
-9/vision_encoder/neck/position_encoding_2/Slice_1_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_18_output_07/vision_encoder/neck/position_encoding_2/Add_1_output_0./vision_encoder/neck/position_encoding_2/Add_1"Add
-ã
-:/vision_encoder/neck/position_encoding_2/Expand_1_output_0
-7/vision_encoder/neck/position_encoding_2/Add_1_output_07/vision_encoder/neck/position_encoding_2/Div_1_output_0./vision_encoder/neck/position_encoding_2/Div_1"Div
-•=/vision_encoder/neck/position_encoding_2/Constant_19_output_04/vision_encoder/neck/position_encoding_2/Constant_19"Constant*
-value*JÛÉ@ 
-æ
-7/vision_encoder/neck/position_encoding_2/Div_1_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_19_output_07/vision_encoder/neck/position_encoding_2/Mul_3_output_0./vision_encoder/neck/position_encoding_2/Mul_3"Mul
-›=/vision_encoder/neck/position_encoding_2/Constant_20_output_04/vision_encoder/neck/position_encoding_2/Constant_20"Constant*
-value*J        
-ô
-7/vision_encoder/neck/position_encoding_2/Mul_3_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_20_output_0;/vision_encoder/neck/position_encoding_2/Unsqueeze_output_02/vision_encoder/neck/position_encoding_2/Unsqueeze"	Unsqueeze
-Ù
-B/vision_encoder/neck/position_encoding_2/Constant_21_output_0__f16=/vision_encoder/neck/position_encoding_2/Constant_21_output_0C/vision_encoder/neck/position_encoding_2/Constant_21_output_0__cast"Cast*	
-to 
-ê
-;/vision_encoder/neck/position_encoding_2/Unsqueeze_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_21_output_07/vision_encoder/neck/position_encoding_2/Div_2_output_0./vision_encoder/neck/position_encoding_2/Div_2"Div
-›=/vision_encoder/neck/position_encoding_2/Constant_22_output_04/vision_encoder/neck/position_encoding_2/Constant_22"Constant*
-value*J        
-ø
-7/vision_encoder/neck/position_encoding_2/Mul_2_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_22_output_0=/vision_encoder/neck/position_encoding_2/Unsqueeze_1_output_04/vision_encoder/neck/position_encoding_2/Unsqueeze_1"	Unsqueeze
-Ù
-B/vision_encoder/neck/position_encoding_2/Constant_23_output_0__f16=/vision_encoder/neck/position_encoding_2/Constant_23_output_0C/vision_encoder/neck/position_encoding_2/Constant_23_output_0__cast"Cast*	
-to 
-ì
-=/vision_encoder/neck/position_encoding_2/Unsqueeze_1_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_23_output_07/vision_encoder/neck/position_encoding_2/Div_3_output_0./vision_encoder/neck/position_encoding_2/Div_3"Div
-›=/vision_encoder/neck/position_encoding_2/Constant_24_output_04/vision_encoder/neck/position_encoding_2/Constant_24"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_2/Constant_25_output_04/vision_encoder/neck/position_encoding_2/Constant_25"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_2/Constant_26_output_04/vision_encoder/neck/position_encoding_2/Constant_26"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_2/Constant_27_output_04/vision_encoder/neck/position_encoding_2/Constant_27"Constant*
-value*J        
-©
-7/vision_encoder/neck/position_encoding_2/Div_2_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_25_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_26_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_24_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_27_output_09/vision_encoder/neck/position_encoding_2/Slice_2_output_00/vision_encoder/neck/position_encoding_2/Slice_2"Slice
-¥
-9/vision_encoder/neck/position_encoding_2/Slice_2_output_05/vision_encoder/neck/position_encoding_2/Sin_output_0,/vision_encoder/neck/position_encoding_2/Sin"Sin
-›=/vision_encoder/neck/position_encoding_2/Constant_28_output_04/vision_encoder/neck/position_encoding_2/Constant_28"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_2/Constant_29_output_04/vision_encoder/neck/position_encoding_2/Constant_29"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_2/Constant_30_output_04/vision_encoder/neck/position_encoding_2/Constant_30"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_2/Constant_31_output_04/vision_encoder/neck/position_encoding_2/Constant_31"Constant*
-value*J        
-©
-7/vision_encoder/neck/position_encoding_2/Div_2_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_29_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_30_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_28_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_31_output_09/vision_encoder/neck/position_encoding_2/Slice_3_output_00/vision_encoder/neck/position_encoding_2/Slice_3"Slice
-¥
-9/vision_encoder/neck/position_encoding_2/Slice_3_output_05/vision_encoder/neck/position_encoding_2/Cos_output_0,/vision_encoder/neck/position_encoding_2/Cos"Cos
-›=/vision_encoder/neck/position_encoding_2/Constant_32_output_04/vision_encoder/neck/position_encoding_2/Constant_32"Constant*
-value*J        
-ö
-5/vision_encoder/neck/position_encoding_2/Sin_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_32_output_0=/vision_encoder/neck/position_encoding_2/Unsqueeze_2_output_04/vision_encoder/neck/position_encoding_2/Unsqueeze_2"	Unsqueeze
-›=/vision_encoder/neck/position_encoding_2/Constant_33_output_04/vision_encoder/neck/position_encoding_2/Constant_33"Constant*
-value*J        
-ö
-5/vision_encoder/neck/position_encoding_2/Cos_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_33_output_0=/vision_encoder/neck/position_encoding_2/Unsqueeze_3_output_04/vision_encoder/neck/position_encoding_2/Unsqueeze_3"	Unsqueeze
-ş
-=/vision_encoder/neck/position_encoding_2/Unsqueeze_2_output_0
-=/vision_encoder/neck/position_encoding_2/Unsqueeze_3_output_08/vision_encoder/neck/position_encoding_2/Concat_output_0//vision_encoder/neck/position_encoding_2/Concat"Concat*
-axis 
-ª
-8/vision_encoder/neck/position_encoding_2/Concat_output_07/vision_encoder/neck/position_encoding_2/Shape_output_0./vision_encoder/neck/position_encoding_2/Shape"Shape
-›=/vision_encoder/neck/position_encoding_2/Constant_34_output_04/vision_encoder/neck/position_encoding_2/Constant_34"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_2/Constant_35_output_04/vision_encoder/neck/position_encoding_2/Constant_35"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_2/Constant_36_output_04/vision_encoder/neck/position_encoding_2/Constant_36"Constant*
-value*J        
-ê
-7/vision_encoder/neck/position_encoding_2/Shape_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_35_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_36_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_34_output_09/vision_encoder/neck/position_encoding_2/Slice_4_output_00/vision_encoder/neck/position_encoding_2/Slice_4"Slice
-›=/vision_encoder/neck/position_encoding_2/Constant_37_output_04/vision_encoder/neck/position_encoding_2/Constant_37"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-ş
-9/vision_encoder/neck/position_encoding_2/Slice_4_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_37_output_0:/vision_encoder/neck/position_encoding_2/Concat_1_output_01/vision_encoder/neck/position_encoding_2/Concat_1"Concat*
-axis  
-ş
-8/vision_encoder/neck/position_encoding_2/Concat_output_0
-:/vision_encoder/neck/position_encoding_2/Concat_1_output_09/vision_encoder/neck/position_encoding_2/Reshape_output_00/vision_encoder/neck/position_encoding_2/Reshape"Reshape*
-	allowzero  
-›=/vision_encoder/neck/position_encoding_2/Constant_38_output_04/vision_encoder/neck/position_encoding_2/Constant_38"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_2/Constant_39_output_04/vision_encoder/neck/position_encoding_2/Constant_39"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_2/Constant_40_output_04/vision_encoder/neck/position_encoding_2/Constant_40"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_2/Constant_41_output_04/vision_encoder/neck/position_encoding_2/Constant_41"Constant*
-value*J        
-©
-7/vision_encoder/neck/position_encoding_2/Div_3_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_39_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_40_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_38_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_41_output_09/vision_encoder/neck/position_encoding_2/Slice_5_output_00/vision_encoder/neck/position_encoding_2/Slice_5"Slice
-©
-9/vision_encoder/neck/position_encoding_2/Slice_5_output_07/vision_encoder/neck/position_encoding_2/Sin_1_output_0./vision_encoder/neck/position_encoding_2/Sin_1"Sin
-›=/vision_encoder/neck/position_encoding_2/Constant_42_output_04/vision_encoder/neck/position_encoding_2/Constant_42"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_2/Constant_43_output_04/vision_encoder/neck/position_encoding_2/Constant_43"Constant*
-value*J        
-›=/vision_encoder/neck/position_encoding_2/Constant_44_output_04/vision_encoder/neck/position_encoding_2/Constant_44"Constant*
-value*Jÿÿÿÿÿÿÿ 
-›=/vision_encoder/neck/position_encoding_2/Constant_45_output_04/vision_encoder/neck/position_encoding_2/Constant_45"Constant*
-value*J        
-©
-7/vision_encoder/neck/position_encoding_2/Div_3_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_43_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_44_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_42_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_45_output_09/vision_encoder/neck/position_encoding_2/Slice_6_output_00/vision_encoder/neck/position_encoding_2/Slice_6"Slice
-©
-9/vision_encoder/neck/position_encoding_2/Slice_6_output_07/vision_encoder/neck/position_encoding_2/Cos_1_output_0./vision_encoder/neck/position_encoding_2/Cos_1"Cos
-›=/vision_encoder/neck/position_encoding_2/Constant_46_output_04/vision_encoder/neck/position_encoding_2/Constant_46"Constant*
-value*J        
-ø
-7/vision_encoder/neck/position_encoding_2/Sin_1_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_46_output_0=/vision_encoder/neck/position_encoding_2/Unsqueeze_4_output_04/vision_encoder/neck/position_encoding_2/Unsqueeze_4"	Unsqueeze
-›=/vision_encoder/neck/position_encoding_2/Constant_47_output_04/vision_encoder/neck/position_encoding_2/Constant_47"Constant*
-value*J        
-ø
-7/vision_encoder/neck/position_encoding_2/Cos_1_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_47_output_0=/vision_encoder/neck/position_encoding_2/Unsqueeze_5_output_04/vision_encoder/neck/position_encoding_2/Unsqueeze_5"	Unsqueeze
-‚
-=/vision_encoder/neck/position_encoding_2/Unsqueeze_4_output_0
-=/vision_encoder/neck/position_encoding_2/Unsqueeze_5_output_0:/vision_encoder/neck/position_encoding_2/Concat_2_output_01/vision_encoder/neck/position_encoding_2/Concat_2"Concat*
-axis 
-°
-:/vision_encoder/neck/position_encoding_2/Concat_2_output_09/vision_encoder/neck/position_encoding_2/Shape_1_output_00/vision_encoder/neck/position_encoding_2/Shape_1"Shape
-›=/vision_encoder/neck/position_encoding_2/Constant_48_output_04/vision_encoder/neck/position_encoding_2/Constant_48"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_2/Constant_49_output_04/vision_encoder/neck/position_encoding_2/Constant_49"Constant*
-value*J         
-›=/vision_encoder/neck/position_encoding_2/Constant_50_output_04/vision_encoder/neck/position_encoding_2/Constant_50"Constant*
-value*J        
-ì
-9/vision_encoder/neck/position_encoding_2/Shape_1_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_49_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_50_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_48_output_09/vision_encoder/neck/position_encoding_2/Slice_7_output_00/vision_encoder/neck/position_encoding_2/Slice_7"Slice
-›=/vision_encoder/neck/position_encoding_2/Constant_51_output_04/vision_encoder/neck/position_encoding_2/Constant_51"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-ş
-9/vision_encoder/neck/position_encoding_2/Slice_7_output_0
-=/vision_encoder/neck/position_encoding_2/Constant_51_output_0:/vision_encoder/neck/position_encoding_2/Concat_3_output_01/vision_encoder/neck/position_encoding_2/Concat_3"Concat*
-axis  
-„
-:/vision_encoder/neck/position_encoding_2/Concat_2_output_0
-:/vision_encoder/neck/position_encoding_2/Concat_3_output_0;/vision_encoder/neck/position_encoding_2/Reshape_1_output_02/vision_encoder/neck/position_encoding_2/Reshape_1"Reshape*
-	allowzero  
-ü
-;/vision_encoder/neck/position_encoding_2/Reshape_1_output_0
-9/vision_encoder/neck/position_encoding_2/Reshape_output_0:/vision_encoder/neck/position_encoding_2/Concat_4_output_01/vision_encoder/neck/position_encoding_2/Concat_4"Concat*
-axis 
-Ë
-:/vision_encoder/neck/position_encoding_2/Concat_4_output_0;/vision_encoder/neck/position_encoding_2/Transpose_output_02/vision_encoder/neck/position_encoding_2/Transpose"	Transpose*
-perm@ @@@ 
-‘
-;/vision_encoder/neck/position_encoding_2/Transpose_output_0$/vision_encoder/neck/Cast_8_output_0/vision_encoder/neck/Cast_8"Cast*	
-to 
 û
 */vision_encoder/neck/convs.3/Conv_output_0
 !model.mask_decoder.conv_s0.weight
@@ -3706,54 +3158,6 @@ s
 /Reshape_2"Reshape*
 	allowzero  
 J
-$/vision_encoder/neck/Cast_8_output_0/Shape_3_output_0/Shape_3"Shape
-K/Constant_12_output_0/Constant_12"Constant*
-value*J         
-K/Constant_13_output_0/Constant_13"Constant*
-value*J         
-K/Constant_14_output_0/Constant_14"Constant*
-value*J        
-|
-/Shape_3_output_0
-/Constant_13_output_0
-/Constant_14_output_0
-/Constant_12_output_0/Slice_3_output_0/Slice_3"Slice
-K/Constant_15_output_0/Constant_15"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-^
-/Slice_3_output_0
-/Constant_15_output_0/Concat_3_output_0	/Concat_3"Concat*
-axis  
-v
-$/vision_encoder/neck/Cast_8_output_0
-/Concat_3_output_0/Reshape_3_output_0
-/Reshape_3"Reshape*
-	allowzero  
-J
-$/vision_encoder/neck/Cast_6_output_0/Shape_4_output_0/Shape_4"Shape
-K/Constant_16_output_0/Constant_16"Constant*
-value*J         
-K/Constant_17_output_0/Constant_17"Constant*
-value*J         
-K/Constant_18_output_0/Constant_18"Constant*
-value*J        
-|
-/Shape_4_output_0
-/Constant_17_output_0
-/Constant_18_output_0
-/Constant_16_output_0/Slice_4_output_0/Slice_4"Slice
-K/Constant_19_output_0/Constant_19"Constant*
-value*Jÿÿÿÿÿÿÿÿ 
-^
-/Slice_4_output_0
-/Constant_19_output_0/Concat_4_output_0	/Concat_4"Concat*
-axis  
-v
-$/vision_encoder/neck/Cast_6_output_0
-/Concat_4_output_0/Reshape_4_output_0
-/Reshape_4"Reshape*
-	allowzero  
-J
 $/vision_encoder/neck/Cast_4_output_0/Shape_5_output_0/Shape_5"Shape
 K/Constant_20_output_0/Constant_20"Constant*
 value*J         
@@ -3798,26 +3202,12 @@ c/Constant_26_output_0/Constant_26"Constant*2
 /Constant_26_output_0feats2
 /Reshape_8"Reshape*
 	allowzero  
-c/Constant_27_output_0/Constant_27"Constant*2
-value*&J        ÿÿÿÿÿÿÿÿ               
-Y
-/Reshape_3_output_0
-/Constant_27_output_0pos0
-/Reshape_9"Reshape*
-	allowzero  
-c/Constant_28_output_0/Constant_28"Constant*2
-value*&J        ÿÿÿÿÿÿÿÿ€       €        
-Z
-/Reshape_4_output_0
-/Constant_28_output_0pos1/Reshape_10"Reshape*
-	allowzero  
 c/Constant_29_output_0/Constant_29"Constant*2
 value*&J        ÿÿÿÿÿÿÿÿ@       @        
 Z
 /Reshape_5_output_0
 /Constant_29_output_0pos2/Reshape_11"Reshape*
-	allowzero  
-main_graph*Ü0
+	allowzero  Extracted from {main_graph}*Ü0
 BMmodel.vision_encoder.backbone.timm_model.stages_0.blocks.0.se.fc1.weight__f16J€Ç-)Ÿ­ˆ-\5hªÂ °Q­M"¢ñ±$¥ 11(¼¥,©k¨¢+¨&%µ5‹)“;˜î¦ö*x°!(©À(Ò¬V¬ )²ù¶$%c¤f S-YŸ»–†"ò0ö¯Í§¢(ä6v.-ç,©¯S1É¯:²J¥¾.0
 ªv.P¯µy1g­5=°¨¯İ¬Ú²È²/&Â­x±˜+³3/°2¬®0(Ñ4¤¥0e6™)°ª,§,+/º/¥0’µ¸§³®s/2µÜ²-X ¥ªt›)]0•+ê#¡+õ¬=-Ş&F î2,¸'ë²Ö¤t0®Ø+;¤â0[£Ê±§3£ 1¬$yÍ¬@¨Ô¯R²é.† ­o­4ª›¬ëï§-f¬w¤/}©¾0q#©0t¤s°j¬ø$«õ–±êœÓ$k*‰õ"Hµ¶¤Ì ®±í)¸(Z3¢ï™¯ªZ­g#2,«ù,"%(ßµ¨²µ«ü$‘g/ö/a¨k°†,0$h)¤¶¤©d™,¬¦¤¨	. -­©ã©ª0(,,Ù.Ö-¯¬ÿ°¦¨.'D6—­c,´T¹2-Vª8,ä°§­-°—¶§¬È¥æ-Ï38.×f¼ªé®ß¤÷'l¬D®´¥GÛ(Ú©”¡3ş/‘&õªŸÛ¬2.ª(©‡)M Õ+å*D'
 —Óä+ß)Ø$À­+@,¢,$Ï(ª­Äªà¯©©J/¤x¥Ëª/©Ça¤¬)Š©ğ WªP)Ù¶?+{¤µ<1E “&[ LF®‚>&ì" …H.$²!ú*V&ù ïq"&¶&¯,ó'²©)¾’•.ò'´¬Æ,ù9,k)!œš&¾*e#e¡¢"š,çµÖ6©+<1¥Ã+œ¨…4Ñ64„3«.Y1d®.#*8÷) 0$V4è¤ç2±³>+ c¯ö"¬4è1M±+9x²Š08-»²P1/%ß"‘¥o³–§{©[*±r­=°M¨ì°æ¥™/ +Î®”¦œ$.5±­§î-­¬U k*Æ&Ã.xœa0Q°•'–+b0£(ğ¤g¶-_,*!ê «ü°Î°¸(Y¤#+®&i£~¤¤&#/*§)@³ü¨<ªù0N/À$ÿ0ª™)Ï¦¯,R¤f*¨H¬²'h.|¬fÌª~¦å¤N)©b1¬Æ¥)°¡Ú'Ï¤‘&©Ÿ+†­A°³'¦›¥ò&¦/C(Â¤ ¨¢±OÊ«h¥77?µİ,÷°-1?®Õ°[¸µO-¥µ0	µé¬¿1¸s®D1°H¶”š®5;5V°¥Õ1Å2•¶j´'6.¸Q4E1ı°‘4†5'µS3î+£4½5H.H²á®Û¯48©/¥;£’¸},¸¨ğ¨V(,0W©Ÿ³ -+«$-L*n¨í+Cª-Ö¯o¢w/,X!¬å±ë(°;¬p2Oª’"h¥K­t¨Ñ¢î Ü(J':,?"-ê%4¨g,Å©Õ¥ã/Š+¢9§g°Ÿ1c.
@@ -27140,15 +26530,7 @@ Bonnx::Conv_2373__f16J€Ò¿ ÆÃ]Ä™E(ÉÏ»9½½ÆkÈ'ÈÂ„E‹ÃÎL~¼Å‚F/C5ÈG<B"ÄŞHÂ)ÄÈÓ
 B=/vision_encoder/neck/position_encoding/Constant_output_0__f16J€ < @ B D E F G H€H I€I J€J K€K L@L€LÀL M@M€MÀM N@N€NÀN O@O€OÀO P P@P`P€P PÀPàP Q Q@Q`Q€Q QÀQàQ R R@R`R€R RÀRàR S S@S`S€S SÀSàS T*Ì@
 B?/vision_encoder/neck/position_encoding/Constant_4_output_0__f16J€ < @ B D E F G H€H I€I J€J K€K L@L€LÀL M@M€MÀM N@N€NÀN O@O€OÀO P P@P`P€P PÀPàP Q Q@Q`Q€Q QÀQàQ R R@R`R€R RÀRàR S S@S`S€S SÀSàS T*Ê€
 B@/vision_encoder/neck/position_encoding/Constant_21_output_0__f16J€ < <<<V=V=)>)>??@@¾@¾@zAzASBSBNCNC8D8DßDßD E E~F~F€G€GTHTH I IÆIÆI«J«J³K³KrLrL"M"MîMîMÙNÙNèOèO‘P‘PEQEQRRSSTT°T°TjUjU@V@V8W8W+X+XĞXĞXYYkZkZi[i[G\G\ñ\ñ\µ]µ]—^—^œ_œ_e`e`aaÜaÜaÄbÄbĞcĞcƒdƒd6e6effòfòfhh¢h¢hYiYi-j-j"k"kllÁlÁl~m~mWnWnSoSo:p:p*Ê€
-B@/vision_encoder/neck/position_encoding/Constant_23_output_0__f16J€ < <<<V=V=)>)>??@@¾@¾@zAzASBSBNCNC8D8DßDßD E E~F~F€G€GTHTH I IÆIÆI«J«J³K³KrLrL"M"MîMîMÙNÙNèOèO‘P‘PEQEQRRSSTT°T°TjUjU@V@V8W8W+X+XĞXĞXYYkZkZi[i[G\G\ñ\ñ\µ]µ]—^—^œ_œ_e`e`aaÜaÜaÄbÄbĞcĞcƒdƒd6e6effòfòfhh¢h¢hYiYi-j-j"k"kllÁlÁl~m~mWnWnSoSo:p:p*Í€
-B?/vision_encoder/neck/position_encoding_1/Constant_output_0__f16J€ < @ B D E F G H€H I€I J€J K€K L@L€LÀL M@M€MÀM N@N€NÀN O@O€OÀO P P@P`P€P PÀPàP Q Q@Q`Q€Q QÀQàQ R R@R`R€R RÀRàR S S@S`S€S SÀSàS TT T0T@TPT`TpT€TT T°TÀTĞTàTğT UU U0U@UPU`UpU€UU U°UÀUĞUàUğU VV V0V@VPV`VpV€VV V°VÀVĞVàVğV WW W0W@WPW`WpW€WW W°WÀWĞWàWğW X*Ï€
-BA/vision_encoder/neck/position_encoding_1/Constant_4_output_0__f16J€ < @ B D E F G H€H I€I J€J K€K L@L€LÀL M@M€MÀM N@N€NÀN O@O€OÀO P P@P`P€P PÀPàP Q Q@Q`Q€Q QÀQàQ R R@R`R€R RÀRàR S S@S`S€S SÀSàS TT T0T@TPT`TpT€TT T°TÀTĞTàTğT UU U0U@UPU`UpU€UU U°UÀUĞUàUğU VV V0V@VPV`VpV€VV V°VÀVĞVàVğV WW W0W@WPW`WpW€WW W°WÀWĞWàWğW X*Ì€
-BB/vision_encoder/neck/position_encoding_1/Constant_21_output_0__f16J€ < <<<V=V=)>)>??@@¾@¾@zAzASBSBNCNC8D8DßDßD E E~F~F€G€GTHTH I IÆIÆI«J«J³K³KrLrL"M"MîMîMÙNÙNèOèO‘P‘PEQEQRRSSTT°T°TjUjU@V@V8W8W+X+XĞXĞXYYkZkZi[i[G\G\ñ\ñ\µ]µ]—^—^œ_œ_e`e`aaÜaÜaÄbÄbĞcĞcƒdƒd6e6effòfòfhh¢h¢hYiYi-j-j"k"kllÁlÁl~m~mWnWnSoSo:p:p*Ì€
-BB/vision_encoder/neck/position_encoding_1/Constant_23_output_0__f16J€ < <<<V=V=)>)>??@@¾@¾@zAzASBSBNCNC8D8DßDßD E E~F~F€G€GTHTH I IÆIÆI«J«J³K³KrLrL"M"MîMîMÙNÙNèOèO‘P‘PEQEQRRSSTT°T°TjUjU@V@V8W8W+X+XĞXĞXYYkZkZi[i[G\G\ñ\ñ\µ]µ]—^—^œ_œ_e`e`aaÜaÜaÄbÄbĞcĞcƒdƒd6e6effòfòfhh¢h¢hYiYi-j-j"k"kllÁlÁl~m~mWnWnSoSo:p:p*Í€
-B?/vision_encoder/neck/position_encoding_2/Constant_output_0__f16J€ < @ B D E F G H€H I€I J€J K€K L@L€LÀL M@M€MÀM N@N€NÀN O@O€OÀO P P@P`P€P PÀPàP Q Q@Q`Q€Q QÀQàQ R R@R`R€R RÀRàR S S@S`S€S SÀSàS TT T0T@TPT`TpT€TT T°TÀTĞTàTğT UU U0U@UPU`UpU€UU U°UÀUĞUàUğU VV V0V@VPV`VpV€VV V°VÀVĞVàVğV WW W0W@WPW`WpW€WW W°WÀWĞWàWğW XXXX X(X0X8X@XHXPXXX`XhXpXxX€XˆXX˜X X¨X°X¸XÀXÈXĞXØXàXèXğXøX YYYY Y(Y0Y8Y@YHYPYXY`YhYpYxY€YˆYY˜Y Y¨Y°Y¸YÀYÈYĞYØYàYèYğYøY ZZZZ Z(Z0Z8Z@ZHZPZXZ`ZhZpZxZ€ZˆZZ˜Z Z¨Z°Z¸ZÀZÈZĞZØZàZèZğZøZ [[[[ [([0[8[@[H[P[X[`[h[p[x[€[ˆ[[˜[ [¨[°[¸[À[È[Ğ[Ø[à[è[ğ[ø[ \*Ï€
-BA/vision_encoder/neck/position_encoding_2/Constant_4_output_0__f16J€ < @ B D E F G H€H I€I J€J K€K L@L€LÀL M@M€MÀM N@N€NÀN O@O€OÀO P P@P`P€P PÀPàP Q Q@Q`Q€Q QÀQàQ R R@R`R€R RÀRàR S S@S`S€S SÀSàS TT T0T@TPT`TpT€TT T°TÀTĞTàTğT UU U0U@UPU`UpU€UU U°UÀUĞUàUğU VV V0V@VPV`VpV€VV V°VÀVĞVàVğV WW W0W@WPW`WpW€WW W°WÀWĞWàWğW XXXX X(X0X8X@XHXPXXX`XhXpXxX€XˆXX˜X X¨X°X¸XÀXÈXĞXØXàXèXğXøX YYYY Y(Y0Y8Y@YHYPYXY`YhYpYxY€YˆYY˜Y Y¨Y°Y¸YÀYÈYĞYØYàYèYğYøY ZZZZ Z(Z0Z8Z@ZHZPZXZ`ZhZpZxZ€ZˆZZ˜Z Z¨Z°Z¸ZÀZÈZĞZØZàZèZğZøZ [[[[ [([0[8[@[H[P[X[`[h[p[x[€[ˆ[[˜[ [¨[°[¸[À[È[Ğ[Ø[à[è[ğ[ø[ \*Ì€
-BB/vision_encoder/neck/position_encoding_2/Constant_21_output_0__f16J€ < <<<V=V=)>)>??@@¾@¾@zAzASBSBNCNC8D8DßDßD E E~F~F€G€GTHTH I IÆIÆI«J«J³K³KrLrL"M"MîMîMÙNÙNèOèO‘P‘PEQEQRRSSTT°T°TjUjU@V@V8W8W+X+XĞXĞXYYkZkZi[i[G\G\ñ\ñ\µ]µ]—^—^œ_œ_e`e`aaÜaÜaÄbÄbĞcĞcƒdƒd6e6effòfòfhh¢h¢hYiYi-j-j"k"kllÁlÁl~m~mWnWnSoSo:p:p*Ì€
-BB/vision_encoder/neck/position_encoding_2/Constant_23_output_0__f16J€ < <<<V=V=)>)>??@@¾@¾@zAzASBSBNCNC8D8DßDßD E E~F~F€G€GTHTH I IÆIÆI«J«J³K³KrLrL"M"MîMîMÙNÙNèOèO‘P‘PEQEQRRSSTT°T°TjUjU@V@V8W8W+X+XĞXĞXYYkZkZi[i[G\G\ñ\ñ\µ]µ]—^—^œ_œ_e`e`aaÜaÜaÄbÄbĞcĞcƒdƒd6e6effòfòfhh¢h¢hYiYi-j-j"k"kllÁlÁl~m~mWnWnSoSo:p:pZ(
+B@/vision_encoder/neck/position_encoding/Constant_23_output_0__f16J€ < <<<V=V=)>)>??@@¾@¾@zAzASBSBNCNC8D8DßDßD E E~F~F€G€GTHTH I IÆIÆI«J«J³K³KrLrL"M"MîMîMÙNÙNèOèO‘P‘PEQEQRRSSTT°T°TjUjU@V@V8W8W+X+XĞXĞXYYkZkZi[i[G\G\ñ\ñ\µ]µ]—^—^œ_œ_e`e`aaÜaÜaÄbÄbĞcĞcƒdƒd6e6effòfòfhh¢h¢hYiYi-j-j"k"kllÁlÁl~m~mWnWnSoSo:p:pZ(
 pixel_values
 
 
@@ -27172,19 +26554,4244 @@ BB/vision_encoder/neck/position_encoding_2/Constant_23_output_0__f16J€ < <<<V
 
 €
 @
-@b!
-pos0
-
+@b
+pos2
+
 
 €
+@
+@jb
+Hmodel.vision_encoder.backbone.timm_model.stages_0.blocks.0.se.fc1.weight
+
+
+0
+
+jb
+Hmodel.vision_encoder.backbone.timm_model.stages_0.blocks.0.se.fc2.weight
+
+0
+
+
+jb
+Hmodel.vision_encoder.backbone.timm_model.stages_1.blocks.0.se.fc1.weight
+
+
+`
+
+jb
+Hmodel.vision_encoder.backbone.timm_model.stages_1.blocks.0.se.fc2.weight
+
+`
+
+
+jT
+Fmodel.vision_encoder.backbone.timm_model.stages_1.blocks.0.se.fc2.bias
+
+
+`jc
+Hmodel.vision_encoder.backbone.timm_model.stages_2.blocks.0.se.fc1.weight
+
+0
+À
+
+jc
+Hmodel.vision_encoder.backbone.timm_model.stages_2.blocks.0.se.fc2.weight
+
+À
+0
+
+jU
+Fmodel.vision_encoder.backbone.timm_model.stages_2.blocks.0.se.fc2.bias
+	
+Àjc
+Hmodel.vision_encoder.backbone.timm_model.stages_2.blocks.2.se.fc1.weight
+
+0
+À
+
+jc
+Hmodel.vision_encoder.backbone.timm_model.stages_2.blocks.2.se.fc2.weight
+
+À
+0
+
+jU
+Fmodel.vision_encoder.backbone.timm_model.stages_2.blocks.2.se.fc2.bias
+	
+Àjc
+Hmodel.vision_encoder.backbone.timm_model.stages_2.blocks.4.se.fc1.weight
+
+0
+À
+
+jc
+Hmodel.vision_encoder.backbone.timm_model.stages_2.blocks.4.se.fc2.weight
+
+À
+0
+
+jU
+Fmodel.vision_encoder.backbone.timm_model.stages_2.blocks.4.se.fc2.bias
+	
+Àjc
+Hmodel.vision_encoder.backbone.timm_model.stages_2.blocks.6.se.fc1.weight
+
+0
+À
+
+jc
+Hmodel.vision_encoder.backbone.timm_model.stages_2.blocks.6.se.fc2.weight
+
+À
+0
+
+jU
+Fmodel.vision_encoder.backbone.timm_model.stages_2.blocks.6.se.fc2.bias
+	
+Àjc
+Hmodel.vision_encoder.backbone.timm_model.stages_2.blocks.8.se.fc1.weight
+
+0
+À
+
+jc
+Hmodel.vision_encoder.backbone.timm_model.stages_2.blocks.8.se.fc2.weight
+
+À
+0
+
+jU
+Fmodel.vision_encoder.backbone.timm_model.stages_2.blocks.8.se.fc2.bias
+	
+Àjd
+Imodel.vision_encoder.backbone.timm_model.stages_2.blocks.10.se.fc1.weight
+
+0
+À
+
+jd
+Imodel.vision_encoder.backbone.timm_model.stages_2.blocks.10.se.fc2.weight
+
+À
+0
+
+jV
+Gmodel.vision_encoder.backbone.timm_model.stages_2.blocks.10.se.fc2.bias
+	
+Àjd
+Imodel.vision_encoder.backbone.timm_model.stages_2.blocks.12.se.fc1.weight
+
+0
+À
+
+jd
+Imodel.vision_encoder.backbone.timm_model.stages_2.blocks.12.se.fc2.weight
+
+À
+0
+
+jV
+Gmodel.vision_encoder.backbone.timm_model.stages_2.blocks.12.se.fc2.bias
+	
+Àjc
+Hmodel.vision_encoder.backbone.timm_model.stages_3.blocks.0.se.fc1.weight
+
+`
+€
+
+jT
+Fmodel.vision_encoder.backbone.timm_model.stages_3.blocks.0.se.fc1.bias
+
+
+`jc
+Hmodel.vision_encoder.backbone.timm_model.stages_3.blocks.0.se.fc2.weight
+
+€
+`
+
+jU
+Fmodel.vision_encoder.backbone.timm_model.stages_3.blocks.0.se.fc2.bias
+	
+€jD
+(model.vision_encoder.neck.convs.0.weight
+
 €
-€b!
-pos1
+€
+
+j5
+&model.vision_encoder.neck.convs.0.bias
+	
+€jD
+(model.vision_encoder.neck.convs.1.weight
+
+€
+À
+
+j5
+&model.vision_encoder.neck.convs.1.bias
+	
+€jC
+(model.vision_encoder.neck.convs.2.weight
+
+€
+`
+
+j5
+&model.vision_encoder.neck.convs.2.bias
+	
+€jC
+(model.vision_encoder.neck.convs.3.weight
+
+€
+0
+
+j5
+&model.vision_encoder.neck.convs.3.bias
+	
+€j<
+!model.mask_decoder.conv_s0.weight
+
+ 
+€
+
+j<
+!model.mask_decoder.conv_s1.weight
+
+@
+€
+
+j-
+model.mask_decoder.conv_s1.bias
+
+
+@j)
+onnx::Conv_2057
+
+
+
+
+j)
+onnx::Conv_2060
+
+0
+
+
+j)
+onnx::Conv_2063
+
+0
+
+
+j)
+onnx::Conv_2069
+
+`
+0
+
+j
+onnx::Conv_2070
+
+
+`j)
+onnx::Conv_2072
+
+0
+`
+
+j)
+onnx::Conv_2075
+
+0
+
+
+j)
+onnx::Conv_2081
+
+`
+0
+
+j
+onnx::Conv_2082
+
+
+`j)
+onnx::Conv_2084
+
+0
+`
+
+j)
+onnx::Conv_2087
+
+0
+
+
+j)
+onnx::Conv_2093
+
+`
+0
+
+j
+onnx::Conv_2094
+
+
+`j)
+onnx::Conv_2096
+
+0
+`
+
+j)
+onnx::Conv_2099
+
+0
+
+
+j)
+onnx::Conv_2102
+
+`
+0
+
+j
+onnx::Conv_2103
+
+
+`j*
+onnx::Conv_2105
+
+À
+`
+
+j
+onnx::Conv_2106
+	
+Àj*
+onnx::Conv_2108
+
+`
+À
+
+j
+onnx::Conv_2109
+
+
+`j)
+onnx::Conv_2111
+
+`
+
+
+j
+onnx::Conv_2112
+
+
+`j)
+onnx::Conv_2114
+
+`
+
+
+j
+onnx::Conv_2115
+
+
+`j*
+onnx::Conv_2117
+
+À
+`
+
+j
+onnx::Conv_2118
+	
+Àj*
+onnx::Conv_2120
+
+`
+À
+
+j
+onnx::Conv_2121
+
+
+`j)
+onnx::Conv_2123
+
+`
+
+
+j
+onnx::Conv_2124
+
+
+`j)
+onnx::Conv_2126
+
+`
+
+
+j
+onnx::Conv_2127
+
+
+`j*
+onnx::Conv_2129
+
+À
+`
+
+j
+onnx::Conv_2130
+	
+Àj*
+onnx::Conv_2132
+
+`
+À
+
+j
+onnx::Conv_2133
+
+
+`j)
+onnx::Conv_2135
+
+`
+
+
+j
+onnx::Conv_2136
+
+
+`j)
+onnx::Conv_2138
+
+`
+
+
+j
+onnx::Conv_2139
+
+
+`j*
+onnx::Conv_2141
+
+À
+`
+
+j
+onnx::Conv_2142
+	
+Àj*
+onnx::Conv_2144
+
+`
+À
+
+j
+onnx::Conv_2145
+
+
+`j)
+onnx::Conv_2147
+
+`
+
+
+j
+onnx::Conv_2148
+
+
+`j*
+onnx::Conv_2150
+
+À
+`
+
+j
+onnx::Conv_2151
+	
+Àj+
+onnx::Conv_2153
+
+€
+À
+
+j
+onnx::Conv_2154
+	
+€j+
+onnx::Conv_2156
+
+À
+€
+
+j
+onnx::Conv_2157
+	
+Àj*
+onnx::Conv_2159
+
+À
+
+
+j
+onnx::Conv_2160
+	
+Àj*
+onnx::Conv_2162
+
+À
+
+
+j
+onnx::Conv_2163
+	
+Àj+
+onnx::Conv_2165
+
+€
+À
+
+j
+onnx::Conv_2166
+	
+€j+
+onnx::Conv_2168
+
+À
+€
+
+j
+onnx::Conv_2169
+	
+Àj*
+onnx::Conv_2171
+
+À
+
+
+j
+onnx::Conv_2172
+	
+Àj*
+onnx::Conv_2174
+
+À
+
+
+j
+onnx::Conv_2175
+	
+Àj+
+onnx::Conv_2177
+
+€
+À
+
+j
+onnx::Conv_2178
+	
+€j+
+onnx::Conv_2180
+
+À
+€
+
+j
+onnx::Conv_2181
+	
+Àj*
+onnx::Conv_2183
+
+À
+
+
+j
+onnx::Conv_2184
+	
+Àj*
+onnx::Conv_2186
+
+À
+
+
+j
+onnx::Conv_2187
+	
+Àj+
+onnx::Conv_2189
+
+€
+À
+
+j
+onnx::Conv_2190
+	
+€j+
+onnx::Conv_2192
+
+À
+€
+
+j
+onnx::Conv_2193
+	
+Àj*
+onnx::Conv_2195
+
+À
+
+
+j
+onnx::Conv_2196
+	
+Àj*
+onnx::Conv_2198
+
+À
+
+
+j
+onnx::Conv_2199
+	
+Àj+
+onnx::Conv_2201
+
+€
+À
+
+j
+onnx::Conv_2202
+	
+€j+
+onnx::Conv_2204
+
+À
+€
+
+j
+onnx::Conv_2205
+	
+Àj*
+onnx::Conv_2207
+
+À
+
+
+j
+onnx::Conv_2208
+	
+Àj*
+onnx::Conv_2210
+
+À
+
+
+j
+onnx::Conv_2211
+	
+Àj+
+onnx::Conv_2213
+
+€
+À
+
+j
+onnx::Conv_2214
+	
+€j+
+onnx::Conv_2216
+
+À
+€
+
+j
+onnx::Conv_2217
+	
+Àj*
+onnx::Conv_2219
+
+À
+
+
+j
+onnx::Conv_2220
+	
+Àj*
+onnx::Conv_2222
+
+À
+
+
+j
+onnx::Conv_2223
+	
+Àj+
+onnx::Conv_2225
+
+€
+À
+
+j
+onnx::Conv_2226
+	
+€j+
+onnx::Conv_2228
+
+À
+€
+
+j
+onnx::Conv_2229
+	
+Àj*
+onnx::Conv_2231
+
+À
+
+
+j
+onnx::Conv_2232
+	
+Àj*
+onnx::Conv_2234
+
+À
+
+
+j
+onnx::Conv_2235
+	
+Àj+
+onnx::Conv_2237
+
+€
+À
+
+j
+onnx::Conv_2238
+	
+€j+
+onnx::Conv_2240
+
+À
+€
+
+j
+onnx::Conv_2241
+	
+Àj*
+onnx::Conv_2243
+
+À
+
+
+j
+onnx::Conv_2244
+	
+Àj*
+onnx::Conv_2246
+
+À
+
+
+j
+onnx::Conv_2247
+	
+Àj+
+onnx::Conv_2249
+
+€
+À
+
+j
+onnx::Conv_2250
+	
+€j+
+onnx::Conv_2252
+
+À
+€
+
+j
+onnx::Conv_2253
+	
+Àj*
+onnx::Conv_2255
+
+À
+
+
+j
+onnx::Conv_2256
+	
+Àj*
+onnx::Conv_2258
+
+À
+
+
+j
+onnx::Conv_2259
+	
+Àj+
+onnx::Conv_2261
+
+€
+À
+
+j
+onnx::Conv_2262
+	
+€j+
+onnx::Conv_2264
+
+À
+€
+
+j
+onnx::Conv_2265
+	
+Àj*
+onnx::Conv_2267
+
+À
+
+
+j
+onnx::Conv_2268
+	
+Àj*
+onnx::Conv_2270
+
+À
+
+
+j
+onnx::Conv_2271
+	
+Àj+
+onnx::Conv_2273
+
+€
+À
+
+j
+onnx::Conv_2274
+	
+€j+
+onnx::Conv_2276
+
+À
+€
+
+j
+onnx::Conv_2277
+	
+Àj*
+onnx::Conv_2279
+
+À
+
+
+j
+onnx::Conv_2280
+	
+Àj*
+onnx::Conv_2282
+
+À
+
+
+j
+onnx::Conv_2283
+	
+Àj+
+onnx::Conv_2285
+
+€
+À
+
+j
+onnx::Conv_2286
+	
+€j+
+onnx::Conv_2288
+
+À
+€
+
+j
+onnx::Conv_2289
+	
+Àj*
+onnx::Conv_2291
+
+À
+
+
+j
+onnx::Conv_2292
+	
+Àj*
+onnx::Conv_2294
+
+À
+
+
+j
+onnx::Conv_2295
+	
+Àj+
+onnx::Conv_2297
+
+€
+À
+
+j
+onnx::Conv_2298
+	
+€j+
+onnx::Conv_2300
+
+À
+€
+
+j
+onnx::Conv_2301
+	
+Àj*
+onnx::Conv_2303
+
+À
+
+
+j
+onnx::Conv_2304
+	
+Àj*
+onnx::Conv_2306
+
+À
+
+
+j
+onnx::Conv_2307
+	
+Àj+
+onnx::Conv_2309
+
+€
+À
+
+j
+onnx::Conv_2310
+	
+€j+
+onnx::Conv_2312
+
+À
+€
+
+j
+onnx::Conv_2313
+	
+Àj*
+onnx::Conv_2315
+
+À
+
+
+j
+onnx::Conv_2316
+	
+Àj*
+onnx::Conv_2318
+
+À
+
+
+j
+onnx::Conv_2319
+	
+Àj+
+onnx::Conv_2321
+
+€
+À
+
+j
+onnx::Conv_2322
+	
+€j+
+onnx::Conv_2324
+
+À
+€
+
+j
+onnx::Conv_2325
+	
+Àj*
+onnx::Conv_2327
+
+À
+
+
+j
+onnx::Conv_2328
+	
+Àj*
+onnx::Conv_2330
+
+À
+
+
+j
+onnx::Conv_2331
+	
+Àj+
+onnx::Conv_2333
+
+€
+À
+
+j
+onnx::Conv_2334
+	
+€j+
+onnx::Conv_2336
+
+À
+€
+
+j
+onnx::Conv_2337
+	
+Àj*
+onnx::Conv_2339
+
+À
+
+
+j
+onnx::Conv_2340
+	
+Àj+
+onnx::Conv_2342
+
+€
+À
+
+j
+onnx::Conv_2343
+	
+€j+
+onnx::Conv_2345
+
+€
+€
+
+j
+onnx::Conv_2346
+	
+€j+
+onnx::Conv_2348
+
+€
+€
+
+j
+onnx::Conv_2349
+	
+€j*
+onnx::Conv_2351
+
+€
+
+
+j
+onnx::Conv_2352
+	
+€j*
+onnx::Conv_2354
+
+€
+
+
+j
+onnx::Conv_2355
+	
+€j+
+onnx::Conv_2357
+
+€
+€
+
+j
+onnx::Conv_2358
+	
+€j+
+onnx::Conv_2360
+
+€
+€
+
+j
+onnx::Conv_2361
+	
+€j*
+onnx::Conv_2363
+
+€
+
+
+j
+onnx::Conv_2364
+	
+€j*
+onnx::Conv_2366
+
+€
+
+
+j
+onnx::Conv_2367
+	
+€j+
+onnx::Conv_2369
+
+€
+€
+
+j
+onnx::Conv_2370
+	
+€j+
+onnx::Conv_2372
+
+€
+€
+
+j
+onnx::Conv_2373
+	
+€jB
+&/vision_encoder/backbone/Cast_output_0
+
+
+
+€
+€jO
+3/vision_encoder/backbone/stem/conv1/c/Conv_output_0
+
+
+
+€
+€j>
+4/vision_encoder/backbone/stem/act1/Constant_output_0
+ jK
+//vision_encoder/backbone/stem/act1/Div_output_0
+
+
+
+€
+€jK
+//vision_encoder/backbone/stem/act1/Erf_output_0
+
+
+
+€
+€j@
+6/vision_encoder/backbone/stem/act1/Constant_1_output_0
+ jK
+//vision_encoder/backbone/stem/act1/Add_output_0
+
+
+
+€
+€jK
+//vision_encoder/backbone/stem/act1/Mul_output_0
+
+
+
+€
+€j@
+6/vision_encoder/backbone/stem/act1/Constant_2_output_0
+ jM
+1/vision_encoder/backbone/stem/act1/Mul_1_output_0
+
+
+
+€
+€jO
+3/vision_encoder/backbone/stem/conv2/c/Conv_output_0
+
+
+0
+€
+€jn
+R/vision_encoder/backbone/stages_0/blocks/blocks.0/token_mixer/conv/c/Conv_output_0
+
+
+0
+€
+€jo
+S/vision_encoder/backbone/stages_0/blocks/blocks.0/token_mixer/conv1/c/Conv_output_0
+
+
+0
+€
+€jf
+J/vision_encoder/backbone/stages_0/blocks/blocks.0/token_mixer/Add_output_0
+
+
+0
+€
+€jh
+L/vision_encoder/backbone/stages_0/blocks/blocks.0/token_mixer/Add_1_output_0
+
+
+0
+€
+€jb
+H/vision_encoder/backbone/stages_0/blocks/blocks.0/se/ReduceMean_output_0
+
+
+0
+
+j`
+F/vision_encoder/backbone/stages_0/blocks/blocks.0/se/fc1/Conv_output_0
+
+
+
+
+j`
+F/vision_encoder/backbone/stages_0/blocks/blocks.0/se/act/Relu_output_0
+
+
+
+
+j`
+F/vision_encoder/backbone/stages_0/blocks/blocks.0/se/fc2/Conv_output_0
+
+
+0
+
+jd
+J/vision_encoder/backbone/stages_0/blocks/blocks.0/se/gate/Sigmoid_output_0
+
+
+0
+
+j]
+A/vision_encoder/backbone/stages_0/blocks/blocks.0/se/Mul_output_0
+
+
+0
+€
+€jq
+U/vision_encoder/backbone/stages_0/blocks/blocks.0/channel_mixer/conv1/c/Conv_output_0
+
+
+`
+€
+€j_
+U/vision_encoder/backbone/stages_0/blocks/blocks.0/channel_mixer/act/Constant_output_0
+ jl
+P/vision_encoder/backbone/stages_0/blocks/blocks.0/channel_mixer/act/Div_output_0
+
+
+`
+€
+€jl
+P/vision_encoder/backbone/stages_0/blocks/blocks.0/channel_mixer/act/Erf_output_0
+
+
+`
+€
+€ja
+W/vision_encoder/backbone/stages_0/blocks/blocks.0/channel_mixer/act/Constant_1_output_0
+ jl
+P/vision_encoder/backbone/stages_0/blocks/blocks.0/channel_mixer/act/Add_output_0
+
+
+`
+€
+€jl
+P/vision_encoder/backbone/stages_0/blocks/blocks.0/channel_mixer/act/Mul_output_0
+
+
+`
+€
+€ja
+W/vision_encoder/backbone/stages_0/blocks/blocks.0/channel_mixer/act/Constant_2_output_0
+ jn
+R/vision_encoder/backbone/stages_0/blocks/blocks.0/channel_mixer/act/Mul_1_output_0
+
+
+`
+€
+€jq
+U/vision_encoder/backbone/stages_0/blocks/blocks.0/channel_mixer/conv2/c/Conv_output_0
+
+
+0
+€
+€jZ
+>/vision_encoder/backbone/stages_0/blocks/blocks.0/Add_output_0
+
+
+0
+€
+€jn
+R/vision_encoder/backbone/stages_0/blocks/blocks.1/token_mixer/conv/c/Conv_output_0
+
+
+0
+€
+€jo
+S/vision_encoder/backbone/stages_0/blocks/blocks.1/token_mixer/conv1/c/Conv_output_0
+
+
+0
+€
+€jf
+J/vision_encoder/backbone/stages_0/blocks/blocks.1/token_mixer/Add_output_0
+
+
+0
+€
+€jh
+L/vision_encoder/backbone/stages_0/blocks/blocks.1/token_mixer/Add_1_output_0
+
+
+0
+€
+€jq
+U/vision_encoder/backbone/stages_0/blocks/blocks.1/channel_mixer/conv1/c/Conv_output_0
+
+
+`
+€
+€j_
+U/vision_encoder/backbone/stages_0/blocks/blocks.1/channel_mixer/act/Constant_output_0
+ jl
+P/vision_encoder/backbone/stages_0/blocks/blocks.1/channel_mixer/act/Div_output_0
+
+
+`
+€
+€jl
+P/vision_encoder/backbone/stages_0/blocks/blocks.1/channel_mixer/act/Erf_output_0
+
+
+`
+€
+€ja
+W/vision_encoder/backbone/stages_0/blocks/blocks.1/channel_mixer/act/Constant_1_output_0
+ jl
+P/vision_encoder/backbone/stages_0/blocks/blocks.1/channel_mixer/act/Add_output_0
+
+
+`
+€
+€jl
+P/vision_encoder/backbone/stages_0/blocks/blocks.1/channel_mixer/act/Mul_output_0
+
+
+`
+€
+€ja
+W/vision_encoder/backbone/stages_0/blocks/blocks.1/channel_mixer/act/Constant_2_output_0
+ jn
+R/vision_encoder/backbone/stages_0/blocks/blocks.1/channel_mixer/act/Mul_1_output_0
+
+
+`
+€
+€jq
+U/vision_encoder/backbone/stages_0/blocks/blocks.1/channel_mixer/conv2/c/Conv_output_0
+
+
+0
+€
+€jZ
+>/vision_encoder/backbone/stages_0/blocks/blocks.1/Add_output_0
+
+
+0
+€
+€js
+W/vision_encoder/backbone/stages_1/downsample/pre_block/token_mixer/conv/c/Conv_output_0
+
+
+0
+€
+€jt
+X/vision_encoder/backbone/stages_1/downsample/pre_block/token_mixer/conv1/c/Conv_output_0
+
+
+0
+€
+€jk
+O/vision_encoder/backbone/stages_1/downsample/pre_block/token_mixer/Add_output_0
+
+
+0
+€
+€jm
+Q/vision_encoder/backbone/stages_1/downsample/pre_block/token_mixer/Add_1_output_0
+
+
+0
+€
+€jv
+Z/vision_encoder/backbone/stages_1/downsample/pre_block/channel_mixer/conv1/c/Conv_output_0
+
+
+`
+€
+€jd
+Z/vision_encoder/backbone/stages_1/downsample/pre_block/channel_mixer/act/Constant_output_0
+ jq
+U/vision_encoder/backbone/stages_1/downsample/pre_block/channel_mixer/act/Div_output_0
+
+
+`
+€
+€jq
+U/vision_encoder/backbone/stages_1/downsample/pre_block/channel_mixer/act/Erf_output_0
+
+
+`
+€
+€jf
+\/vision_encoder/backbone/stages_1/downsample/pre_block/channel_mixer/act/Constant_1_output_0
+ jq
+U/vision_encoder/backbone/stages_1/downsample/pre_block/channel_mixer/act/Add_output_0
+
+
+`
+€
+€jq
+U/vision_encoder/backbone/stages_1/downsample/pre_block/channel_mixer/act/Mul_output_0
+
+
+`
+€
+€jf
+\/vision_encoder/backbone/stages_1/downsample/pre_block/channel_mixer/act/Constant_2_output_0
+ js
+W/vision_encoder/backbone/stages_1/downsample/pre_block/channel_mixer/act/Mul_1_output_0
+
+
+`
+€
+€jv
+Z/vision_encoder/backbone/stages_1/downsample/pre_block/channel_mixer/conv2/c/Conv_output_0
+
+
+0
+€
+€j_
+C/vision_encoder/backbone/stages_1/downsample/pre_block/Add_output_0
+
+
+0
+€
+€jk
+O/vision_encoder/backbone/stages_1/downsample/spatial_downsample/c/Conv_output_0
+
+
+0
+€
+€jk
+O/vision_encoder/backbone/stages_1/downsample/channel_downsample/c/Conv_output_0
+
+
+`
+€
+€jc
+F/vision_encoder/backbone/stages_1/downsample/ffn/conv1/c/Conv_output_0
+
+
+À
+€
+€jP
+F/vision_encoder/backbone/stages_1/downsample/ffn/act/Constant_output_0
+ j^
+A/vision_encoder/backbone/stages_1/downsample/ffn/act/Div_output_0
+
+
+À
+€
+€j^
+A/vision_encoder/backbone/stages_1/downsample/ffn/act/Erf_output_0
+
+
+À
+€
+€jR
+H/vision_encoder/backbone/stages_1/downsample/ffn/act/Constant_1_output_0
+ j^
+A/vision_encoder/backbone/stages_1/downsample/ffn/act/Add_output_0
+
+
+À
+€
+€j^
+A/vision_encoder/backbone/stages_1/downsample/ffn/act/Mul_output_0
+
+
+À
+€
+€jR
+H/vision_encoder/backbone/stages_1/downsample/ffn/act/Constant_2_output_0
+ j`
+C/vision_encoder/backbone/stages_1/downsample/ffn/act/Mul_1_output_0
+
+
+À
+€
+€jb
+F/vision_encoder/backbone/stages_1/downsample/ffn/conv2/c/Conv_output_0
+
+
+`
+€
+€jU
+9/vision_encoder/backbone/stages_1/downsample/Add_output_0
+
+
+`
+€
+€jn
+R/vision_encoder/backbone/stages_1/blocks/blocks.0/token_mixer/conv/c/Conv_output_0
+
+
+`
+€
+€jo
+S/vision_encoder/backbone/stages_1/blocks/blocks.0/token_mixer/conv1/c/Conv_output_0
+
+
+`
+€
+€jf
+J/vision_encoder/backbone/stages_1/blocks/blocks.0/token_mixer/Add_output_0
+
+
+`
+€
+€jh
+L/vision_encoder/backbone/stages_1/blocks/blocks.0/token_mixer/Add_1_output_0
+
+
+`
+€
+€jb
+H/vision_encoder/backbone/stages_1/blocks/blocks.0/se/ReduceMean_output_0
+
+
+`
+
+j`
+F/vision_encoder/backbone/stages_1/blocks/blocks.0/se/fc1/Conv_output_0
+
+
+
+
+j`
+F/vision_encoder/backbone/stages_1/blocks/blocks.0/se/act/Relu_output_0
+
+
+
+
+j`
+F/vision_encoder/backbone/stages_1/blocks/blocks.0/se/fc2/Conv_output_0
+
+
+`
+
+jd
+J/vision_encoder/backbone/stages_1/blocks/blocks.0/se/gate/Sigmoid_output_0
+
+
+`
+
+j]
+A/vision_encoder/backbone/stages_1/blocks/blocks.0/se/Mul_output_0
+
+
+`
+€
+€jr
+U/vision_encoder/backbone/stages_1/blocks/blocks.0/channel_mixer/conv1/c/Conv_output_0
+
+
+À
+€
+€j_
+U/vision_encoder/backbone/stages_1/blocks/blocks.0/channel_mixer/act/Constant_output_0
+ jm
+P/vision_encoder/backbone/stages_1/blocks/blocks.0/channel_mixer/act/Div_output_0
+
+
+À
+€
+€jm
+P/vision_encoder/backbone/stages_1/blocks/blocks.0/channel_mixer/act/Erf_output_0
+
+
+À
+€
+€ja
+W/vision_encoder/backbone/stages_1/blocks/blocks.0/channel_mixer/act/Constant_1_output_0
+ jm
+P/vision_encoder/backbone/stages_1/blocks/blocks.0/channel_mixer/act/Add_output_0
+
+
+À
+€
+€jm
+P/vision_encoder/backbone/stages_1/blocks/blocks.0/channel_mixer/act/Mul_output_0
+
+
+À
+€
+€ja
+W/vision_encoder/backbone/stages_1/blocks/blocks.0/channel_mixer/act/Constant_2_output_0
+ jo
+R/vision_encoder/backbone/stages_1/blocks/blocks.0/channel_mixer/act/Mul_1_output_0
+
+
+À
+€
+€jq
+U/vision_encoder/backbone/stages_1/blocks/blocks.0/channel_mixer/conv2/c/Conv_output_0
+
+
+`
+€
+€jZ
+>/vision_encoder/backbone/stages_1/blocks/blocks.0/Add_output_0
+
+
+`
+€
+€jn
+R/vision_encoder/backbone/stages_1/blocks/blocks.1/token_mixer/conv/c/Conv_output_0
+
+
+`
+€
+€jo
+S/vision_encoder/backbone/stages_1/blocks/blocks.1/token_mixer/conv1/c/Conv_output_0
+
+
+`
+€
+€jf
+J/vision_encoder/backbone/stages_1/blocks/blocks.1/token_mixer/Add_output_0
+
+
+`
+€
+€jh
+L/vision_encoder/backbone/stages_1/blocks/blocks.1/token_mixer/Add_1_output_0
+
+
+`
+€
+€jr
+U/vision_encoder/backbone/stages_1/blocks/blocks.1/channel_mixer/conv1/c/Conv_output_0
+
+
+À
+€
+€j_
+U/vision_encoder/backbone/stages_1/blocks/blocks.1/channel_mixer/act/Constant_output_0
+ jm
+P/vision_encoder/backbone/stages_1/blocks/blocks.1/channel_mixer/act/Div_output_0
+
+
+À
+€
+€jm
+P/vision_encoder/backbone/stages_1/blocks/blocks.1/channel_mixer/act/Erf_output_0
+
+
+À
+€
+€ja
+W/vision_encoder/backbone/stages_1/blocks/blocks.1/channel_mixer/act/Constant_1_output_0
+ jm
+P/vision_encoder/backbone/stages_1/blocks/blocks.1/channel_mixer/act/Add_output_0
+
+
+À
+€
+€jm
+P/vision_encoder/backbone/stages_1/blocks/blocks.1/channel_mixer/act/Mul_output_0
+
+
+À
+€
+€ja
+W/vision_encoder/backbone/stages_1/blocks/blocks.1/channel_mixer/act/Constant_2_output_0
+ jo
+R/vision_encoder/backbone/stages_1/blocks/blocks.1/channel_mixer/act/Mul_1_output_0
+
+
+À
+€
+€jq
+U/vision_encoder/backbone/stages_1/blocks/blocks.1/channel_mixer/conv2/c/Conv_output_0
+
+
+`
+€
+€jZ
+>/vision_encoder/backbone/stages_1/blocks/blocks.1/Add_output_0
+
+
+`
+€
+€js
+W/vision_encoder/backbone/stages_2/downsample/pre_block/token_mixer/conv/c/Conv_output_0
+
+
+`
+€
+€jt
+X/vision_encoder/backbone/stages_2/downsample/pre_block/token_mixer/conv1/c/Conv_output_0
+
+
+`
+€
+€jk
+O/vision_encoder/backbone/stages_2/downsample/pre_block/token_mixer/Add_output_0
+
+
+`
+€
+€jm
+Q/vision_encoder/backbone/stages_2/downsample/pre_block/token_mixer/Add_1_output_0
+
+
+`
+€
+€jw
+Z/vision_encoder/backbone/stages_2/downsample/pre_block/channel_mixer/conv1/c/Conv_output_0
+
+
+À
+€
+€jd
+Z/vision_encoder/backbone/stages_2/downsample/pre_block/channel_mixer/act/Constant_output_0
+ jr
+U/vision_encoder/backbone/stages_2/downsample/pre_block/channel_mixer/act/Div_output_0
+
+
+À
+€
+€jr
+U/vision_encoder/backbone/stages_2/downsample/pre_block/channel_mixer/act/Erf_output_0
+
+
+À
+€
+€jf
+\/vision_encoder/backbone/stages_2/downsample/pre_block/channel_mixer/act/Constant_1_output_0
+ jr
+U/vision_encoder/backbone/stages_2/downsample/pre_block/channel_mixer/act/Add_output_0
+
+
+À
+€
+€jr
+U/vision_encoder/backbone/stages_2/downsample/pre_block/channel_mixer/act/Mul_output_0
+
+
+À
+€
+€jf
+\/vision_encoder/backbone/stages_2/downsample/pre_block/channel_mixer/act/Constant_2_output_0
+ jt
+W/vision_encoder/backbone/stages_2/downsample/pre_block/channel_mixer/act/Mul_1_output_0
+
+
+À
+€
+€jv
+Z/vision_encoder/backbone/stages_2/downsample/pre_block/channel_mixer/conv2/c/Conv_output_0
+
+
+`
+€
+€j_
+C/vision_encoder/backbone/stages_2/downsample/pre_block/Add_output_0
+
+
+`
+€
+€ji
+O/vision_encoder/backbone/stages_2/downsample/spatial_downsample/c/Conv_output_0
+
+
+`
+@
+@jj
+O/vision_encoder/backbone/stages_2/downsample/channel_downsample/c/Conv_output_0
+
+
+À
+@
+@ja
+F/vision_encoder/backbone/stages_2/downsample/ffn/conv1/c/Conv_output_0
+
+
+€
+@
+@jP
+F/vision_encoder/backbone/stages_2/downsample/ffn/act/Constant_output_0
+ j\
+A/vision_encoder/backbone/stages_2/downsample/ffn/act/Div_output_0
+
+
+€
+@
+@j\
+A/vision_encoder/backbone/stages_2/downsample/ffn/act/Erf_output_0
+
+
+€
+@
+@jR
+H/vision_encoder/backbone/stages_2/downsample/ffn/act/Constant_1_output_0
+ j\
+A/vision_encoder/backbone/stages_2/downsample/ffn/act/Add_output_0
+
+
+€
+@
+@j\
+A/vision_encoder/backbone/stages_2/downsample/ffn/act/Mul_output_0
+
+
+€
+@
+@jR
+H/vision_encoder/backbone/stages_2/downsample/ffn/act/Constant_2_output_0
+ j^
+C/vision_encoder/backbone/stages_2/downsample/ffn/act/Mul_1_output_0
+
+
+€
+@
+@ja
+F/vision_encoder/backbone/stages_2/downsample/ffn/conv2/c/Conv_output_0
+
+
+À
+@
+@jT
+9/vision_encoder/backbone/stages_2/downsample/Add_output_0
+
+
+À
+@
+@jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.0/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.0/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@je
+J/vision_encoder/backbone/stages_2/blocks/blocks.0/token_mixer/Add_output_0
+
+
+À
+@
+@jg
+L/vision_encoder/backbone/stages_2/blocks/blocks.0/token_mixer/Add_1_output_0
+
+
+À
+@
+@jc
+H/vision_encoder/backbone/stages_2/blocks/blocks.0/se/ReduceMean_output_0
+
+
+À
+
+j`
+F/vision_encoder/backbone/stages_2/blocks/blocks.0/se/fc1/Conv_output_0
+
+
+0
+
+j`
+F/vision_encoder/backbone/stages_2/blocks/blocks.0/se/act/Relu_output_0
+
+
+0
+
+ja
+F/vision_encoder/backbone/stages_2/blocks/blocks.0/se/fc2/Conv_output_0
+
+
+À
+
+je
+J/vision_encoder/backbone/stages_2/blocks/blocks.0/se/gate/Sigmoid_output_0
+
+
+À
+
+j\
+A/vision_encoder/backbone/stages_2/blocks/blocks.0/se/Mul_output_0
+
+
+À
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.0/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j_
+U/vision_encoder/backbone/stages_2/blocks/blocks.0/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.0/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.0/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.0/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.0/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.0/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.0/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.0/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.0/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jY
+>/vision_encoder/backbone/stages_2/blocks/blocks.0/Add_output_0
+
+
+À
+@
+@jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.1/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.1/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@je
+J/vision_encoder/backbone/stages_2/blocks/blocks.1/token_mixer/Add_output_0
+
+
+À
+@
+@jg
+L/vision_encoder/backbone/stages_2/blocks/blocks.1/token_mixer/Add_1_output_0
+
+
+À
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.1/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j_
+U/vision_encoder/backbone/stages_2/blocks/blocks.1/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.1/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.1/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.1/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.1/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.1/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.1/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.1/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.1/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jY
+>/vision_encoder/backbone/stages_2/blocks/blocks.1/Add_output_0
+
+
+À
+@
+@jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.2/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.2/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@je
+J/vision_encoder/backbone/stages_2/blocks/blocks.2/token_mixer/Add_output_0
+
+
+À
+@
+@jg
+L/vision_encoder/backbone/stages_2/blocks/blocks.2/token_mixer/Add_1_output_0
+
+
+À
+@
+@jc
+H/vision_encoder/backbone/stages_2/blocks/blocks.2/se/ReduceMean_output_0
+
+
+À
+
+j`
+F/vision_encoder/backbone/stages_2/blocks/blocks.2/se/fc1/Conv_output_0
+
+
+0
+
+j`
+F/vision_encoder/backbone/stages_2/blocks/blocks.2/se/act/Relu_output_0
+
+
+0
+
+ja
+F/vision_encoder/backbone/stages_2/blocks/blocks.2/se/fc2/Conv_output_0
+
+
+À
+
+je
+J/vision_encoder/backbone/stages_2/blocks/blocks.2/se/gate/Sigmoid_output_0
+
+
+À
+
+j\
+A/vision_encoder/backbone/stages_2/blocks/blocks.2/se/Mul_output_0
+
+
+À
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.2/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j_
+U/vision_encoder/backbone/stages_2/blocks/blocks.2/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.2/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.2/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.2/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.2/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.2/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.2/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.2/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.2/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jY
+>/vision_encoder/backbone/stages_2/blocks/blocks.2/Add_output_0
+
+
+À
+@
+@jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.3/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.3/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@je
+J/vision_encoder/backbone/stages_2/blocks/blocks.3/token_mixer/Add_output_0
+
+
+À
+@
+@jg
+L/vision_encoder/backbone/stages_2/blocks/blocks.3/token_mixer/Add_1_output_0
+
+
+À
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.3/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j_
+U/vision_encoder/backbone/stages_2/blocks/blocks.3/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.3/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.3/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.3/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.3/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.3/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.3/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.3/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.3/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jY
+>/vision_encoder/backbone/stages_2/blocks/blocks.3/Add_output_0
+
+
+À
+@
+@jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.4/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.4/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@je
+J/vision_encoder/backbone/stages_2/blocks/blocks.4/token_mixer/Add_output_0
+
+
+À
+@
+@jg
+L/vision_encoder/backbone/stages_2/blocks/blocks.4/token_mixer/Add_1_output_0
+
+
+À
+@
+@jc
+H/vision_encoder/backbone/stages_2/blocks/blocks.4/se/ReduceMean_output_0
+
+
+À
+
+j`
+F/vision_encoder/backbone/stages_2/blocks/blocks.4/se/fc1/Conv_output_0
+
+
+0
+
+j`
+F/vision_encoder/backbone/stages_2/blocks/blocks.4/se/act/Relu_output_0
+
+
+0
+
+ja
+F/vision_encoder/backbone/stages_2/blocks/blocks.4/se/fc2/Conv_output_0
+
+
+À
+
+je
+J/vision_encoder/backbone/stages_2/blocks/blocks.4/se/gate/Sigmoid_output_0
+
+
+À
+
+j\
+A/vision_encoder/backbone/stages_2/blocks/blocks.4/se/Mul_output_0
+
+
+À
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.4/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j_
+U/vision_encoder/backbone/stages_2/blocks/blocks.4/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.4/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.4/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.4/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.4/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.4/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.4/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.4/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.4/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jY
+>/vision_encoder/backbone/stages_2/blocks/blocks.4/Add_output_0
+
+
+À
+@
+@jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.5/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.5/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@je
+J/vision_encoder/backbone/stages_2/blocks/blocks.5/token_mixer/Add_output_0
+
+
+À
+@
+@jg
+L/vision_encoder/backbone/stages_2/blocks/blocks.5/token_mixer/Add_1_output_0
+
+
+À
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.5/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j_
+U/vision_encoder/backbone/stages_2/blocks/blocks.5/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.5/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.5/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.5/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.5/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.5/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.5/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.5/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.5/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jY
+>/vision_encoder/backbone/stages_2/blocks/blocks.5/Add_output_0
+
+
+À
+@
+@jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.6/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.6/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@je
+J/vision_encoder/backbone/stages_2/blocks/blocks.6/token_mixer/Add_output_0
+
+
+À
+@
+@jg
+L/vision_encoder/backbone/stages_2/blocks/blocks.6/token_mixer/Add_1_output_0
+
+
+À
+@
+@jc
+H/vision_encoder/backbone/stages_2/blocks/blocks.6/se/ReduceMean_output_0
+
+
+À
+
+j`
+F/vision_encoder/backbone/stages_2/blocks/blocks.6/se/fc1/Conv_output_0
+
+
+0
+
+j`
+F/vision_encoder/backbone/stages_2/blocks/blocks.6/se/act/Relu_output_0
+
+
+0
+
+ja
+F/vision_encoder/backbone/stages_2/blocks/blocks.6/se/fc2/Conv_output_0
+
+
+À
+
+je
+J/vision_encoder/backbone/stages_2/blocks/blocks.6/se/gate/Sigmoid_output_0
+
+
+À
+
+j\
+A/vision_encoder/backbone/stages_2/blocks/blocks.6/se/Mul_output_0
+
+
+À
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.6/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j_
+U/vision_encoder/backbone/stages_2/blocks/blocks.6/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.6/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.6/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.6/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.6/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.6/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.6/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.6/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.6/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jY
+>/vision_encoder/backbone/stages_2/blocks/blocks.6/Add_output_0
+
+
+À
+@
+@jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.7/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.7/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@je
+J/vision_encoder/backbone/stages_2/blocks/blocks.7/token_mixer/Add_output_0
+
+
+À
+@
+@jg
+L/vision_encoder/backbone/stages_2/blocks/blocks.7/token_mixer/Add_1_output_0
+
+
+À
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.7/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j_
+U/vision_encoder/backbone/stages_2/blocks/blocks.7/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.7/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.7/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.7/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.7/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.7/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.7/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.7/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.7/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jY
+>/vision_encoder/backbone/stages_2/blocks/blocks.7/Add_output_0
+
+
+À
+@
+@jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.8/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.8/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@je
+J/vision_encoder/backbone/stages_2/blocks/blocks.8/token_mixer/Add_output_0
+
+
+À
+@
+@jg
+L/vision_encoder/backbone/stages_2/blocks/blocks.8/token_mixer/Add_1_output_0
+
+
+À
+@
+@jc
+H/vision_encoder/backbone/stages_2/blocks/blocks.8/se/ReduceMean_output_0
+
+
+À
+
+j`
+F/vision_encoder/backbone/stages_2/blocks/blocks.8/se/fc1/Conv_output_0
+
+
+0
+
+j`
+F/vision_encoder/backbone/stages_2/blocks/blocks.8/se/act/Relu_output_0
+
+
+0
+
+ja
+F/vision_encoder/backbone/stages_2/blocks/blocks.8/se/fc2/Conv_output_0
+
+
+À
+
+je
+J/vision_encoder/backbone/stages_2/blocks/blocks.8/se/gate/Sigmoid_output_0
+
+
+À
+
+j\
+A/vision_encoder/backbone/stages_2/blocks/blocks.8/se/Mul_output_0
+
+
+À
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.8/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j_
+U/vision_encoder/backbone/stages_2/blocks/blocks.8/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.8/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.8/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.8/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.8/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.8/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.8/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.8/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.8/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jY
+>/vision_encoder/backbone/stages_2/blocks/blocks.8/Add_output_0
+
+
+À
+@
+@jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.9/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.9/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@je
+J/vision_encoder/backbone/stages_2/blocks/blocks.9/token_mixer/Add_output_0
+
+
+À
+@
+@jg
+L/vision_encoder/backbone/stages_2/blocks/blocks.9/token_mixer/Add_1_output_0
+
+
+À
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.9/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j_
+U/vision_encoder/backbone/stages_2/blocks/blocks.9/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.9/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.9/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.9/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.9/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jk
+P/vision_encoder/backbone/stages_2/blocks/blocks.9/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@ja
+W/vision_encoder/backbone/stages_2/blocks/blocks.9/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_2/blocks/blocks.9/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_2/blocks/blocks.9/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jY
+>/vision_encoder/backbone/stages_2/blocks/blocks.9/Add_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.10/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jo
+T/vision_encoder/backbone/stages_2/blocks/blocks.10/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@jf
+K/vision_encoder/backbone/stages_2/blocks/blocks.10/token_mixer/Add_output_0
+
+
+À
+@
+@jh
+M/vision_encoder/backbone/stages_2/blocks/blocks.10/token_mixer/Add_1_output_0
+
+
+À
+@
+@jd
+I/vision_encoder/backbone/stages_2/blocks/blocks.10/se/ReduceMean_output_0
+
+
+À
+
+ja
+G/vision_encoder/backbone/stages_2/blocks/blocks.10/se/fc1/Conv_output_0
+
+
+0
+
+ja
+G/vision_encoder/backbone/stages_2/blocks/blocks.10/se/act/Relu_output_0
+
+
+0
+
+jb
+G/vision_encoder/backbone/stages_2/blocks/blocks.10/se/fc2/Conv_output_0
+
+
+À
+
+jf
+K/vision_encoder/backbone/stages_2/blocks/blocks.10/se/gate/Sigmoid_output_0
+
+
+À
+
+j]
+B/vision_encoder/backbone/stages_2/blocks/blocks.10/se/Mul_output_0
+
+
+À
+@
+@jq
+V/vision_encoder/backbone/stages_2/blocks/blocks.10/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j`
+V/vision_encoder/backbone/stages_2/blocks/blocks.10/channel_mixer/act/Constant_output_0
+ jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.10/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.10/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@jb
+X/vision_encoder/backbone/stages_2/blocks/blocks.10/channel_mixer/act/Constant_1_output_0
+ jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.10/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.10/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@jb
+X/vision_encoder/backbone/stages_2/blocks/blocks.10/channel_mixer/act/Constant_2_output_0
+ jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.10/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jq
+V/vision_encoder/backbone/stages_2/blocks/blocks.10/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jZ
+?/vision_encoder/backbone/stages_2/blocks/blocks.10/Add_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.11/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jo
+T/vision_encoder/backbone/stages_2/blocks/blocks.11/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@jf
+K/vision_encoder/backbone/stages_2/blocks/blocks.11/token_mixer/Add_output_0
+
+
+À
+@
+@jh
+M/vision_encoder/backbone/stages_2/blocks/blocks.11/token_mixer/Add_1_output_0
+
+
+À
+@
+@jq
+V/vision_encoder/backbone/stages_2/blocks/blocks.11/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j`
+V/vision_encoder/backbone/stages_2/blocks/blocks.11/channel_mixer/act/Constant_output_0
+ jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.11/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.11/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@jb
+X/vision_encoder/backbone/stages_2/blocks/blocks.11/channel_mixer/act/Constant_1_output_0
+ jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.11/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.11/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@jb
+X/vision_encoder/backbone/stages_2/blocks/blocks.11/channel_mixer/act/Constant_2_output_0
+ jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.11/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jq
+V/vision_encoder/backbone/stages_2/blocks/blocks.11/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jZ
+?/vision_encoder/backbone/stages_2/blocks/blocks.11/Add_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.12/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jo
+T/vision_encoder/backbone/stages_2/blocks/blocks.12/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@jf
+K/vision_encoder/backbone/stages_2/blocks/blocks.12/token_mixer/Add_output_0
+
+
+À
+@
+@jh
+M/vision_encoder/backbone/stages_2/blocks/blocks.12/token_mixer/Add_1_output_0
+
+
+À
+@
+@jd
+I/vision_encoder/backbone/stages_2/blocks/blocks.12/se/ReduceMean_output_0
+
+
+À
+
+ja
+G/vision_encoder/backbone/stages_2/blocks/blocks.12/se/fc1/Conv_output_0
+
+
+0
+
+ja
+G/vision_encoder/backbone/stages_2/blocks/blocks.12/se/act/Relu_output_0
+
+
+0
+
+jb
+G/vision_encoder/backbone/stages_2/blocks/blocks.12/se/fc2/Conv_output_0
+
+
+À
+
+jf
+K/vision_encoder/backbone/stages_2/blocks/blocks.12/se/gate/Sigmoid_output_0
+
+
+À
+
+j]
+B/vision_encoder/backbone/stages_2/blocks/blocks.12/se/Mul_output_0
+
+
+À
+@
+@jq
+V/vision_encoder/backbone/stages_2/blocks/blocks.12/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j`
+V/vision_encoder/backbone/stages_2/blocks/blocks.12/channel_mixer/act/Constant_output_0
+ jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.12/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.12/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@jb
+X/vision_encoder/backbone/stages_2/blocks/blocks.12/channel_mixer/act/Constant_1_output_0
+ jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.12/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.12/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@jb
+X/vision_encoder/backbone/stages_2/blocks/blocks.12/channel_mixer/act/Constant_2_output_0
+ jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.12/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jq
+V/vision_encoder/backbone/stages_2/blocks/blocks.12/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jZ
+?/vision_encoder/backbone/stages_2/blocks/blocks.12/Add_output_0
+
+
+À
+@
+@jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.13/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@jo
+T/vision_encoder/backbone/stages_2/blocks/blocks.13/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@jf
+K/vision_encoder/backbone/stages_2/blocks/blocks.13/token_mixer/Add_output_0
+
+
+À
+@
+@jh
+M/vision_encoder/backbone/stages_2/blocks/blocks.13/token_mixer/Add_1_output_0
+
+
+À
+@
+@jq
+V/vision_encoder/backbone/stages_2/blocks/blocks.13/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@j`
+V/vision_encoder/backbone/stages_2/blocks/blocks.13/channel_mixer/act/Constant_output_0
+ jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.13/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.13/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@jb
+X/vision_encoder/backbone/stages_2/blocks/blocks.13/channel_mixer/act/Constant_1_output_0
+ jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.13/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jl
+Q/vision_encoder/backbone/stages_2/blocks/blocks.13/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@jb
+X/vision_encoder/backbone/stages_2/blocks/blocks.13/channel_mixer/act/Constant_2_output_0
+ jn
+S/vision_encoder/backbone/stages_2/blocks/blocks.13/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@jq
+V/vision_encoder/backbone/stages_2/blocks/blocks.13/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@jZ
+?/vision_encoder/backbone/stages_2/blocks/blocks.13/Add_output_0
+
+
+À
+@
+@jr
+W/vision_encoder/backbone/stages_3/downsample/pre_block/token_mixer/conv/c/Conv_output_0
+
+
+À
+@
+@js
+X/vision_encoder/backbone/stages_3/downsample/pre_block/token_mixer/conv1/c/Conv_output_0
+
+
+À
+@
+@jj
+O/vision_encoder/backbone/stages_3/downsample/pre_block/token_mixer/Add_output_0
+
+
+À
+@
+@jl
+Q/vision_encoder/backbone/stages_3/downsample/pre_block/token_mixer/Add_1_output_0
+
+
+À
+@
+@ju
+Z/vision_encoder/backbone/stages_3/downsample/pre_block/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+@
+@jd
+Z/vision_encoder/backbone/stages_3/downsample/pre_block/channel_mixer/act/Constant_output_0
+ jp
+U/vision_encoder/backbone/stages_3/downsample/pre_block/channel_mixer/act/Div_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_3/downsample/pre_block/channel_mixer/act/Erf_output_0
+
+
+€
+@
+@jf
+\/vision_encoder/backbone/stages_3/downsample/pre_block/channel_mixer/act/Constant_1_output_0
+ jp
+U/vision_encoder/backbone/stages_3/downsample/pre_block/channel_mixer/act/Add_output_0
+
+
+€
+@
+@jp
+U/vision_encoder/backbone/stages_3/downsample/pre_block/channel_mixer/act/Mul_output_0
+
+
+€
+@
+@jf
+\/vision_encoder/backbone/stages_3/downsample/pre_block/channel_mixer/act/Constant_2_output_0
+ jr
+W/vision_encoder/backbone/stages_3/downsample/pre_block/channel_mixer/act/Mul_1_output_0
+
+
+€
+@
+@ju
+Z/vision_encoder/backbone/stages_3/downsample/pre_block/channel_mixer/conv2/c/Conv_output_0
+
+
+À
+@
+@j^
+C/vision_encoder/backbone/stages_3/downsample/pre_block/Add_output_0
+
+
+À
+@
+@jj
+O/vision_encoder/backbone/stages_3/downsample/spatial_downsample/c/Conv_output_0
+
+
+À
+ 
+ jj
+O/vision_encoder/backbone/stages_3/downsample/channel_downsample/c/Conv_output_0
+
+
+€
+ 
+ ja
+F/vision_encoder/backbone/stages_3/downsample/ffn/conv1/c/Conv_output_0
+
+
+€
+ 
+ jP
+F/vision_encoder/backbone/stages_3/downsample/ffn/act/Constant_output_0
+ j\
+A/vision_encoder/backbone/stages_3/downsample/ffn/act/Div_output_0
+
+
+€
+ 
+ j\
+A/vision_encoder/backbone/stages_3/downsample/ffn/act/Erf_output_0
+
+
+€
+ 
+ jR
+H/vision_encoder/backbone/stages_3/downsample/ffn/act/Constant_1_output_0
+ j\
+A/vision_encoder/backbone/stages_3/downsample/ffn/act/Add_output_0
+
+
+€
+ 
+ j\
+A/vision_encoder/backbone/stages_3/downsample/ffn/act/Mul_output_0
+
+
+€
+ 
+ jR
+H/vision_encoder/backbone/stages_3/downsample/ffn/act/Constant_2_output_0
+ j^
+C/vision_encoder/backbone/stages_3/downsample/ffn/act/Mul_1_output_0
+
+
+€
+ 
+ ja
+F/vision_encoder/backbone/stages_3/downsample/ffn/conv2/c/Conv_output_0
+
+
+€
+ 
+ jT
+9/vision_encoder/backbone/stages_3/downsample/Add_output_0
+
+
+€
+ 
+ jm
+R/vision_encoder/backbone/stages_3/blocks/blocks.0/token_mixer/conv/c/Conv_output_0
+
+
+€
+ 
+ jn
+S/vision_encoder/backbone/stages_3/blocks/blocks.0/token_mixer/conv1/c/Conv_output_0
+
+
+€
+ 
+ je
+J/vision_encoder/backbone/stages_3/blocks/blocks.0/token_mixer/Add_output_0
+
+
+€
+ 
+ jg
+L/vision_encoder/backbone/stages_3/blocks/blocks.0/token_mixer/Add_1_output_0
+
+
+€
+ 
+ jc
+H/vision_encoder/backbone/stages_3/blocks/blocks.0/se/ReduceMean_output_0
+
+
+€
+
+j`
+F/vision_encoder/backbone/stages_3/blocks/blocks.0/se/fc1/Conv_output_0
+
+
+`
+
+j`
+F/vision_encoder/backbone/stages_3/blocks/blocks.0/se/act/Relu_output_0
+
+
+`
+
+ja
+F/vision_encoder/backbone/stages_3/blocks/blocks.0/se/fc2/Conv_output_0
+
+
+€
+
+je
+J/vision_encoder/backbone/stages_3/blocks/blocks.0/se/gate/Sigmoid_output_0
+
+
+€
+
+j\
+A/vision_encoder/backbone/stages_3/blocks/blocks.0/se/Mul_output_0
+
+
+€
+ 
+ jp
+U/vision_encoder/backbone/stages_3/blocks/blocks.0/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+ 
+ j_
+U/vision_encoder/backbone/stages_3/blocks/blocks.0/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_3/blocks/blocks.0/channel_mixer/act/Div_output_0
+
+
+€
+ 
+ jk
+P/vision_encoder/backbone/stages_3/blocks/blocks.0/channel_mixer/act/Erf_output_0
+
+
+€
+ 
+ ja
+W/vision_encoder/backbone/stages_3/blocks/blocks.0/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_3/blocks/blocks.0/channel_mixer/act/Add_output_0
+
+
+€
+ 
+ jk
+P/vision_encoder/backbone/stages_3/blocks/blocks.0/channel_mixer/act/Mul_output_0
+
+
+€
+ 
+ ja
+W/vision_encoder/backbone/stages_3/blocks/blocks.0/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_3/blocks/blocks.0/channel_mixer/act/Mul_1_output_0
+
+
+€
+ 
+ jp
+U/vision_encoder/backbone/stages_3/blocks/blocks.0/channel_mixer/conv2/c/Conv_output_0
+
+
+€
+ 
+ jY
+>/vision_encoder/backbone/stages_3/blocks/blocks.0/Add_output_0
+
+
+€
+ 
+ jm
+R/vision_encoder/backbone/stages_3/blocks/blocks.1/token_mixer/conv/c/Conv_output_0
+
+
+€
+ 
+ jn
+S/vision_encoder/backbone/stages_3/blocks/blocks.1/token_mixer/conv1/c/Conv_output_0
+
+
+€
+ 
+ je
+J/vision_encoder/backbone/stages_3/blocks/blocks.1/token_mixer/Add_output_0
+
+
+€
+ 
+ jg
+L/vision_encoder/backbone/stages_3/blocks/blocks.1/token_mixer/Add_1_output_0
+
+
+€
+ 
+ jp
+U/vision_encoder/backbone/stages_3/blocks/blocks.1/channel_mixer/conv1/c/Conv_output_0
+
+
+€
+ 
+ j_
+U/vision_encoder/backbone/stages_3/blocks/blocks.1/channel_mixer/act/Constant_output_0
+ jk
+P/vision_encoder/backbone/stages_3/blocks/blocks.1/channel_mixer/act/Div_output_0
+
+
+€
+ 
+ jk
+P/vision_encoder/backbone/stages_3/blocks/blocks.1/channel_mixer/act/Erf_output_0
+
+
+€
+ 
+ ja
+W/vision_encoder/backbone/stages_3/blocks/blocks.1/channel_mixer/act/Constant_1_output_0
+ jk
+P/vision_encoder/backbone/stages_3/blocks/blocks.1/channel_mixer/act/Add_output_0
+
+
+€
+ 
+ jk
+P/vision_encoder/backbone/stages_3/blocks/blocks.1/channel_mixer/act/Mul_output_0
+
+
+€
+ 
+ ja
+W/vision_encoder/backbone/stages_3/blocks/blocks.1/channel_mixer/act/Constant_2_output_0
+ jm
+R/vision_encoder/backbone/stages_3/blocks/blocks.1/channel_mixer/act/Mul_1_output_0
+
+
+€
+ 
+ jp
+U/vision_encoder/backbone/stages_3/blocks/blocks.1/channel_mixer/conv2/c/Conv_output_0
+
+
+€
+ 
+ jY
+>/vision_encoder/backbone/stages_3/blocks/blocks.1/Add_output_0
+
+
+€
+ 
+ j=
+"/vision_encoder/neck/Cast_output_0
+
+
+€
+ 
+ jE
+*/vision_encoder/neck/convs.0/Conv_output_0
+
+
+€
+ 
+ j?
+$/vision_encoder/neck/Cast_1_output_0
+
+
+À
+@
+@jE
+*/vision_encoder/neck/convs.1/Conv_output_0
+
+
+€
+@
+@j?
+$/vision_encoder/neck/Cast_2_output_0
+
+
+€
+ 
+ j4
+&/vision_encoder/neck/Constant_output_0
+
+
+j?
+$/vision_encoder/neck/Resize_output_0
+
+
+€
+@
+@j?
+$/vision_encoder/neck/Cast_3_output_0
+
+
+€
+@
+@j<
+!/vision_encoder/neck/Add_output_0
+
+
+€
+@
+@jN
+8/vision_encoder/neck/position_encoding/Constant_output_0
+
+
+@
+jH
+:/vision_encoder/neck/position_encoding/Constant_1_output_0
+
+
+jH
+:/vision_encoder/neck/position_encoding/Constant_2_output_0
+
+
+jM
+?/vision_encoder/neck/position_encoding/ConstantOfShape_output_0
+
+
+jD
+:/vision_encoder/neck/position_encoding/Constant_3_output_0
+ jA
+3/vision_encoder/neck/position_encoding/Mul_output_0
+
+
+jC
+5/vision_encoder/neck/position_encoding/Equal_output_0
+
+	
+jC
+5/vision_encoder/neck/position_encoding/Where_output_0
+
+
+jX
+6/vision_encoder/neck/position_encoding/Expand_output_0
+
+unk__0
+@
+unk__1jP
+:/vision_encoder/neck/position_encoding/Constant_4_output_0
+
+
+
+@jH
+:/vision_encoder/neck/position_encoding/Constant_5_output_0
+
+
+jH
+:/vision_encoder/neck/position_encoding/Constant_6_output_0
+
+
+jO
+A/vision_encoder/neck/position_encoding/ConstantOfShape_1_output_0
+
+
+jD
+:/vision_encoder/neck/position_encoding/Constant_7_output_0
+ jC
+5/vision_encoder/neck/position_encoding/Mul_1_output_0
+
+
+jE
+7/vision_encoder/neck/position_encoding/Equal_1_output_0
+
+	
+jE
+7/vision_encoder/neck/position_encoding/Where_1_output_0
+
+
+jZ
+8/vision_encoder/neck/position_encoding/Expand_1_output_0
+
+unk__2
+unk__3
+@jH
+:/vision_encoder/neck/position_encoding/Constant_8_output_0
+
+
+jH
+:/vision_encoder/neck/position_encoding/Constant_9_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_10_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_11_output_0
+
+
+jW
+5/vision_encoder/neck/position_encoding/Slice_output_0
+
+unk__0
+
+unk__1jE
+;/vision_encoder/neck/position_encoding/Constant_12_output_0
+ jU
+3/vision_encoder/neck/position_encoding/Add_output_0
+
+unk__0
+
+unk__1jU
+3/vision_encoder/neck/position_encoding/Div_output_0
+
+unk__0
+@
+unk__1jE
+;/vision_encoder/neck/position_encoding/Constant_13_output_0
+ jW
+5/vision_encoder/neck/position_encoding/Mul_2_output_0
+
+unk__0
+@
+unk__1jI
+;/vision_encoder/neck/position_encoding/Constant_14_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_15_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_16_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_17_output_0
+
+
+jY
+7/vision_encoder/neck/position_encoding/Slice_1_output_0
+
+unk__2
+unk__3
+jE
+;/vision_encoder/neck/position_encoding/Constant_18_output_0
+ jW
+5/vision_encoder/neck/position_encoding/Add_1_output_0
+
+unk__2
+unk__3
+jW
+5/vision_encoder/neck/position_encoding/Div_1_output_0
+
+unk__2
+unk__3
+@jE
+;/vision_encoder/neck/position_encoding/Constant_19_output_0
+ jW
+5/vision_encoder/neck/position_encoding/Mul_3_output_0
+
+unk__2
+unk__3
+@jI
+;/vision_encoder/neck/position_encoding/Constant_20_output_0
+
+
+j_
+9/vision_encoder/neck/position_encoding/Unsqueeze_output_0"
+ 
+unk__2
+unk__3
+@
+jJ
+;/vision_encoder/neck/position_encoding/Constant_21_output_0
+	
+€j\
+5/vision_encoder/neck/position_encoding/Div_2_output_0#
+!
+unk__2
+unk__3
+@
+€jI
+;/vision_encoder/neck/position_encoding/Constant_22_output_0
+
+
+ja
+;/vision_encoder/neck/position_encoding/Unsqueeze_1_output_0"
+ 
+unk__0
+@
+unk__1
+jJ
+;/vision_encoder/neck/position_encoding/Constant_23_output_0
+	
+€j\
+5/vision_encoder/neck/position_encoding/Div_3_output_0#
+!
+unk__0
+@
+unk__1
+€jI
+;/vision_encoder/neck/position_encoding/Constant_24_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_25_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_26_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_27_output_0
+
+
+j]
+7/vision_encoder/neck/position_encoding/Slice_2_output_0"
+ 
+unk__2
+unk__3
+@
+@jY
+3/vision_encoder/neck/position_encoding/Sin_output_0"
+ 
+unk__2
+unk__3
+@
+@jI
+;/vision_encoder/neck/position_encoding/Constant_28_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_29_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_30_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_31_output_0
+
+
+j]
+7/vision_encoder/neck/position_encoding/Slice_3_output_0"
+ 
+unk__2
+unk__3
+@
+@jY
+3/vision_encoder/neck/position_encoding/Cos_output_0"
+ 
+unk__2
+unk__3
+@
+@jI
+;/vision_encoder/neck/position_encoding/Constant_32_output_0
+
+
+je
+;/vision_encoder/neck/position_encoding/Unsqueeze_2_output_0&
+$ 
+unk__2
+unk__3
+@
+@
+jI
+;/vision_encoder/neck/position_encoding/Constant_33_output_0
+
+
+je
+;/vision_encoder/neck/position_encoding/Unsqueeze_3_output_0&
+$ 
+unk__2
+unk__3
+@
+@
+j`
+6/vision_encoder/neck/position_encoding/Concat_output_0&
+$ 
+unk__2
+unk__3
+@
+@
+jC
+5/vision_encoder/neck/position_encoding/Shape_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_34_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_35_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_36_output_0
+
+
+jE
+7/vision_encoder/neck/position_encoding/Slice_4_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_37_output_0
+
+
+jF
+8/vision_encoder/neck/position_encoding/Concat_1_output_0
+
+
+ji
+7/vision_encoder/neck/position_encoding/Reshape_output_0.
+,(
+unk__4
+unk__5
+unk__6
+unk__7jI
+;/vision_encoder/neck/position_encoding/Constant_38_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_39_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_40_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_41_output_0
+
+
+j]
+7/vision_encoder/neck/position_encoding/Slice_5_output_0"
+ 
+unk__0
+@
+unk__1
+@j[
+5/vision_encoder/neck/position_encoding/Sin_1_output_0"
+ 
+unk__0
+@
+unk__1
+@jI
+;/vision_encoder/neck/position_encoding/Constant_42_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_43_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_44_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_45_output_0
+
+
+j]
+7/vision_encoder/neck/position_encoding/Slice_6_output_0"
+ 
+unk__0
+@
+unk__1
+@j[
+5/vision_encoder/neck/position_encoding/Cos_1_output_0"
+ 
+unk__0
+@
+unk__1
+@jI
+;/vision_encoder/neck/position_encoding/Constant_46_output_0
+
+
+je
+;/vision_encoder/neck/position_encoding/Unsqueeze_4_output_0&
+$ 
+unk__0
+@
+unk__1
+@
+jI
+;/vision_encoder/neck/position_encoding/Constant_47_output_0
+
+
+je
+;/vision_encoder/neck/position_encoding/Unsqueeze_5_output_0&
+$ 
+unk__0
+@
+unk__1
+@
+jb
+8/vision_encoder/neck/position_encoding/Concat_2_output_0&
+$ 
+unk__0
+@
+unk__1
+@
+jE
+7/vision_encoder/neck/position_encoding/Shape_1_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_48_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_49_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_50_output_0
+
+
+jE
+7/vision_encoder/neck/position_encoding/Slice_7_output_0
+
+
+jI
+;/vision_encoder/neck/position_encoding/Constant_51_output_0
+
+
+jF
+8/vision_encoder/neck/position_encoding/Concat_3_output_0
+
+
+jm
+9/vision_encoder/neck/position_encoding/Reshape_1_output_00
+.*
+unk__8
+unk__9
+	unk__10
+	unk__11jl
+8/vision_encoder/neck/position_encoding/Concat_4_output_00
+.*
+unk__8
+unk__9
+	unk__10
+	unk__12jm
+9/vision_encoder/neck/position_encoding/Transpose_output_00
+.*
+unk__8
+	unk__12
+unk__9
+	unk__10jX
+$/vision_encoder/neck/Cast_4_output_00
+.*
+unk__8
+	unk__12
+unk__9
+	unk__10j@
+$/vision_encoder/neck/Cast_5_output_0
+
+
+`
+€
+€jG
+*/vision_encoder/neck/convs.2/Conv_output_0
 
 
 €
 €
-€b
+€j@
+$/vision_encoder/neck/Cast_7_output_0
+
+
+0
+€
+€jG
+*/vision_encoder/neck/convs.3/Conv_output_0
+
+
+€
+€
+€j2
+/conv_s0/Conv_output_0
+
+
+ 
+€
+€j2
+/conv_s1/Conv_output_0
+
+
+@
+€
+€j
+/Shape_output_0
+
+
+j 
+/Constant_output_0
+
+
+j"
+/Constant_1_output_0
+
+
+j"
+/Constant_2_output_0
+
+
+j
+/Slice_output_0
+
+
+j"
+/Constant_3_output_0
+
+
+j
+/Concat_output_0
+
+
+j<
+/Reshape_output_0'
+%!
+	unk__39
+	unk__40
+	unk__41j
+/Shape_1_output_0
+
+
+j"
+/Constant_4_output_0
+
+
+j"
+/Constant_5_output_0
+
+
+j"
+/Constant_6_output_0
+
+
+j
+/Slice_1_output_0
+
+
+j"
+/Constant_7_output_0
+
+
+j 
+/Concat_1_output_0
+
+
+j>
+/Reshape_1_output_0'
+%!
+	unk__42
+	unk__43
+	unk__44j
+/Shape_2_output_0
+
+
+j"
+/Constant_8_output_0
+
+
+j"
+/Constant_9_output_0
+
+
+j#
+/Constant_10_output_0
+
+
+j
+/Slice_2_output_0
+
+
+j#
+/Constant_11_output_0
+
+
+j 
+/Concat_2_output_0
+
+
+j>
+/Reshape_2_output_0'
+%!
+	unk__45
+	unk__46
+	unk__47j
+/Shape_5_output_0
+
+
+j#
+/Constant_20_output_0
+
+
+j#
+/Constant_21_output_0
+
+
+j#
+/Constant_22_output_0
+
+
+j
+/Slice_5_output_0
+
+
+j#
+/Constant_23_output_0
+
+
+j 
+/Concat_5_output_0
+
+
+j>
+/Reshape_5_output_0'
+%!
+	unk__54
+	unk__55
+	unk__56j#
+/Constant_24_output_0
+
+
+j#
+/Constant_25_output_0
+
+
+j#
+/Constant_26_output_0
+
+
+j#
+/Constant_29_output_0
+
+
+j(
+pixel_values
+
+
+
+€
+€j"
+feats0
+
+
+ 
+€
+€j"
+feats1
+
+
+@
+€
+€j!
+feats2
+
+
+€
+@
+@j
 pos2
 
 
