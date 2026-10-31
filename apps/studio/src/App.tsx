@@ -414,7 +414,8 @@ export default function App() {
             {selectActive && (
               // Its buttons are never a click "outside" (Undo can re-render away under the click before it bubbles).
               <div className="select-bar" role="status" onClick={(e) => e.stopPropagation()}>
-                <span>{s.subjectTracking !== null ? `Following it through the clip… ${Math.round(s.subjectTracking * 100)}%` : s.seg.on && (s.seg.phase === "tracking" || s.seg.phase === "download") ? segStatusText(s.seg) : s.subjectNote ?? "Tap a subject to leave it out or add it"}</span>
+                {/* AI progress is in the dock's status line: here only what a tap does. */}
+                <span>{s.subjectTracking !== null ? `Following ${Math.round(s.subjectTracking * 100)}%` : s.subjectNote ?? "Tap to add or remove"}</span>
                 {s.subjectUndo > 0 && <button type="button" className="link-btn" onClick={() => void studio.undoSubjectTap()}>Undo</button>}
                 <button type="button" className="link-btn" onClick={() => (wide ? setPane("colour") : closeSheet())}>Done</button>
               </div>

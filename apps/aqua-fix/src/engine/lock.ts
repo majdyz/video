@@ -43,7 +43,10 @@ export function noteCut(segments: readonly LockSegment[], cutSeen: Map<number, n
  */
 export function lockParams(l: GradeParams, p: GradeParams, lockRange = false): GradeParams {
   const fit = p.backdropFit ?? l.backdropFit;
-  return lockRange ? { ...l, backdropFit: fit } : { ...l, zLo: p.zLo, zHi: p.zHi, backdropFit: fit };
+  // Seabed recovery follows the frame (a clip that swims from the sand into the blue): its median over a scene was
+  // nothing whenever most of the scene was open water.
+  const sb = { seabedNeed: p.seabedNeed ?? l.seabedNeed, seabedLw: p.seabedLw ?? l.seabedLw, seabedLb: p.seabedLb ?? l.seabedLb };
+  return lockRange ? { ...l, ...sb, backdropFit: fit } : { ...l, ...sb, zLo: p.zLo, zHi: p.zHi, backdropFit: fit };
 }
 
 /** Clip time between analyses, preview and export alike (engine tick / analyzeDue): the grade of a frame depends on the clip, not on timing. */

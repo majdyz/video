@@ -2726,3 +2726,33 @@ a {
   user-select: text;
   -webkit-user-select: text;
 }
+
+/* Selecting subjects: one compact pill (hint · Undo · Done), centred under the top bar. */
+.select-bar {
+  flex-wrap: nowrap;
+  width: auto;
+  max-width: calc(100% - 2 * var(--s-3));
+  gap: var(--s-1);
+  padding: 4px 4px 4px 14px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.select-bar span {
+  flex: 0 1 auto;
+  overflow: visible;
+  font-weight: 500;
+}
+.select-bar .link-btn {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+}
+.select-bar .link-btn:last-child {
+  background: #fff;
+  color: #0a0c10;
+}
+.is-narrow .select-bar {
+  left: 50%;
+  max-width: calc(100% - 96px);
+  transform: translateX(-50%);
+}

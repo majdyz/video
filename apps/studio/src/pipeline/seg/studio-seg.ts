@@ -128,7 +128,9 @@ export function outlineSelection(o: SegOverlay | null, engine: SubjectSelection 
     }
     if (engine) ids[i] = engine.ids[Math.min(engine.height - 1, Math.floor(((y + 0.5) / h) * engine.height)) * engine.width + Math.min(engine.width - 1, Math.floor(((x + 0.5) / w) * engine.width))];
   }
-  const animals = (engine?.animals ?? []).filter((a) => ids.includes(a.id));
+  // With the AI on, the engine's unpicked candidates (dashed) are left out: on a reef they are rock patches, a maze
+  // of lines over the picture. Its picked animals and the AI's outline stay.
+  const animals = (engine?.animals ?? []).filter((a) => ids.includes(a.id) && (a.override === "include" || (a.override !== "exclude" && a.strength > 0.5)));
   if (ml) animals.push({ id: ML_OUTLINE_ID, strength: 1 });
   return { width: w, height: h, ids, animals };
 }
