@@ -467,6 +467,7 @@ export class SubjectSeg {
   private lastActivity = 0;
   private onEvent(e: SessionEvent): void {
     this.lastActivity = performance.now();
+    if (e.ev === "trace") { crumb(`ai· ${e.msg}`); return; }
     const live = this.live;
     if (!live) return;
     if (e.ev === "frames") {

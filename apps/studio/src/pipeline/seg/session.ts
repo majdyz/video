@@ -70,6 +70,8 @@ export type SessionEvents = {
   rejected(id: number): void;
   /** Segment k's seeds are needed (its canonical frame t): tracking waits for session.seeds(k, ...). */
   needSeeds(k: number, t: number): void;
+  /** Breadcrumbs of the heavy steps (the main thread keeps them: a phone that kills the page leaves no log). */
+  trace?(msg: string): void;
 };
 
 type ObjState = {
@@ -121,6 +123,7 @@ export class SegSession {
   private model: EdgeTam;
   private frames: SessionFrames;
   private ev: SessionEvents;
+  private traced = 0;
 
   constructor(model: EdgeTam, frames: SessionFrames, span: { start: number; end: number }, ev: SessionEvents) {
     this.model = model;
@@ -336,9 +339,12 @@ export class SegSession {
 
   private async autoSeedsNow(t0: number): Promise<SegObject[]> {
     const t = this.snap(t0), A = AUTO, { mw: w, mh: h } = this;
+    this.ev.trace?.("auto: decode");
     const { rgba1024 } = await this.pixels(t, true);
     const cells = this.cellCache.get(Math.round(t * SEG.sampleHz) - this.grid.i0);
+    this.ev.trace?.("auto: encode");
     await this.model.encode(rgba1024!);
+    this.ev.trace?.("auto: encoded; probing");
     this.lastEncoded = NaN;
     const cands: { m: Float32Array; q: number }[] = [];
     const stats: string[] = [];
@@ -500,7 +506,13 @@ export class SegSession {
     this.lastStepT = t;
     const reverse = !goFwd, key = `${s.o.id}${goFwd ? "f" : "b"}`;
     const { luma, rgba1024 } = await this.pixels(t, t !== this.lastEncoded);
-    if (t !== this.lastEncoded) { await this.model.encode(rgba1024!); this.lastEncoded = t; }
+    if (t !== this.lastEncoded) {
+      const tr = this.traced++ < 3;
+      if (tr) this.ev.trace?.(`encode ${t.toFixed(2)}s`);
+      await this.model.encode(rgba1024!);
+      this.lastEncoded = t;
+      if (tr) this.ev.trace?.("encoded");
+    }
     // Each direction's bank starts with the prompted keyframe (its conditioning frame), as in the batch pass.
     const first = idx === 0;
     let pts: [number, number][] | null = null, labels: number[] | null = null;

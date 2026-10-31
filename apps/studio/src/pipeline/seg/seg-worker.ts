@@ -77,6 +77,7 @@ if (!isPthread) self.onmessage = async (ev: MessageEvent<Req>) => {
         idle: (profile) => emit({ ev: "idle", profile }),
         needSeeds: (k, t) => emit({ ev: "seeds", k, t }),
         rejected: (id) => emit({ ev: "rejected", id }),
+        trace: (msg) => emit({ ev: "trace", msg }),
       });
       session = s;
       post({ ok: true, width: frames.width, height: frames.height, mw: s.mw, mh: s.mh, i0: s.grid.i0, n: s.grid.n });

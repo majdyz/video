@@ -12,7 +12,8 @@ export type SessionEvent =
   | { ev: "progress"; done: number; total: number }
   | { ev: "idle"; profile: Record<string, number> }
   | { ev: "seeds"; k: number; t: number }
-  | { ev: "rejected"; id: number };
+  | { ev: "rejected"; id: number }
+  | { ev: "trace"; msg: string };
 export type SessionInfo = { width: number; height: number; mw: number; mh: number; i0: number; n: number };
 
 export type SegManifest = { model: string; source: string; files: Record<string, { bytes: number; sha256: string }> };
