@@ -4,6 +4,7 @@ import { cpSync, createReadStream, existsSync, readFileSync, readdirSync, statSy
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execSync } from "node:child_process";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Capacitor / file:// builds pass STUDIO_BASE=./ ; the web build lives under /video/studio/.
@@ -102,6 +103,8 @@ export default defineConfig({
   plugins: [react(), sharedMediapipe(), studioSegModels(), studioServiceWorker()],
   server: { fs: { allow: [resolve(here, "../.."), "/home/majdyz/video/node_modules"] } },
   worker: { format: "es" },
+  // The build shown in About (which version a phone is really running).
+  define: { __BUILD_ID__: JSON.stringify((() => { try { return execSync("git rev-parse --short HEAD").toString().trim(); } catch { return "dev"; } })()) },
   // onnxruntime-web finds its WASM next to its own module (new URL(..., import.meta.url)): no dev pre-bundling.
   optimizeDeps: { exclude: ["onnxruntime-web"] },
 });

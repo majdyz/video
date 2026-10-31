@@ -393,7 +393,8 @@ export class Studio {
       if (this.tools.colour.subjectPop) this.schedulePausedAnalysis();
     });
     video.addEventListener("seeked", () => {
-      if (this.snap.kind !== "video") return;
+      // A subject's track pass seeks through the clip itself and paints nothing until it is done.
+      if (this.snap.kind !== "video" || this.snap.subjectTracking !== null) return;
       if (this.pendingSeek !== null) {
         // Still scrubbing: show this frame, then on to the latest target (no still or analysis for a passing frame).
         const t = this.pendingSeek;

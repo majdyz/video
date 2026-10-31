@@ -3,7 +3,7 @@ import type { FootageStatus } from "../pipeline/studio.ts";
 import { Chips } from "./controls";
 
 const ORDER: FootageProfile[] = ["standard", "dlogm", "gplog", "hlg", "pq", "applelog", "wide"];
-const SHORT: Record<FootageProfile, string> = {
+export const FOOTAGE_SHORT: Record<FootageProfile, string> = {
   standard: "Standard",
   dlogm: "D-Log M",
   hlg: "HDR HLG",
@@ -29,8 +29,8 @@ const HINT: Record<FootageProfile, string> = {
 export function FootageField({ footage, onChange, disabled }: { footage: FootageStatus; onChange: (c: FootageChoice) => void; disabled?: boolean }) {
   const detected = footage.info?.detected ?? "standard";
   const items = [
-    { id: "auto" as FootageChoice, label: `Auto · ${SHORT[detected]}`, hint: footage.info?.evidence.join("; ") || "From the clip's colour tags and camera metadata" },
-    ...ORDER.map((id) => ({ id: id as FootageChoice, label: SHORT[id], hint: HINT[id] })),
+    { id: "auto" as FootageChoice, label: `Auto · ${FOOTAGE_SHORT[detected]}`, hint: footage.info?.evidence.join("; ") || "From the clip's colour tags and camera metadata" },
+    ...ORDER.map((id) => ({ id: id as FootageChoice, label: FOOTAGE_SHORT[id], hint: HINT[id] })),
   ];
   return (
     <div className="adv__field footage-field">

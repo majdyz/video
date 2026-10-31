@@ -167,6 +167,7 @@
 }
 
 [data-theme="light"] {
+  --editor-bg: var(--bg);
   color-scheme: light;
   --wordmark-ink: #18181b;
 

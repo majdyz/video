@@ -139,3 +139,13 @@ export const IconWarning = (p: P) => (
     <path d="M12 10v4.5M12 17.2v.1" />
   </Svg>
 );
+export const IconExpand = (p: P) => (
+  <Svg {...p}>
+    <path d="M4.5 9V4.5H9M15 4.5h4.5V9M19.5 15v4.5H15M9 19.5H4.5V15" />
+  </Svg>
+);
+export const IconShrink = (p: P) => (
+  <Svg {...p}>
+    <path d="M9 4.5V9H4.5M19.5 9H15V4.5M15 19.5V15h4.5M4.5 15H9v4.5" />
+  </Svg>
+);

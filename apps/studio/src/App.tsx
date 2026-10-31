@@ -1,23 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Studio } from "./pipeline/studio.ts";
 import { segStatusText } from "./pipeline/seg/studio-seg.ts";
-import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, initialVivid, lookOf, profileDefaults, savedVivid, type ToolId, type ToolsState } from "./pipeline/tools.ts";
+import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, initialVivid, lookOf, profileDefaults, savedVivid, subjectPopVisible, type ToolId, type ToolsState } from "./pipeline/tools.ts";
 import { BRAND, SAMPLE } from "./brand.ts";
 import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
-import { AdvancedControls, TOOL_ICON, ToolPanel } from "./ui/panels";
+import { AdvancedControls, SubjectsPanel, TOOL_ICON, ToolPanel, toolStatus } from "./ui/panels";
+import { ToolDock } from "./ui/tool-dock";
 import { SubjectOutlines } from "./ui/subjects";
 import { ExportSheet } from "./ui/export-sheet";
-import { AdvancedDrawer } from "./ui/advanced";
 import { EmptyState } from "./ui/empty";
 import { Sheet } from "./ui/sheet";
 import { IconButton, Segmented } from "./ui/controls";
-import { IconClose, IconCompare, IconExport, IconMore, IconPlus, IconWarning } from "./ui/icons";
+import { IconClose, IconCompare, IconExpand, IconExport, IconMore, IconPlus, IconShrink, IconSpark, IconWarning } from "./ui/icons";
 import { useMedia } from "./ui/use-media";
 import { FootageField } from "./ui/footage";
 import { isNativeShell } from "./native/registry.ts";
 import { formatTimecode, trimAt } from "./pipeline/trim.ts";
 import { lookAfterRemove, removeCut, segmentAtTime, segmentNumber, splitAt, visibleSegments } from "./pipeline/segments.ts";
+
+declare const __BUILD_ID__: string;
 
 type Theme = "abyss" | "light";
 const THEMES: { id: Theme; label: string }[] = [
@@ -45,10 +47,14 @@ function initialTools(): ToolsState {
   return t;
 }
 
-/** `?dock=open|closed` for screenshots; otherwise the dock follows the picture (see below). */
-function initialDock(): boolean | null {
-  const q = new URLSearchParams(location.search).get("dock");
-  return q ? q === "open" : null;
+/** A tool's controls, or Subjects (Subject pop and its selection: the ✨ button on the picture). */
+type Pane = ToolId | "subjects";
+const PANE_LABEL: Record<Pane, string> = { ...TOOL_LABEL, subjects: "Subjects" };
+const PANE_ICON: Record<Pane, (p: { size?: number }) => React.ReactNode> = { ...TOOL_ICON, subjects: IconSpark };
+
+/** `?sheet=colour|…` for screenshots: the phone's tool sheet open on that pane. */
+function initialSheet(): boolean {
+  return !!new URLSearchParams(location.search).get("sheet");
 }
 
 export default function App() {
@@ -61,24 +67,24 @@ export default function App() {
   const liveRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [tools, setToolsState] = useState<ToolsState>(initialTools);
-  const [tab, setTab] = useState<ToolId>(() => (new URLSearchParams(location.search).get("tab") as ToolId) || "colour");
+  const [pane, setPane] = useState<Pane>(() => { const q = new URLSearchParams(location.search); return (q.get("sheet") || q.get("tab") || "colour") as Pane; });
+  /** The tool the panels edit (Subjects belongs to Colour). */
+  const tab: ToolId = pane === "subjects" ? "colour" : pane;
   const [split, setSplit] = useState<number | null>(0.5);
   /** Selected timeline segment (its region index, segments.ts): what the Colour panel edits once the clip is split. */
   const [selLook, setSelLook] = useState(0);
   const [holding, setHolding] = useState(false);
-  /** Advanced section, inline under the tool's main controls (the preview stays in view). */
-  const [advOpen, setAdvOpen] = useState(false);
-  const advRef = useRef(advOpen);
-  advRef.current = advOpen;
+  /** Phone: the open tool sheet (pane's controls; the picture above stays live). */
+  const [sheetOpen, setSheetOpen] = useState(initialSheet);
+  /** Full screen: the picture alone (the Fullscreen API where there is one, else the page's own chrome hidden). */
+  const [immersive, setImmersive] = useState(false);
   const [tapPulse, setTapPulse] = useState<{ u: number; v: number; t: number } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
-  // Phone dock: collapsed for portrait clips (the picture gets the height), open for
-  // landscape ones (the space is there anyway) until the user toggles it.
-  const [dockPref, setDockOpen] = useState<boolean | null>(initialDock);
   const [hasLive, setHasLive] = useState(false);
   const [theme, setTheme] = useState<Theme>(() => (document.documentElement.dataset.theme === "light" ? "light" : "abyss"));
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const motionLogRef = useRef<HTMLInputElement>(null);
   const wide = useMedia(WIDE_QUERY);
 
   useEffect(() => {
@@ -169,10 +175,10 @@ export default function App() {
     if (id) setToolsState((t) => (t.dewarp.profile === id ? t : { ...t, dewarp: { ...t.dewarp, ...profileDefaults(id) } }));
   }, [s.camera]);
 
-  const tabs = photo ? TOOL_ORDER.filter((id) => id !== "stabilise") : TOOL_ORDER;
+  const tabs: Pane[] = [...(photo ? TOOL_ORDER.filter((id) => id !== "stabilise") : TOOL_ORDER), ...(subjectPopVisible() ? ["subjects" as const] : [])];
   useEffect(() => {
-    if (photo && tab === "stabilise") setTab("colour");
-  }, [photo, tab]);
+    if (photo && pane === "stabilise") setPane("colour");
+  }, [photo, pane]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -218,71 +224,133 @@ export default function App() {
       .catch((e: unknown) => console.error("[native] pick failed", e));
   };
   const aspect = s.info ? s.info.displayW / s.info.displayH : null;
-  const dockOpen = dockPref ?? (aspect !== null && aspect > 1.05);
   const pill = s.busy ?? (tools.stabilise.enabled && !photo && !exporting && (s.stab.state === "analysing" || s.stab.state === "solving")
     ? (s.stab.state === "solving" ? "Planning a smooth path…" : `Analysing motion ${Math.round(s.stab.progress * 100)}%`)
     // AI subject detection works in the background, also while the clip plays.
     : s.seg.on && s.seg.phase === "tracking" && !exporting && tools.colour.enabled && tools.colour.subjectPop ? `AI subjects ${Math.round((s.seg.progress ?? 0) * 100)}%`
     : null);
 
-  const closeAdv = useCallback(() => setAdvOpen(false), []);
+  const closeSheet = useCallback(() => setSheetOpen(false), []);
   const popOn = !!panelTools.colour.subjectPop || new URLSearchParams(location.search).get("pop") === "1";
+  const paneOpen = wide || sheetOpen;
   /**
-   * Selecting subjects (Subject pop): while Colour's Advanced section is open with Subject pop on, the subjects it
-   * found are outlined over the preview and a tap on the picture includes / excludes the one under the finger
-   * (instead of closing Advanced); the before / after line steps aside so the whole picture is the result.
+   * Selecting subjects (Subject pop): while Subjects is open with Subject pop on, the subjects it found are outlined
+   * over the preview and a tap on the picture includes / excludes the one under the finger; the before / after line
+   * steps aside so the whole picture is the result.
    */
-  const selectActive = advOpen && (wide || dockOpen) && popOn && ready && !exporting && tab === "colour" && tools.colour.enabled;
+  const selectActive = pane === "subjects" && paneOpen && popOn && ready && !exporting && tools.colour.enabled;
   useEffect(() => {
     // The outlines must match the paused frame, not the last analysis taken while playing.
     if (selectActive) void studio.refreshSubjects();
   }, [studio, selectActive]);
   useEffect(() => studio.setSplit(holding ? 1 : selectActive ? null : split), [studio, split, holding, selectActive]);
   const getSelection = useCallback(() => studio.outlineSelection(), [studio]);
-  const openAdv = () => {
-    setAdvOpen(true);
-    setDockOpen(true);
+  const openPane = (id: Pane) => {
+    setPane(id);
+    setSheetOpen(true);
+    setImmersive(false);
   };
-  const selectTab = (id: ToolId) => {
-    if (!wide && id === tab && dockOpen) {
-      setDockOpen(false);
-      setAdvOpen(false);
-    } else {
-      setTab(id);
-      setDockOpen(true);
-    }
+  /** The ✨ button on the picture: Subjects open, Subject pop (and Colour) on. */
+  const openSubjects = () => {
+    openPane("subjects");
+    if (!panelTools.colour.subjectPop || !tools.colour.enabled) setPanelTools((t) => ({ ...t, colour: { ...t.colour, subjectPop: true, enabled: true } }));
   };
 
-  const compare = (
-    <IconButton label={split === null ? "Show before and after" : "Hide before and after"} pressed={split !== null} className={split !== null ? "is-active" : ""} onClick={() => setSplit((v) => (v === null ? 0.5 : null))} disabled={!ready || exporting}>
-      <IconCompare size={18} />
-    </IconButton>
-  );
+  // Full screen: the real one where the browser has it for the page (not iPhone Safari: the page's chrome hides instead).
+  const toggleImmersive = () => {
+    const next = !immersive;
+    setImmersive(next);
+    if (next) setSheetOpen(false);
+    try {
+      if (next && document.fullscreenEnabled && !document.fullscreenElement) void document.documentElement.requestFullscreen().catch(() => undefined);
+      else if (!next && document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+    } catch { /* not supported */ }
+  };
+  useEffect(() => {
+    const onFs = () => { if (!document.fullscreenElement) setImmersive(false); };
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
+  useEffect(() => {
+    if (!immersive && !(sheetOpen && !wide)) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || document.querySelector(".sheet-layer")) return;
+      if (immersive) setImmersive(false);
+      else setSheetOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [immersive, sheetOpen, wide]);
+
   // Photos have no timeline: name and size instead.
   const bar = s.phase !== "empty" && (
     <div className={`viewer__bar${photo ? "" : " viewer__bar--video"}`}>
       {photo ? (
-        <>
-          <div className="photo-meta">
-            <span className="photo-meta__name">{s.fileName}</span>
-            <span className="photo-meta__size">{s.info ? `${s.info.displayW} × ${s.info.displayH}` : ""}</span>
-          </div>
-          {compare}
-        </>
+        <div className="photo-meta">
+          <span className="photo-meta__name">{s.fileName}</span>
+          <span className="photo-meta__size">{s.info ? `${s.info.displayW} × ${s.info.displayH}` : ""}</span>
+        </div>
       ) : (
         <Timeline time={s.currentTime} duration={s.duration} playing={s.playing} disabled={!ready || exporting} trim={s.trim} thumbs={s.thumbs} onToggle={() => studio.togglePlay()} onSeek={(t) => studio.seek(t)} onTrim={(r, commit) => studio.setTrim(r, commit)}
           cuts={segs.cuts} selected={editLook} canSplit={canSplit} onSplit={doSplit}
           onSelect={setSelLook}
           onCuts={(cuts, commit) => studio.setSegments({ cuts, looks: studio.getSnapshot().segments.looks }, commit)}
-          onRemoveCut={removeSplit}>
-          {compare}
-        </Timeline>
+          onRemoveCut={removeSplit} />
       )}
     </div>
   );
 
+  const exportBtn = (
+    <button type="button" className="btn btn--primary export-btn" onClick={() => { studio.pause(); setExportOpen(true); }} disabled={!ready || !s.canExport || colourPending}
+      title={colourPending ? `Export unlocks once the colour analysis of this ${photo ? "photo" : "clip"} is done` : undefined}>
+      {colourPending ? <span className="pill__dot" aria-hidden="true" /> : <IconExport size={18} />}
+      <span>{colourPending ? (wide ? "Reading the water…" : "Analysing") : "Export"}</span>
+    </button>
+  );
+  const subjectsOn = !!panelTools.colour.subjectPop && tools.colour.enabled;
+  // On the picture (Instagram-style): before / after, Subjects, full screen; in full screen only the way out.
+  const rail = s.phase !== "empty" && (
+    <div className="canvas-rail" onClick={(e) => e.stopPropagation()}>
+      {!immersive && (
+        <>
+          <button type="button" className={`rail-btn${split !== null ? " is-on" : ""}`} aria-pressed={split !== null} onClick={() => setSplit((v) => (v === null ? 0.5 : null))} disabled={!ready || exporting || selectActive}>
+            <IconCompare size={20} /><span>Compare</span>
+          </button>
+          {subjectPopVisible() && (
+            <button type="button" className={`rail-btn${subjectsOn ? " is-on" : ""}${selectActive ? " is-active" : ""}`} aria-pressed={selectActive} onClick={() => (selectActive ? closeSheet() : openSubjects())} disabled={!ready || exporting}>
+              <IconSpark size={20} /><span>{s.seg.on && subjectsOn && !photo ? "AI subjects" : "Subjects"}</span>
+            </button>
+          )}
+        </>
+      )}
+      <button type="button" className="rail-btn" onClick={toggleImmersive} aria-label={immersive ? "Exit full screen" : "Full screen"} disabled={s.phase !== "ready"}>
+        {immersive ? <IconShrink size={20} /> : <IconExpand size={20} />}{!immersive && <span>Full screen</span>}
+      </button>
+    </div>
+  );
+  const subjectControls = { corrections: s.subjectOverrides.length, onReset: () => studio.setSubjectOverrides([]), ai: s.kind === "video" ? { on: s.seg.on, status: segStatusText(s.seg), onToggle: (on: boolean) => studio.setSegEnabled(on) } : undefined };
+  const paneBody = pane === "subjects" ? (
+    <SubjectsPanel tools={panelTools} setTools={setPanelTools} colourOn={tools.colour.enabled} disabled={exporting || !ready} photo={photo} subjects={subjectControls} />
+  ) : (
+    <ToolPanel tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} scope={tab === "colour" ? segScope : null} stab={s.stab} info={s.info} colourProfiled={s.colourProfiled} photo={photo} camera={s.camera} disabled={exporting || !ready}
+      advanced={
+        <section className="finetune" aria-label={`${TOOL_LABEL[tab]} fine-tuning${tab === "colour" && segNum ? `, segment ${segNum.index} of ${segNum.count}` : ""}`}>
+          <h4 className="finetune__title">Fine-tune</h4>
+          <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined} />
+          {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
+        </section>
+      } />
+  );
+  const footageNote = s.kind === "video" && s.footage.note && (
+    <p className="panel__note footage-note" role="note">
+      {s.footage.note}
+      <button type="button" className="link-btn" onClick={() => openPane("colour")} disabled={exporting}>Change</button>
+    </p>
+  );
+  const paneOn = (id: Pane) => (id === "subjects" ? subjectsOn : tools[id].enabled);
+
   return (
-    <div className={`app phase-${s.phase}${wide ? " is-wide" : " is-narrow"}${dockOpen ? " dock-open" : ""}${advOpen && (wide || dockOpen) ? " adv-open" : ""}`} style={aspect ? ({ ["--clip-ar" as string]: aspect.toFixed(4) }) : undefined} data-stab={s.stab.state} data-export={s.exp.state} data-kind={s.kind ?? "none"}>
+    <div className={`app phase-${s.phase}${wide ? " is-wide" : " is-narrow"}${!wide && sheetOpen ? " sheet-open" : ""}${immersive ? " is-immersive" : ""}`} style={aspect ? ({ ["--clip-ar" as string]: aspect.toFixed(4) }) : undefined} data-stab={s.stab.state} data-export={s.exp.state} data-kind={s.kind ?? "none"}>
       <header className="topbar">
         <h1 className="wordmark">{BRAND.name}</h1>
         <div className="topbar__actions">
@@ -294,11 +362,12 @@ export default function App() {
           <IconButton label="About and appearance" onClick={() => setAboutOpen(true)}>
             <IconMore size={18} />
           </IconButton>
+          {!wide && s.phase !== "empty" && exportBtn}
         </div>
       </header>
 
       <main className="workspace">
-        <section className="viewer" aria-label="Preview" onClick={advOpen ? (e) => { if (!(e.target as HTMLElement).closest(".stage__frame, .viewer__bar")) closeAdv(); } : undefined}>
+        <section className="viewer" aria-label="Preview">
           <Stage
             aspect={s.phase === "empty" ? null : aspect}
             nativeWidth={s.info?.displayW ?? 0}
@@ -311,7 +380,7 @@ export default function App() {
             holding={holding}
             onSplit={setSplit}
             onHold={ready && !exporting ? setHolding : undefined}
-            onTap={selectActive ? undefined : advOpen ? closeAdv : photo ? undefined : () => studio.togglePlay()}
+            onTap={selectActive || photo ? undefined : () => studio.togglePlay()}
             onTapAt={selectActive ? (u, v) => { void studio.toggleSubjectAt(u, v); setTapPulse({ u, v, t: performance.now() }); } : undefined}
             overlay={selectActive ? <SubjectOutlines getSelection={getSelection} pulse={tapPulse} /> : undefined}
             onZoom={onZoom}
@@ -322,122 +391,91 @@ export default function App() {
             resetKey={`${s.fileName}:${s.info?.displayW}x${s.info?.displayH}`}
           >
             {s.phase === "empty" && <EmptyState accept={ACCEPT} onFile={openFile} onPick={native ? pick : undefined} onSample={() => { setSplit(0.5); setSelLook(0); void studio.openUrl(`${import.meta.env.BASE_URL}samples/${SAMPLE.file}`, SAMPLE.file); }} busy={s.busy} />}
-            {s.phase !== "empty" && pill && (
+            {s.phase !== "empty" && pill && !selectActive && (
               <div className="pill" role="status"><span className="pill__dot" aria-hidden="true" />{pill}</div>
             )}
+            {rail}
             {selectActive && (
               // Its buttons are never a click "outside" (Undo can re-render away under the click before it bubbles).
               <div className="select-bar" role="status" onClick={(e) => e.stopPropagation()}>
                 <span>{s.subjectTracking !== null ? `Following it through the clip… ${Math.round(s.subjectTracking * 100)}%` : s.seg.on && (s.seg.phase === "tracking" || s.seg.phase === "download") ? segStatusText(s.seg) : s.subjectNote ?? "Tap a subject to leave it out or add it"}</span>
                 {s.subjectUndo > 0 && <button type="button" className="link-btn" onClick={() => void studio.undoSubjectTap()}>Undo</button>}
-                <button type="button" className="link-btn" onClick={closeAdv}>Done</button>
+                <button type="button" className="link-btn" onClick={() => (wide ? setPane("colour") : closeSheet())}>Done</button>
               </div>
             )}
           </Stage>
           {wide && bar}
         </section>
 
-        {s.phase !== "empty" && (
+        {s.phase !== "empty" && !wide && (
+          // Phone: everything floats on the full-screen picture (a soft scrim, no panel): the open tool's options
+          // (ToolDock) or the timeline, over the tool bar.
+          <aside className="controls" aria-label="Tools" onClick={(e) => e.stopPropagation()}>
+            {sheetOpen ? (
+              <ToolDock pane={pane} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} camera={s.camera} photo={photo} disabled={exporting || !ready}
+                footage={s.kind === "video" ? s.footage : null} onFootage={s.kind === "video" ? (c) => studio.setFootage(c) : null}
+                onMotionLog={s.kind === "video" ? () => motionLogRef.current?.click() : null}
+                subjects={subjectControls}
+                status={pane === "subjects" ? (selectActive ? null : "Tap ✨ Subjects to pick animals") : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
+            ) : bar}
+            <nav className="toolbar" aria-label="Tools">
+              {tabs.map((id) => {
+                const Icon = PANE_ICON[id];
+                const open = sheetOpen && pane === id;
+                return (
+                  <button key={id} type="button" className={`toolbar__btn${paneOn(id) ? " is-enabled" : ""}${open ? " is-open" : ""}`} aria-pressed={open}
+                    onClick={() => (open ? closeSheet() : id === "subjects" ? openSubjects() : openPane(id))} disabled={!ready}>
+                    <span className="toolbar__icon" aria-hidden="true"><Icon size={22} /></span>
+                    <span className="toolbar__label">{PANE_LABEL[id]}</span>
+                    <span className="sr-only">{paneOn(id) ? ", on" : ", off"}</span>
+                  </button>
+                );
+              })}
+            </nav>
+          </aside>
+        )}
+
+        {s.phase !== "empty" && wide && (
           <aside className="controls" aria-label="Tools">
-            {!wide && (
-              <button
-                type="button"
-                className="dock__grab"
-                aria-expanded={dockOpen}
-                aria-controls="tool-panel"
-                aria-label={dockOpen ? "Hide tool controls" : "Show tool controls"}
-                onClick={(e) => {
-                  // A drag already set the state; the click that follows it must not undo it.
-                  if (e.currentTarget.dataset.dragged) { delete e.currentTarget.dataset.dragged; return; }
-                  if (advOpen) setAdvOpen(false);
-                  else setDockOpen(!dockOpen);
-                }}
-                onPointerDown={(e) => {
-                  const y0 = e.clientY;
-                  const el = e.currentTarget;
-                  el.setPointerCapture(e.pointerId);
-                  const move = (ev: PointerEvent) => {
-                    const dy = ev.clientY - y0;
-                    if (Math.abs(dy) > 24) {
-                      el.dataset.dragged = "1";
-                      // Down closes Advanced first, then the dock.
-                      if (dy > 0 && advRef.current) setAdvOpen(false);
-                      else setDockOpen(dy < 0);
-                      up();
-                    }
-                  };
-                  const up = () => {
-                    el.removeEventListener("pointermove", move);
-                    el.removeEventListener("pointerup", up);
-                    el.removeEventListener("pointercancel", up);
-                  };
-                  el.addEventListener("pointermove", move);
-                  el.addEventListener("pointerup", up);
-                  el.addEventListener("pointercancel", up);
-                }}
-              >
-                <span className="dock__handle" aria-hidden="true" />
-              </button>
-            )}
-            {!wide && bar}
-            <div className="controls__panel" id="tool-panel" role="tabpanel" aria-labelledby={`tab-${tab}`} hidden={!wide && !dockOpen}>
-              {s.kind === "video" && s.footage.note && (
-                <p className="panel__note footage-note" role="note">
-                  {s.footage.note}
-                  <button type="button" className="link-btn" onClick={() => { setTab("colour"); openAdv(); }} disabled={exporting}>Change</button>
-                </p>
-              )}
-              <ToolPanel tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} scope={tab === "colour" ? segScope : null} stab={s.stab} info={s.info} colourProfiled={s.colourProfiled} photo={photo} camera={s.camera} disabled={exporting || !ready}
-                advanced={
-                  <AdvancedDrawer open={advOpen && (wide || dockOpen)} onToggle={() => (advOpen ? setAdvOpen(false) : openAdv())} onClose={closeAdv} disabled={exporting || !ready} id="adv-section"
-                    label={`${TOOL_LABEL[tab]} advanced settings${tab === "colour" && segNum ? `, segment ${segNum.index} of ${segNum.count}` : ""}`}>
-                    <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined}
-                      subjects={{ corrections: s.subjectOverrides.length, onReset: () => studio.setSubjectOverrides([]), ai: { on: s.seg.on, status: segStatusText(s.seg), onToggle: (on) => studio.setSegEnabled(on) } }} />
-                    {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
-                  </AdvancedDrawer>
-                } />
+            <div className="controls__panel" id="tool-panel" role="tabpanel" aria-labelledby={`tab-${pane}`}>
+              {footageNote}
+              {paneBody}
             </div>
             <div className="tabs" role="tablist" aria-label="Tool">
               {tabs.map((id) => {
-                const Icon = TOOL_ICON[id];
+                const Icon = PANE_ICON[id];
                 return (
-                  <button key={id} id={`tab-${id}`} type="button" role="tab" aria-selected={tab === id} aria-controls="tool-panel" className={`tab${tab === id ? " is-on" : ""}${tools[id].enabled ? " is-enabled" : ""}`} onClick={() => selectTab(id)}>
+                  <button key={id} id={`tab-${id}`} type="button" role="tab" aria-selected={pane === id} aria-controls="tool-panel" className={`tab${pane === id ? " is-on" : ""}${paneOn(id) ? " is-enabled" : ""}`} onClick={() => setPane(id)}>
                     <span className="tab__icon" aria-hidden="true"><Icon size={16} /></span>
-                    <span className="tab__label">{TOOL_LABEL[id]}</span>
+                    <span className="tab__label">{PANE_LABEL[id]}</span>
                     <span className="tab__dot" aria-hidden="true" />
-                    <span className="sr-only">{tools[id].enabled ? ", on" : ", off"}</span>
+                    <span className="sr-only">{paneOn(id) ? ", on" : ", off"}</span>
                   </button>
                 );
               })}
             </div>
-            {wide && (
-              <section className="chain" aria-label="Processing order">
-                <h2 className="chain__label">Processing order</h2>
-                <ol>
-                  {(["dewarp", "stabilise", "colour"] as ToolId[]).filter((id) => !photo || id !== "stabilise").map((id) => {
-                    const Icon = TOOL_ICON[id];
-                    const on = tools[id].enabled;
-                    const note = !on ? "Off"
-                      : id === "stabilise" ? (s.stab.state === "ready" ? "Ready" : s.stab.state === "error" ? "Failed" : s.stab.state === "off" ? "Waiting" : `${Math.round(s.stab.progress * 100)}%`)
-                      : id === "colour" ? (photo ? "On" : s.colourProfiled ? "Scene-locked" : "Analysing") : "On";
-                    return (
-                      <li key={id} className={on ? "is-on" : ""}>
-                        <button type="button" onClick={() => setTab(id)} className={tab === id ? "is-current" : ""}>
-                          <span className="chain__icon" aria-hidden="true"><Icon size={16} /></span>
-                          <span className="chain__name">{TOOL_LABEL[id]}</span>
-                          <span className="chain__note">{note}</span>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ol>
-              </section>
-            )}
-            <button type="button" className="btn btn--primary export-btn" onClick={() => { studio.pause(); setExportOpen(true); }} disabled={!ready || !s.canExport || colourPending}
-              title={colourPending ? `Export unlocks once the colour analysis of this ${photo ? "photo" : "clip"} is done` : undefined}>
-              <IconExport size={18} />
-              <span>{colourPending ? "Reading the water…" : "Export"}</span>
-            </button>
+            <section className="chain" aria-label="Processing order">
+              <h2 className="chain__label">Processing order</h2>
+              <ol>
+                {(["dewarp", "stabilise", "colour"] as ToolId[]).filter((id) => !photo || id !== "stabilise").map((id) => {
+                  const Icon = TOOL_ICON[id];
+                  const on = tools[id].enabled;
+                  const note = !on ? "Off"
+                    : id === "stabilise" ? (s.stab.state === "ready" ? "Ready" : s.stab.state === "error" ? "Failed" : s.stab.state === "off" ? "Waiting" : `${Math.round(s.stab.progress * 100)}%`)
+                    : id === "colour" ? (photo ? "On" : s.colourProfiled ? "Scene-locked" : "Analysing") : "On";
+                  return (
+                    <li key={id} className={on ? "is-on" : ""}>
+                      <button type="button" onClick={() => setPane(id)} className={pane === id ? "is-current" : ""}>
+                        <span className="chain__icon" aria-hidden="true"><Icon size={16} /></span>
+                        <span className="chain__name">{TOOL_LABEL[id]}</span>
+                        <span className="chain__note">{note}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ol>
+            </section>
+            {exportBtn}
           </aside>
         )}
       </main>
@@ -451,6 +489,7 @@ export default function App() {
       )}
 
       <video ref={videoRef} className="source-video" muted playsInline aria-hidden="true" />
+      <input ref={motionLogRef} type="file" accept=".gcsv,.csv,text/csv" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) studio.setMotionLog(f); }} />
       <input ref={fileInputRef} type="file" accept={ACCEPT} hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) openFile(f); }} />
 
       <ExportSheet open={exportOpen} onClose={() => { setExportOpen(false); if (s.exp.state === "done" || s.exp.state === "error") studio.dismissExport(); }} studio={studio} snap={s} tools={tools} />
@@ -473,6 +512,7 @@ export default function App() {
             {s.engine === "webgpu" ? "WebGPU" : s.engine === "webgl2" ? "WebGL2" : s.engine === "failed" ? "No GPU" : "GPU starting"}
             {" · "}
             {s.exportMode === "realtime" ? "real-time export (plays the clip through once)" : s.exportMode === "native" ? "native hardware encoder" : "WebCodecs export"}
+            {" · build "}{__BUILD_ID__}
           </p>
           <div className="about__credit">
             <h3>Sample clip</h3>

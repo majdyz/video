@@ -194,6 +194,8 @@ export function Timeline({
         {formatTimecode(drag.cuts[drag.k])}
       </div>
     );
+  } else if (drag?.kind === "scrub" && drag.moved) {
+    tip = <div className="trim__tip trim__tip--head" style={{ left: `${headPct}%` }} aria-hidden="true">{formatTimecode(drag.t)}</div>;
   } else if (drag && (drag.kind === "in" || drag.kind === "out")) {
     const w = stripRef.current?.clientWidth ?? 0;
     const atIn = drag.kind === "in";
@@ -210,7 +212,7 @@ export function Timeline({
   }
 
   return (
-    <div className={`timeline${disabled ? " is-disabled" : ""}${trimmed ? " is-trimmed" : ""}${drag ? " is-dragging" : ""}`}>
+    <div className={`timeline${disabled ? " is-disabled" : ""}${trimmed ? " is-trimmed" : ""}${drag ? ` is-dragging is-dragging--${drag.kind}` : ""}`}>
       <button type="button" className="timeline__play" aria-label={playing ? "Pause" : "Play"} onClick={onToggle} disabled={disabled}>
         {playing ? <IconPause size={18} /> : <IconPlay size={18} />}
       </button>

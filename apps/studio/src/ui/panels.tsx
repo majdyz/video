@@ -2,7 +2,6 @@ import { useRef, type ReactNode } from "react";
 import {
   COLOUR_PRESETS,
   DEFAULT_COLOUR,
-  subjectPopVisible,
   DEFAULT_STABILISE,
   cameraLabel,
   unrecognisedCameraHint,
@@ -20,7 +19,7 @@ import type { StabStatus } from "../pipeline/studio.ts";
 import type { ClipInfo } from "../pipeline/probe.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { Chips, Segmented, Slider, Switch } from "./controls";
-import { IconColour, IconDewarp, IconStabilise } from "./icons";
+import { IconColour, IconDewarp, IconSpark, IconStabilise } from "./icons";
 
 export const TOOL_ICON: Record<ToolId, (p: { size?: number }) => ReactNode> = {
   colour: IconColour,
@@ -50,11 +49,9 @@ type Props = {
   scope?: string | null;
 };
 
-/** The active tool's controls: header with on/off, preset chips, one Strength, Advanced. */
-export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, photo, camera, disabled, advanced, scope }: Props) {
+/** The tool's live state line ("Scene-locked to this clip", "Analysing motion · 40%", "Detected: GoPro HERO12"). */
+export function toolStatus({ tool, tools, stab, info, colourProfiled, photo, camera }: Pick<Props, "tool" | "tools" | "stab" | "info" | "colourProfiled" | "photo" | "camera">): ReactNode {
   const enabled = tools[tool].enabled;
-  const Icon = TOOL_ICON[tool];
-  const setEnabled = (v: boolean) => setTools((t) => ({ ...t, [tool]: { ...t[tool], enabled: v } }));
   let status: ReactNode = TOOL_BLURB[tool];
   if (tool === "stabilise" && enabled) {
     if (stab.state === "analysing") status = <span className="status-live">Analysing motion · {Math.round(stab.progress * 100)}%</span>;
@@ -72,6 +69,15 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
   // Gyro stabilisation + Dewarp: the gyro warp straightens through the clip's own lens model.
   const gyroLens = tool === "dewarp" && enabled && tools.stabilise.enabled && stab.state === "ready" && stab.info?.mode === "gyro";
   if (gyroLens) status = <span className="status-good">{detected ? `Detected: ${detected}` : stab.info?.camera} · gyro lens model</span>;
+  return status;
+}
+
+/** The active tool's controls: header with on/off, preset chips, one Strength, Advanced. */
+export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, photo, camera, disabled, advanced, scope }: Props) {
+  const enabled = tools[tool].enabled;
+  const Icon = TOOL_ICON[tool];
+  const setEnabled = (v: boolean) => setTools((t) => ({ ...t, [tool]: { ...t[tool], enabled: v } }));
+  const status = toolStatus({ tool, tools, stab, info, colourProfiled, photo, camera });
   const note = tool === "stabilise" && enabled && stab.info?.warning ? stab.info.warning : null;
 
   return (
@@ -155,7 +161,6 @@ function MotionLogField({ name, onChange }: { name: string | null; onChange: (fi
   );
 }
 
-/** Everything that isn't the main Strength. */
 /** Subject pop selection controls (App owns the select mode; the studio keeps the corrections). */
 export type SubjectControls = {
   corrections: number;
@@ -164,7 +169,55 @@ export type SubjectControls = {
   ai?: { on: boolean; status: string | null; onToggle: (on: boolean) => void };
 };
 
-export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, subjects }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus; onMotionLog?: (file: File | null) => void; subjects?: SubjectControls }) {
+/**
+ * Subjects: Subject pop and how its animals are chosen, a tool of its own (the ✨ button on the picture opens it).
+ * While it is open the picture outlines the subjects and a tap there adds or leaves one out (App).
+ */
+export function SubjectsPanel({ tools, setTools, subjects, colourOn, disabled, photo }: {
+  tools: ToolsState;
+  setTools: (fn: (t: ToolsState) => ToolsState) => void;
+  subjects: SubjectControls;
+  colourOn: boolean;
+  disabled: boolean;
+  photo?: boolean;
+}) {
+  const c = tools.colour;
+  const on = !!c.subjectPop && colourOn;
+  const up = (patch: Partial<typeof c>) => setTools((t) => ({ ...t, colour: { ...t.colour, ...patch, enabled: true } }));
+  const status = !colourOn ? "Needs Colour on" : !c.subjectPop ? "Separates fish, divers and animals from the blue" : subjects.corrections ? `${subjects.corrections} ${subjects.corrections === 1 ? "change" : "changes"} to the automatic choice` : "Tap an animal in the picture to add or remove it";
+  return (
+    <div className={`panel${on ? "" : " is-off"}`}>
+      <div className="panel__head">
+        <span className="panel__icon" aria-hidden="true"><IconSpark size={18} /></span>
+        <div className="panel__title">
+          <h3>Subjects <span className="adv__beta">Beta</span></h3>
+          <p aria-live="polite">{status}</p>
+        </div>
+        <Switch checked={on} onChange={(v) => up({ subjectPop: v })} label="Subject pop" disabled={disabled} />
+      </div>
+      {on && (
+        <div className="panel__body">
+          <Slider emphasis label="Pop" value={c.popStrength ?? DEFAULT_COLOUR.popStrength ?? 50} min={0} max={100} defaultValue={DEFAULT_COLOUR.popStrength} disabled={disabled}
+            format={(v) => (v < 25 ? "Subtle" : v > 75 ? "Strong" : String(Math.round(v)))} onChange={(v) => up({ popStrength: v })} />
+          {!photo && subjects.ai && (
+            <label className={`lookrow${subjects.ai.on ? " is-on" : ""}`}>
+              <span className="lookrow__text">
+                <span className="lookrow__name">AI detection</span>
+                <small role="status" aria-live="polite">{subjects.ai.status ?? "Follows each subject through the clip with an on-device model (33 MB, once)"}</small>
+              </span>
+              <Switch checked={subjects.ai.on} onChange={subjects.ai.onToggle} label="AI subject detection" disabled={disabled} />
+            </label>
+          )}
+          <div className="adv__actions">
+            <button type="button" className="link-btn" onClick={subjects.onReset} disabled={!subjects.corrections || disabled}>Reset selection</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus; onMotionLog?: (file: File | null) => void }) {
   if (tool === "colour") {
     const c = tools.colour;
     const up = (patch: Partial<typeof c>) => setTools((t) => ({ ...t, colour: { ...t.colour, ...patch } }));
@@ -175,30 +228,6 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, sub
         <Slider label="Saturation" value={c.saturation * 100} min={0} max={200} defaultValue={100} format={(v) => `${Math.round(v)}%`} onChange={(v) => up({ saturation: v / 100 })} />
         <Slider label="Clarity" value={c.clarity * 100} min={0} max={100} defaultValue={DEFAULT_COLOUR.clarity * 100} onChange={(v) => up({ clarity: v / 100 })} />
         <Slider label="Haze removal" value={c.veil * 100} min={0} max={120} defaultValue={DEFAULT_COLOUR.veil * 100} onChange={(v) => up({ veil: v / 100 })} />
-        {subjectPopVisible() && (
-          <div className="adv__field adv__field--row">
-            <span className="adv__label">Subject pop<span className="adv__beta">Beta</span> <small>Separates fish, divers and animals from open blue water</small></span>
-            <Switch checked={!!c.subjectPop} onChange={(v) => up({ subjectPop: v })} label="Subject pop" />
-          </div>
-        )}
-        {subjectPopVisible() && c.subjectPop && (
-          <Slider label="Pop strength" value={c.popStrength ?? DEFAULT_COLOUR.popStrength ?? 50} min={0} max={100} defaultValue={DEFAULT_COLOUR.popStrength}
-            format={(v) => (v < 25 ? "Subtle" : v > 75 ? "Strong" : String(Math.round(v)))} onChange={(v) => up({ popStrength: v })} />
-        )}
-        {subjectPopVisible() && c.subjectPop && subjects && (
-          <div className="adv__field">
-            <span className="adv__label">Subjects <small>{subjects.corrections ? `${subjects.corrections} ${subjects.corrections === 1 ? "change" : "changes"} to the automatic choice` : "chosen automatically; tap one in the picture to leave it out, or tap anything else to add it"}</small></span>
-            <span className="adv__actions">
-              <button type="button" className="link-btn" onClick={subjects.onReset} disabled={!subjects.corrections}>Reset selection</button>
-            </span>
-          </div>
-        )}
-        {subjectPopVisible() && c.subjectPop && subjects?.ai && (
-          <div className="adv__field adv__field--row">
-            <span className="adv__label">AI subject detection<span className="adv__beta">Beta</span> <small role="status" aria-live="polite">{subjects.ai.status ?? "Follows the subjects you tap with an on-device model (33 MB download once)"}</small></span>
-            <Switch checked={subjects.ai.on} onChange={subjects.ai.onToggle} label="AI subject detection" />
-          </div>
-        )}
         <p className="adv__hint">Strength 50 is the engine's own estimate for this clip; above it the correction is pushed harder (redder reds, whiter sand) at some cost to fidelity.</p>
         <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, colour: { ...DEFAULT_COLOUR, enabled: t.colour.enabled, vivid: t.colour.vivid } }))}>Reset colour</button>
       </div>
