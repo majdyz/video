@@ -572,14 +572,18 @@ export class SegSession {
 
   private postKeys(): void {
     const out: { t: number; conf: number }[] = [];
+    // Area-weighted over the shown subjects (the overlay is their union): a small fish leaving the frame with a low
+    // confidence must not dim the big animal's pop (the minimum did, and the pop blinked with it).
+    const n = this.mw * this.mh;
     for (const t of this.keys) {
-      let c = 1, seen = false;
+      let num = 0, den = 0;
       for (const s of this.objs.values()) {
         if (s.o.kind !== "include" || !s.shown.has(t)) continue;
-        c = Math.min(c, s.conf.get(t) ?? 1);
-        seen = true;
+        const k = s.keys.get(t);
+        const a = k ? Math.max(1, area(rleDecode(k, n), 127)) : 1;
+        num += a * (s.conf.get(t) ?? 1); den += a;
       }
-      if (seen) out.push({ t, conf: c });
+      if (den > 0) out.push({ t, conf: num / den });
     }
     this.ev.keys(out);
   }

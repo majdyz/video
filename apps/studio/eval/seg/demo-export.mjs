@@ -51,6 +51,21 @@ for (const t of (process.env.MASKT ?? "1,2,3,4,5").split(",").map(Number)) {
   const m = await p.evaluate((t) => { const o = window.studio.seg.overlayAt(t); return o ? { w: o.width, h: o.height, a: Array.from(o.alpha, (x) => Math.round(255 * x)) } : null; }, t);
   if (m) fs.writeFileSync(`${out}/mask-${t}.pgm`, Buffer.concat([Buffer.from(`P5\n${m.w} ${m.h}\n255\n`), Buffer.from(m.a)]));
 }
+// Per-frame overlay series (flicker diagnosis): the ML weight (max near), the consistency quality and the mask area.
+{
+  const series = await p.evaluate(() => {
+    const out = [];
+    for (let i = 0; i < 400; i++) {
+      const t = i / 30, o = window.studio.seg.overlayAt(t);
+      if (!o && t > 1) break;
+      let a = 0, nm = 0;
+      if (o) { for (let k = 0; k < o.alpha.length; k++) { if (o.alpha[k] > 0.5) a++; if (o.near[k] > nm) nm = o.near[k]; } }
+      out.push({ t: +t.toFixed(3), w: +nm.toFixed(4), q: o ? +(o.quality ?? 1).toFixed(4) : null, area: a });
+    }
+    return out;
+  });
+  fs.writeFileSync(`${out}/series.json`, JSON.stringify(series));
+}
 async function exportTo(name) {
   const dl = p.waitForEvent("download", { timeout: 3600000 }).catch(() => null);
   await p.getByRole("button", { name: /^Export$/ }).first().click(); await p.waitForTimeout(1500);

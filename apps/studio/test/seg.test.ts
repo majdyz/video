@@ -8,7 +8,7 @@ import { composeSegStrength, SEG_THICK, waterField } from "../../aqua-fix/src/en
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
 import { SUBJECT_CLEAR } from "../../aqua-fix/src/engine/params.ts";
-import { fillInterval, keyTimes, sampleRange, SEG, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
+import { confWeight, fillInterval, keyTimes, sampleRange, SEG, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
 import { linearToOklab } from "../../aqua-fix/src/engine/color.ts";
 import { autoObjects, maskStats, ML_OUTLINE_ID, seedObjects, outlineSelection, popComponentBox, promptFor, SegLive, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
 
@@ -123,8 +123,11 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(iou(tr.rawAt(7 / 30)!.inc, sqAt(7)) === 1, "an exact frame time reads its filled frame");
   assert.ok(iou(tr.rawAt(7.5 / 30)!.inc, sqAt(7)) > 0.85, "between two samples: their blend");
   assert.deepEqual(Array.from(tr.at(0.4)!.alpha), Array.from(new SegTrack(W, H, K, grid.i0, frames, frames.map(() => null)).at(0.4)!.alpha), "a pure function of the pass");
-  assert.ok(tr.weightAt(3 / 6) < 0.5, "a doubtful keyframe lowers the ML weight");
+  assert.ok(tr.weightAt(3 / 6) > 0.95, `one doubtful keyframe does not dim the pop (${tr.weightAt(3 / 6).toFixed(2)})`);
   assert.ok(tr.weightAt(0) > 0.95, "far from it the ML weight is full");
+  // A track lost for about a second fades out (slowly).
+  const lostK = Array.from({ length: 25 }, (_, k) => ({ t: k / 4, conf: k >= 10 && k <= 14 ? 0 : 0.5 }));
+  assert.ok(confWeight(lostK, 3) < 0.3 && confWeight(lostK, 0.5) > 0.95, `a lost track fades (${confWeight(lostK, 3).toFixed(2)})`);
   let step = 0;
   for (let t = 0; t < 1; t += 1 / 30) step = Math.max(step, Math.abs(tr.weightAt(t + 1 / 30) - tr.weightAt(t)));
   assert.ok(step < 0.2, `the weight never snaps (max step per frame ${step.toFixed(2)})`);
@@ -353,6 +356,18 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(a[0].prompt.labels.every((l) => l === 1) && !a[0].prompt.box, "positives only, no box");
   assert.ok(a[0].prompt.points.every(([u, v]) => u > 40 / w && u < 120 / w && v > 30 / h && v < 50 / h), "inside the animal");
   assert.deepEqual(seedObjects(null, 0, []), [], "no open water: nothing");
+}
+
+// An animal swimming closer (its mask growing steadily, 4x over the clip) is trusted throughout: the pop must not
+// breathe with its size.
+{
+  const mw = 96, mh = 48, qw = 24, qh = 12, n = 150;
+  const live = new SegLive({ mw, mh, i0: 0, n });
+  const grow = (i: number) => { const m = new Uint8Array(mw * mh), r = 5 + (15 * i) / n; for (let y = 0; y < mh; y++) for (let x = 0; x < mw; x++) if ((x - 48) ** 2 + (y - 24) ** 2 < r * r) m[y * mw + x] = 255; return m; };
+  live.put(Array.from({ length: n }, (_, i) => ({ i, alpha: rleEncode(grow(i)), nearQ: rleEncode(new Uint8Array(qw * qh).fill(255)), excQ: null, depQ: rleEncode(new Uint8Array(qw * qh).fill(255)) })));
+  let qmin = 1;
+  for (let i = 0; i < n; i++) qmin = Math.min(qmin, live.qualityAt(i));
+  assert.ok(qmin > 0.99, `steady growth is not a fragment (min ${qmin.toFixed(2)})`);
 }
 
 console.log("seg tests passed");

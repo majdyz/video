@@ -59,9 +59,13 @@ export const SEG = {
   alphaR: 6,
   /** The ML mask replaces the engine's within this many feather radii of the subject. */
   nearK: 3,
-  /** Confidence curve: dips widen over ±erodeS, then a raised-cosine average over ±easeS (ease down and up). */
-  erodeS: 0.2,
-  easeS: 0.4,
+  /** Confidence curve (confWeight): a raised-cosine average of the keyframe confidences over ±easeS, mapped through
+   * confLo..confHi. Long and gentle on purpose: keyframe confidences of a good track wander (0.3-0.7), and a weight
+   * that follows them frame to frame makes the pop breathe and blink; only a track that is really lost (low
+   * confidence for about a second) fades out, slowly. */
+  easeS: 1.0,
+  confLo: 0.12,
+  confHi: 0.3,
   /** Beyond the first / last keyframe the ML weight fades out over this long (s). */
   edgeFadeS: 0.25,
   /** Filled frames per clip second (the mask grid in time). */
@@ -419,23 +423,13 @@ export class SegTrack {
   /** Bytes held (for the memory note in the report). */
   get bytes(): number { return this.inc.reduce((s, m) => s + m.byteLength, 0) + this.exc.reduce((s, m) => s + (m?.byteLength ?? 0), 0); }
 
-  /** Confidence weight at t: keyframe confidences, dips widened (±erodeS) then eased (raised cosine ±easeS). */
+  /** Confidence weight at t (confWeight), faded out past the first / last keyframe. */
   weightAt(t: number): number {
     const K = this.keys;
     if (!K.length) return 0;
     const edge = Math.min(1, Math.max(0, 1 - Math.max(this.start - t, t - this.end, 0) / SEG.edgeFadeS));
     if (edge <= 0) return 0;
-    let num = 0, den = 0;
-    for (let i = 0; i < K.length; i++) {
-      const d = Math.abs(K[i].t - t);
-      if (d > SEG.easeS) continue;
-      let c = K[i].conf;
-      for (let j = i - 1; j >= 0 && K[i].t - K[j].t <= SEG.erodeS + 1e-6; j--) c = Math.min(c, K[j].conf);
-      for (let j = i + 1; j < K.length && K[j].t - K[i].t <= SEG.erodeS + 1e-6; j++) c = Math.min(c, K[j].conf);
-      const wk = 0.5 + 0.5 * Math.cos((Math.PI * d) / SEG.easeS);
-      num += wk * c; den += wk;
-    }
-    return edge * (den > 0 ? num / den : K[nearestKey(K, t)].conf);
+    return edge * confWeight(K, t);
   }
 
   /** Raw (unfeathered) include / exclude maps at t: the filled frames around t (linear between two samples). */
@@ -487,7 +481,21 @@ export class SegTrack {
   }
 }
 
-function nearestKey(K: Keyframe[], t: number): number {
+/** The ML weight at t from keyframe confidences (see SEG.easeS): raised-cosine average over ±easeS, confLo..confHi. */
+export function confWeight(K: readonly { t: number; conf: number }[], t: number): number {
+  if (!K.length) return 0;
+  let num = 0, den = 0;
+  for (const k of K) {
+    const d = Math.abs(k.t - t);
+    if (d > SEG.easeS) continue;
+    const wk = 0.5 + 0.5 * Math.cos((Math.PI * d) / SEG.easeS);
+    num += wk * k.conf; den += wk;
+  }
+  const c = den > 0 ? num / den : K[nearestKey(K, t)].conf;
+  return smoothstep(SEG.confLo, SEG.confHi, c);
+}
+
+function nearestKey(K: readonly { t: number }[], t: number): number {
   let b = 0;
   for (let i = 1; i < K.length; i++) if (Math.abs(K[i].t - t) < Math.abs(K[b].t - t)) b = i;
   return b;

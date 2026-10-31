@@ -8,7 +8,7 @@ import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelecti
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
 import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
-import { maskSize, SEG, type SegObject } from "./track.ts";
+import { confWeight, maskSize, SEG, type SegObject } from "./track.ts";
 import type { SessionFrameOut } from "./session.ts";
 
 const PREF_KEY = "deepfix.subjectPop.ai";
@@ -181,7 +181,7 @@ export function promptFor(o: Pick<SubjectOverride, "u" | "v">, boxes: readonly P
  * preview hands over to the engine's mask smoothly.
  */
 /** SegLive.qualityAt: the mask consistency check (see there). */
-export const SEG_QUALITY = { windowS: 2.5, shrinkLo: 0.45, shrinkHi: 0.7, partMin: 0.04, partKeep: 0.45, erodeS: 0.15, easeS: 0.4 };
+export const SEG_QUALITY = { jumpS: 0.2, dropLo: 0.5, dropHi: 0.72, holdS: 2.0, recover: 0.85, partMin: 0.04, partKeep: 0.5, partPersistS: 0.25, partShare: 0.7, easeS: 0.5 };
 
 /** A mask's area (alpha over 0.5, 0..255) and its significant parts (4-connected, at least partMin of the area). */
 export function maskStats(alpha: Uint8Array, w: number, h: number): { area: number; parts: number } {
@@ -238,50 +238,71 @@ export class SegLive {
   }
 
   /**
-   * How much the mask of frame i can be trusted as the whole animal (0..1, SEG_QUALITY): it drops when the mask
-   * suddenly shrinks (area under shrinkLo..shrinkHi of the upper quartile of its area over ±windowS) or falls apart
-   * into more significant parts than it usually has there (a head on its own, the tail as a separate piece), then
-   * eases over time (the worst over ±erodeS, a raised-cosine average over ±easeS), so a fragment is popped less, as
-   * a whole and smoothly, never as a pasted-on patch.
+   * How much the mask of frame i can be trusted as the whole animal (0..1, SEG_QUALITY), from sudden changes only (an
+   * animal swimming closer or away changes its area steadily, and the pop must hold steady through that):
+   *   a drop   the area falls to under dropLo..dropHi of its level jumpS earlier (the mask lost the body: the head
+   *            alone); held until it recovers to `recover` of that level, at most holdS. The same backwards in time
+   *            for a sudden gain (a fragment before the whole animal);
+   *   parts    more significant parts than usual (the median over ±holdS) in at least partShare of the frames within
+   *            ±partPersistS (a tail cut off), not a part that blinks for a frame where a thin tail crosses itself.
+   * The raw value is averaged over ±easeS (raised cosine): a fragment is popped less, as a whole and smoothly.
    */
   qualityAt(i: number): number {
     const hit = this.qCache.get(i);
     if (hit !== undefined) return hit;
     const Q = SEG_QUALITY, hz = SEG.sampleHz;
-    const raw = (j: number): number | null => {
-      const s = this.stats[j];
-      if (!s || s.area === 0) return null;
-      const W = Math.round(Q.windowS * hz), areas: number[] = [], parts: number[] = [];
-      for (let k = Math.max(0, j - W); k <= Math.min(this.n - 1, j + W); k++) {
-        const o = this.stats[k];
-        if (o && o.area > 0) { areas.push(o.area); parts.push(o.parts); }
+    const J = Math.max(1, Math.round(Q.jumpS * hz)), Hd = Math.round(Q.holdS * hz), P = Math.round(Q.partPersistS * hz);
+    const areaOf = (k: number) => (k >= 0 && k < this.n ? this.stats[k]?.area ?? 0 : 0);
+    // The level the area dropped from (looking `dir` = −1 back, +1 forward): the largest jump within holdS whose
+    // level the mask has not recovered to since, as a ratio; 1 when none.
+    const dropRatio = (j: number, dir: number): number => {
+      const a = areaOf(j);
+      if (!a) return 1;
+      let worst = 1;
+      for (let s = 1; s <= Hd; s++) {
+        const k = j + dir * s, k0 = k + dir * J;
+        const ak = areaOf(k), a0 = areaOf(k0);
+        if (!ak || !a0) break;
+        if (ak >= Q.recover * a0) continue;
+        // A sudden drop between k0 and k (within jumpS): the frames from k to j stay under its level.
+        const r = ak / a0;
+        if (r < Q.dropHi) {
+          let held = true;
+          for (let m = j; m !== k; m += dir) if (areaOf(m) >= Q.recover * a0) { held = false; break; }
+          if (held) worst = Math.min(worst, a / a0);
+        }
       }
-      areas.sort((a, b) => a - b); parts.sort((a, b) => a - b);
-      const ref = areas[Math.min(areas.length - 1, Math.floor(0.75 * areas.length))];
+      return worst;
+    };
+    const raw = (j: number): number | null => {
+      const st = this.stats[j];
+      if (!st || st.area === 0) return null;
+      const ra = Math.min(dropRatio(j, -1), dropRatio(j, 1));
+      const qa = smoothstep(Q.dropLo, Q.dropHi, ra);
+      const parts: number[] = [];
+      for (let k = Math.max(0, j - Hd); k <= Math.min(this.n - 1, j + Hd); k++) { const o = this.stats[k]; if (o && o.area > 0) parts.push(o.parts); }
+      parts.sort((x, y) => x - y);
       const usual = parts[parts.length >> 1];
-      const qa = smoothstep(Q.shrinkLo, Q.shrinkHi, s.area / Math.max(1, ref));
-      const qp = s.parts > usual ? Math.pow(Q.partKeep, s.parts - usual) : 1;
+      let more = 0, cnt = 0;
+      for (let k = Math.max(0, j - P); k <= Math.min(this.n - 1, j + P); k++) { const o = this.stats[k]; if (o && o.area > 0) { cnt++; if (o.parts > usual) more++; } }
+      const qp = cnt && more / cnt >= Q.partShare && st.parts > usual ? Math.pow(Q.partKeep, st.parts - usual) : 1;
       return Math.min(qa, qp);
     };
-    const E = Math.round(Q.erodeS * hz), A = Math.round(Q.easeS * hz);
+    const A = Math.round(Q.easeS * hz);
     let num = 0, den = 0;
     for (let d = -A; d <= A; d++) {
       const j = i + d;
       if (j < 0 || j >= this.n) continue;
-      let m: number | null = null;
-      for (let k = j - E; k <= j + E; k++) {
-        if (k < 0 || k >= this.n) continue;
-        const r = raw(k);
-        if (r !== null) m = m === null ? r : Math.min(m, r);
-      }
-      if (m === null) continue;
+      const r = raw(j);
+      if (r === null) continue;
       const w = 0.5 + 0.5 * Math.cos((Math.PI * d) / (A + 1));
-      num += w * m; den += w;
+      num += w * r; den += w;
     }
     const q = den > 0 ? num / den : 1;
     this.qCache.set(i, q);
     return q;
   }
+
 
   setConf(c: { t: number; conf: number }[]): void {
     this.conf = c;
@@ -292,20 +313,9 @@ export class SegLive {
     return this.frames.reduce((s, f) => s + (f ? f.alpha.byteLength + f.nearQ.byteLength + f.depQ.byteLength + (f.excQ?.byteLength ?? 0) : 0), 0);
   }
 
-  /** Keyframe confidences eased over time (as track.ts SegTrack.weightAt). */
+  /** Keyframe confidences eased over time (track.ts confWeight, as SegTrack.weightAt). */
   private weightAt(t: number): number {
-    let num = 0, den = 0;
-    const K = this.conf;
-    for (let i = 0; i < K.length; i++) {
-      const d = Math.abs(K[i].t - t);
-      if (d > SEG.easeS) continue;
-      let c = K[i].conf;
-      for (let j = i - 1; j >= 0 && K[i].t - K[j].t <= SEG.erodeS + 1e-6; j--) c = Math.min(c, K[j].conf);
-      for (let j = i + 1; j < K.length && K[j].t - K[i].t <= SEG.erodeS + 1e-6; j++) c = Math.min(c, K[j].conf);
-      const wk = 0.5 + 0.5 * Math.cos((Math.PI * d) / SEG.easeS);
-      num += wk * c; den += wk;
-    }
-    return den > 0 ? num / den : 0;
+    return this.conf.length ? confWeight(this.conf, t) : 0;
   }
 
   /** The overlay at clip time t, or null where nothing is filled near t. */
