@@ -41,10 +41,15 @@ export const SEG = {
   frameCache: 240,
   /** Flow guard: re-prompt when the tracker keeps less than this share of the carried mask... */
   guardShare: 0.25,
+  /** The same for the lite encoder (vision_encoder_lite). */
+  guardShareLite: 0.6,
   /** ...of a carried mask at least this share of the frame. */
   guardMinArea: 0.001,
   /** A tapped subject whose prompted mask covers more than this share of the frame is the water, not a subject. */
   maxTapArea: 0.45,
+  /** A tracked mask over this share of the frame, or growing past runawayGrow × the flow-carried one, is dropped. */
+  runawayArea: 0.3,
+  runawayGrow: 2.5,
   /** Probability remap before the guided filter: drop sub-threshold haze, keep the 0.5 contour. */
   remapLo: 0.15,
   remapSpan: 0.7,

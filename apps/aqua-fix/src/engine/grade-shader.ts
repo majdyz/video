@@ -720,7 +720,9 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
   lk.yz = highlightPink(lk.x, lk.yz);
   lk.yz = popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0));
-  float wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z;
+  // The engine's own masks are blobs reaching past the animal: there the warmth also needs the pixel's own departure
+  // from the water (it hugs the animal's outline); an AI mask is the outline already.
+  float wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * (p[24].y > 0.5 ? 1.0 : depart);
   lk.yz = warmPop(lk.x, lk.yz, wk);
   // The warm chroma may exceed the source-relative cap (a cyan shark has little to start from).
   vec3 o1 = oklabToLinear(capChroma(lk, max(cSrc, wk * WP_CMIN * 1.5)));
@@ -1200,7 +1202,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
   lk = vec3(lk.x, highlightPink(lk.x, lk.yz));
   lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0)));
-  let wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z;
+  let wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * select(depart, 1.0, p[24].y > 0.5);
   lk = vec3(lk.x, warmPop(lk.x, lk.yz, wk));
   let o1 = oklabToLinear(capChroma(lk, max(cSrc, wk * WP_CMIN * 1.5)));
   let o2 = fitToGamut(o1 * detailRatio(src, lin));

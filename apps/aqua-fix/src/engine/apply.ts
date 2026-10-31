@@ -310,7 +310,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   vv[0] = Lp; vv[1] *= kc; vv[2] *= kc;
   const hn0 = highlightPink(vv[0], vv[1], vv[2]);
   const hn1 = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * objectNeutralOf(p), 0, 1));
-  const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * (s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0);
+  const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP) * (s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0);
   const hn = warmPop(vv[0], hn1[0], hn1[1], wk);
   const capped = capChroma(vv[0], hn[0], hn[1], Math.max(cSrc, wk * WARM_POP.cMin * 1.5));
   const [r1, g1, b1] = oklabToLinear(vv[0], capped[0], capped[1]);

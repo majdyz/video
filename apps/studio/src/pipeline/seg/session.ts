@@ -534,15 +534,17 @@ export class SegSession {
       return;
     }
     const prev = goFwd ? s.prevF : s.prevB;
-    let reprompts = 0, agree = 1;
+    let reprompts = 0, agree = 1, carriedArea = 0;
     if (prev && !first) {
       const tg = performance.now();
       const fl = denseFlow(gray(luma, this.mw, this.mh), gray(prev.luma, this.mw, this.mh));
       const carried = warp(prev.m, fl);
       this.prof.guardMs += performance.now() - tg;
       const ca = area(carried);
+      carriedArea = ca;
       if (ca > SEG.guardMinArea * this.mw * this.mh) {
-        if (area(m) < SEG.guardShare * ca) {
+        // The lite (512-px) encoder loses thin subjects more easily (a turning thresher): it re-prompts sooner.
+        if (area(m) < (this.model.lite ? SEG.guardShareLite : SEG.guardShare) * ca) {
           const pr = promptFromMask(carried, this.mw, this.mh, this.mw / 640);
           if (pr) {
             const P: [number, number][] = [...pr.pos, ...pr.neg].map(([x, y]) => [((x + 0.5) / this.mw) * 1024, ((y + 0.5) / this.mh) * 1024]);
@@ -552,6 +554,15 @@ export class SegSession {
           }
         }
         agree = iou(m, carried);
+      }
+    }
+    // A runaway mask (the tracker slid onto the reef or the water: a big warm patch over the background): over
+    // SEG.runawayArea of the frame, or SEG.runawayGrow × what the flow carried, is no subject: the frame shows none.
+    {
+      const N = this.mw * this.mh, a = area(m), ca = carriedArea;
+      if (a > SEG.runawayArea * N || (ca > SEG.guardMinArea * N && a > SEG.runawayGrow * ca && a > 0.05 * N)) {
+        m = new Float32Array(N);
+        agree = 0;
       }
     }
     if (goFwd) { s.prevF = { m, luma }; s.fi++; } else { s.prevB = { m, luma }; s.bi++; }

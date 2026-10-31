@@ -222,6 +222,8 @@ export class SegLive {
   private qCache = new Map<number, number>();
   private conf: { t: number; conf: number }[] = [];
   filled = 0;
+  /** Quality check relaxed (lite encoder): only a near-total loss dims the pop. */
+  lenient = false;
   constructor(info: { mw: number; mh: number; i0: number; n: number }) {
     this.mw = info.mw;
     this.mh = info.mh;
@@ -290,7 +292,7 @@ export class SegLive {
       const st = this.stats[j];
       if (!st || st.area === 0) return null;
       const ra = Math.min(dropRatio(j, -1), dropRatio(j, 1));
-      return smoothstep(Q.dropLo, Q.dropHi, ra);
+      return this.lenient ? smoothstep(Q.dropLo * 0.4, Q.dropHi * 0.5, ra) : smoothstep(Q.dropLo, Q.dropHi, ra);
     };
     const A = Math.round(Q.easeS * hz);
     let num = 0, den = 0;
@@ -574,6 +576,9 @@ export class SubjectSeg {
         crumb(`ai: session ${info.width}x${info.height}, ${info.n} frames`);
         if (this.file !== file) return null;
         this.live = new SegLive(info);
+        // The lite encoder drops thin parts (a thresher's tail) while the body stays right: a sudden area drop is no
+        // sign of a lost subject there, and dimming the pop for it made the subject blink.
+        this.live.lenient = !!model.info?.ep.endsWith("lite");
         segLog(`session open: ${info.width}×${info.height}, masks ${info.mw}×${info.mh}, ${info.n} frames`);
         return this.live;
       } catch (e) {
