@@ -7,7 +7,7 @@
 //        ROBUST=1 (also grade frames through the colour engine: engine vs ML vs corrupted ML masks, robust.ts)
 //        TUNE=1 (Subject pop tuning, tune.ts: no segmentation pass; the masks of an earlier run in MASKS, default
 //        <SEG_DATA>/app-eval-tone, graded Vivid on, pop off vs on at STRENGTHS, frames BOARDF; OUT gets <clip>.tune.json;
-//        RES=1280: frames from cache/<clip>_1280.npy, the export's size, instead of the 640 px cache; halo.ts metric)
+//        SW={...}: SEG_WATER overrides; RES=1280: frames from cache/<clip>_1280.npy, the export's size, instead of the 640 px cache; halo.ts metric)
 // Needs the model files (apps/studio/scripts/seg-models.py) and Playwright in ~/browser.
 import { createServer } from "vite";
 import fs from "node:fs";
@@ -109,7 +109,7 @@ try {
     const page = await browser.newPage();
     page.on("console", (m) => { const t = m.text(); if (/pass|PASS|ROBUST|TUNE|track|frame \d|DONE|ERROR|model|engine/.test(t)) console.log(`[${clip}] ${t}`); });
     page.on("pageerror", (e) => console.log(`[${clip}] PAGEERROR ${e.message}`));
-    const url = `${base}?clip=${clip}&w=${W}&h=${H}&frames=${T}&objects=${encodeURIComponent(JSON.stringify(objects))}&prefer=${process.env.PREFER ?? "auto"}${process.env.SEGFPS ? `&segfps=${process.env.SEGFPS}` : ""}&robust=${process.env.ROBUST === "1" ? 1 : 0}&boardf=${process.env.BOARDF ?? (BOARD_FRAMES[clip] ?? [6, 90, 165]).join(",")}&strengths=${process.env.STRENGTHS ?? "0,0.25,0.5,0.75,1"}&sp=${encodeURIComponent(process.env.SP ?? "")}&sc=${encodeURIComponent(process.env.SC ?? "")}`;
+    const url = `${base}?clip=${clip}&w=${W}&h=${H}&frames=${T}&objects=${encodeURIComponent(JSON.stringify(objects))}&prefer=${process.env.PREFER ?? "auto"}${process.env.SEGFPS ? `&segfps=${process.env.SEGFPS}` : ""}&robust=${process.env.ROBUST === "1" ? 1 : 0}&boardf=${process.env.BOARDF ?? (BOARD_FRAMES[clip] ?? [6, 90, 165]).join(",")}&strengths=${process.env.STRENGTHS ?? "0,0.25,0.5,0.75,1"}&sp=${encodeURIComponent(process.env.SP ?? "")}&sc=${encodeURIComponent(process.env.SC ?? "")}&sw=${encodeURIComponent(process.env.SW ?? "")}`;
     await page.goto(url);
     await page.waitForFunction(() => /DONE|ERROR/.test(document.getElementById("log").textContent), null, { timeout: 3 * 3600_000, polling: 2000 });
     await page.close();

@@ -12,8 +12,11 @@ import { fillTrack, maskSize, type Keyframe } from "../../src/pipeline/seg/track
 import { bbox, dilate } from "../../src/pipeline/seg/mask.ts";
 import { deltaE, guard, lab, stats } from "./robust.ts";
 import { halo, upsample } from "./halo.ts";
+import { SEG_WATER } from "../../../aqua-fix/src/engine/seg-overlay.ts";
 
 const q = new URLSearchParams(location.search);
+// `?sw={...}` overrides SEG_WATER (read at run time by composeSegStrength).
+if (q.get("sw")) Object.assign(SEG_WATER, JSON.parse(q.get("sw")!));
 const clip = q.get("clip")!;
 const W = +q.get("w")!, H = +q.get("h")!, T = +q.get("frames")!;
 const strengths = (q.get("strengths") ?? "0,0.25,0.5,0.75,1").split(",").map(Number);

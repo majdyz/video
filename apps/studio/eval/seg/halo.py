@@ -98,4 +98,5 @@ def main():
     print(json.dumps({"dir": d, "mean": mean, "frames": rows}))
 
 
-main()
+if __name__ == "__main__":
+    main()

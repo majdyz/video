@@ -221,17 +221,18 @@ export const DETAIL_TAPS: readonly (readonly [number, number, number])[] = [
  * Lightness is left as graded (no lift: shading, counter-shading, highlights stay). The gate is OBJECT_NEUTRAL's
  * (red-starved, lit pixels of the subject). The engine-mask weight softens where the subject's colour fades into
  * the water's (edgeFloor at no departure).
- * Kept light: the clearing raises the luminance of a blue-cast grey (the same Oklab L with less blue reads lighter),
- * and a full clearing turns a blue-grey shark into a flat white cut-out.
+ * A negative desat gives the chroma left after the cast back a little (×(1 − desat)): the animal's own colour comes
+ * forward instead of fading to grey; a full clearing with desaturation turns a blue-grey shark into a flat white
+ * cut-out (the clearing alone raises a blue-cast grey's luminance).
  */
-export const SUBJECT_CLEAR = { k: 0.2, cMax: 0.025, desat: 0.02, edgeFloor: 0.3 };
+export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.3 };
 
 /**
  * Subject pop separation (on top of SUBJECT_CLEAR), per unit of the pop weight P = subject tone weight × pop
  * strength × the user's Strength (uniform p23.w, 1 = default): all of it stays on the subject (with an AI mask,
  * inside its contour: grade-shader toneWeight), nothing outside it changes, and none of it invents colour or
- * structure. Subtle on purpose (about +5 L* on a lit subject at the default Strength): the animal steps forward from
- * the water, it is not turned into a white cut-out.
+ * structure. At the default Strength: about +8 L* on a lit subject, most of the separation from local contrast and
+ * colour (the cast cleared, the animal's own chroma kept) rather than a white lift; a diver should see it at once.
  *   vividKeep  the share of the Vivid look's water darkening the subject is spared (its colour stays Vivid's);
  *              Vivid tells water by hue, so a blue-grey animal would otherwise darken with the water.
  *   clarity    extra local contrast (the frame's own CLAHE) on the subject: its own texture, more of it.
@@ -243,7 +244,7 @@ export const SUBJECT_CLEAR = { k: 0.2, cMax: 0.025, desat: 0.02, edgeFloor: 0.3 
  *   hueMax     on the subject, the output hue stays within this angle (radians) of the source pixel's own hue:
  *              the tone never rotates a dark blue toward magenta or brown.
  */
-export const SUBJECT_POP = { vividKeep: 0.35, clarity: 0.1, lift: 0.035, chromaFollow: 0.5, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
+export const SUBJECT_POP = { vividKeep: 0.6, clarity: 0.35, lift: 0.06, chromaFollow: 0.3, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
 
 /** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
 export function popStrengthK(s: { subjectPopStrength?: number }): number {
