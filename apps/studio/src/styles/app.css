@@ -2572,7 +2572,7 @@ a {
 .tool-dock__status:empty {
   display: none;
 }
-.tool-dock.is-off .bubble:not(.bubble--power):not(.bubble--toggle) {
+.tool-dock.is-off .bubble:not(.bubble--power):not(.bubble--toggle):not(.bubble--done) {
   opacity: 0.45;
 }
 
@@ -2673,4 +2673,40 @@ a {
   .bubbles__item {
     animation: none;
   }
+}
+
+/* Phone v3: no tool bar. Tools are small discs on the rail (Instagram story editor); the foot holds only the
+   timeline, or the open tool's bar and bubbles, on a light scrim. */
+.is-narrow .canvas-rail {
+  gap: var(--s-2);
+}
+.is-narrow .rail-btn {
+  min-width: 52px;
+  font-size: 10px;
+}
+.is-narrow .rail-btn > svg {
+  padding: 9px;
+}
+.is-narrow .rail-btn--tool.is-enabled:not(.is-on) > svg {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+.rail-sep {
+  align-self: center;
+  width: 20px;
+  height: 1px;
+  margin: 2px 0;
+  background: rgba(255, 255, 255, 0.35);
+}
+.is-narrow:not(.phase-empty) .controls {
+  padding-top: 36px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.6) 0%, rgba(0, 0, 0, 0.3) 60%, rgba(0, 0, 0, 0) 100%);
+}
+.is-narrow .timeline {
+  --trim-h: 34px;
+}
+.bubble--done {
+  min-width: 48px;
+  padding: 0;
+  background: #fff;
+  color: #0a0c10;
 }

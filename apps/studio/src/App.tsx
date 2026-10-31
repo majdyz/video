@@ -308,15 +308,28 @@ export default function App() {
     </button>
   );
   const subjectsOn = !!panelTools.colour.subjectPop && tools.colour.enabled;
+  const paneOn = (id: Pane) => (id === "subjects" ? subjectsOn : tools[id].enabled);
   // On the picture (Instagram-style): before / after, Subjects, full screen; in full screen only the way out.
   const rail = s.phase !== "empty" && (
     <div className="canvas-rail" onClick={(e) => e.stopPropagation()}>
+      {!immersive && !wide && tabs.map((id) => {
+        // Phone: the tools live on the rail too (no tool bar over the picture); the open one is white.
+        const Icon = PANE_ICON[id];
+        const open = sheetOpen && pane === id;
+        return (
+          <button key={id} type="button" className={`rail-btn rail-btn--tool${open ? " is-on" : ""}${paneOn(id) ? " is-enabled" : ""}`} aria-pressed={open}
+            onClick={() => (open ? closeSheet() : id === "subjects" ? openSubjects() : openPane(id))} disabled={!ready}>
+            <Icon size={20} /><span>{PANE_LABEL[id]}</span>
+          </button>
+        );
+      })}
+      {!immersive && !wide && <span className="rail-sep" aria-hidden="true" />}
       {!immersive && (
         <>
           <button type="button" className={`rail-btn${split !== null ? " is-on" : ""}`} aria-pressed={split !== null} onClick={() => setSplit((v) => (v === null ? 0.5 : null))} disabled={!ready || exporting || selectActive}>
             <IconCompare size={20} /><span>Compare</span>
           </button>
-          {subjectPopVisible() && (
+          {subjectPopVisible() && wide && (
             <button type="button" className={`rail-btn${subjectsOn ? " is-on" : ""}${selectActive ? " is-active" : ""}`} aria-pressed={selectActive} onClick={() => (selectActive ? closeSheet() : openSubjects())} disabled={!ready || exporting}>
               <IconSpark size={20} /><span>{s.seg.on && subjectsOn && !photo ? "AI subjects" : "Subjects"}</span>
             </button>
@@ -347,7 +360,6 @@ export default function App() {
       <button type="button" className="link-btn" onClick={() => openPane("colour")} disabled={exporting}>Change</button>
     </p>
   );
-  const paneOn = (id: Pane) => (id === "subjects" ? subjectsOn : tools[id].enabled);
 
   return (
     <div className={`app phase-${s.phase}${wide ? " is-wide" : " is-narrow"}${!wide && sheetOpen ? " sheet-open" : ""}${immersive ? " is-immersive" : ""}`} style={aspect ? ({ ["--clip-ar" as string]: aspect.toFixed(4) }) : undefined} data-stab={s.stab.state} data-export={s.exp.state} data-kind={s.kind ?? "none"}>
@@ -415,23 +427,9 @@ export default function App() {
               <ToolDock pane={pane} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} camera={s.camera} photo={photo} disabled={exporting || !ready}
                 footage={s.kind === "video" ? s.footage : null} onFootage={s.kind === "video" ? (c) => studio.setFootage(c) : null}
                 onMotionLog={s.kind === "video" ? () => motionLogRef.current?.click() : null}
-                subjects={subjectControls}
+                subjects={subjectControls} onClose={closeSheet}
                 status={pane === "subjects" ? (selectActive ? null : "Tap ✨ Subjects to pick animals") : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
             ) : bar}
-            <nav className="toolbar" aria-label="Tools">
-              {tabs.map((id) => {
-                const Icon = PANE_ICON[id];
-                const open = sheetOpen && pane === id;
-                return (
-                  <button key={id} type="button" className={`toolbar__btn${paneOn(id) ? " is-enabled" : ""}${open ? " is-open" : ""}`} aria-pressed={open}
-                    onClick={() => (open ? closeSheet() : id === "subjects" ? openSubjects() : openPane(id))} disabled={!ready}>
-                    <span className="toolbar__icon" aria-hidden="true"><Icon size={22} /></span>
-                    <span className="toolbar__label">{PANE_LABEL[id]}</span>
-                    <span className="sr-only">{paneOn(id) ? ", on" : ", off"}</span>
-                  </button>
-                );
-              })}
-            </nav>
           </aside>
         )}
 
