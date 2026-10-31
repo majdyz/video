@@ -282,7 +282,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // Green water (red.ts): the cast the balance could not remove goes to a muted blue-grey.
   [a, b] = greenNeutral(L, a, b, greenWeight(p) * (1 - RED.gnObjKeep * conf));
   // Engine-mask weight, softened where the subject's colour fades into the water's (grade-shader toneWeight).
-  const tN = objectNeutral(L, a, b, r0, g0, b0, onFar, toneW, objectNeutralOf(p));
+  const tN = objectNeutral(L, a, b, r0, g0, b0, onFar, toneW, objectNeutralOf(p)) * smoothstep(SUBJECT_POP.keepDarkLo, SUBJECT_POP.keepDarkHi, L);
   // In open blue water the person detector also fires on sharks and big
   // fish: skin colour only where the source has red left to be skin.
   const personS = person * (1 - objectNeutralOf(p) * redDeficit(r0, g0, b0));
@@ -305,7 +305,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const Lv = popP > 0 ? vividLook(looked[0], guarded[0], guarded[1], (s.vivid ?? 0) * (1 - SUBJECT_POP.vividKeep * Math.min(1, popP)), greenWeight(p))[0] : vv[0];
   const Lp = Lv + SUBJECT_POP.lift * popP * 4 * Lv * Math.max(0, 1 - Lv);
   // The chroma follows part of the lift: a lifted blue-grey stays blue-grey.
-  const kc = 1 + SUBJECT_POP.chromaFollow * (Lp / Math.max(1e-4, Lv) - 1);
+  const cf = 1 + (SUBJECT_POP.chromaFollow - 1) * smoothstep(SUBJECT_POP.keepDarkLo, SUBJECT_POP.keepDarkHi, Lv);
+  const kc = 1 + cf * (Lp / Math.max(1e-4, Lv) - 1);
   vv[0] = Lp; vv[1] *= kc; vv[2] *= kc;
   const hn0 = highlightPink(vv[0], vv[1], vv[2]);
   const hn = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * objectNeutralOf(p), 0, 1));

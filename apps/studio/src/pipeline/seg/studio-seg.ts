@@ -4,7 +4,7 @@
 // fallback: with the toggle off, before a pass, outside it, while unsure, or when the model can't load or runs
 // too slowly, the overlay is null (or eases to nothing) and the grade is exactly the engine's.
 import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts";
-import type { SubjectOverride, SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
+import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
 import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
@@ -70,6 +70,37 @@ export function autoObjects(sel: SubjectSelection | null, t: number, boxes: read
       const px = 0.04 * (b.x1 - b.x0) + 1, py = 0.04 * (b.y1 - b.y0) + 1;
       prompt.box = { x0: Math.max(0, (b.x0 - px) / w), y0: Math.max(0, (b.y0 - py) / h), x1: Math.min(1, (b.x1 + 1 + px) / w), y1: Math.min(1, (b.y1 + 1 + py) / h) };
     }
+    out.push({ kind: "include", t, prompt });
+  }
+  return out;
+}
+
+/** seedObjects: an animal of the seed frame's own map is followed when its verdict is at least this (animalTarget). */
+export const SEED = { minTarget: 0.5, maxObjects: 4 };
+
+/**
+ * The subjects to follow, from one analysis of the seed frame (engine animalMap: deterministic for the frame), as ML
+ * prompts: points spread inside each animal's region, no box and no negative points (a negative near
+ * the animal lands on its own tail or fin when the engine's region covers only part of it, and the tracker then
+ * keeps the head alone). Largest animals first, at most SEED.maxObjects.
+ */
+export function seedObjects(am: AnimalMap | null, t: number, boxes: readonly PersonBox[]): SegObject[] {
+  if (!am) return [];
+  const { width: w, height: h } = am, out: SegObject[] = [];
+  const order = am.list.map((a, i) => ({ a, i })).filter(({ a }) => animalTarget(a) >= SEED.minTarget).sort((x, y) => y.a.area - x.a.area).slice(0, SEED.maxObjects);
+  for (const { i } of order) {
+    const m = new Float32Array(w * h);
+    let n = 0;
+    for (let k = 0; k < m.length; k++) if (am.labels[k] === i + 1) { m[k] = 1; n++; }
+    if (n < 4) continue;
+    const pr = promptFromMask(m, w, h, w / 640, 4, 0);
+    if (!pr) continue;
+    const uv = ([x, y]: [number, number]): [number, number] => [(x + 0.5) / w, (y + 0.5) / h];
+    const prompt: SegObject["prompt"] = { points: pr.pos.map(uv), labels: pr.pos.map(() => 1) };
+    // No box either: the engine's region may be the front of a long animal (a box there clips the tail), and the
+    // person detector's box (it fires on sharks too) arrives asynchronously, so it would make the seeds depend on
+    // timing. Points spread over the animal are enough for the tracker, a diver included.
+    void boxes;
     out.push({ kind: "include", t, prompt });
   }
   return out;
@@ -149,12 +180,42 @@ export function promptFor(o: Pick<SubjectOverride, "u" | "v">, boxes: readonly P
  * engine overlay; frames not filled yet are null, and the ML weight eases to nothing over ~0.3 s toward them, so the
  * preview hands over to the engine's mask smoothly.
  */
+/** SegLive.qualityAt: the mask consistency check (see there). */
+export const SEG_QUALITY = { windowS: 2.5, shrinkLo: 0.45, shrinkHi: 0.7, partMin: 0.04, partKeep: 0.45, erodeS: 0.15, easeS: 0.4 };
+
+/** A mask's area (alpha over 0.5, 0..255) and its significant parts (4-connected, at least partMin of the area). */
+export function maskStats(alpha: Uint8Array, w: number, h: number): { area: number; parts: number } {
+  const n = w * h, lab = new Int32Array(n), sizes: number[] = [];
+  let area = 0;
+  for (let i = 0; i < n; i++) if (alpha[i] > 127) area++;
+  if (!area) return { area: 0, parts: 0 };
+  const stack: number[] = [];
+  for (let s = 0; s < n; s++) {
+    if (alpha[s] <= 127 || lab[s]) continue;
+    let size = 0;
+    lab[s] = 1; stack.push(s);
+    while (stack.length) {
+      const i = stack.pop()!, x = i % w;
+      size++;
+      if (x > 0 && alpha[i - 1] > 127 && !lab[i - 1]) { lab[i - 1] = 1; stack.push(i - 1); }
+      if (x < w - 1 && alpha[i + 1] > 127 && !lab[i + 1]) { lab[i + 1] = 1; stack.push(i + 1); }
+      if (i >= w && alpha[i - w] > 127 && !lab[i - w]) { lab[i - w] = 1; stack.push(i - w); }
+      if (i < n - w && alpha[i + w] > 127 && !lab[i + w]) { lab[i + w] = 1; stack.push(i + w); }
+    }
+    sizes.push(size);
+  }
+  return { area, parts: sizes.filter((z) => z >= Math.max(20, SEG_QUALITY.partMin * area)).length };
+}
+
 export class SegLive {
   readonly mw: number;
   readonly mh: number;
   readonly i0: number;
   readonly n: number;
   private frames: (SessionFrameOut | undefined)[];
+  /** Per filled frame: the mask's area (px over 0.5) and its significant parts (maskStats). */
+  private stats: ({ area: number; parts: number } | undefined)[];
+  private qCache = new Map<number, number>();
   private conf: { t: number; conf: number }[] = [];
   filled = 0;
   constructor(info: { mw: number; mh: number; i0: number; n: number }) {
@@ -163,6 +224,7 @@ export class SegLive {
     this.i0 = info.i0;
     this.n = info.n;
     this.frames = new Array(info.n);
+    this.stats = new Array(info.n);
   }
 
   put(items: SessionFrameOut[]): void {
@@ -170,7 +232,55 @@ export class SegLive {
       if (f.i < 0 || f.i >= this.n) continue;
       if (!this.frames[f.i]) this.filled++;
       this.frames[f.i] = f;
+      this.stats[f.i] = maskStats(rleDecode(f.alpha, this.mw * this.mh), this.mw, this.mh);
     }
+    this.qCache.clear();
+  }
+
+  /**
+   * How much the mask of frame i can be trusted as the whole animal (0..1, SEG_QUALITY): it drops when the mask
+   * suddenly shrinks (area under shrinkLo..shrinkHi of the upper quartile of its area over ±windowS) or falls apart
+   * into more significant parts than it usually has there (a head on its own, the tail as a separate piece), then
+   * eases over time (the worst over ±erodeS, a raised-cosine average over ±easeS), so a fragment is popped less, as
+   * a whole and smoothly, never as a pasted-on patch.
+   */
+  qualityAt(i: number): number {
+    const hit = this.qCache.get(i);
+    if (hit !== undefined) return hit;
+    const Q = SEG_QUALITY, hz = SEG.sampleHz;
+    const raw = (j: number): number | null => {
+      const s = this.stats[j];
+      if (!s || s.area === 0) return null;
+      const W = Math.round(Q.windowS * hz), areas: number[] = [], parts: number[] = [];
+      for (let k = Math.max(0, j - W); k <= Math.min(this.n - 1, j + W); k++) {
+        const o = this.stats[k];
+        if (o && o.area > 0) { areas.push(o.area); parts.push(o.parts); }
+      }
+      areas.sort((a, b) => a - b); parts.sort((a, b) => a - b);
+      const ref = areas[Math.min(areas.length - 1, Math.floor(0.75 * areas.length))];
+      const usual = parts[parts.length >> 1];
+      const qa = smoothstep(Q.shrinkLo, Q.shrinkHi, s.area / Math.max(1, ref));
+      const qp = s.parts > usual ? Math.pow(Q.partKeep, s.parts - usual) : 1;
+      return Math.min(qa, qp);
+    };
+    const E = Math.round(Q.erodeS * hz), A = Math.round(Q.easeS * hz);
+    let num = 0, den = 0;
+    for (let d = -A; d <= A; d++) {
+      const j = i + d;
+      if (j < 0 || j >= this.n) continue;
+      let m: number | null = null;
+      for (let k = j - E; k <= j + E; k++) {
+        if (k < 0 || k >= this.n) continue;
+        const r = raw(k);
+        if (r !== null) m = m === null ? r : Math.min(m, r);
+      }
+      if (m === null) continue;
+      const w = 0.5 + 0.5 * Math.cos((Math.PI * d) / (A + 1));
+      num += w * m; den += w;
+    }
+    const q = den > 0 ? num / den : 1;
+    this.qCache.set(i, q);
+    return q;
   }
 
   setConf(c: { t: number; conf: number }[]): void {
@@ -216,7 +326,7 @@ export class SegLive {
     const up = (q: Uint8Array) => resize(Float32Array.from(rleDecode(q, qw * qh), (x) => x / 255), qw, qh, mw, mh);
     const near = up(f.nearQ);
     for (let k = 0; k < near.length; k++) near[k] *= w;
-    return { width: mw, height: mh, alpha: Float32Array.from(rleDecode(f.alpha, mw * mh), (x) => x / 255), exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ) };
+    return { width: mw, height: mh, alpha: Float32Array.from(rleDecode(f.alpha, mw * mh), (x) => x / 255), exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ), quality: this.qualityAt(i) };
   }
 
   /** Share of the grid filled (0..1). */

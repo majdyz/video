@@ -10,7 +10,7 @@ import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
 import { SUBJECT_CLEAR } from "../../aqua-fix/src/engine/params.ts";
 import { fillInterval, keyTimes, sampleRange, SEG, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
 import { linearToOklab } from "../../aqua-fix/src/engine/color.ts";
-import { autoObjects, ML_OUTLINE_ID, outlineSelection, popComponentBox, promptFor, SegLive, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
+import { autoObjects, maskStats, ML_OUTLINE_ID, seedObjects, outlineSelection, popComponentBox, promptFor, SegLive, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
 
 const entry = (v: number): MemEntry => ({ mem: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), pos: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), ptr: new Float32Array(256).fill(v), score: 1 });
 const tpos = Float32Array.from({ length: 7 * 64 }, (_, i) => Math.floor(i / 64) * 100);
@@ -312,6 +312,47 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(r.length < m.length / 10, `codes small (${r.length} of ${m.length} bytes)`);
   const noise = Uint8Array.from({ length: 1000 }, (_, i) => (i * 7919) % 251);
   assert.deepEqual(rleDecode(rleEncode(noise), noise.length), noise);
+}
+
+// The mask consistency check: a mask that suddenly shrinks to a fragment (the head alone, the tail as a separate
+// piece) is trusted less, smoothly over time; a steady mask is trusted in full.
+{
+  const mw = 64, mh = 32, qw = 16, qh = 8, n = 120;
+  const live = new SegLive({ mw, mh, i0: 0, n });
+  const body = (i: number) => {
+    const m = new Uint8Array(mw * mh);
+    const frag = i >= 50 && i < 70; // frames 50..69: the head alone plus the tail as a separate piece
+    for (let y = 10; y < 20; y++) for (let x = 8; x < 56; x++) {
+      if (frag && x >= 20 && x < 48) continue;
+      m[y * mw + x] = 255;
+    }
+    return m;
+  };
+  assert.deepEqual(maskStats(body(0), mw, mh), { area: 480, parts: 1 });
+  assert.equal(maskStats(body(55), mw, mh).parts, 2);
+  live.put(Array.from({ length: n }, (_, i) => ({ i, alpha: rleEncode(body(i)), nearQ: rleEncode(new Uint8Array(qw * qh).fill(255)), excQ: null, depQ: rleEncode(new Uint8Array(qw * qh).fill(255)) })));
+  const q = Array.from({ length: n }, (_, i) => live.qualityAt(i));
+  assert.ok(q[10] > 0.99 && q[110] > 0.99, `a steady mask is trusted (${q[10].toFixed(2)})`);
+  assert.ok(q[60] < 0.2, `a fragment is not popped as the animal (${q[60].toFixed(2)})`);
+  let step = 0;
+  for (let i = 1; i < n; i++) step = Math.max(step, Math.abs(q[i] - q[i - 1]));
+  assert.ok(step < 0.15, `the trust eases over time, no jump (max ${step.toFixed(2)} per frame)`);
+  assert.equal(live.at(60 / 30)?.quality, q[60], "the overlay carries it");
+}
+
+// Seeds come from one analysis's own animal map (deterministic for the frame): positive points only, no box, the
+// largest animals first, weak verdicts skipped.
+{
+  const w = 160, h = 90, labels = new Uint8Array(w * h);
+  for (let y = 30; y < 50; y++) for (let x = 40; x < 120; x++) labels[y * w + x] = 1; // a big animal
+  for (let y = 10; y < 16; y++) for (let x = 10; x < 18; x++) labels[y * w + x] = 2; // a small, unsure one
+  const am = { width: w, height: h, labels, list: [{ cx: 80, cy: 40, area: 0.11, weight: 1, coverage: 1 }, { cx: 14, cy: 13, area: 0.003, weight: 0.05, coverage: 0.1 }] };
+  const a = seedObjects(am, 0, []), b = seedObjects(am, 0, []);
+  assert.equal(a.length, 1, "the unsure animal is not followed");
+  assert.deepEqual(a, b, "same frame, same seeds");
+  assert.ok(a[0].prompt.labels.every((l) => l === 1) && !a[0].prompt.box, "positives only, no box");
+  assert.ok(a[0].prompt.points.every(([u, v]) => u > 40 / w && u < 120 / w && v > 30 / h && v < 50 / h), "inside the animal");
+  assert.deepEqual(seedObjects(null, 0, []), [], "no open water: nothing");
 }
 
 console.log("seg tests passed");

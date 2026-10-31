@@ -21,6 +21,8 @@ export type SegOverlay = {
   /** How far each texel departs from the water around it (0..1), or null (studio seg/; the grade tells water from
    * the subject with composeSegStrength's own water field). */
   depart?: Float32Array | null;
+  /** How far this frame's mask can be trusted as the whole animal (0..1, studio SegLive.qualityAt): scales the tone. */
+  quality?: number;
 };
 
 /**
@@ -255,7 +257,7 @@ export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): {
     }
     // Thick parts carry R = SEG_THICK (no per-pixel test: their ramp is long, the contour's water gets next to nothing).
     out[i * 4] = !wf ? -1 : ramp > 1.5 * SEG_TONE.rampIn ? SEG_THICK : wf.L[i];
-    out[i * 4 + 1] = wf ? wf.trust[i] : 1;
+    out[i * 4 + 1] = (wf ? wf.trust[i] : 1) * (o.quality ?? 1);
     out[i * 4 + 2] = a;
     out[i * 4 + 3] = o.near[i];
   }

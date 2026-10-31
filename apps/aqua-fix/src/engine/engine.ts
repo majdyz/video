@@ -716,6 +716,7 @@ export class GradeEngine {
     // A sample out of playback order (profile, track pass) says nothing about the animals on screen.
     if (!this.rawReq) {
       if (cut) this.animals.reset();
+      this.lastAnimalMap = this.settings.subjectPop && (packet.params.backdrop ?? 0) > 0 ? raw.animals ?? null : null;
       if (this.settings.subjectPop && (packet.params.backdrop ?? 0) > 0 && raw.animals) this.animals.update(raw.animals, this.reqTimeSec, packet.fields.data, packet.guide.data);
       // No longer open water (or Subject pop off): the animals fade out where they are, never snap.
       else this.animals.fadeAll();
@@ -954,6 +955,16 @@ export class GradeEngine {
   }
 
   /** The tracked animals now (ids per map texel + state), for drawing outlines and hit-testing taps. */
+  /**
+   * The latest analysis's own animals (the raw map, before the tracker's temporal confidence): a pure function of
+   * that frame, so seeding from it gives the same subjects whenever and however often the frame is analysed (the
+   * tracker's confidence depends on how many analyses ran since its reset). Null outside open water.
+   */
+  animalMap(): AnimalMap | null {
+    return this.lastAnimalMap;
+  }
+  private lastAnimalMap: AnimalMap | null = null;
+
   subjectSelection(): SubjectSelection | null {
     return this.settings.subjectPop ? this.animals.selection(this.lastTickSec) : null;
   }

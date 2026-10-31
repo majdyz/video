@@ -12,7 +12,7 @@ fs.mkdirSync(out, { recursive: true });
 const b = await chromium.launch({ args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
 const ctx = await b.newContext({ viewport: { width: 1280, height: 800 }, acceptDownloads: true });
 const p = await ctx.newPage();
-const logs = []; p.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`)); p.on("pageerror", (e) => logs.push("PAGEERROR " + e.message));
+const logs = []; p.on("console", (m) => { logs.push(`[${m.type()}] ${m.text()}`); if (/seed prompts|\[seg\].*(stall|fail|error)/i.test(m.text())) console.log(m.text().slice(0, 900)); }); p.on("pageerror", (e) => logs.push("PAGEERROR " + e.message));
 const t0 = Date.now(); const ts = () => ((Date.now() - t0) / 1000).toFixed(0) + "s";
 const snap = () => p.evaluate(() => { const s = window.studio.getSnapshot(); return { seg: s.seg, exp: s.exp?.state, cov: window.studio.seg.live ? +window.studio.seg.live.coverage.toFixed(3) : null, pending: !!window.studio.seg.pending, colour: { vivid: s.tools?.colour?.vivid, pop: s.tools?.colour?.subjectPop } }; });
 await p.goto(base + `?debug=1&dock=open${process.env.EXTRA ?? ""}`);
@@ -63,6 +63,8 @@ async function exportTo(name) {
   const done = p.getByRole("button", { name: /^(Done|Close|Back to edit)/ }); if (await done.count() && await done.first().isVisible()) await done.first().click().catch(() => undefined);
   await p.waitForTimeout(1500);
 }
+// MASKS_ONLY=1: stop after the pass and the mask dump (seeding / mask reproducibility checks).
+if (process.env.MASKS_ONLY === "1") { fs.writeFileSync(`${out}/logs.txt`, logs.join("\n")); await b.close(); process.exit(0); }
 await exportTo("pop-on");
 // Subject pop off: same clip, same grade.
 for (let k = 0; k < 3 && !(await pop.isVisible().catch(() => false)); k++) { await p.getByRole("button", { name: /Advanced/ }).first().click().catch(() => undefined); await p.waitForTimeout(1200); }

@@ -124,6 +124,8 @@ const float SP_CLARITY = ${SUBJECT_POP.clarity.toFixed(4)};
 const float SP_LIFT = ${SUBJECT_POP.lift.toFixed(4)};
 const float SP_CHROMA = ${SUBJECT_POP.chromaFollow.toFixed(4)};
 const float SP_ENGINE = ${SUBJECT_POP.engineKeep.toFixed(4)};
+const float SP_KEEP_LO = ${SUBJECT_POP.keepDarkLo.toFixed(4)};
+const float SP_KEEP_HI = ${SUBJECT_POP.keepDarkHi.toFixed(4)};
 const float SP_DARK_LO = ${SUBJECT_POP.darkLo.toFixed(4)};
 const float SP_DARK_HI = ${SUBJECT_POP.darkHi.toFixed(4)};
 const float SP_HUE_COS = ${Math.cos(SUBJECT_POP.hueMax).toFixed(6)};
@@ -684,7 +686,8 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   scale *= saturation;
   float onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
   lab.yz = greenNeutral(lab.x, lab.yz, p[22].w * (1.0 - RED_GN_OBJ_KEEP * conf));
-  float tN = objectNeutral(lab.x, lab.yz, lin, onFar, ow, popS);
+  // Dark parts (a thresher's long tail) keep their colour: no cast clearing there (SUBJECT_POP.keepDarkLo..Hi).
+  float tN = objectNeutral(lab.x, lab.yz, lin, onFar, ow, popS) * smoothstepf(SP_KEEP_LO, SP_KEEP_HI, lab.x);
   float personS = person * (1.0 - p[16].w * (1.0 - redKeep));
   scale *= warmClamp(lab.yz, lin, onFar, personS, popS);
   vec2 nab = clearCast(lab.yz * scale, veilHue, tN / ON_MIX);
@@ -698,7 +701,9 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   vec3 lkV = vividLook(lk, p[23].z, p[22].w);
   float Lv = popP > 0.0 ? vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w).x : lkV.x;
   float Lp = popLift(Lv, popP);
-  lk = vec3(Lp, lkV.yz * (1.0 + SP_CHROMA * (Lp / max(1e-4, Lv) - 1.0)));
+  // ...and their chroma follows the lift in full (saturation kept): a lifted navy tail stays navy, not grey-mauve.
+  float cf = mix(1.0, SP_CHROMA, smoothstepf(SP_KEEP_LO, SP_KEEP_HI, Lv));
+  lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
   lk.yz = highlightPink(lk.x, lk.yz);
   lk.yz = popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0));
   vec3 o1 = oklabToLinear(capChroma(lk, cSrc));
@@ -1158,7 +1163,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
   let gnab = greenNeutral(lab.x, lab.yz, p[22].w * (1.0 - RED_GN_OBJ_KEEP * conf));
   lab = vec3(lab.x, gnab);
-  let tN = objectNeutral(lab.x, lab.yz, lin, onFar, ow, popS);
+  let tN = objectNeutral(lab.x, lab.yz, lin, onFar, ow, popS) * smoothstepf(SP_KEEP_LO, SP_KEEP_HI, lab.x);
   let personS = person * (1.0 - p[16].w * (1.0 - redKeep));
   scale *= warmClamp(lab.yz, lin, onFar, personS, popS);
   let nab = clearCast(lab.yz * scale, veilHue, tN / ON_MIX);
@@ -1170,7 +1175,8 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   var Lv = lkV.x;
   if (popP > 0.0) { Lv = vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w).x; }
   let Lp = popLift(Lv, popP);
-  lk = vec3(Lp, lkV.yz * (1.0 + SP_CHROMA * (Lp / max(1e-4, Lv) - 1.0)));
+  let cf = mix(1.0, SP_CHROMA, smoothstepf(SP_KEEP_LO, SP_KEEP_HI, Lv));
+  lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
   lk = vec3(lk.x, highlightPink(lk.x, lk.yz));
   lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0)));
   let o1 = oklabToLinear(capChroma(lk, cSrc));

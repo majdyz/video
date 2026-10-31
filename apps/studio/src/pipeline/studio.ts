@@ -20,7 +20,7 @@ import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validat
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
 import { pickAnimal, type SubjectOverride, type SubjectPathPoint, type SubjectSelection } from "../../../aqua-fix/src/engine/animals.ts";
 import { toggleOverride } from "./subjects.ts";
-import { autoObjects, outlineSelection, segPopsAt, SubjectSeg, type SegStatus } from "./seg/studio-seg.ts";
+import { outlineSelection, seedObjects, segPopsAt, SubjectSeg, type SegStatus } from "./seg/studio-seg.ts";
 import type { SegOverlay } from "../../../aqua-fix/src/engine/seg-overlay.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
@@ -689,7 +689,7 @@ export class Studio {
     const run = this.seedChain.then(async () => {
       const e = this.engine, v = this.video, file = this.file;
       if (!e || !v || !file || !this.seg.live || this.seg.hasSegment(k)) return;
-      let objs: ReturnType<typeof autoObjects> = [];
+      let objs: ReturnType<typeof seedObjects> = [];
       try {
         if (!this.seedVid || this.seedVid.file !== file) {
           this.dropSeedVideo();
@@ -710,7 +710,9 @@ export class Studio {
         e.setTime(t);
         this.uploadToEngine(sv, t, false);
         await e.analyzeNow(true).catch(() => undefined);
-        objs = autoObjects(this.subjectSelection(), t, e.personBoxesNow());
+        // From this one analysis's own animals (deterministic for the frame), not the tracker's confidence (which
+        // depends on how many analyses happened to run since the reset).
+        objs = seedObjects(e.animalMap(), t, e.personBoxesNow());
         e.resetTracking();
       } catch (err) {
         console.warn(`[seg] segment ${k} seed frame failed`, err);
@@ -721,6 +723,7 @@ export class Studio {
       if (this.file !== file) return;
       await this.seg.seedSegment(k, t, objs);
       console.info(`[seg] seeded segment ${k} on the canonical frame ${t.toFixed(2)} s: ${objs.length} subject(s)`);
+      console.info(`[seg] seed prompts ${k}: ${JSON.stringify(objs.map((o) => ({ p: o.prompt.points.map(([x, y]) => [+x.toFixed(3), +y.toFixed(3)]), l: o.prompt.labels, b: o.prompt.box ? [o.prompt.box.x0, o.prompt.box.y0, o.prompt.box.x1, o.prompt.box.y1].map((v) => +v.toFixed(3)) : null })))}`);
     });
     this.seedChain = run.catch(() => undefined);
     return run;
@@ -794,7 +797,7 @@ export class Studio {
       const a = pass(o.alpha, o.near, o.depart ?? null);
       const ex = o.exclude ? pass(o.exclude, null, null) : null;
       const ch = (d: Uint8ClampedArray, c: number) => { const f = new Float32Array(w * h); for (let i = 0; i < w * h; i++) f[i] = d[i * 4 + c] / 255; return f; };
-      const out: SegOverlay = { width: w, height: h, alpha: ch(a, 0), near: ch(a, 1), depart: o.depart ? ch(a, 2) : null, exclude: ex ? ch(ex, 0) : null };
+      const out: SegOverlay = { width: w, height: h, alpha: ch(a, 0), near: ch(a, 1), depart: o.depart ? ch(a, 2) : null, exclude: ex ? ch(ex, 0) : null, quality: o.quality };
       Object.assign(g, { t, o, out });
       return out;
     } catch {
