@@ -427,9 +427,11 @@ export default function App() {
               <ToolDock pane={pane} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} camera={s.camera} photo={photo} disabled={exporting || !ready}
                 footage={s.kind === "video" ? s.footage : null} onFootage={s.kind === "video" ? (c) => studio.setFootage(c) : null}
                 onMotionLog={s.kind === "video" ? () => motionLogRef.current?.click() : null}
-                subjects={subjectControls} onClose={closeSheet} playback={photo ? null : { playing: s.playing, toggle: () => studio.togglePlay() }}
-                status={pane === "subjects" ? (selectActive ? null : "Tap ✨ Subjects to pick animals") : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
-            ) : bar}
+                subjects={subjectControls} onClose={closeSheet}
+                status={pane === "subjects" ? (s.kind === "video" && (s.seg.on || s.seg.phase === "unavailable") ? segStatusText(s.seg) : null) : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
+            ) : null}
+            {/* The timeline (play / pause, scrub) stays while a tool is open: a change is checked across the clip. */}
+            {bar}
           </aside>
         )}
 

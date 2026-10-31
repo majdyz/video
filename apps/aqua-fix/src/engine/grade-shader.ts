@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, VIVID, VIVID_LOOK } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, VIVID, VIVID_LOOK, WARM_POP } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 import { BACKDROP } from "./backdrop.ts";
 import { RED_GLSL, RED_WGSL } from "./red.ts";
@@ -122,6 +122,14 @@ const float SC_EDGE = ${SUBJECT_CLEAR.edgeFloor.toFixed(4)};
 const float SP_VIVID = ${SUBJECT_POP.vividKeep.toFixed(4)};
 const float SP_CLARITY = ${SUBJECT_POP.clarity.toFixed(4)};
 const float SP_LIFT = ${SUBJECT_POP.lift.toFixed(4)};
+const float WP_HUE = ${WARM_POP.hue.toFixed(4)};
+const float WP_CMIN = ${WARM_POP.cMin.toFixed(4)};
+const float WP_CMAX = ${WARM_POP.cMax.toFixed(4)};
+const float WP_KEEP = ${WARM_POP.keep.toFixed(4)};
+const float WP_LLO = ${WARM_POP.lLo.toFixed(4)};
+const float WP_LHI = ${WARM_POP.lHi.toFixed(4)};
+const float WP_WLO = ${WARM_POP.wLo.toFixed(4)};
+const float WP_WHI = ${WARM_POP.wHi.toFixed(4)};
 const float SP_CHROMA = ${SUBJECT_POP.chromaFollow.toFixed(4)};
 const float SP_ENGINE = ${SUBJECT_POP.engineKeep.toFixed(4)};
 const float SP_KEEP_LO = ${SUBJECT_POP.keepDarkLo.toFixed(4)};
@@ -480,6 +488,11 @@ float popStrength(vec4 an) { return max(p[16].w, segPop(an)); }
 // Subject pop separation (SUBJECT_POP; mirrors apply.ts): P = tone weight × pop strength × the user's Strength.
 // A midtone lift of the subject's L (reversed for a subject darker than the water: p24.x, seg-overlay.ts
 // popDirection). Nothing outside the subject changes.
+// Warm pop (WARM_POP): the subject's chroma toward a warm cream hue; k = the subject's weight × warmth.
+vec2 warmPop(float L, vec2 ab, float k) {
+  float Ct = min(WP_CMAX, max(WP_KEEP * length(ab), WP_CMIN * smoothstepf(WP_LLO, WP_LHI, L)));
+  return mix(ab, vec2(cos(WP_HUE), sin(WP_HUE)) * Ct, k);
+}
 float popLift(float L, float P) { return L + SP_LIFT * P * p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
 // Hue guard: on the subject (weight w) the output hue stays within SUBJECT_POP.hueMax of the source pixel's hue.
 vec2 popHue(vec2 ab, vec2 abSrc, float w) {
@@ -707,7 +720,10 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
   lk.yz = highlightPink(lk.x, lk.yz);
   lk.yz = popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0));
-  vec3 o1 = oklabToLinear(capChroma(lk, cSrc));
+  float wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z;
+  lk.yz = warmPop(lk.x, lk.yz, wk);
+  // The warm chroma may exceed the source-relative cap (a cyan shark has little to start from).
+  vec3 o1 = oklabToLinear(capChroma(lk, max(cSrc, wk * WP_CMIN * 1.5)));
   vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
@@ -994,6 +1010,10 @@ fn animalStrength(uv: vec2<f32>) -> vec4<f32> {
 fn objectWeight(conf: f32) -> f32 { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
 fn segPop(an: vec4<f32>) -> f32 { return select(0.0, smoothstepf(SEG_POP_LO, SEG_POP_HI, an.w), an.w > 0.0); }
 fn popStrength(an: vec4<f32>) -> f32 { return max(params.p[16].w, segPop(an)); }
+fn warmPop(L: f32, ab: vec2<f32>, k: f32) -> vec2<f32> {
+  let Ct = min(WP_CMAX, max(WP_KEEP * length(ab), WP_CMIN * smoothstepf(WP_LLO, WP_LHI, L)));
+  return mix(ab, vec2<f32>(cos(WP_HUE), sin(WP_HUE)) * Ct, k);
+}
 fn popLift(L: f32, P: f32) -> f32 { return L + SP_LIFT * P * params.p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
 fn popHue(ab: vec2<f32>, abSrc: vec2<f32>, w: f32) -> vec2<f32> {
   let C = length(ab); let Cs = length(abSrc);
@@ -1180,7 +1200,9 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
   lk = vec3(lk.x, highlightPink(lk.x, lk.yz));
   lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0)));
-  let o1 = oklabToLinear(capChroma(lk, cSrc));
+  let wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z;
+  lk = vec3(lk.x, warmPop(lk.x, lk.yz, wk));
+  let o1 = oklabToLinear(capChroma(lk, max(cSrc, wk * WP_CMIN * 1.5)));
   let o2 = fitToGamut(o1 * detailRatio(src, lin));
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);

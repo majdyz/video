@@ -50,6 +50,8 @@ export type UserSettings = {
   subjectPop?: boolean;
   /** Subject pop Strength, 0..1 (0.5 = the tuned default; 0 keeps only the subject's colour clearing). */
   subjectPopStrength?: number;
+  /** Warm pop on the subject, 0..1 (0 = off). */
+  subjectPopWarmth?: number;
 };
 
 /**
@@ -104,6 +106,8 @@ export type GradeSettings = {
   subjectPop?: boolean;
   /** Subject pop Strength, 0..1 (UserSettings.subjectPopStrength). */
   subjectPopStrength?: number;
+  /** Warm pop on the subject, 0..1 (UserSettings.subjectPopWarmth). */
+  subjectPopWarmth?: number;
   /** Vivid look amount after the do-no-harm gate (vividAmountOf; CPU reference). */
   vivid?: number;
 };
@@ -249,6 +253,16 @@ export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.
  *   hueMax     on the subject, the output hue stays within this angle (radians) of the source pixel's own hue:
  *              the tone never rotates a dark blue toward magenta or brown.
  */
+/**
+ * Warm pop: on the subject only (the pop's weight × warmth), its Oklab chroma pulled toward a warm cream hue (`hue`,
+ * radians) at `keep` of its own chroma, at least `cMin` on its lit parts (L over lLo..lHi) and at most `cMax` (a
+ * saturated cyan turned warm at full chroma read orange, not cream), the way a dive colour fixer warms a whole
+ * frame, but the water keeps its colour. (A red gain alone does nothing on a cyan shark: it has almost no red.) The
+ * weight is the subject mask's own (tone weight over wLo..wHi), not the pop's strength: the engine's masks pop at half
+ * strength and a murky backdrop lowers it further, which left the warmth invisible.
+ */
+export const WARM_POP = { hue: (78 * Math.PI) / 180, cMin: 0.05, cMax: 0.075, keep: 0.4, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3 };
+
 export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
 
 /** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
@@ -509,6 +523,7 @@ export function resolveSettings(s: UserSettings): GradeSettings {
     hazeLift: 0,
     subjectPop: !!s.subjectPop,
     subjectPopStrength: s.subjectPopStrength,
+    subjectPopWarmth: s.subjectPopWarmth,
   };
 }
 
@@ -860,6 +875,7 @@ export function packUniforms(
   u[93] = 1;
   u[94] = vividAmountOf(params, settings);
   u[95] = popStrengthK(settings); // p23.w: Subject pop Strength multiplier
+  u[98] = settings.subjectPop ? Math.min(1, Math.max(0, settings.subjectPopWarmth ?? 0)) : 0; // p24.z: Warm pop amount
   u[96] = 1; // p24.x: Subject pop lift direction (set per frame by the engine, seg-overlay.ts popDirection)
   // p24.y: an AI subject overlay is on this frame (set by the engine): the AI alone weights the pop (grade-shader toneWeight)
   return u;

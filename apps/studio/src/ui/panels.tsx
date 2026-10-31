@@ -199,6 +199,9 @@ export function SubjectsPanel({ tools, setTools, subjects, colourOn, disabled, p
         <div className="panel__body">
           <Slider emphasis label="Pop" value={c.popStrength ?? DEFAULT_COLOUR.popStrength ?? 50} min={0} max={100} defaultValue={DEFAULT_COLOUR.popStrength} disabled={disabled}
             format={(v) => (v < 25 ? "Subtle" : v > 75 ? "Strong" : String(Math.round(v)))} onChange={(v) => up({ popStrength: v })} />
+          <Slider label="Warmth" value={c.popWarmth ?? DEFAULT_COLOUR.popWarmth ?? 0} min={0} max={100} defaultValue={DEFAULT_COLOUR.popWarmth} disabled={disabled}
+            format={(v) => (v < 1 ? "Off" : String(Math.round(v)))} onChange={(v) => up({ popWarmth: v })} />
+          <p className="adv__hint">Warms the subjects (red back into a shark's skin) while the water keeps its colour.</p>
           {!photo && subjects.ai && (
             <label className={`lookrow${subjects.ai.on ? " is-on" : ""}`}>
               <span className="lookrow__text">

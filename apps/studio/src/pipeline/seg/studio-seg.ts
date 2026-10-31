@@ -372,6 +372,10 @@ type LogOp =
 /** A finished pass's worker (the model's ~800 MB of WASM heap) is shut down after this long idle (ms). */
 export const SEG_HIBERNATE_MS = 15000;
 
+function errText(e: unknown): string {
+  return (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 120);
+}
+
 export class SubjectSeg {
   status: SegStatus;
   private model: WorkerSegModel | null = null;
@@ -436,7 +440,8 @@ export class SubjectSeg {
       } catch (e) {
         m.dispose();
         segLog("model failed to load; using the engine's masks", e);
-        this.set({ phase: "unavailable", progress: null, note: "Not available on this device; using standard detection" });
+        // The reason rides along (shown in Subjects): a phone can't be debugged from here otherwise.
+        this.set({ phase: "unavailable", progress: null, note: `Not available on this device; using standard detection (${errText(e)})` });
         return null;
       } finally {
         this.loading = null;
@@ -551,7 +556,7 @@ export class SubjectSeg {
         return this.live;
       } catch (e) {
         segLog("session failed to open; using the engine's masks", e);
-        this.set({ phase: "unavailable", note: "This clip can't be decoded for AI detection; using standard detection" });
+        this.set({ phase: "unavailable", note: `This clip can't be decoded for AI detection; using standard detection (${errText(e)})` });
         return null;
       } finally {
         this.opening = null;

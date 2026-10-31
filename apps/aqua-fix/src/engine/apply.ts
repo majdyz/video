@@ -4,7 +4,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, boostParams, vividAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, boostParams, vividAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -309,8 +309,10 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const kc = 1 + cf * (Lp / Math.max(1e-4, Lv) - 1);
   vv[0] = Lp; vv[1] *= kc; vv[2] *= kc;
   const hn0 = highlightPink(vv[0], vv[1], vv[2]);
-  const hn = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * objectNeutralOf(p), 0, 1));
-  const capped = capChroma(vv[0], hn[0], hn[1], cSrc);
+  const hn1 = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * objectNeutralOf(p), 0, 1));
+  const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * (s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0);
+  const hn = warmPop(vv[0], hn1[0], hn1[1], wk);
+  const capped = capChroma(vv[0], hn[0], hn[1], Math.max(cSrc, wk * WARM_POP.cMin * 1.5));
   const [r1, g1, b1] = oklabToLinear(vv[0], capped[0], capped[1]);
   void C;
 
@@ -327,6 +329,13 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
     sg + (gs - sg) * s.strength,
     sb + (bs - sb) * s.strength,
   ];
+}
+
+/** Warm pop (grade-shader warmPop): the subject's chroma toward a warm cream hue (k = weight × warmth). */
+function warmPop(L: number, a: number, b: number, k: number): [number, number] {
+  if (k <= 0) return [a, b];
+  const ct = Math.min(WARM_POP.cMax, Math.max(WARM_POP.keep * Math.hypot(a, b), WARM_POP.cMin * smoothstep(WARM_POP.lLo, WARM_POP.lHi, L)));
+  return [a + (Math.cos(WARM_POP.hue) * ct - a) * k, b + (Math.sin(WARM_POP.hue) * ct - b) * k];
 }
 
 /** Hue guard (grade-shader popHue): on the subject (weight w) the hue stays within SUBJECT_POP.hueMax of the source's. */

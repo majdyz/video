@@ -30,6 +30,8 @@ export type ColourState = {
   subjectPop?: boolean;
   /** Subject pop Strength, 0..100 (50 = the tuned default; 0 = colour clearing only, 100 = strong). */
   popStrength?: number;
+  /** Warm pop on the subjects, 0..100 (0 = off): a red push on the subject only, the water keeps its colour. */
+  popWarmth?: number;
   /** "Vivid" look (on by default): deep muted navy water, darker water, black shadows, the sun kept bright (VIVID_LOOK in the engine; it stands down by itself on graded, topside, night and ROV footage). */
   vivid?: boolean;
 };
@@ -54,6 +56,7 @@ export const DEFAULT_COLOUR: ColourState = {
   veil: DEFAULT_SETTINGS.veil,
   subjectPop: false,
   popStrength: 50,
+  popWarmth: 50,
   vivid: true,
 };
 
@@ -100,6 +103,7 @@ export function colourSettings(c: ColourLook): UserSettings {
     veil: c.veil,
     subjectPop: !!c.subjectPop,
     subjectPopStrength: Math.min(100, Math.max(0, c.popStrength ?? DEFAULT_COLOUR.popStrength ?? 50)) / 100,
+    subjectPopWarmth: Math.min(100, Math.max(0, c.popWarmth ?? DEFAULT_COLOUR.popWarmth ?? 0)) / 100,
     vivid: c.vivid ? 1 : 0,
   };
 }
