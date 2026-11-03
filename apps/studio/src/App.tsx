@@ -42,7 +42,12 @@ function initialTools(): ToolsState {
   // Style: ?style=natural|vivid|blue or ?vivid=0|1, else the user's saved choice, else Vivid.
   const style = styleFlags(initialStyle(location.search, savedVivid()));
   const list = q.get("tools");
-  if (!list) return { ...DEFAULT_TOOLS, colour: { ...DEFAULT_TOOLS.colour, ...style } };
+  // ?tool=stabilise|dewarp|colour (the old single-tool URLs land here): that tool on, its pane open.
+  const one = q.get("tool") as ToolId | null;
+  if (!list) {
+    const t: ToolsState = { ...DEFAULT_TOOLS, colour: { ...DEFAULT_TOOLS.colour, ...style } };
+    return one && TOOL_ORDER.includes(one) ? ({ ...t, [one]: { ...t[one], enabled: true } } as ToolsState) : t;
+  }
   const on = new Set(list.split(","));
   const t: ToolsState = {
     colour: { ...DEFAULT_TOOLS.colour, enabled: on.has("colour"), ...style },
@@ -57,9 +62,10 @@ type Pane = ToolId | "subjects";
 const PANE_LABEL: Record<Pane, string> = { ...TOOL_LABEL, subjects: "Subjects" };
 const PANE_ICON: Record<Pane, (p: { size?: number }) => React.ReactNode> = { ...TOOL_ICON, subjects: IconSpark };
 
-/** `?sheet=colour|…` for screenshots: the phone's tool sheet open on that pane. */
+/** `?sheet=colour|…` (screenshots) or `?tool=…` (the old single-tool URLs): the phone's tool sheet open on that pane. */
 function initialSheet(): boolean {
-  return !!new URLSearchParams(location.search).get("sheet");
+  const q = new URLSearchParams(location.search);
+  return !!(q.get("sheet") || q.get("tool"));
 }
 
 export default function App() {
@@ -72,7 +78,7 @@ export default function App() {
   const liveRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [tools, setToolsState] = useState<ToolsState>(initialTools);
-  const [pane, setPane] = useState<Pane>(() => { const q = new URLSearchParams(location.search); return (q.get("sheet") || q.get("tab") || "colour") as Pane; });
+  const [pane, setPane] = useState<Pane>(() => { const q = new URLSearchParams(location.search); return (q.get("sheet") || q.get("tab") || q.get("tool") || "colour") as Pane; });
   /** The tool the panels edit (Subjects belongs to Colour). */
   const tab: ToolId = pane === "subjects" ? "colour" : pane;
   const [split, setSplit] = useState<number | null>(0.5);
@@ -598,9 +604,6 @@ export default function App() {
               <a href={SAMPLE.licence.url} target="_blank" rel="noreferrer">{SAMPLE.licence.name}</a>. {SAMPLE.note}
             </p>
           </div>
-          <p className="about__fine">
-            Classic tools: <a href="../aqua-fix/">Aqua Fix</a> · <a href="../motion-fix/">Motion Fix</a> · <a href="../dewarp/">Dewarp</a>
-          </p>
         </div>
       </Sheet>
     </div>
