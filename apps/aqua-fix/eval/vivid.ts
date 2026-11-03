@@ -24,13 +24,15 @@
 // Writes <out>/<id>-{src,auto,vivid}.png (middle frame; also graded at `bw` px wide as
 // <id>-{src,auto,vivid}-big.png when --bw is set) and, with --raw 1,
 // <out>/<id>-{src,auto,vivid}.rgb (rgb24 frames, for an A/B video).
+// --pair a,b picks the two grades compared (default auto,vivid; styles: auto = Natural, vivid, blue = Blue water);
+// the output keeps the column names "auto" (a) and "vivid" (b).
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.ts";
 import { applyGrade } from "../src/engine/apply.ts";
-import { DEFAULT_SETTINGS, vividAmountOf, type FrameAnalysis, type UserSettings } from "../src/engine/params.ts";
+import { DEFAULT_SETTINGS, blueAmountOf, vividAmountOf, type FrameAnalysis, type UserSettings } from "../src/engine/params.ts";
 import { ClipSim } from "./clip-sim.ts";
 import { deltaE00, srgb8ToLab } from "./colour-metrics.ts";
 
@@ -87,7 +89,9 @@ function corrDetail(o: Lab, s: Lab | null, w: number, h: number): Float32Array {
 const hueOf = (a: number, b: number) => ((Math.atan2(b, a) * 180) / Math.PI + 360) % 360;
 const pct = (xs: number[], q: number) => { if (!xs.length) return NaN; const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
 
-const SETTINGS: Record<"auto" | "vivid", UserSettings> = { auto: DEFAULT_SETTINGS, vivid: { ...DEFAULT_SETTINGS, vivid: 1 } };
+const STYLE: Record<string, UserSettings> = { auto: DEFAULT_SETTINGS, vivid: { ...DEFAULT_SETTINGS, vivid: 1 }, blue: { ...DEFAULT_SETTINGS, vivid: 1, blue: 1 } };
+const [PA, PB] = opt("pair", "auto,vivid").split(",");
+const SETTINGS: Record<"auto" | "vivid", UserSettings> = { auto: STYLE[PA], vivid: STYLE[PB] };
 const jsonl = fs.createWriteStream(path.join(outDir, "vivid.jsonl"), { flags: "a" });
 for (const c of list) {
   if (ONLY && !ONLY.has(c.id)) continue;
@@ -199,7 +203,7 @@ for (const c of list) {
       for (const [k, p] of Object.entries(px)) await sharp(Buffer.from(p.buffer, p.byteOffset, p.byteLength), { raw: { width: BW, height: BH, channels: 4 } }).png().toFile(path.join(outDir, `${c.id}-${k}-big.png`));
     }
     if (f === mid) {
-      amount = vividAmountOf(x.params, SETTINGS.vivid);
+      amount = PB === "blue" ? blueAmountOf(x.params, SETTINGS.vivid) : vividAmountOf(x.params, SETTINGS.vivid);
       for (const [k, px] of [["src", fulls[f]], ["auto", outs.auto], ["vivid", outs.vivid]] as const) {
         await sharp(Buffer.from(px.buffer, px.byteOffset, px.byteLength), { raw: { width: GW, height: GH, channels: 4 } }).png().toFile(path.join(outDir, `${c.id}-${k}.png`));
       }

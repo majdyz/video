@@ -11,7 +11,10 @@ import {
   applyStabPreset,
   profileAspectMismatch,
   profileDefaults,
-  saveVivid,
+  saveStyle,
+  styleFlags,
+  styleOf,
+  COLOUR_STYLES,
   type ToolId,
   type ToolsState,
 } from "../pipeline/tools.ts";
@@ -100,14 +103,11 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
           <>
             <Chips label="Scene" items={COLOUR_PRESETS} value={tools.colour.preset} disabled={disabled}
               onChange={(id) => setTools((t) => ({ ...t, colour: { ...t.colour, preset: id, enabled: true } }))} />
-            <label className={`lookrow${tools.colour.vivid ? " is-on" : ""}`}>
-              <span className="lookrow__text">
-                <span className="lookrow__name">Vivid</span>
-                <small>{tools.colour.vivid ? "Deep blue water, white sand, rich blacks, bright sun" : "Off: natural correction only"}</small>
-              </span>
-              <Switch checked={!!tools.colour.vivid} label="Vivid" disabled={disabled}
-                onChange={(v) => { saveVivid(v); setTools((t) => ({ ...t, colour: { ...t.colour, vivid: v, enabled: true } })); }} />
-            </label>
+            <div className="stylepick">
+              <Segmented label="Style" items={COLOUR_STYLES} value={styleOf(tools.colour)} disabled={disabled}
+                onChange={(id) => { saveStyle(id); setTools((t) => ({ ...t, colour: { ...t.colour, ...styleFlags(id), enabled: true } })); }} />
+              <small className="stylepick__hint">{COLOUR_STYLES.find((s) => s.id === styleOf(tools.colour))?.hint}</small>
+            </div>
             <Slider emphasis label="Strength" value={tools.colour.strength} min={0} max={100} defaultValue={DEFAULT_COLOUR.strength} disabled={disabled}
               onChange={(v) => setTools((t) => ({ ...t, colour: { ...t.colour, strength: v, enabled: true } }))} />
           </>
@@ -232,7 +232,7 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog }: {
         <Slider label="Clarity" value={c.clarity * 100} min={0} max={100} defaultValue={DEFAULT_COLOUR.clarity * 100} onChange={(v) => up({ clarity: v / 100 })} />
         <Slider label="Haze removal" value={c.veil * 100} min={0} max={120} defaultValue={DEFAULT_COLOUR.veil * 100} onChange={(v) => up({ veil: v / 100 })} />
         <p className="adv__hint">Strength 50 is the engine's own estimate for this clip; above it the correction is pushed harder (redder reds, whiter sand) at some cost to fidelity.</p>
-        <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, colour: { ...DEFAULT_COLOUR, enabled: t.colour.enabled, vivid: t.colour.vivid } }))}>Reset colour</button>
+        <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, colour: { ...DEFAULT_COLOUR, enabled: t.colour.enabled, vivid: t.colour.vivid, blue: t.colour.blue } }))}>Reset colour</button>
       </div>
     );
   }

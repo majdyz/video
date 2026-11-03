@@ -1,0 +1,118 @@
+// The "Blue water" style (BLUE_WATER; opt-in in the studio's Style picker) and its gate (blueGateOf).
+//   node --experimental-strip-types apps/aqua-fix/test/bluewater.test.ts
+import assert from "node:assert/strict";
+import { blueLook, vividLook } from "../src/engine/apply.ts";
+import { BLUE_WATER, CLAHE_BINS, DEFAULT_SETTINGS, IDENTITY_PARAMS, blueAmountOf, blueGateOf, blueSceneOf, packUniforms, vividAmountOf, vividGateOf, type DepthMap } from "../src/engine/params.ts";
+
+const D = Math.PI / 180;
+const lab = (L: number, C: number, hDeg: number): [number, number, number] => [L, C * Math.cos(hDeg * D), C * Math.sin(hDeg * D)];
+const hueOf = (x: readonly number[]) => ((Math.atan2(x[2], x[1]) / D) % 360 + 360) % 360;
+const chromaOf = (x: readonly number[]) => Math.hypot(x[1], x[2]);
+const run = (x: [number, number, number], v = 1, g = 0) => blueLook(x[0], x[1], x[2], v, g);
+
+// 1. Off is the identity and the default; it never changes Vivid's amount.
+{
+  const x = lab(0.4, 0.05, 190);
+  const o = run(x, 0);
+  assert.deepEqual([o[0], o[1], o[2]], x);
+  assert.equal(DEFAULT_SETTINGS.blue ?? 0, 0);
+  assert.equal(blueAmountOf(IDENTITY_PARAMS, DEFAULT_SETTINGS), 0);
+  assert.equal(vividAmountOf(IDENTITY_PARAMS, { ...DEFAULT_SETTINGS, vivid: 1, blue: 1 }), vividAmountOf(IDENTITY_PARAMS, { ...DEFAULT_SETTINGS, vivid: 1 }));
+  const depth: DepthMap = { width: 1, height: 1, fields: new Float32Array(4), guide: new Float32Array(3) };
+  const clahe = { tilesX: 1, tilesY: 1, bins: CLAHE_BINS, data: new Float32Array(CLAHE_BINS) };
+  assert.equal(packUniforms(IDENTITY_PARAMS, DEFAULT_SETTINGS, depth, clahe, 0, 1)[103], 0);
+  assert.equal(packUniforms(IDENTITY_PARAMS, { ...DEFAULT_SETTINGS, vivid: 1, blue: 1 }, depth, clahe, 0, 1)[103], 1);
+  console.log("ok  off by default, Vivid unchanged");
+}
+
+// 2. Blue, teal and green water all land on the cobalt target (the graders' 249–256°) at chroma ≈ cK·L.
+{
+  const T = BLUE_WATER.target / D;
+  for (const [L, C, h, g] of [[0.32, 0.068, 234, 0], [0.4, 0.037, 189, 0], [0.4, 0.027, 186, 0.1], [0.4, 0.05, 150, 1], [0.35, 0.05, 275, 0]] as const) {
+    const o = run(lab(L, C, h), 1, g);
+    assert.ok(Math.abs(hueOf(o) - T) < 6, `water ${h}° (g ${g}) → ${hueOf(o).toFixed(1)}°`);
+    assert.ok(chromaOf(o) > 0.06 && chromaOf(o) < 0.105, `water C ${C} → ${chromaOf(o).toFixed(3)}`);
+  }
+  console.log("ok  all water → cobalt");
+}
+
+// 3. Near-greys (whose hue is noise) pass source chroma noise at a bounded gain: no blue/green speckle on dark,
+//    noisy water or hazy reef ("water" is a linear projection, not a hue angle).
+{
+  let worst = 0;
+  for (let i = 0; i < 20000; i++) {
+    const x = lab(0.05 + 0.9 * Math.random(), 0.02 * Math.random(), 360 * Math.random());
+    const y: [number, number, number] = [x[0], x[1] + 0.002 * (Math.random() - 0.5), x[2] + 0.002 * (Math.random() - 0.5)];
+    const a0 = run(x), b = run(y);
+    worst = Math.max(worst, Math.hypot(a0[1] - b[1], a0[2] - b[2]) / Math.max(1e-6, Math.hypot(x[1] - y[1], x[2] - y[2])));
+  }
+  assert.ok(worst < 3, `near-grey chroma noise gain ${worst.toFixed(2)}`);
+  console.log(`ok  near-grey noise gain ${worst.toFixed(2)}×`);
+}
+
+// 4. Smooth: neighbouring colours stay neighbours (no step anywhere in the colour space).
+{
+  let worst = 0;
+  for (let i = 0; i < 20000; i++) {
+    const x = lab(0.05 + 0.9 * Math.random(), 0.15 * Math.random(), 360 * Math.random());
+    const y: [number, number, number] = [x[0] + 0.002 * (Math.random() - 0.5), x[1] + 0.002 * (Math.random() - 0.5), x[2] + 0.002 * (Math.random() - 0.5)];
+    const a = run(x), b = run(y);
+    const dIn = Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
+    worst = Math.max(worst, Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) / Math.max(1e-6, dIn));
+  }
+  assert.ok(worst < 8, `local gain ${worst.toFixed(1)}`);
+  console.log(`ok  smooth (worst local gain ${worst.toFixed(1)}×)`);
+}
+
+// 5. Warm subjects go orange and richer; skin-red hues and silver / white subjects are not pushed warm.
+{
+  const j = run(lab(0.74, 0.057, 85));
+  assert.ok(hueOf(j) < 78 && hueOf(j) > 58 && chromaOf(j) > 0.075, `jelly ${hueOf(j).toFixed(1)}° C ${chromaOf(j).toFixed(3)}`);
+  const skin = run(lab(0.7, 0.06, 25));
+  assert.ok(Math.abs(hueOf(skin) - 25) < 1 && Math.abs(chromaOf(skin) - 0.06) < 1e-3, "skin-red hue unchanged");
+  const silver = run(lab(0.68, 0.025, 225));
+  assert.ok(chromaOf(silver) < 0.012, `silver C ${chromaOf(silver).toFixed(3)}`);
+  const white = run(lab(0.95, 0.01, 230));
+  assert.ok(chromaOf(white) < 0.01 && white[0] > 0.94, "white stays white");
+  console.log("ok  warm → orange, silver → neutral");
+}
+
+// 6. Shadows: deeper, monotone in L, black stays black and near-neutral.
+{
+  let prev = -1;
+  for (let L = 0; L <= 1.0001; L += 0.01) {
+    const o = run(lab(L, 0.03, 240));
+    assert.ok(o[0] <= L + 1e-9 && o[0] >= prev - 1e-9, `L ${L} → ${o[0]}`);
+    prev = o[0];
+  }
+  const k = run(lab(0.1, 0.01, 200));
+  assert.ok(k[0] < 0.08 && chromaOf(k) < 0.03, `shadow ${k[0]} C ${chromaOf(k)}`);
+  console.log("ok  deeper shadows");
+}
+
+// 7. Gate: a sunlit cenote (dark veil, top much lighter) keeps the style; torch-lit caves / night do not; Vivid's gate is unchanged.
+{
+  assert.ok(blueGateOf(0.292, 0.019, -0.41) > 0.95);
+  assert.ok(vividGateOf(0.292, 0.019, -0.41) < 0.2);
+  assert.equal(blueGateOf(0.247, 0.012, -0.03), 0);
+  assert.ok(blueGateOf(0.28, 0.03, 0.1) < 0.05);
+  assert.ok(blueGateOf(0.615, 0.034, 0.513) <= 0.3);
+  assert.equal(blueGateOf(0.87, 0.136, -0.33), 1);
+  assert.equal(blueAmountOf({ ...IDENTITY_PARAMS, blueGate: 0.25 }, { ...DEFAULT_SETTINGS, blue: 1 }), 0.25);
+  assert.equal(blueAmountOf({ ...IDENTITY_PARAMS, calm: 0.9 }, { ...DEFAULT_SETTINGS, blue: 1 }), 0);
+  // Scene: water behind the subject (the graded pairs: open share − object confidence +0.02..+0.42) keeps the style;
+  // close reef / moss / sand (−0.14..−0.55) step back to Vivid alone.
+  assert.ok(blueSceneOf(0.55, 0.53) > 0.9 && blueSceneOf(0.83, 0.41) === 1);
+  assert.ok(blueSceneOf(0.41, 0.66) < 0.1 && blueSceneOf(0.1, 0.65) === 0);
+  assert.equal(blueGateOf(0.87, 0.136, -0.33, blueSceneOf(0.1, 0.65)), 0);
+  console.log("ok  gate");
+}
+
+// 8. Applied after Vivid, Blue water finishes what Vivid starts on teal (Vivid alone stays short of cobalt).
+{
+  const x = lab(0.45, 0.05, 195);
+  const v = vividLook(x[0], x[1], x[2], 1, 0);
+  const b = run(v);
+  assert.ok(hueOf(v) < 240 && Math.abs(hueOf(b) - BLUE_WATER.target / D) < 4, `vivid ${hueOf(v).toFixed(1)} → blue ${hueOf(b).toFixed(1)}`);
+  console.log("ok  on top of Vivid");
+}

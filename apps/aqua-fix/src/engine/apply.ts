@@ -4,7 +4,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, boostParams, vividAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, HIGHLIGHT_PINK, HAZE_LIFT, boostParams, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -28,7 +28,7 @@ export function resolveContext(ctx: ApplyContext): PixelContext {
   const hz = ctx.settings.hazeAuto !== false;
   const params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(ctx.params), pushOf(ctx.settings)), ctx.settings)), ctx.settings);
   const base = greenSettings(presetSettings(calmSettings(resolveSettings(ctx.settings), params), ctx.settings), params);
-  return { ...ctx, params, settings: { ...lookSettings(hz ? hazeSettings(base, params) : base, params), vivid: vividAmountOf(params, ctx.settings) } };
+  return { ...ctx, params, settings: { ...lookSettings(hz ? hazeSettings(base, params) : base, params), vivid: vividAmountOf(params, ctx.settings), blue: blueAmountOf(params, ctx.settings) } };
 }
 
 /**
@@ -312,8 +312,10 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const hn1 = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * objectNeutralOf(p), 0, 1));
   const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP) * (s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0);
   const hn = warmPop(vv[0], hn1[0], hn1[1], wk);
-  const capped = capChroma(vv[0], hn[0], hn[1], Math.max(cSrc, wk * WARM_POP.cMin * 1.5));
-  const [r1, g1, b1] = oklabToLinear(vv[0], capped[0], capped[1]);
+  // Blue water style (opt-in): cobalt water, orange warm subjects, neutral silver, deeper shadows.
+  const bl = blueLook(vv[0], hn[0], hn[1], s.blue ?? 0, greenWeight(p));
+  const capped = capChroma(bl[0], bl[1], bl[2], Math.max(cSrc, wk * WARM_POP.cMin * 1.5, bl[3]));
+  const [r1, g1, b1] = oklabToLinear(bl[0], capped[0], capped[1]);
   void C;
 
   // Artifact guard: the pixel's detail against its base, at unit gain.
@@ -515,6 +517,40 @@ export function vividLook(L: number, a: number, b: number, v: number, g: number)
   C *= 1 - V.hiDesat * lw;
   const wt = V.warmC * lw;
   return [L2, C * Math.cos(h2) + wt * Math.cos(V.warmHue), C * Math.sin(h2) + wt * Math.sin(V.warmHue)];
+}
+
+/**
+ * Blue water style in Oklab (mirrors the shaders; see BLUE_WATER in params.ts).
+ * (L, a, b) = graded colour after Vivid, v = amount (blueAmountOf), g = green-water weight.
+ * Returns (L, a, b, chroma floor for capChroma): the chroma the style sets on purpose is not rolled off.
+ */
+export function blueLook(L: number, a: number, b: number, v: number, g: number): [number, number, number, number] {
+  if (v <= 0) return [L, a, b, 0];
+  const B = BLUE_WATER;
+  const C0 = Math.hypot(a, b);
+  const h = Math.atan2(b, a);
+  const hh = h < 0 ? h + 2 * Math.PI : h;
+  // Warm subjects first, on the pixel's own hue (30°–120°: the pull never wraps): toward orange, richer.
+  const warm = smoothstep(B.warmIn0, B.warmIn1, hh) * (1 - smoothstep(B.warmOut0, B.warmOut1, hh)) * smoothstep(B.warmCLo, B.warmCHi, C0) * smoothstep(B.warmLLo, B.warmLHi, L) * v;
+  const hw = hh + (B.warmHue - hh) * B.warmPull * warm;
+  const Cw = Math.max(C0, Math.min(C0 * (1 + B.warmGain * warm), B.warmCMax));
+  let a2 = Cw * Math.cos(hw), b2 = Cw * Math.sin(hw);
+  // Water: blend (a, b) toward the cobalt point; "water" by a linear projection on the warm direction (no hue angle).
+  const s = a * Math.cos(B.warmDir) + b * Math.sin(B.warmDir);
+  const cool = 1 - smoothstep(B.sLo, B.sHi, s);
+  const vio = smoothstep(B.vcLo, B.vcHi, C0) * smoothstep(B.vio0, B.vio1, hh) * (1 - smoothstep(B.vio2, 2 * Math.PI, hh));
+  const neutral = smoothstep(B.neutralLLo, B.neutralLHi, L) * (1 - smoothstep(B.neutralCLo, B.neutralCHi, C0));
+  const ct = Math.min(B.cMax, B.cK * L) * (1 - B.hiDrop * smoothstep(B.hiLo, B.hiHi, L));
+  const veg = smoothstep(B.vegCLo, B.vegCHi, C0) * smoothstep(B.vegIn0, B.vegIn1, hh) * (1 - smoothstep(B.vegOut0, B.vegOut1, hh)) * (1 - B.vegGreen * g);
+  const w = B.mix * cool * (1 - vio) * (1 - veg) * (1 - neutral) * v;
+  a2 += (ct * Math.cos(B.target) - a2) * w;
+  b2 += (ct * Math.sin(B.target) - b2) * w;
+  // Silver / white: neutral (cool side only; warm whites keep their warmth).
+  const nk = 1 - B.neutralK * neutral * cool * v;
+  a2 *= nk; b2 *= nk;
+  // Deeper shadows (monotone in L).
+  const L2 = L * (1 - B.shadowK * v * (1 - smoothstep(0, B.shadowHi, L)));
+  return [L2, a2, b2, Math.max(ct * w, Cw * warm)];
 }
 
 /** Near-white pink guard (mirrors the shaders; see HIGHLIGHT_PINK in params.ts). Returns (a, b). */

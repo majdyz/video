@@ -40,6 +40,13 @@ export type UserSettings = {
    * neutral. A per-pixel function of the graded colour only (no masks).
    */
   vivid?: number;
+  /**
+   * "Blue water" style, 0..1 (opt-in, default 0; see BLUE_WATER): on top of
+   * Vivid, all water (green and teal included) goes to one cobalt blue, warm
+   * subjects more orange, silver/white subjects neutral, shadows deeper.
+   * A per-pixel function of the graded colour only (no masks).
+   */
+  blue?: number;
   /** Debug (?hazeauto=0): disables the haze-adaptive default for A/B runs. */
   hazeAuto?: boolean;
   /**
@@ -77,7 +84,7 @@ export const PRESET_ADJUST: Record<ScenePreset, { red: number; blue: number; red
   reef: { red: 1, blue: 1, redMax: 1.6, dehaze: 0, clarity: -0.1, exposure: 0.97, hazeLift: 0 },
 };
 
-export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto", subjectPop: false, subjectPopStrength: 0.5, subjectPopWarmth: 0.5, seabed: 0.6, vivid: 0 };
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto", subjectPop: false, subjectPopStrength: 0.5, subjectPopWarmth: 0.5, seabed: 0.6, vivid: 0, blue: 0 };
 export const INTENSITY_MAX = 2;
 
 /** Internal controls the shader reads, derived from the intensity. */
@@ -112,6 +119,8 @@ export type GradeSettings = {
   subjectPopWarmth?: number;
   /** Vivid look amount after the do-no-harm gate (vividAmountOf; CPU reference). */
   vivid?: number;
+  /** Blue water amount after the same gate (blueAmountOf; CPU reference). */
+  blue?: number;
 };
 
 /**
@@ -475,6 +484,78 @@ export const VIVID_LOOK = {
 };
 
 /**
+ * "Blue water" style (UserSettings.blue), fitted to the user's human-graded
+ * pairs (~/video-data/refs/human-graded-2026-11-01: barracuda, cenote,
+ * jellyfish). The graders put ALL water — blue, teal and green alike — on one
+ * cobalt blue (Oklab hue 249–256°, chroma 0.07–0.08 median, ≈0.1 at L 0.4–0.5),
+ * turn warm subjects more orange (jellyfish 88° → 62°, chroma ×2), leave
+ * silver and white subjects neutral and deepen the shadows. Runs after Vivid,
+ * last in Oklab; like Vivid every weight is a smooth function of the graded
+ * colour (never of a mask), so it draws no edge the picture does not have
+ * and adds no flicker of its own.
+ *
+ * Water: (a, b) blends toward the cobalt point T(L) = ct(L)·(cos target,
+ * sin target) by `mix`. ct = `cK`·L (≤ `cMax`, ×(1 − hiDrop) over
+ * `hiLo..hiHi`): zero at black, so blacks stay black. What is "water" is
+ * decided by a linear projection, not a hue angle: s = (a, b)·(cos warmDir,
+ * sin warmDir), cool = 1 − smoothstep(sLo, sHi, s). Near-greys (whose hue
+ * is noise) have s ≈ 0 whatever their hue, so source chroma noise passes at
+ * a bounded gain (no blue/green speckle on dark noisy water, no blotches on
+ * hazy reef); warm colours with real chroma (skin, sand in sunlight, orange
+ * fish) keep theirs. Vegetation (yellow-green `vegIn0..vegOut1` with chroma
+ * `vegCLo..vegCHi`) keeps its green. Vivid violets (purple coral: chroma vcLo..vcHi, hue
+ * vio0..vio1, fading back by vio2..2π) keep their colour.
+ * Silver / white: bright (neutralL*) low-chroma (neutralC*) pixels take no
+ * blue and lose `neutralK` of their chroma.
+ * Warm: hues in `warmIn0..warmOut1` with real chroma are pulled toward
+ * `warmHue` by `warmPull` and gain `warmGain` chroma (≤ `warmCMax`).
+ * Shadows: L ×(1 − shadowK) at black, easing out by `shadowHi` (monotone).
+ */
+export const BLUE_WATER = {
+  target: (253 * Math.PI) / 180, // measured: the graded water's Oklab hue (249.3°, 251.2°, 255.9°; mean 252°)
+  mix: 0.9,
+  warmDir: (45 * Math.PI) / 180, // the warm side of the projection (skin, orange, sand, red)
+  sLo: -0.01,
+  sHi: 0.06,
+  vcLo: 0.07,
+  vcHi: 0.12,
+  vio0: (285 * Math.PI) / 180,
+  vio1: (310 * Math.PI) / 180,
+  vio2: (345 * Math.PI) / 180,
+  vegIn0: (60 * Math.PI) / 180, // vegetation (moss, seagrass, algae: yellow-green 80–130° with real chroma) keeps its
+  vegIn1: (80 * Math.PI) / 180, // colour; green water sits at 140–200° (the graded cenote / jellyfish) and still turns
+  vegOut0: (125 * Math.PI) / 180,
+  vegOut1: (158 * Math.PI) / 180,
+  vegCLo: 0.02,
+  vegCHi: 0.045,
+  vegGreen: 0.8, // in green water (red.ts greenWeight) the green is mostly cast: the keep relaxes by this share
+  cK: 0.24, // water chroma cK·L (the references: 0.065 at L 0.25, 0.08–0.12 at L 0.4–0.5) …
+  cMax: 0.1, // … capped …
+  hiLo: 0.55, // … and falling off in bright water (sunlit surface, beams: 0.04 at L 0.8)
+  hiHi: 0.85,
+  hiDrop: 0.6,
+  neutralLLo: 0.45, // bright … (wide ramps: a pixel hovering at the edge must not flip between neutral and blue)
+  neutralLHi: 0.75,
+  neutralCLo: 0.02, // … low-chroma pixels are silver / white, not water (the graded barracuda: C 0.02)
+  neutralCHi: 0.08,
+  neutralK: 0.8,
+  warmHue: (62 * Math.PI) / 180, // measured: the graded jellyfish
+  warmIn0: (30 * Math.PI) / 180,
+  warmIn1: (50 * Math.PI) / 180,
+  warmOut0: (82 * Math.PI) / 180, // yellow-green grass is not pushed orange
+  warmOut1: (105 * Math.PI) / 180,
+  warmCLo: 0.015,
+  warmCHi: 0.045,
+  warmLLo: 0.2,
+  warmLHi: 0.4,
+  warmPull: 0.5,
+  warmGain: 0.7,
+  warmCMax: 0.15,
+  shadowK: 0.25,
+  shadowHi: 0.4,
+};
+
+/**
  * Near-white tint guard in the default grade: faint pink/magenta in a
  * near-white highlight (a sun opening, the surface) goes neutral. Skin hues
  * (≥ ~55°) and the warm white of sunlight are outside the band.
@@ -515,10 +596,48 @@ export function vividGateOf(veilL: number, veilC: number, lift: number): number 
 
 /** The Vivid amount the shader reads (0..1): the user's setting through the gate (VIVID_GATE). */
 export function vividAmountOf(p: GradeParams, s: UserSettings): number {
-  const v = Math.min(1, Math.max(0, s.vivid ?? 0));
-  if (v <= 0) return 0;
+  return Math.min(1, Math.max(0, s.vivid ?? 0)) * calmGateOf(p) * Math.min(1, Math.max(0, p.vividGate ?? 1));
+}
+
+/**
+ * Blue water's gate: Vivid's, except that a dark veil does not mean night
+ * when the frame is clearly lit from above (top third much lighter than the
+ * bottom: a sunlit cenote or a dark deep-water frame, `sunLo..sunHi` of
+ * bottom-minus-top Oklab L; torch-lit caves and night dives measure ≥ −0.05
+ * on the valset, the graded cenote −0.41).
+ */
+export const BLUE_GATE = { sunLo: -0.15, sunHi: -0.3, sceneLo: -0.3, sceneHi: 0.05, sceneSd: 0.025, sceneCool: 0.02 };
+
+/**
+ * Scene evidence (analyze.ts) for Blue water: the share of the frame that is
+ * open water (smooth — local Oklab L std < sceneSd over 5×5 — and on the cool
+ * side, a·cos45° + b·sin45° < sceneCool) minus the engine's mean object
+ * confidence. The graders' pairs (water behind the subject) score +0.02 to
+ * +0.42 and green open water +0.64; close reef, moss and sand frames −0.14 to
+ * −0.55, where tinting the mid-tones blue while the highlights stay neutral
+ * turns texture into blue/white speckle — there the style steps back
+ * (sceneLo..sceneHi) and Vivid alone remains. Clip-locked, never per pixel.
+ */
+export function blueSceneOf(openShare: number, confMean: number): number {
+  return smoothstepP(BLUE_GATE.sceneLo, BLUE_GATE.sceneHi, openShare - confMean);
+}
+
+/** Frame evidence for the Blue water gate (analyze.ts), as vividGateOf, times the scene evidence (blueSceneOf). 1 = full look. */
+export function blueGateOf(veilL: number, veilC: number, lift: number, scene = 1): number {
+  const G = VIVID_GATE;
+  const night = Math.max(smoothstepP(G.veilLLo, G.veilLHi, veilL), smoothstepP(-BLUE_GATE.sunLo, -BLUE_GATE.sunHi, -lift));
+  const rov = smoothstepP(G.liftLo, G.liftHi, lift) * (1 - smoothstepP(G.veilCLo, G.veilCHi, veilC));
+  return night * (1 - (1 - G.rovKeep) * rov) * scene;
+}
+
+/** The Blue water amount the shader reads (0..1): the user's setting through the gate (graded, topside, night, ROV). */
+export function blueAmountOf(p: GradeParams, s: UserSettings): number {
+  return Math.min(1, Math.max(0, s.blue ?? 0)) * calmGateOf(p) * Math.min(1, Math.max(0, p.blueGate ?? p.vividGate ?? 1));
+}
+
+function calmGateOf(p: GradeParams): number {
   const calm = Math.min(1, Math.max(0, Math.max(p.calm ?? 0, p.calmTone ?? 0)));
-  return v * (1 - smoothstepP(VIVID_GATE.calmLo, VIVID_GATE.calmHi, calm)) * Math.min(1, Math.max(0, p.vividGate ?? 1));
+  return 1 - smoothstepP(VIVID_GATE.calmLo, VIVID_GATE.calmHi, calm);
 }
 
 /** Push amount above the estimate, 0..1. */
@@ -725,6 +844,8 @@ export type GradeParams = {
   subjectTone?: number;
   /** Vivid gate from the frame (vividGateOf: night / torch / ROV evidence), 0..1; clip-locked. Absent = 1. */
   vividGate?: number;
+  /** Blue water gate from the frame (blueGateOf), 0..1; clip-locked. Absent = vividGate. */
+  blueGate?: number;
   /** Seabed recovery (SEABED): how much red is missing (0..1), and the frame's water / bright Oklab L. */
   seabedNeed?: number;
   seabedLw?: number;
@@ -847,7 +968,8 @@ export const CLAHE_BINS = 32;
  *  p16: hazeWeight, deepHaze, detail guard, object-neutral strength
  *  p17: haze-lift subtraction per channel (hazeLiftT), neutral subtraction (hazeLift·hazeBlack)
  *  p18–p22: backdrop surface (18 coefficients, L / a / b; backdrop.ts), p22.z subject tone, p22.w green-water weight (red.ts)
- *  p23: temporal history valid (backend), temporal layer on (engine), Vivid amount (vividAmountOf), 0
+ *  p23: temporal history valid (backend), temporal layer on (engine), Vivid amount (vividAmountOf), Subject pop Strength
+ *  p25: Seabed amount, water L, bright L, Blue water amount (blueAmountOf)
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -900,6 +1022,7 @@ export function packUniforms(
   u[100] = Math.min(1, Math.max(0, settings.seabed ?? 0)) * Math.min(1, Math.max(0, params.seabedNeed ?? 0)) * (1 - Math.min(1, Math.max(0, params.backdrop ?? 0)));
   u[101] = params.seabedLw ?? 0;
   u[102] = params.seabedLb ?? 1;
+  u[103] = blueAmountOf(params, settings); // p25.w: Blue water amount
   u[96] = 1; // p24.x: Subject pop lift direction (set per frame by the engine, seg-overlay.ts popDirection)
   // p24.y: an AI subject overlay is on this frame (set by the engine): the AI alone weights the pop (grade-shader toneWeight)
   return u;
@@ -992,6 +1115,7 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     backdrop: m(a.backdrop ?? 0, b.backdrop ?? 0),
     subjectTone: m(a.subjectTone ?? 0, b.subjectTone ?? 0),
     vividGate: m(a.vividGate ?? 1, b.vividGate ?? 1),
+    blueGate: m(a.blueGate ?? a.vividGate ?? 1, b.blueGate ?? b.vividGate ?? 1),
     seabedNeed: m(a.seabedNeed ?? 0, b.seabedNeed ?? 0),
     seabedLw: m(a.seabedLw ?? 0, b.seabedLw ?? 0),
     seabedLb: m(a.seabedLb ?? 1, b.seabedLb ?? 1),

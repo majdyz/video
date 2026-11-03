@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, VIVID, VIVID_LOOK, WARM_POP, SEABED } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, VIVID, VIVID_LOOK, BLUE_WATER, WARM_POP, SEABED } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 import { BACKDROP } from "./backdrop.ts";
 import { RED_GLSL, RED_WGSL } from "./red.ts";
@@ -176,6 +176,7 @@ const float ON_WARM_SIN = ${Math.sin(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_LO = ${OBJECT_NEUTRAL.warmLo.toFixed(4)};
 const float ON_WARM_HI = ${OBJECT_NEUTRAL.warmHi.toFixed(4)};
 ${Object.entries(VIVID_LOOK).map(([k, v]) => `const float VL_${k.replace(/[A-Z]/g, (c) => "_" + c).toUpperCase()} = ${v.toFixed(6)};`).join("\n")}
+${Object.entries(BLUE_WATER).map(([k, v]) => `const float BW_${k.replace(/[A-Z]/g, (c) => "_" + c).toUpperCase()} = ${v.toFixed(6)};`).join("\n")}
 ${Object.entries(HIGHLIGHT_PINK).map(([k, v]) => `const float HP_${k.replace(/[A-Z]/g, (c) => "_" + c).toUpperCase()} = ${v.toFixed(6)};`).join("\n")}
 `;
 const LOOK_CONSTS_WGSL = LOOK_CONSTS_GLSL.replace(/const float (\w+) = ([^;]+);/g, "const $1: f32 = $2;");
@@ -366,6 +367,28 @@ vec3 vividLook(vec3 lab, float v, float g) {
   C *= 1.0 - VL_HI_DESAT * lw;
   float wt = VL_WARM_C * lw;
   return vec3(L2, C * cos(h2) + wt * cos(VL_WARM_HUE), C * sin(h2) + wt * sin(VL_WARM_HUE));
+}
+// Blue water style (see BLUE_WATER in params.ts; mirrors apply.ts blueLook). Returns (L, a, b, chroma floor).
+vec4 blueLook(vec3 lab, float v, float g) {
+  if (v <= 0.0) return vec4(lab, 0.0);
+  float C0 = length(lab.yz);
+  float h = atan(lab.z, lab.y);
+  float hh = h < 0.0 ? h + 6.2831853 : h;
+  float warm = smoothstepf(BW_WARM_IN0, BW_WARM_IN1, hh) * (1.0 - smoothstepf(BW_WARM_OUT0, BW_WARM_OUT1, hh)) * smoothstepf(BW_WARM_C_LO, BW_WARM_C_HI, C0) * smoothstepf(BW_WARM_L_LO, BW_WARM_L_HI, lab.x) * v;
+  float hw = hh + (BW_WARM_HUE - hh) * BW_WARM_PULL * warm;
+  float Cw = max(C0, min(C0 * (1.0 + BW_WARM_GAIN * warm), BW_WARM_C_MAX));
+  vec2 ab = Cw * vec2(cos(hw), sin(hw));
+  float s = dot(lab.yz, vec2(cos(BW_WARM_DIR), sin(BW_WARM_DIR)));
+  float cool = 1.0 - smoothstepf(BW_S_LO, BW_S_HI, s);
+  float vio = smoothstepf(BW_VC_LO, BW_VC_HI, C0) * smoothstepf(BW_VIO0, BW_VIO1, hh) * (1.0 - smoothstepf(BW_VIO2, 6.2831853, hh));
+  float neutral = smoothstepf(BW_NEUTRAL_L_LO, BW_NEUTRAL_L_HI, lab.x) * (1.0 - smoothstepf(BW_NEUTRAL_C_LO, BW_NEUTRAL_C_HI, C0));
+  float ct = min(BW_C_MAX, BW_C_K * lab.x) * (1.0 - BW_HI_DROP * smoothstepf(BW_HI_LO, BW_HI_HI, lab.x));
+  float veg = smoothstepf(BW_VEG_C_LO, BW_VEG_C_HI, C0) * smoothstepf(BW_VEG_IN0, BW_VEG_IN1, hh) * (1.0 - smoothstepf(BW_VEG_OUT0, BW_VEG_OUT1, hh)) * (1.0 - BW_VEG_GREEN * g);
+  float w = BW_MIX * cool * (1.0 - vio) * (1.0 - veg) * (1.0 - neutral) * v;
+  ab += (ct * vec2(cos(BW_TARGET), sin(BW_TARGET)) - ab) * w;
+  ab *= 1.0 - BW_NEUTRAL_K * neutral * cool * v;
+  float L2 = lab.x * (1.0 - BW_SHADOW_K * v * (1.0 - smoothstepf(0.0, BW_SHADOW_HI, lab.x)));
+  return vec4(L2, ab, max(ct * w, Cw * warm));
 }
 // Near-white pink guard (see HIGHLIGHT_PINK; mirrors apply.ts highlightPink).
 vec2 highlightPink(float L, vec2 ab) {
@@ -752,13 +775,16 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // from the water (it hugs the animal's outline); an AI mask is the outline already.
   float wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * (p[24].y > 0.5 ? 1.0 : depart);
   lk.yz = warmPop(lk.x, lk.yz, wk);
+  // Blue water style (opt-in, p25.w): cobalt water, orange warm subjects, neutral silver, deeper shadows.
+  vec4 bl = blueLook(lk, p[25].w, p[22].w);
+  lk = bl.xyz;
   // Seabed recovery: sand and reef to a warm neutral (and a little lighter) where the water left no red.
   if (p[25].x > 0.0) {
     float sb = seabedW(uv, lab0.x) * p[25].x;
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
   // The warm chroma may exceed the source-relative cap (a cyan shark has little to start from).
-  vec3 o1 = oklabToLinear(capChroma(lk, max(cSrc, wk * WP_CMIN * 1.5)));
+  vec3 o1 = oklabToLinear(capChroma(lk, max(max(cSrc, wk * WP_CMIN * 1.5), bl.w)));
   vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
@@ -940,6 +966,28 @@ fn vividLook(lab: vec3<f32>, v: f32, g: f32) -> vec3<f32> {
   C *= 1.0 - VL_HI_DESAT * lw;
   let wt = VL_WARM_C * lw;
   return vec3(L2, C * cos(h2) + wt * cos(VL_WARM_HUE), C * sin(h2) + wt * sin(VL_WARM_HUE));
+}
+// Blue water style (mirrors the GLSL / apply.ts blueLook). Returns (L, a, b, chroma floor).
+fn blueLook(lab: vec3<f32>, v: f32, g: f32) -> vec4<f32> {
+  if (v <= 0.0) { return vec4<f32>(lab, 0.0); }
+  let C0 = length(lab.yz);
+  let h = atan2(lab.z, lab.y);
+  let hh = select(h, h + 6.2831853, h < 0.0);
+  let warm = smoothstepf(BW_WARM_IN0, BW_WARM_IN1, hh) * (1.0 - smoothstepf(BW_WARM_OUT0, BW_WARM_OUT1, hh)) * smoothstepf(BW_WARM_C_LO, BW_WARM_C_HI, C0) * smoothstepf(BW_WARM_L_LO, BW_WARM_L_HI, lab.x) * v;
+  let hw = hh + (BW_WARM_HUE - hh) * BW_WARM_PULL * warm;
+  let Cw = max(C0, min(C0 * (1.0 + BW_WARM_GAIN * warm), BW_WARM_C_MAX));
+  var ab = Cw * vec2<f32>(cos(hw), sin(hw));
+  let s = dot(lab.yz, vec2<f32>(cos(BW_WARM_DIR), sin(BW_WARM_DIR)));
+  let cool = 1.0 - smoothstepf(BW_S_LO, BW_S_HI, s);
+  let vio = smoothstepf(BW_VC_LO, BW_VC_HI, C0) * smoothstepf(BW_VIO0, BW_VIO1, hh) * (1.0 - smoothstepf(BW_VIO2, 6.2831853, hh));
+  let neutral = smoothstepf(BW_NEUTRAL_L_LO, BW_NEUTRAL_L_HI, lab.x) * (1.0 - smoothstepf(BW_NEUTRAL_C_LO, BW_NEUTRAL_C_HI, C0));
+  let ct = min(BW_C_MAX, BW_C_K * lab.x) * (1.0 - BW_HI_DROP * smoothstepf(BW_HI_LO, BW_HI_HI, lab.x));
+  let veg = smoothstepf(BW_VEG_C_LO, BW_VEG_C_HI, C0) * smoothstepf(BW_VEG_IN0, BW_VEG_IN1, hh) * (1.0 - smoothstepf(BW_VEG_OUT0, BW_VEG_OUT1, hh)) * (1.0 - BW_VEG_GREEN * g);
+  let w = BW_MIX * cool * (1.0 - vio) * (1.0 - veg) * (1.0 - neutral) * v;
+  ab += (ct * vec2<f32>(cos(BW_TARGET), sin(BW_TARGET)) - ab) * w;
+  ab *= 1.0 - BW_NEUTRAL_K * neutral * cool * v;
+  let L2 = lab.x * (1.0 - BW_SHADOW_K * v * (1.0 - smoothstepf(0.0, BW_SHADOW_HI, lab.x)));
+  return vec4<f32>(L2, ab, max(ct * w, Cw * warm));
 }
 fn highlightPink(L: f32, ab: vec2<f32>) -> vec2<f32> {
   let C = length(ab);
@@ -1254,11 +1302,13 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0)));
   let wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * select(depart, 1.0, p[24].y > 0.5);
   lk = vec3(lk.x, warmPop(lk.x, lk.yz, wk));
+  let bl = blueLook(lk, params.p[25].w, p[22].w);
+  lk = bl.xyz;
   if (params.p[25].x > 0.0) {
     let sb = seabedW(uv, lab0.x) * params.p[25].x;
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2<f32>(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
-  let o1 = oklabToLinear(capChroma(lk, max(cSrc, wk * WP_CMIN * 1.5)));
+  let o1 = oklabToLinear(capChroma(lk, max(max(cSrc, wk * WP_CMIN * 1.5), bl.w)));
   let o2 = fitToGamut(o1 * detailRatio(src, lin));
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);

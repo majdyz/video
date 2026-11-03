@@ -15,6 +15,10 @@ import {
   GYRO_DEFAULT_SMOOTHING,
   subjectPopVisible,
   initialVivid,
+  initialStyle,
+  styleFlags,
+  styleOf,
+  COLOUR_STYLES,
   VIVID_PREF_KEY,
 } from "../src/pipeline/tools.ts";
 import { DEFAULT_GYRO_PARAMS } from "../../motion-fix/src/lib/gyro/gyro-stabilize.ts";
@@ -46,6 +50,19 @@ assert.equal(initialVivid("?vivid=0", "1"), false);
 assert.equal(initialVivid("?vivid=1&tools=colour", "0"), true);
 assert.equal(initialVivid("?vivid=x", "0"), false);
 assert.equal(VIVID_PREF_KEY, "studio.vivid");
+// Style picker: Natural / Vivid / Blue water (Vivid + Blue water); the default stays Vivid.
+assert.deepEqual(COLOUR_STYLES.map((s) => s.id), ["natural", "vivid", "blue"]);
+assert.equal(styleOf(DEFAULT_TOOLS.colour), "vivid");
+for (const id of ["natural", "vivid", "blue"] as const) assert.equal(styleOf(styleFlags(id)), id);
+assert.deepEqual(colourSettings({ ...DEFAULT_TOOLS.colour, ...styleFlags("blue") }), { ...DEFAULT_SETTINGS, vivid: 1, blue: 1 });
+assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, vivid: false, blue: true }).blue, 0, "Blue water rides on Vivid");
+assert.equal(initialStyle("", null), "vivid");
+assert.equal(initialStyle("", "blue"), "blue");
+assert.equal(initialStyle("", "0"), "natural");
+assert.equal(initialStyle("?style=blue", "0"), "blue");
+assert.equal(initialStyle("?vivid=0", "blue"), "natural");
+assert.equal(initialStyle("?vivid=1", "blue"), "vivid");
+assert.equal(initialVivid("", "blue"), true, "an older build reading a saved Blue water choice falls back to Vivid on");
 
 // Stabilise: defaults are Motion Fix's; presets set both knobs.
 assert.deepEqual(stabiliseParams(DEFAULT_TOOLS.stabilise), DEFAULT_PARAMS);

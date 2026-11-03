@@ -8,7 +8,10 @@ import {
   cameraLabel,
   dewarpChips,
   profileDefaults,
-  saveVivid,
+  saveStyle,
+  styleFlags,
+  styleOf,
+  COLOUR_STYLES,
   type ToolId,
   type ToolsState,
 } from "../pipeline/tools.ts";
@@ -49,7 +52,7 @@ function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | n
   const ps: Param[] = [
     { id: "strength", label: "Strength", value: pct(c.strength), slider: { value: c.strength, min: 0, max: 100, def: DEFAULT_COLOUR.strength, onChange: (v) => up({ strength: v }) } },
     { id: "scene", label: "Scene", value: scene?.label ?? "Auto", choices: { items: COLOUR_PRESETS, value: c.preset, onChange: (id) => up({ preset: id as typeof c.preset }) } },
-    { id: "vivid", label: "Vivid", value: c.vivid ? "On" : "Off", toggle: { on: !!c.vivid, onChange: (v) => { saveVivid(v); up({ vivid: v }); } } },
+    { id: "vivid", label: "Style", value: COLOUR_STYLES.find((s) => s.id === styleOf(c))?.label ?? "Vivid", choices: { items: COLOUR_STYLES, value: styleOf(c), onChange: (id) => { const s = id as ReturnType<typeof styleOf>; saveStyle(s); up(styleFlags(s)); } } },
     { id: "look", label: "Deep blue", more: true, value: pct(c.look * 100), slider: { value: c.look * 100, min: 0, max: 100, def: 0, onChange: (v) => up({ look: v / 100 }) } },
     { id: "sat", label: "Saturation", more: true, value: `${Math.round(c.saturation * 100)}%`, slider: { value: c.saturation * 100, min: 0, max: 200, def: 100, format: (v) => `${Math.round(v)}%`, onChange: (v) => up({ saturation: v / 100 }) } },
     { id: "clarity", label: "Clarity", more: true, value: pct(c.clarity * 100), slider: { value: c.clarity * 100, min: 0, max: 100, def: DEFAULT_COLOUR.clarity * 100, onChange: (v) => up({ clarity: v / 100 }) } },
@@ -66,7 +69,7 @@ function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | n
       },
     });
   }
-  ps.push({ id: "reset", label: "Reset", more: true, action: () => set((t) => ({ ...t, colour: { ...DEFAULT_COLOUR, enabled: t.colour.enabled, vivid: t.colour.vivid } })) });
+  ps.push({ id: "reset", label: "Reset", more: true, action: () => set((t) => ({ ...t, colour: { ...DEFAULT_COLOUR, enabled: t.colour.enabled, vivid: t.colour.vivid, blue: t.colour.blue } })) });
   return ps;
 }
 

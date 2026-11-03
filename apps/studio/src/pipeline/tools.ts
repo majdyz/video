@@ -36,6 +36,8 @@ export type ColourState = {
   seabed?: number;
   /** "Vivid" look (on by default): deep muted navy water, darker water, black shadows, the sun kept bright (VIVID_LOOK in the engine; it stands down by itself on graded, topside, night and ROV footage). */
   vivid?: boolean;
+  /** "Blue water" style (with vivid): all water one cobalt blue, warm subjects orange, silver neutral, deeper shadows (BLUE_WATER in the engine; same gate as Vivid). */
+  blue?: boolean;
 };
 
 /** The "Subject pop" switch stays hidden until its mask tracking is clean (the engine path ships off; `?pop=1` forces it on for checks). */
@@ -77,6 +79,39 @@ export function initialVivid(search: string, saved: string | null): boolean {
   return DEFAULT_COLOUR.vivid !== false;
 }
 
+/** The colour style picker: Natural (no look), Vivid, Blue water (Vivid + BLUE_WATER). */
+export type ColourStyle = "natural" | "vivid" | "blue";
+export const COLOUR_STYLES: Chip<ColourStyle>[] = [
+  { id: "natural", label: "Natural", hint: "Natural correction only" },
+  { id: "vivid", label: "Vivid", hint: "Deep blue water, white sand, rich blacks, bright sun" },
+  { id: "blue", label: "Blue water", hint: "All water one cobalt blue, warm subjects, deeper shadows" },
+];
+
+export function styleOf(c: { vivid?: boolean; blue?: boolean }): ColourStyle {
+  return c.vivid ? (c.blue ? "blue" : "vivid") : "natural";
+}
+
+/** The ColourState flags for a style. */
+export function styleFlags(id: ColourStyle): { vivid: boolean; blue: boolean } {
+  return { vivid: id !== "natural", blue: id === "blue" };
+}
+
+/**
+ * Style at start-up: `?style=natural|vivid|blue` overrides, then `?vivid=0|1`;
+ * otherwise a saved explicit choice ("0" / "1" / "blue" under VIVID_PREF_KEY); otherwise Vivid.
+ */
+export function initialStyle(search: string, saved: string | null): ColourStyle {
+  const q = new URLSearchParams(search).get("style");
+  if (q === "natural" || q === "vivid" || q === "blue") return q;
+  if (saved === "blue" && new URLSearchParams(search).get("vivid") === null) return "blue";
+  return initialVivid(search, saved) ? "vivid" : "natural";
+}
+
+/** Remembers an explicit style choice (Vivid's key, so older builds still read "0" / "1"). */
+export function saveStyle(id: ColourStyle): void {
+  try { localStorage.setItem(VIVID_PREF_KEY, id === "blue" ? "blue" : id === "vivid" ? "1" : "0"); } catch { /* private mode */ }
+}
+
 /** Reads the saved Vivid choice (null when none, or storage is unavailable). */
 export function savedVivid(): string | null {
   try { return typeof localStorage === "undefined" ? null : localStorage.getItem(VIVID_PREF_KEY); } catch { return null; }
@@ -110,6 +145,7 @@ export function colourSettings(c: ColourLook): UserSettings {
     // Seabed recovery rides on Vivid (one look: deep blue water, white sand), no control of its own.
     seabed: c.vivid ? Math.min(100, Math.max(0, c.seabed ?? DEFAULT_COLOUR.seabed ?? 0)) / 100 : 0,
     vivid: c.vivid ? 1 : 0,
+    blue: c.vivid && c.blue ? 1 : 0,
   };
 }
 

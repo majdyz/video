@@ -30,7 +30,7 @@ import {
   type FrameAnalysis,
   type GradeParams,
   type Vec3,
- CONF_BRIGHT, DEFAULT_SETTINGS, HAZE_AUTO, hazeLiftRatio, hazeWeightOf, SEABED, vividGateOf } from "./params.ts";
+ CONF_BRIGHT, DEFAULT_SETTINGS, HAZE_AUTO, hazeLiftRatio, hazeWeightOf, SEABED, BLUE_GATE, blueGateOf, blueSceneOf, vividGateOf } from "./params.ts";
 
 /** Thumbnail size the engine analyses at (upright, 16:9 box). */
 export const ANALYSIS_W = 256;
@@ -588,7 +588,25 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     }
   }
   const veilLab = linearToOklab(binf[0], binf[1], binf[2]);
-  const vividGate = vividGateOf(veilLab[0], Math.hypot(veilLab[1], veilLab[2]), topN > 0 && botN > 0 ? botL / botN - topL / topN : 0);
+  const gateLift = topN > 0 && botN > 0 ? botL / botN - topL / topN : 0;
+  const vividGate = vividGateOf(veilLab[0], Math.hypot(veilLab[1], veilLab[2]), gateLift);
+  // Blue water scene evidence (blueSceneOf): open-water share (smooth, cool) minus the mean object confidence.
+  let blueScene = 1;
+  {
+    const m1 = temp("bwMean", n), m2 = temp("bwSq", n), sq = temp("bwIn", n), tmp = temp("bwTmp", n);
+    for (let i = 0; i < n; i++) sq[i] = okL[i] * okL[i];
+    boxBlur(okL, w, h, 2, m1, tmp);
+    boxBlur(sq, w, h, 2, m2, tmp);
+    const c45 = Math.SQRT1_2;
+    let open = 0, cm = 0;
+    for (let i = 0; i < n; i++) {
+      const sd = Math.sqrt(Math.max(0, m2[i] - m1[i] * m1[i]));
+      if (sd < BLUE_GATE.sceneSd && (okA[i] + okB[i]) * c45 < BLUE_GATE.sceneCool) open++;
+      cm += confMap[i];
+    }
+    blueScene = blueSceneOf(open / n, cm / n);
+  }
+  const blueGate = blueGateOf(veilLab[0], Math.hypot(veilLab[1], veilLab[2]), gateLift, blueScene);
   // Seabed recovery (SEABED): the frame's water and bright lightness, and how little red its bright pixels have.
   let seabedLw = 0, seabedLb = 1, seabedNeed = 0;
   {
@@ -651,6 +669,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     backdropFit: Array.from(backdropFit),
     subjectTone,
     vividGate,
+    blueGate,
   };
   return { params, depth, clahe, mean, diag: { sandWeight: sand.weight, sandFrac: sand.frac, sandMask, calm: evidence, backdrop: backdropValidity } };
 }
