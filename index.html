@@ -4,21 +4,25 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#0a0a0b" />
-<title>deepfix</title>
+<title>DiveGrade</title>
 <meta http-equiv="refresh" content="0; url=./studio/" />
 <link rel="canonical" href="./studio/" />
-<script>location.replace("./studio/" + location.search + location.hash);</script>
+<script>
+  // Keep any extra query (e.g. ?coi=0) and the hash.
+  (function () {
+    var t = new URL("./studio/", location.href);
+    new URLSearchParams(location.search).forEach(function (v, k) { if (!t.searchParams.has(k)) t.searchParams.set(k, v); });
+    t.hash = location.hash;
+    location.replace(t.href);
+  })();
+</script>
 <style>
   html, body { margin: 0; height: 100%; background: #0a0a0b; color: #ededf0; font: 15px/1.5 -apple-system, system-ui, sans-serif; }
-  main { min-height: 100%; display: grid; place-content: center; gap: 12px; text-align: center; padding: 24px; }
+  main { min-height: 100%; display: grid; place-content: center; text-align: center; padding: 24px; }
   a { color: #ededf0; text-underline-offset: 3px; text-decoration-color: rgba(255,255,255,.25); }
-  small { color: #76767e; }
 </style>
 </head>
 <body>
-<main>
-  <a href="./studio/">Open deepfix &rarr;</a>
-  <small>Classic tools: <a href="./classic/">all</a> · <a href="./aqua-fix/">Aqua Fix</a> · <a href="./motion-fix/">Motion Fix</a> · <a href="./dewarp/">Dewarp</a></small>
-</main>
+<main><a href="./studio/">Open DiveGrade &rarr;</a></main>
 </body>
 </html>
