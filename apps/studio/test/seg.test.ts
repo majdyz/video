@@ -166,13 +166,15 @@ const img = (dx: number, dy: number): Gray => {
   assert.equal(segPopsAt({ width: 4, height: 4, alpha, exclude: null, near: new Float32Array(16) }, 1.5 / 4, 1.5 / 4), false);
   assert.equal(segPopsAt(null, 0.5, 0.5), false);
   // Outlines with AI on: the ML subject (solid) over the engine's other animals, on the overlay grid.
-  const eng = { width: 2, height: 2, ids: Uint16Array.from([0, 0, 0, 7]), animals: [{ id: 7, strength: 0.1 }] };
+  // (The engine's animal is one it picked: since 3cca855 its unpicked candidates are left out with AI on.)
+  const eng = { width: 2, height: 2, ids: Uint16Array.from([0, 0, 0, 7]), animals: [{ id: 7, strength: 0.9 }] };
   const nearPart = near.slice(); nearPart[15] = 0; // the ML is trusted everywhere but the far corner
   const os = outlineSelection({ width: 4, height: 4, alpha, exclude: null, near: nearPart }, eng)!;
   assert.equal(os.ids[5], ML_OUTLINE_ID);
   assert.equal(os.ids[15], 7, "the engine's animal where the ML is not trusted, resampled");
   assert.equal(os.ids[10], 0, "where the ML is trusted, its 'not the subject' wins over the engine's animal");
   assert.deepEqual(os.animals.map((a) => a.id).sort(), [7, ML_OUTLINE_ID].sort());
+  assert.deepEqual(outlineSelection({ width: 4, height: 4, alpha, exclude: null, near: nearPart }, { ...eng, animals: [{ id: 7, strength: 0.1 }] })!.animals.map((a) => a.id), [ML_OUTLINE_ID], "an unpicked candidate has no outline with AI on");
   assert.equal(outlineSelection(null, eng), eng, "AI off: the engine's selection");
   // Taking out a popped subject: the exclude gets the popped region's box.
   const ba = new Float32Array(100), bn = new Float32Array(100).fill(1);
