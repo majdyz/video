@@ -6,7 +6,7 @@
 import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts";
 import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
-import { crumb } from "../crumbs.ts";
+import { aiCrashed, crumb, lastCrash } from "../crumbs.ts";
 import { isWeakDevice } from "../device.ts";
 import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
@@ -15,10 +15,12 @@ import type { SessionFrameOut } from "./session.ts";
 
 const PREF_KEY = "deepfix.subjectPop.ai";
 export type SegPhase = "off" | "download" | "starting" | "ready" | "tracking" | "unavailable";
-/** weak: a phone the model is a poor fit for (device.ts); AI is off there with a line saying why. */
-export type SegStatus = { on: boolean; phase: SegPhase; progress: number | null; note: string | null; weak?: boolean };
+/** weak: a phone the model is a poor fit for (device.ts); AI is off there with a line saying why. crashed: the last
+ * session died while the model worked (crumbs.ts aiCrashed), so AI was turned off for this one (until turned on). */
+export type SegStatus = { on: boolean; phase: SegPhase; progress: number | null; note: string | null; weak?: boolean; crashed?: boolean };
 
 export const WEAK_DEVICE_NOTE = "AI detection starts off on this phone: the model is slow here and can run out of memory. Turn it on to try it";
+export const CRASHED_NOTE = "AI tracking crashed last time on this phone, so it's off; turn on to retry";
 
 function readPref(): boolean {
   try {
@@ -38,7 +40,7 @@ function writePref(on: boolean): void {
 
 /** The inline status under the toggle (null: the default hint). */
 export function segStatusText(s: SegStatus): string | null {
-  if (!s.on) return s.weak ? WEAK_DEVICE_NOTE : null;
+  if (!s.on) return s.crashed ? CRASHED_NOTE : s.weak ? WEAK_DEVICE_NOTE : null;
   const pc = s.progress !== null ? ` ${Math.round(s.progress * 100)}%` : "";
   switch (s.phase) {
     case "download": return `Downloading the model…${pc}`;
@@ -419,8 +421,16 @@ export class SubjectSeg {
 
   constructor(onChange: () => void) {
     this.onChange = onChange;
-    const on = readPref();
-    this.status = { on, phase: on ? "ready" : "off", progress: null, note: null, weak: isWeakDevice() };
+    let on = readPref();
+    // The page died while the model worked last time (a phone out of memory): AI starts off, once; turning it on again
+    // is the user's call (and a crash after that turns it off again).
+    const crashed = on && aiCrashed(lastCrash());
+    if (crashed) {
+      on = false;
+      writePref(false);
+      crumb("ai: off (crashed last time)");
+    }
+    this.status = { on, phase: on ? "ready" : "off", progress: null, note: null, weak: isWeakDevice(), crashed };
     queueMicrotask(() => this.onChange());
   }
 
@@ -436,7 +446,7 @@ export class SubjectSeg {
   /** The toggle. Turning it on starts the model download (progress in status). */
   setOn(on: boolean): void {
     writePref(on);
-    this.set({ on, phase: on ? (this.model ? "ready" : "download") : "off", progress: null, note: null });
+    this.set({ on, phase: on ? (this.model ? "ready" : "download") : "off", progress: null, note: null, crashed: false });
     if (on && !this.hibernated) void this.ensureModel();
   }
 
@@ -446,14 +456,16 @@ export class SubjectSeg {
     this.set({ phase: "download", progress: 0 });
     crumb("ai: model load");
     this.loading = (async () => {
-      const m = new WorkerSegModel();
+      // Where the model can only run on WASM, the worker with the plain WASM runtime: the WebGPU build's (twice the
+      // WebAssembly) start-up was the pass's memory peak (+130 MB in Chromium).
+      const m = new WorkerSegModel(isWebKit() || !("gpu" in navigator));
       try {
         // WebGPU in iPhone Safari crashed the page on the first frames (crash log, 31 Oct, iOS 18.7): WebKit runs
         // the model on WASM.
         await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: isWebKit() ? "wasm" : "auto", lite: isWebKit() || new URLSearchParams(location.search).get("seglite") === "1" });
         m.onEvent = (e) => this.onEvent(e);
         this.model = m;
-        crumb(`ai: model ready (${m.info?.ep ?? "?"}, ${m.info?.threads ?? "?"} threads)`);
+        crumb(`ai: model ready (${m.info?.ep ?? "?"}, ${m.info?.threads ?? "?"} threads, heap ${m.info?.heapMB ?? "?"} MB)`);
         this.set({ phase: "ready", progress: null });
         return m;
       } catch (e) {
@@ -488,7 +500,7 @@ export class SubjectSeg {
     } else if (e.ev === "progress") {
       this.busy = e.done < e.total;
       const tens = e.total ? Math.floor((10 * e.done) / e.total) : 0;
-      if (tens !== this.crumbTens) { this.crumbTens = tens; crumb(`ai: pass ${tens * 10}% (${e.done}/${e.total})`); }
+      if (tens !== this.crumbTens) { this.crumbTens = tens; crumb(`ai: pass ${tens * 10}% (${e.done}/${e.total}) · heap ${e.heapMB ?? "?"} MB`); }
       this.set({ phase: "tracking", progress: e.total ? e.done / e.total : null });
     } else if (e.ev === "seeds") {
       segLog(`segment ${e.k} seeds asked for (${e.t.toFixed(2)} s)`);

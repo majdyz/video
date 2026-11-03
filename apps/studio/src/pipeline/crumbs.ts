@@ -36,6 +36,17 @@ export function lastCrash(): string[] | null {
   return previous;
 }
 
+/**
+ * Whether a crashed session's last step was the AI model at work (its load, session, encode, probe or pass steps;
+ * not its hibernation or a failed load): the phone ran out of memory there. Pure (the steps as startCrumbs kept them).
+ */
+export function aiCrashed(steps: readonly string[] | null): boolean {
+  const last = steps?.[steps.length - 1];
+  if (!last) return false;
+  const m = last.match(/^\S+ (ai[:·] .*)$/);
+  return !!m && !/^ai: (hibernate|model failed)/.test(m[1]);
+}
+
 /** This session's steps so far (Send feedback attaches them). */
 export function sessionCrumbs(): string[] {
   try {

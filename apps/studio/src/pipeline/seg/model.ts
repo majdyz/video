@@ -9,7 +9,7 @@ import type { SessionFrameOut } from "./session.ts";
 export type SessionEvent =
   | { ev: "frames"; items: SessionFrameOut[] }
   | { ev: "keys"; conf: { t: number; conf: number }[] }
-  | { ev: "progress"; done: number; total: number }
+  | { ev: "progress"; done: number; total: number; heapMB?: number }
   | { ev: "idle"; profile: Record<string, number> }
   | { ev: "seeds"; k: number; t: number }
   | { ev: "rejected"; id: number }
@@ -17,7 +17,8 @@ export type SessionEvent =
 export type SessionInfo = { width: number; height: number; mw: number; mh: number; i0: number; n: number };
 
 export type SegManifest = { model: string; source: string; files: Record<string, { bytes: number; sha256: string }> };
-export type SegLoadInfo = { ep: string; f16: boolean; threads: number; loadMs: number; bytes: number };
+/** heapMB: onnxruntime-web's WASM heap once the graphs are loaded (wasm-heap.ts). */
+export type SegLoadInfo = { ep: string; f16: boolean; threads: number; loadMs: number; bytes: number; heapMB: number };
 
 const CACHE = "deepfix-seg-v1";
 const GRAPH_FILES: GraphName[] = ["vision_encoder", "mask_decoder", "memory_attention", "memory_encoder"];
@@ -87,8 +88,11 @@ export class WorkerSegModel implements SegModel {
   /** Background-session events (frames, keyframe confidences, progress, idle). */
   onEvent: ((e: SessionEvent) => void) | null = null;
 
-  constructor() {
-    this.w = new Worker(new URL("./seg-worker.ts", import.meta.url), { type: "module" });
+  /** wasm: the worker with the plain WASM runtime, no WebGPU (seg-worker-wasm.ts; WebKit). */
+  constructor(wasm = false) {
+    this.w = wasm
+      ? new Worker(new URL("./seg-worker-wasm.ts", import.meta.url), { type: "module" })
+      : new Worker(new URL("./seg-worker.ts", import.meta.url), { type: "module" });
     this.w.onmessage = (ev: MessageEvent<Record<string, unknown> & { id: number; error?: string }>) => {
       if (ev.data.type === "ev") { this.onEvent?.(ev.data as unknown as SessionEvent); return; }
       const p = this.waiting.get(ev.data.id);
@@ -134,8 +138,8 @@ export class WorkerSegModel implements SegModel {
     void pruneCache(keys);
     const bank = await (await fetch(`${base}bank.json?v=${man.files["bank.json"]?.sha256.slice(0, 16) ?? "0"}`)).json();
     const threads = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
-    const r = await this.call({ type: "init", models, bank, threads, prefer: opts.prefer ?? "auto", lite }, Object.values(models));
-    this.info = { ep: String(r.ep) + (lite ? " lite" : ""), f16: !!r.f16, threads: Number(r.threads), loadMs: performance.now() - t0, bytes: total };
+    const r = await this.call({ type: "init", models, bank, threads, prefer: opts.prefer ?? "auto", lite, debug: segDebug() }, Object.values(models));
+    this.info = { ep: String(r.ep) + (lite ? " lite" : ""), f16: !!r.f16, threads: Number(r.threads), loadMs: performance.now() - t0, bytes: total, heapMB: Number(r.heapMB ?? 0) };
     segLog(`model ready on ${this.info.ep} (tried ${(r.tried as string[]).join(", ")}; WebGPU adapter ${r.webgpu ? "yes" : "no"}, shader-f16 ${r.f16 ? "yes" : "no"}; WASM threads ${this.info.threads}, cross-origin isolated ${r.coi ? "yes" : "no"})`, this.info);
     for (const f of r.failed as string[]) segLog("execution provider skipped:", f);
     return this.info;

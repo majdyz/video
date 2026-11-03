@@ -1,8 +1,10 @@
-// Send feedback's report and issue link, and the weak-device check that keeps AI off on small phones (pure).
+// Send feedback's report and issue link, the weak-device check that keeps AI off on small phones, and the AI crash check (pure).
 //   node --experimental-strip-types apps/studio/test/feedback.test.ts
 import assert from "node:assert/strict";
 import { feedbackReport, feedbackTitle, issueUrl, ISSUE_URL_MAX, TRUNCATED } from "../src/pipeline/feedback.ts";
 import { isIOS, weakDevice } from "../src/pipeline/device.ts";
+import { aiCrashed } from "../src/pipeline/crumbs.ts";
+import { CRASHED_NOTE, segStatusText, WEAK_DEVICE_NOTE } from "../src/pipeline/seg/studio-seg.ts";
 
 const ctx = { build: "abc1234", device: ["Device: iPhone", "Screen: 390×844 @3x"], steps: ["10:00:00 start", "10:00:05 open"], crash: null };
 
@@ -58,6 +60,19 @@ const ctx = { build: "abc1234", device: ["Device: iPhone", "Screen: 390×844 @3x
   assert.equal(weakDevice({ ua: android, cores: 4 }), true);
   assert.equal(weakDevice({ ua: desktop, memory: 2, cores: 2 }), false, "desktops keep their default");
   assert.equal(weakDevice({ ua: ipad, touch: 0, cores: 4, coi: false }), false, "Mac Safari");
+}
+
+// AI crash: a crashed session whose last step was the model at work turns AI off for the next one (studio-seg).
+{
+  assert.equal(aiCrashed(null), false, "the last session ended cleanly");
+  assert.equal(aiCrashed([]), false);
+  assert.equal(aiCrashed(["15:48:52 ai: session open", "15:48:56 ai: pass 0% (2/50) · heap 120 MB"]), true, "died in the pass");
+  assert.equal(aiCrashed(["15:48:53 ai· encoded · heap 100 MB"]), true, "died in a worker step");
+  assert.equal(aiCrashed(["15:48:52 ai: pass 100% (50/50)", "15:50:00 ai: hibernate"]), false, "the model was shut down");
+  assert.equal(aiCrashed(["15:48:52 ai: model failed: out of memory"]), false);
+  assert.equal(aiCrashed(["15:48:52 ai: pass 100% (50/50)", "15:49:00 export start"]), false, "died elsewhere");
+  assert.equal(segStatusText({ on: false, phase: "off", progress: null, note: null, weak: true, crashed: true }), CRASHED_NOTE, "the crash note over the weak-device one");
+  assert.equal(segStatusText({ on: false, phase: "off", progress: null, note: null, weak: true }), WEAK_DEVICE_NOTE);
 }
 
 console.log("feedback tests passed");

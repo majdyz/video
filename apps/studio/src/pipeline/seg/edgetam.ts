@@ -14,11 +14,23 @@ export type BankParams = { no_memory_embedding: number[]; memory_temporal_positi
 const MEAN = [0.485, 0.456, 0.406], STD = [0.229, 0.224, 0.225];
 
 export class EdgeTam {
-  private feats: { f0: T; f1: T; f2: T; p2: T } | null = null;
+  private feats: { f0: T; f1: T; f2: T } | null = null;
   private banks = new Map<string, ObjectBank>();
   private noMem: Float32Array;
   private tpos: Float32Array;
-  private pixels = new Float32Array(3 * 1024 * 1024);
+  /** Reused buffers (a phone's JS heap lets garbage typed arrays pile up between collections): the encoder input
+   * (sized for the encoder), the decoder's feats2 and the current frame's features in memory-attention order. */
+  private pixels: Float32Array | null = null;
+  private pix = new Float32Array(HIDDEN * 4096);
+  private seqF2 = new Float32Array(HIDDEN * 4096);
+  private seqP2 = new Float32Array(HIDDEN * 4096);
+  /** seqF2 holds the encoded frame (filled on its first attend; several objects step on one encode). */
+  private seqReady = false;
+  /** seqP2 holds pos2, feats2's position encoding: the same for every frame, so the encoder hands it over once (each
+   * output is a fresh 4 MB copy out of the WASM heap, and a phone's garbage collector lets them pile up). */
+  private posReady = false;
+  /** Called after each graph run (encode, init / attend, decoder, memory encoder): the worker's heap breadcrumbs. */
+  onStage: ((stage: string) => void) | null = null;
   /** Time spent per stage (ms) and counts, for the pass profile (session.ts). */
   readonly timing = { encode: 0, encodes: 0, attend: 0, decoder: 0, memEnc: 0, steps: 0 };
 
@@ -59,7 +71,9 @@ export class EdgeTam {
 
   /** RGBA 1024×1024 (the upright frame stretched) → features of the frame the next steps run on. */
   async encode(rgba: Uint8ClampedArray): Promise<void> {
-    const S = this.lite ? 512 : 1024, n = S * S, px = this.pixels;
+    const S = this.lite ? 512 : 1024, n = S * S;
+    if (this.pixels?.length !== 3 * n) this.pixels = new Float32Array(3 * n);
+    const px = this.pixels;
     if (this.lite) {
       for (let y = 0; y < 512; y++) for (let x = 0; x < 512; x++) {
         const a = (2 * y * 1024 + 2 * x) * 4, b = a + 4, c = a + 4096, d = c + 4, i = y * 512 + x;
@@ -72,18 +86,25 @@ export class EdgeTam {
     }
     this.dispose();
     const t0 = performance.now();
-    const o = await this.s.vision_encoder.run({ pixel_values: new this.ort.Tensor("float32", px.subarray(0, 3 * n), [1, 3, S, S]) });
+    const o = await this.s.vision_encoder.run({ pixel_values: new this.ort.Tensor("float32", px, [1, 3, S, S]) }, this.posReady ? ["feats0", "feats1", "feats2"] : ["feats0", "feats1", "feats2", "pos2"]);
     this.timing.encode += performance.now() - t0;
     this.timing.encodes++;
-    this.feats = { f0: o.feats0, f1: o.feats1, f2: o.feats2, p2: o.pos2 };
-    o.pos0?.dispose?.();
-    o.pos1?.dispose?.();
+    this.onStage?.("encode");
+    this.feats = { f0: o.feats0, f1: o.feats1, f2: o.feats2 };
+    if (!this.posReady) {
+      // (1, 256, 64, 64) → (4096, 1, 256)
+      const p2 = await o.pos2.getData() as Float32Array;
+      for (let c = 0; c < 256; c++) for (let i = 0; i < 4096; i++) this.seqP2[i * 256 + c] = p2[c * 4096 + i];
+      o.pos2.dispose?.();
+      this.posReady = true;
+    }
   }
 
   private dispose(): void {
     if (!this.feats) return;
     for (const t of Object.values(this.feats)) t.dispose?.();
     this.feats = null;
+    this.seqReady = false;
   }
 
   drop(key: string): void {
@@ -103,18 +124,18 @@ export class EdgeTam {
     if (!bank) this.banks.set(key, (bank = newBank()));
     const init = !!points && isEmpty(bank);
     const f2 = await F.f2.getData() as Float32Array;
-    let pix: Float32Array;
+    const pix = this.pix;
     const ta = performance.now();
     if (init) {
-      pix = new Float32Array(f2.length);
-      for (let c = 0; c < HIDDEN; c++) for (let i = 0; i < 4096; i++) pix[c * 4096 + i] = f2[c * 4096 + i] + this.noMem[c];
+      this.noMemory(f2);
     } else {
       const m = assembleMemory(bank, frame, reverse, this.tpos);
       if (!m) throw new Error("no conditioning frame");
-      pix = await this.attend(f2, await F.p2.getData() as Float32Array, m);
+      await this.attend(f2, m);
     }
     const tb = performance.now();
     this.timing.attend += tb - ta;
+    this.onStage?.(init ? "init" : "attend");
     const P = points ?? [[0, 0]], L = labels ?? [-1];
     const dec = await this.s.mask_decoder.run({
       feats0: F.f0, feats1: F.f1, feats2: new ort.Tensor("float32", pix, [1, 256, 64, 64]),
@@ -123,12 +144,14 @@ export class EdgeTam {
     });
     const tc = performance.now();
     this.timing.decoder += tc - tb;
+    this.onStage?.("decoder");
     const men = await this.s.memory_encoder.run({
       vision_features: F.f2, pred_masks_high_res: dec.high_res_masks.reshape([1, 1, 1024, 1024]),
       is_mask_from_pts: new ort.Tensor("bool", Uint8Array.from([points ? 1 : 0]), [1]),
     });
     this.timing.memEnc += performance.now() - tc;
     this.timing.steps++;
+    this.onStage?.("memory encoder");
     const score = (await dec.object_score_logits.getData() as Float32Array)[0];
     const ious = await dec.iou_scores.getData() as Float32Array;
     storeMemory(bank, frame, {
@@ -152,14 +175,12 @@ export class EdgeTam {
     const F = this.feats;
     if (!F) throw new Error("encode first");
     const ort = this.ort;
-    const f2 = await F.f2.getData() as Float32Array;
-    const pix = new Float32Array(f2.length);
-    for (let c = 0; c < HIDDEN; c++) for (let i = 0; i < 4096; i++) pix[c * 4096 + i] = f2[c * 4096 + i] + this.noMem[c];
+    const pix = this.noMemory(await F.f2.getData() as Float32Array);
     const dec = await this.s.mask_decoder.run({
       feats0: F.f0, feats1: F.f1, feats2: new ort.Tensor("float32", pix, [1, 256, 64, 64]),
       input_points: new ort.Tensor("float32", Float32Array.from(points.flat()), [1, 1, points.length, 2]),
       input_labels: new ort.Tensor("int32", Int32Array.from(labels), [1, 1, labels.length]),
-    });
+    }, ["pred_masks", "iou_scores", "object_score_logits"]); // not the 1024² mask nor the pointer: copies for nothing
     const score = (await dec.object_score_logits.getData() as Float32Array)[0];
     const ious = await dec.iou_scores.getData() as Float32Array;
     const d = dec.pred_masks.dims;
@@ -168,17 +189,25 @@ export class EdgeTam {
     return { logits, lw: d[d.length - 1], lh: d[d.length - 2], score, iou: Math.max(...ious) };
   }
 
-  private async attend(f2: Float32Array, p2: Float32Array, m: { spatial: Float32Array; spatialPos: Float32Array; spatialLen: number; pointer: Float32Array; pointerPos: Float32Array; pointerLen: number }): Promise<Float32Array> {
+  /** feats2 with the no-memory embedding (a conditioning frame, a probe) into this.pix. */
+  private noMemory(f2: Float32Array): Float32Array {
+    const pix = this.pix;
+    for (let c = 0; c < HIDDEN; c++) for (let i = 0; i < 4096; i++) pix[c * 4096 + i] = f2[c * 4096 + i] + this.noMem[c];
+    return pix;
+  }
+
+  /** Memory attention on the encoded frame → the conditioned feats2 in this.pix. */
+  private async attend(f2: Float32Array, m: { spatial: Float32Array; spatialPos: Float32Array; spatialLen: number; pointer: Float32Array; pointerPos: Float32Array; pointerLen: number }): Promise<void> {
     const ort = this.ort;
-    // (1, 256, 64, 64) → (4096, 1, 256)
-    const tr = (src: Float32Array) => {
-      const o = new Float32Array(4096 * 256);
-      for (let c = 0; c < 256; c++) for (let i = 0; i < 4096; i++) o[i * 256 + c] = src[c * 4096 + i];
-      return o;
-    };
+    if (!this.seqReady) {
+      // (1, 256, 64, 64) → (4096, 1, 256), once per encoded frame
+      const o = this.seqF2;
+      for (let c = 0; c < 256; c++) for (let i = 0; i < 4096; i++) o[i * 256 + c] = f2[c * 4096 + i];
+      this.seqReady = true;
+    }
     const out = await this.s.memory_attention.run({
-      current_vision_features: new ort.Tensor("float32", tr(f2), [4096, 1, 256]),
-      current_vision_position_embeddings: new ort.Tensor("float32", tr(p2), [4096, 1, 256]),
+      current_vision_features: new ort.Tensor("float32", this.seqF2, [4096, 1, 256]),
+      current_vision_position_embeddings: new ort.Tensor("float32", this.seqP2, [4096, 1, 256]),
       spatial_memory: new ort.Tensor("float32", m.spatial, [m.spatialLen, 1, MEM_DIM]),
       spatial_memory_position_embeddings: new ort.Tensor("float32", m.spatialPos, [m.spatialLen, 1, MEM_DIM]),
       pointer_memory: new ort.Tensor("float32", m.pointer, [m.pointerLen, 1, MEM_DIM]),
@@ -186,9 +215,8 @@ export class EdgeTam {
     });
     const c = await out.conditioned_features.getData() as Float32Array; // (1, 1, 4096, 256)
     out.conditioned_features.dispose?.();
-    const pix = new Float32Array(256 * 4096);
+    const pix = this.pix;
     for (let i = 0; i < 4096; i++) for (let k = 0; k < 256; k++) pix[k * 4096 + i] = c[i * 256 + k];
-    return pix;
   }
 }
 

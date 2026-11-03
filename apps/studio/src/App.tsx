@@ -477,7 +477,7 @@ export default function App() {
                 footage={s.kind === "video" ? s.footage : null} onFootage={s.kind === "video" ? (c) => studio.setFootage(c) : null}
                 onMotionLog={s.kind === "video" ? () => motionLogRef.current?.click() : null}
                 subjects={subjectControls} onClose={closeSheet}
-                status={pane === "subjects" ? (s.kind === "video" && (s.seg.on || s.seg.phase === "unavailable" || s.seg.weak) ? segStatusText(s.seg) : null) : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
+                status={pane === "subjects" ? (s.kind === "video" && (s.seg.on || s.seg.phase === "unavailable" || s.seg.weak || s.seg.crashed) ? segStatusText(s.seg) : null) : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
             ) : null}
             {/* The timeline (play / pause, scrub) stays while a tool is open: a change is checked across the clip. */}
             {bar}
