@@ -1,4 +1,4 @@
-// deepfix service worker: offline launch and offline tools.
+// DiveGrade service worker: offline launch and offline tools.
 //
 // The build (vite.config.ts, studioServiceWorker) replaces the two
 // placeholders below: VERSION becomes a hash of the built files, PRECACHE
@@ -8,8 +8,8 @@
 // network-first so a deploy never serves an index pointing at deleted
 // bundles. Each deploy gets a new cache and the old one is deleted on
 // activate.
-const VERSION = "studio-7c5f5e2dddbb";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker--wK0gl3y.js","./assets/analysis-worker-DrkfLbeB.js","./assets/bridge-DAO2VkYd.js","./assets/colour-CG3FDUQV.js","./assets/dewarp-_gJQYFFO.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-ChvGIsbt.js","./assets/fisheye-D0_b3mZj.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-CQk1FsPC.js","./assets/index-DnjVOKGd.css","./assets/media-DKE0hdXz.js","./assets/motion-D0n6QsFt.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/seg-worker-C31dFdrS.js","./assets/videoframe-colorspace-zfqeaqOD.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-D4TrakeJ.js"];
+const VERSION = "studio-402616bdbfd9";
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker--wK0gl3y.js","./assets/analysis-worker-DrkfLbeB.js","./assets/bridge-CE8n5bWe.js","./assets/colour-gVlUDJOn.js","./assets/dewarp-ChWA9p6n.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-BrH_a5uz.js","./assets/fisheye-D0_b3mZj.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-D4qbwuOa.css","./assets/index-Dv7aJ4L9.js","./assets/media-8kKoEBJp.js","./assets/motion-D0n6QsFt.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/seg-worker-C31dFdrS.js","./assets/videoframe-colorspace-zfqeaqOD.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-D4TrakeJ.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
