@@ -1,4 +1,4 @@
-# deepfix mobile (iOS + Android)
+# DiveGrade mobile (iOS + Android)
 
 Capacitor 8 shell around the Studio web app (`apps/studio`). The web code is
 the product; the native side adds what a browser can't do well: original files

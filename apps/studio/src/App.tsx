@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Studio } from "./pipeline/studio.ts";
 import { segStatusText } from "./pipeline/seg/studio-seg.ts";
-import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, initialStyle, lookOf, profileDefaults, savedVivid, styleFlags, subjectPopVisible, type ToolId, type ToolsState } from "./pipeline/tools.ts";
+import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, enabledTools, initialStyle, lookOf, profileDefaults, savedVivid, styleFlags, styleOf, subjectPopVisible, type ToolId, type ToolsState } from "./pipeline/tools.ts";
 import { BRAND, SAMPLE } from "./brand.ts";
 import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
 import { AdvancedControls, SubjectsPanel, TOOL_ICON, ToolPanel, toolStatus } from "./ui/panels";
 import { ToolDock } from "./ui/tool-dock";
-import { lastCrash } from "./pipeline/crumbs.ts";
+import { lastCrash, sessionCrumbs } from "./pipeline/crumbs.ts";
+import { deviceFacts, isWeakDevice } from "./pipeline/device.ts";
+import type { FeedbackContext } from "./pipeline/feedback.ts";
 import { SubjectOutlines } from "./ui/subjects";
 import { ExportSheet } from "./ui/export-sheet";
 import { EmptyState } from "./ui/empty";
 import { Sheet } from "./ui/sheet";
+import { IntroSheet, introDue, markIntroSeen } from "./ui/intro";
+import { FeedbackSheet } from "./ui/feedback";
 import { IconButton, Segmented } from "./ui/controls";
 import { IconClose, IconCompare, IconExpand, IconExport, IconMore, IconPlus, IconShrink, IconSpark, IconWarning } from "./ui/icons";
 import { useMedia } from "./ui/use-media";
@@ -82,6 +86,9 @@ export default function App() {
   const [tapPulse, setTapPulse] = useState<{ u: number; v: number; t: number } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  /** First visit: the three-step intro (ui/intro.tsx); About reopens it. */
+  const [introOpen, setIntroOpen] = useState(introDue);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   /** The last session crashed (crumbs.ts): its steps, offered once at start-up and kept in About. */
   const crash = useMemo(() => lastCrash(), []);
   const [crashToast, setCrashToast] = useState(!!crash);
@@ -212,6 +219,40 @@ export default function App() {
     setSplit(0.5);
     setSelLook(0);
     void studio.open(f);
+  };
+  const openSample = () => {
+    setSplit(0.5);
+    setSelLook(0);
+    void studio.openUrl(`${import.meta.env.BASE_URL}samples/${SAMPLE.file}`, SAMPLE.file);
+  };
+  const closeIntro = () => {
+    markIntroSeen();
+    setIntroOpen(false);
+  };
+  /** What Send feedback attaches, read when it opens (the clip, the tools and the steps as they are then). */
+  const toolsRef = useRef(tools);
+  toolsRef.current = tools;
+  const feedbackContext = useCallback((): FeedbackContext => {
+    const snap = studio.getSnapshot(), t = toolsRef.current, f = deviceFacts();
+    const standalone = matchMedia("(display-mode: standalone)").matches || !!(navigator as Navigator & { standalone?: boolean }).standalone;
+    const on = enabledTools(t);
+    return {
+      build: __BUILD_ID__,
+      device: [
+        `Browser: ${f.ua}`,
+        `Screen: ${screen.width}×${screen.height} @${devicePixelRatio}x, window ${innerWidth}×${innerHeight}${standalone ? ", home-screen app" : ""}`,
+        `Memory ${f.memory ?? "?"} GB · ${f.cores || "?"} cores · cross-origin isolated ${f.coi ? "yes" : "no"} · weak device ${isWeakDevice() ? "yes" : "no"}`,
+        `GPU ${snap.engine} · export ${snap.exportMode} · AI ${snap.seg.on ? `on (${snap.seg.phase})` : "off"}${snap.seg.note ? ` · ${snap.seg.note}` : ""}`,
+        snap.info ? `Clip: ${snap.kind} ${snap.info.displayW}×${snap.info.displayH}${snap.kind === "video" ? `, ${snap.duration.toFixed(1)} s` : ""}` : "Clip: none open",
+        `Tools: ${on.length ? on.map((id) => (id === "colour" ? `colour (${styleOf(t.colour)}${t.colour.subjectPop ? ", subject pop" : ""})` : id)).join(", ") : "none"}`,
+      ],
+      steps: sessionCrumbs(),
+      crash,
+    };
+  }, [studio, crash]);
+  const openFeedback = () => {
+    setAboutOpen(false);
+    setFeedbackOpen(true);
   };
   // In the app (apps/mobile) clips come from the native pickers: originals,
   // telemetry tracks intact, and a sandbox path the native exporter reads the
@@ -368,14 +409,17 @@ export default function App() {
   return (
     <div className={`app phase-${s.phase}${wide ? " is-wide" : " is-narrow"}${!wide && sheetOpen ? " sheet-open" : ""}${immersive ? " is-immersive" : ""}`} style={aspect ? ({ ["--clip-ar" as string]: aspect.toFixed(4) }) : undefined} data-stab={s.stab.state} data-export={s.exp.state} data-kind={s.kind ?? "none"}>
       <header className="topbar">
-        <h1 className="wordmark">{BRAND.name}</h1>
+        <div className="brand">
+          <h1 className="wordmark">{BRAND.name}</h1>
+          {BRAND.beta && <span className="brand__beta">Beta</span>}
+        </div>
         <div className="topbar__actions">
           {s.phase !== "empty" && (
             <IconButton label="Open another clip or photo" onClick={() => pick()} disabled={exporting}>
               <IconPlus size={18} />
             </IconButton>
           )}
-          <IconButton label="About and appearance" onClick={() => setAboutOpen(true)}>
+          <IconButton label="About, help and feedback" onClick={() => setAboutOpen(true)}>
             <IconMore size={18} />
           </IconButton>
           {!wide && s.phase !== "empty" && exportBtn}
@@ -406,7 +450,7 @@ export default function App() {
             showPlayHint={ready && !photo && !s.busy && !exporting && !selectActive}
             resetKey={`${s.fileName}:${s.info?.displayW}x${s.info?.displayH}`}
           >
-            {s.phase === "empty" && <EmptyState accept={ACCEPT} onFile={openFile} onPick={native ? pick : undefined} onSample={() => { setSplit(0.5); setSelLook(0); void studio.openUrl(`${import.meta.env.BASE_URL}samples/${SAMPLE.file}`, SAMPLE.file); }} busy={s.busy} />}
+            {s.phase === "empty" && <EmptyState accept={ACCEPT} onFile={openFile} onPick={native ? pick : undefined} onSample={openSample} busy={s.busy} />}
             {s.phase !== "empty" && pill && !selectActive && (
               <div className="pill" role="status"><span className="pill__dot" aria-hidden="true" />{pill}</div>
             )}
@@ -433,7 +477,7 @@ export default function App() {
                 footage={s.kind === "video" ? s.footage : null} onFootage={s.kind === "video" ? (c) => studio.setFootage(c) : null}
                 onMotionLog={s.kind === "video" ? () => motionLogRef.current?.click() : null}
                 subjects={subjectControls} onClose={closeSheet}
-                status={pane === "subjects" ? (s.kind === "video" && (s.seg.on || s.seg.phase === "unavailable") ? segStatusText(s.seg) : null) : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
+                status={pane === "subjects" ? (s.kind === "video" && (s.seg.on || s.seg.phase === "unavailable" || s.seg.weak) ? segStatusText(s.seg) : null) : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
             ) : null}
             {/* The timeline (play / pause, scrub) stays while a tool is open: a change is checked across the clip. */}
             {bar}
@@ -507,13 +551,22 @@ export default function App() {
 
       <ExportSheet open={exportOpen} onClose={() => { setExportOpen(false); if (s.exp.state === "done" || s.exp.state === "error") studio.dismissExport(); }} studio={studio} snap={s} tools={tools} />
 
+      <IntroSheet open={introOpen} onClose={closeIntro}
+        onSample={s.phase === "empty" ? () => { closeIntro(); openSample(); } : null}
+        onOpen={s.phase === "empty" ? () => { closeIntro(); pick(); } : null} />
+      <FeedbackSheet open={feedbackOpen} onClose={() => setFeedbackOpen(false)} context={feedbackContext} />
+
       <Sheet open={aboutOpen} onClose={() => setAboutOpen(false)} title={BRAND.name}>
         <div className="about">
+          <div className="about__actions">
+            <button type="button" className="btn btn--ghost" onClick={openFeedback}>Send feedback</button>
+            <button type="button" className="btn btn--ghost" onClick={() => { setAboutOpen(false); setIntroOpen(true); }}>How it works</button>
+          </div>
           <div className="adv__field">
             <span className="adv__label" id="appearance-label">Appearance</span>
             <Segmented label="Appearance" items={THEMES} value={theme} onChange={setTheme} />
           </div>
-          <p>{BRAND.tagline} Everything runs on this device: nothing is uploaded.</p>
+          <p>{BRAND.tagline} Everything runs on this device: nothing is uploaded.{BRAND.beta ? " It is in beta: some things will break, and Send feedback tells us which." : ""}</p>
           <ul className="about__list">
             <li><b>Colour</b> physically based underwater correction (backscatter removal, range-adaptive white balance), locked per scene across the clip.</li>
             <li><b>Stabilise</b> feature tracking with an L1-optimal camera path and wobble suppression.</li>
@@ -525,14 +578,17 @@ export default function App() {
             {s.engine === "webgpu" ? "WebGPU" : s.engine === "webgl2" ? "WebGL2" : s.engine === "failed" ? "No GPU" : "GPU starting"}
             {" · "}
             {s.exportMode === "realtime" ? "real-time export (plays the clip through once)" : s.exportMode === "native" ? "native hardware encoder" : "WebCodecs export"}
-            {" · build "}{__BUILD_ID__}
+            {" · "}{BRAND.beta ? "beta " : ""}{"build "}{__BUILD_ID__}
           </p>
           {crash && (
             <div className="about__credit">
               <h3>Last session crashed</h3>
               <p>Its last steps (send them to the developer):</p>
               <pre className="crash-log">{crash.join("\n")}</pre>
-              <button type="button" className="btn btn--ghost" onClick={() => void navigator.clipboard?.writeText(crash.join("\n")).catch(() => undefined)}>Copy</button>
+              <div className="about__actions">
+                <button type="button" className="btn btn--ghost" onClick={openFeedback}>Send report</button>
+                <button type="button" className="btn btn--quiet" onClick={() => void navigator.clipboard?.writeText(crash.join("\n")).catch(() => undefined)}>Copy</button>
+              </div>
             </div>
           )}
           <div className="about__credit">

@@ -35,3 +35,12 @@ export function crumb(msg: string): void {
 export function lastCrash(): string[] | null {
   return previous;
 }
+
+/** This session's steps so far (Send feedback attaches them). */
+export function sessionCrumbs(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(KEY) || "[]") as string[];
+  } catch {
+    return [];
+  }
+}

@@ -1,4 +1,4 @@
-/* deepfix components. Every colour, font, radius, duration comes from
+/* DiveGrade components. Every colour, font, radius, duration comes from
    theme/tokens.css: never hard-code a value here that a theme might change. */
 
 *,
@@ -89,6 +89,18 @@ a {
   letter-spacing: var(--wordmark-tracking);
   line-height: 1;
   color: var(--wordmark-ink);
+}
+
+/* The wordmark and a plain-text "Beta" beside it (not a badge). */
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+}
+.brand__beta {
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--text-3);
 }
 
 .topbar__actions {
@@ -1593,6 +1605,112 @@ a {
   color: var(--text-1);
   margin-right: 4px;
 }
+.about__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+.about__actions .btn {
+  height: 40px;
+  padding: 0 var(--s-4);
+  font-size: var(--fs-sm);
+}
+
+/* First-run intro: three numbered steps, plain numerals. */
+.intro__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.intro__lede {
+  margin: 0;
+}
+.intro__steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+.intro__steps li {
+  display: flex;
+  gap: var(--s-3);
+}
+.intro__num {
+  flex: none;
+  width: 18px;
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text-3);
+}
+.intro__text b {
+  display: block;
+  margin-bottom: 2px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.intro__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin-top: var(--s-2);
+}
+
+/* Send feedback */
+.feedback {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.feedback p {
+  margin: 0;
+}
+.feedback__field textarea {
+  display: block;
+  width: 100%;
+  min-height: 112px;
+  padding: var(--s-3);
+  border: 0;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--line-2);
+  color: var(--text-1);
+  /* 16px: iOS Safari zooms the page into smaller inputs. */
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.4;
+  resize: vertical;
+}
+.feedback__attached summary {
+  cursor: pointer;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+.feedback__attached .crash-log {
+  margin: var(--s-2) 0 0;
+}
+.feedback__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.feedback__issue {
+  align-self: center;
+  margin-left: 0;
+}
+.feedback__note {
+  font-size: var(--fs-xs);
+  color: var(--text-1);
+}
+
 .about__fine {
   font-size: var(--fs-xs);
   color: var(--text-3);
@@ -2217,7 +2335,7 @@ a {
 .is-narrow:not(.phase-empty) .topbar > * {
   pointer-events: auto;
 }
-.is-narrow:not(.phase-empty) .wordmark {
+.is-narrow:not(.phase-empty) .brand {
   display: none;
 }
 .is-narrow:not(.phase-empty) .topbar__actions {

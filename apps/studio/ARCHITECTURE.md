@@ -1,4 +1,4 @@
-# deepfix Studio: architecture
+# DiveGrade Studio: architecture
 
 One app for the three dive tools (Colour, Stabilise, Dewarp), built to be
 wrapped by Capacitor later. The engines stay where they are and are
@@ -415,7 +415,7 @@ deploy gets a new cache name and old caches are deleted on activate.
   `[data-theme]` block. Text colours meet WCAG AA (4.5:1) on every surface
   in all three themes.
 * Restraint rules (user feedback): the wordmark is one plain colour
-  (`BRAND.name` in `src/brand.ts` is a placeholder); the accent appears
+  (`BRAND.name` in `src/brand.ts`, DiveGrade, with a plain-text "Beta" beside it); the accent appears
   only on Export, the active slider fill and focus rings; selection,
   switches, values and icons are neutral greys; no glows, glass blur,
   gradients or all-caps tracked labels.

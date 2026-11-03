@@ -31,7 +31,7 @@ export function EmptyState({ onFile, onPick, onSample, busy, accept }: { onFile:
             </button>
           )}
           <button type="button" className="btn btn--quiet empty__sample" onClick={onSample} disabled={!!busy}>
-            Use sample clip
+            Try a sample clip
           </button>
         </div>
       </div>

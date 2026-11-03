@@ -1,8 +1,11 @@
-// Product naming in one place. The name is a placeholder (the store name is
-// not decided); the wordmark is this string in one plain colour.
+// Product naming in one place; the wordmark is this string in one plain colour.
 export const BRAND = {
-  name: "deepfix",
+  name: "DiveGrade",
   tagline: "Colour, stabilise and dewarp dive video and photos.",
+  /** Private beta: "Beta" in plain text beside the wordmark and in About. */
+  beta: true,
+  /** Where "Open a GitHub issue" in Send feedback goes (owner/repo). */
+  issues: "majdyz/video",
 };
 
 /**

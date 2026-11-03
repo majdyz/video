@@ -7,6 +7,7 @@ import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts"
 import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
 import { crumb } from "../crumbs.ts";
+import { isWeakDevice } from "../device.ts";
 import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
 import { confWeight, maskSize, SEG, type SegObject } from "./track.ts";
@@ -14,7 +15,10 @@ import type { SessionFrameOut } from "./session.ts";
 
 const PREF_KEY = "deepfix.subjectPop.ai";
 export type SegPhase = "off" | "download" | "starting" | "ready" | "tracking" | "unavailable";
-export type SegStatus = { on: boolean; phase: SegPhase; progress: number | null; note: string | null };
+/** weak: a phone the model is a poor fit for (device.ts); AI is off there with a line saying why. */
+export type SegStatus = { on: boolean; phase: SegPhase; progress: number | null; note: string | null; weak?: boolean };
+
+export const WEAK_DEVICE_NOTE = "AI detection starts off on this phone: the model is slow here and can run out of memory. Turn it on to try it";
 
 function readPref(): boolean {
   try {
@@ -34,7 +38,7 @@ function writePref(on: boolean): void {
 
 /** The inline status under the toggle (null: the default hint). */
 export function segStatusText(s: SegStatus): string | null {
-  if (!s.on) return null;
+  if (!s.on) return s.weak ? WEAK_DEVICE_NOTE : null;
   const pc = s.progress !== null ? ` ${Math.round(s.progress * 100)}%` : "";
   switch (s.phase) {
     case "download": return `Downloading the model…${pc}`;
@@ -416,7 +420,7 @@ export class SubjectSeg {
   constructor(onChange: () => void) {
     this.onChange = onChange;
     const on = readPref();
-    this.status = { on, phase: on ? "ready" : "off", progress: null, note: null };
+    this.status = { on, phase: on ? "ready" : "off", progress: null, note: null, weak: isWeakDevice() };
     queueMicrotask(() => this.onChange());
   }
 

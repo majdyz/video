@@ -17,7 +17,7 @@ for (const q of variants) {
   await p.goto(`${base}?debug=1&pop=1${q}`);
   for (let i = 0; i < 40; i++) { const ok = await p.evaluate(() => crossOriginIsolated).catch(() => false); if (ok || !q.includes("coi")) break; await p.waitForTimeout(500); }
   await p.waitForLoadState("load");
-  await p.getByText("Use sample clip").click();
+  await p.getByText("Try a sample clip").click();
   await p.waitForFunction(() => window.studio?.getSnapshot().phase === "ready" && window.studio.getSnapshot().colourProfiled && !window.studio.getSnapshot().busy, null, { timeout: 300000 }).catch(() => undefined);
   await p.evaluate(() => { window.studio.pause(); window.studio.seek(2); });
   await p.waitForTimeout(6000);

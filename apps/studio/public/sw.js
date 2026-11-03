@@ -1,4 +1,4 @@
-// deepfix service worker: offline launch and offline tools.
+// DiveGrade service worker: offline launch and offline tools.
 //
 // The build (vite.config.ts, studioServiceWorker) replaces the two
 // placeholders below: VERSION becomes a hash of the built files, PRECACHE
