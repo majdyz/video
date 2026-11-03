@@ -8,8 +8,8 @@
 // network-first so a deploy never serves an index pointing at deleted
 // bundles. Each deploy gets a new cache and the old one is deleted on
 // activate.
-const VERSION = "studio-402616bdbfd9";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker--wK0gl3y.js","./assets/analysis-worker-DrkfLbeB.js","./assets/bridge-CE8n5bWe.js","./assets/colour-gVlUDJOn.js","./assets/dewarp-ChWA9p6n.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-BrH_a5uz.js","./assets/fisheye-D0_b3mZj.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-D4qbwuOa.css","./assets/index-Dv7aJ4L9.js","./assets/media-8kKoEBJp.js","./assets/motion-D0n6QsFt.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/seg-worker-C31dFdrS.js","./assets/videoframe-colorspace-zfqeaqOD.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-D4TrakeJ.js"];
+const VERSION = "studio-523647018faf";
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker--wK0gl3y.js","./assets/analysis-worker-DrkfLbeB.js","./assets/bridge-C93wX4MP.js","./assets/colour-MXKDoWCk.js","./assets/dewarp-DAH7wbKJ.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-D_WO9NMl.js","./assets/fisheye-D0_b3mZj.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-BWwpnQNV.js","./assets/index-D4qbwuOa.css","./assets/media-nr4-CaS1.js","./assets/motion-D0n6QsFt.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/seg-worker-BzHpmH56.js","./assets/seg-worker-wasm-Dztm-7b3.js","./assets/videoframe-colorspace-zfqeaqOD.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-D4TrakeJ.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -22,7 +22,10 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys()
       .then((keys) => Promise.all(keys.filter((k) => k.startsWith("studio-") && k !== VERSION).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim()),
+      .then(() => self.clients.claim())
+      // The first visit's navigation came before this worker: its ?coi=0 is read from the page it now controls.
+      .then(() => self.clients.matchAll({ type: "window" }))
+      .then((pages) => { if (pages.some((p) => new URL(p.url).searchParams.get("coi") === "0")) setCoi(false); }),
   );
 });
 
@@ -30,12 +33,12 @@ self.addEventListener("activate", (event) => {
 // every response this worker serves gets COOP / COEP / CORP added. The page is then crossOriginIsolated, which
 // SharedArrayBuffer and so multi-threaded WASM (AI subject detection, onnxruntime-web) need. Everything the
 // studio loads is same-origin (fonts and MediaPipe are self-hosted), so require-corp blocks nothing.
-// Opt-in (?coi=1) since 29 Oct: an isolated page rendered a black preview on iPhone Safari (the same deploy also
-// shipped two WGSL compile errors, the likelier cause; the studio now defaults to WebGL2). The mode follows the
-// last navigation (?coi=1 on, without it off) and is kept in a tiny cache entry, since this worker can be stopped
-// and restarted between requests.
+// On by default since 3 Nov (it was opt-in from 29 Oct, after an isolated page rendered a black preview on iPhone
+// Safari; that deploy also shipped two WGSL compile errors, the likelier cause). The mode
+// follows the last navigation (?coi=0 off, otherwise on) and is kept in a tiny cache entry, since this worker can be
+// stopped and restarted between requests.
 const COI_CACHE = "deepfix-coi";
-let coiMode = caches.open(COI_CACHE).then((c) => c.match("mode")).then((r) => (r ? r.text() : "0")).then((t) => t === "1").catch(() => false);
+let coiMode = caches.open(COI_CACHE).then((c) => c.match("mode")).then((r) => (r ? r.text() : "1")).then((t) => t === "1").catch(() => true);
 function setCoi(on) {
   coiMode = Promise.resolve(on);
   caches.open(COI_CACHE).then((c) => c.put("mode", new Response(on ? "1" : "0"))).catch(() => undefined);
@@ -61,7 +64,7 @@ function put(req, res) {
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET" || !req.url.startsWith(self.location.origin)) return;
-  if (req.mode === "navigate") setCoi(new URL(req.url).searchParams.get("coi") === "1");
+  if (req.mode === "navigate") setCoi(new URL(req.url).searchParams.get("coi") !== "0");
   // Sample clip: let the browser stream it (range requests), don't cache it. Same-origin subresources need no
   // isolation headers (only documents and workers do), so a pass-through is fine.
   if (req.url.includes("/samples/")) return;

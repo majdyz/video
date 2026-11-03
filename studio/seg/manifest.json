@@ -15,12 +15,12 @@
    "sha256": "1234643d4202c9ce513f5c727bbf6a90f9e6784bfed16bf9bb1ec74a2f50d321"
   },
   "memory_attention.onnx": {
-   "bytes": 10543972,
-   "sha256": "74611894ceee4287f83e341eb9f69941e31f4dec808cebe0e3c94fe84f7f8307"
+   "bytes": 10585951,
+   "sha256": "8d46ac1c93de14f1d110df2e714f843a22502b88597121e6a4985a18e4bbf154"
   },
   "memory_encoder.onnx": {
-   "bytes": 3442661,
-   "sha256": "5baf96f839a386b94b3e83941ca6845df218ef3189b434b64975bb2caf82bc61"
+   "bytes": 3478754,
+   "sha256": "68ea7491ee0d1314a1b9f352d52f99af8e7aa27e40b20994b5592de8d903615d"
   },
   "vision_encoder.onnx": {
    "bytes": 10075042,
