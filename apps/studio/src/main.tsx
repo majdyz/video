@@ -20,10 +20,11 @@ createRoot(document.getElementById("root")!).render(<App />);
 // the binary and a SW cache would outlive app updates.
 if ("serviceWorker" in navigator && import.meta.env.PROD && !("Capacitor" in window)) {
   window.addEventListener("load", () => {
-    // ?coi=1 (opt-in): cross-origin isolation from the service worker's headers (sw.js), for multi-threaded WASM.
-    // The first visit is not controlled yet: once the worker takes over, reload once, only right after start-up and
-    // never after any interaction (a reload would drop what was just opened).
-    if (new URLSearchParams(location.search).get("coi") === "1" && !window.crossOriginIsolated) {
+    // Cross-origin isolation from the service worker's headers (sw.js), for multi-threaded WASM (the AI model): on by
+    // default since 3 Nov, ?coi=0 turns it off. The first visit is not controlled yet: once the worker takes over,
+    // reload once, only right after start-up and never after any interaction (a reload would drop what was just
+    // opened); that visit runs without isolation.
+    if (new URLSearchParams(location.search).get("coi") !== "0" && !window.crossOriginIsolated) {
       const t0 = performance.now();
       let touched = false;
       for (const ev of ["pointerdown", "keydown", "drop", "change"]) window.addEventListener(ev, () => (touched = true), { capture: true, once: true });

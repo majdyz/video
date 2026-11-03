@@ -22,7 +22,10 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys()
       .then((keys) => Promise.all(keys.filter((k) => k.startsWith("studio-") && k !== VERSION).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim()),
+      .then(() => self.clients.claim())
+      // The first visit's navigation came before this worker: its ?coi=0 is read from the page it now controls.
+      .then(() => self.clients.matchAll({ type: "window" }))
+      .then((pages) => { if (pages.some((p) => new URL(p.url).searchParams.get("coi") === "0")) setCoi(false); }),
   );
 });
 
@@ -30,12 +33,12 @@ self.addEventListener("activate", (event) => {
 // every response this worker serves gets COOP / COEP / CORP added. The page is then crossOriginIsolated, which
 // SharedArrayBuffer and so multi-threaded WASM (AI subject detection, onnxruntime-web) need. Everything the
 // studio loads is same-origin (fonts and MediaPipe are self-hosted), so require-corp blocks nothing.
-// Opt-in (?coi=1) since 29 Oct: an isolated page rendered a black preview on iPhone Safari (the same deploy also
-// shipped two WGSL compile errors, the likelier cause; the studio now defaults to WebGL2). The mode follows the
-// last navigation (?coi=1 on, without it off) and is kept in a tiny cache entry, since this worker can be stopped
-// and restarted between requests.
+// On by default since 3 Nov (it was opt-in from 29 Oct, after an isolated page rendered a black preview on iPhone
+// Safari; that deploy also shipped two WGSL compile errors, the likelier cause). The mode
+// follows the last navigation (?coi=0 off, otherwise on) and is kept in a tiny cache entry, since this worker can be
+// stopped and restarted between requests.
 const COI_CACHE = "deepfix-coi";
-let coiMode = caches.open(COI_CACHE).then((c) => c.match("mode")).then((r) => (r ? r.text() : "0")).then((t) => t === "1").catch(() => false);
+let coiMode = caches.open(COI_CACHE).then((c) => c.match("mode")).then((r) => (r ? r.text() : "1")).then((t) => t === "1").catch(() => true);
 function setCoi(on) {
   coiMode = Promise.resolve(on);
   caches.open(COI_CACHE).then((c) => c.put("mode", new Response(on ? "1" : "0"))).catch(() => undefined);
@@ -61,7 +64,7 @@ function put(req, res) {
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET" || !req.url.startsWith(self.location.origin)) return;
-  if (req.mode === "navigate") setCoi(new URL(req.url).searchParams.get("coi") === "1");
+  if (req.mode === "navigate") setCoi(new URL(req.url).searchParams.get("coi") !== "0");
   // Sample clip: let the browser stream it (range requests), don't cache it. Same-origin subresources need no
   // isolation headers (only documents and workers do), so a pass-through is fine.
   if (req.url.includes("/samples/")) return;
