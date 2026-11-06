@@ -98,7 +98,7 @@ function dewarpParams(tools: ToolsState, set: Setter, camera: CameraInfo | null)
   const ps: Param[] = [
     { id: "strength", label: "Strength", value: pct(d.strength), slider: { value: d.strength, min: 0, max: 100, def: profileDefaults(d.profile).strength, onChange: (v) => up({ strength: v }) } },
     { id: "camera", label: "Camera", value: chips.find((c) => c.id === d.profile)?.label ?? cameraLabel(camera) ?? "Pick", choices: { items: chips, value: d.profile, onChange: (id) => up({ ...profileDefaults(id) }) } },
-    { id: "proj", label: "Projection", more: true, value: d.projection === "rectilinear" ? "Straight" : "Natural", choices: { items: [{ id: "rectilinear", label: "Straight lines" }, { id: "stereographic", label: "Natural shapes" }], value: d.projection, onChange: (v) => up({ projection: v as typeof d.projection }) } },
+    ...(d.profile === "phone-ultra-wide" ? [] : [{ id: "proj", label: "Projection", more: true, value: d.projection === "rectilinear" ? "Straight" : "Natural", choices: { items: [{ id: "rectilinear", label: "Straight lines" }, { id: "stereographic", label: "Natural shapes" }], value: d.projection, onChange: (v) => up({ projection: v as typeof d.projection }) } } as Param]),
     { id: "fit", label: "Auto-fit", more: true, value: d.autoZoom ? "On" : "Off", toggle: { on: d.autoZoom, onChange: (v) => up({ autoZoom: v }) } },
   ];
   if (!d.autoZoom) ps.push({ id: "zoom", label: "Zoom", more: true, value: `${d.zoom.toFixed(2)}×`, slider: { value: d.zoom * 100, min: 60, max: 200, def: 100, format: (v) => `${(v / 100).toFixed(2)}×`, onChange: (v) => up({ zoom: v / 100 }) } });

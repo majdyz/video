@@ -240,6 +240,7 @@ export const DEWARP_PROFILES: Chip<string>[] = [
   { id: "osmo-action-ultra-wide", label: "Osmo Ultra Wide", hint: PROFILES["osmo-action-ultra-wide"]?.label ?? "" },
   { id: "gopro-wide-16x9", label: "GoPro Wide", hint: PROFILES["gopro-wide-16x9"]?.label ?? "" },
   { id: "gopro-wide-4x3", label: "GoPro Wide 4:3", hint: PROFILES["gopro-wide-4x3"]?.label ?? "" },
+  { id: "phone-ultra-wide", label: "Phone 0.5×", hint: PROFILES["phone-ultra-wide"]?.label ?? "" },
   { id: "none", label: "Already straight", hint: PROFILES["none"]?.label ?? "" },
   { id: "generic-fisheye", label: "Other", hint: PROFILES["generic-fisheye"]?.label ?? "" },
 ];

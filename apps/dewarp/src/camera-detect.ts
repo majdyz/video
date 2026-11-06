@@ -56,6 +56,10 @@ export type CameraInfo = {
   profileId?: string;
   /** Short reasons, for the log and the hint under the camera picker. */
   evidence: string[];
+  /** Photos (Studio): the 35 mm-equivalent focal length from EXIF. */
+  focal35?: number;
+  /** Photos: EXIF says a phone's main / tele camera, so the Phone 0.5× fix leaves it as is (batches mix lenses). */
+  notUltraWide?: boolean;
 };
 
 type Box = { type: string; start: number; end: number; body: number };

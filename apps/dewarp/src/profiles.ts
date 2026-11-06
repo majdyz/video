@@ -21,6 +21,8 @@ export type FisheyeProfile = {
   strength?: number;
   /** GoPro Wide/Max calibrations are HyperSmooth off; a HyperSmooth clip is cropped by its known factor. */
   goproHyperSmooth?: boolean;
+  /** Phone ultra-wide: the source is already rectilinear; the stretch fix (fisheye.ts) instead of an undistort. */
+  rectilinear?: boolean;
 };
 
 /**
@@ -98,6 +100,12 @@ export const PROFILES: Record<string, FisheyeProfile> = {
   "gopro-max-lens-16x9": {
     label: "GoPro HERO9–11 with Max Lens Mod, 16:9",
     fovDeg: 160, k1: 0, lens: GOPRO_MAX_LENS_16_9, source: "Gyroflow lens profile (HERO10 Max Lens Mod, official)", goproHyperSmooth: true,
+  },
+  "phone-ultra-wide": {
+    label: "Phone 0.5× ultra-wide (iPhone, Pixel, Galaxy…): un-stretches people and things at the edges, keeps vertical lines straight",
+    // The phone has already removed the barrel distortion; 70 % (Pannini d 0.7) tuned on real 0.5× group shots:
+    // edge faces and bodies back to natural proportions, floor / ceiling lines only gently curved.
+    fovDeg: (2 * Math.atan(Math.hypot(36, 24) / 2 / 13) * 180) / Math.PI /* 13 mm equivalent (fisheye.ts fovFromF35) */, k1: 0, strength: 0.7, rectilinear: true, source: "Pannini re-projection (Sharpless et al. 2010)",
   },
   "generic-fisheye": { label: "Other camera, set the FOV yourself", fovDeg: 150, k1: 0 },
   "none": { label: "Already straight (GoPro Linear, Osmo dewarp on full)", fovDeg: 150, k1: 0, strength: 0 },

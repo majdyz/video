@@ -98,6 +98,8 @@ export default function App() {
   /** Bumped per new batch: restarts its thumbnails. */
   const [batchKey, setBatchKey] = useState(0);
   const [batchOpen, setBatchOpen] = useState(false);
+  const batchOpenRef = useRef(false);
+  batchOpenRef.current = batchOpen;
   const [notice, setNotice] = useState<string | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   /** First visit: the three-step intro (ui/intro.tsx); About reopens it. */
@@ -196,9 +198,16 @@ export default function App() {
 
   // Dewarp preselects the camera / lens the clip's metadata names (the user can still pick another).
   useEffect(() => {
+    // Photos: a 0.5× shot (EXIF) turns on Phone 0.5×; anything else leaves the user's pick (a batch mixes lenses).
+    if (studio.getSnapshot().kind === "photo") {
+      if (s.camera?.profileId === "phone-ultra-wide" && !batchOpenRef.current && !studio.phoneFixOff) {
+        setToolsState((t) => (t.dewarp.enabled && t.dewarp.profile === "phone-ultra-wide" ? t : { ...t, dewarp: { ...t.dewarp, ...profileDefaults("phone-ultra-wide"), enabled: true } }));
+      }
+      return;
+    }
     const id = detectedProfile(s.camera);
     if (id) setToolsState((t) => (t.dewarp.profile === id ? t : { ...t, dewarp: { ...t.dewarp, ...profileDefaults(id) } }));
-  }, [s.camera]);
+  }, [s.camera, studio]);
 
   const tabs: Pane[] = [...(photo ? TOOL_ORDER.filter((id) => id !== "stabilise") : TOOL_ORDER), ...(subjectPopVisible() ? ["subjects" as const] : [])];
   useEffect(() => {
@@ -646,6 +655,7 @@ export default function App() {
             <li><b>Stabilise</b> feature tracking with an L1-optimal camera path and wobble suppression.</li>
             <li><b>Dewarp</b> calibrated fisheye lens profiles (Gyroflow, CC0) to straight lines.</li>
             <li><b>Photos</b> JPEG, PNG and HEIC (where the browser reads it) get Colour and Dewarp, saved as a full-resolution JPEG that keeps the original's date, location and camera details.</li>
+            <li><b>Phone 0.5×</b> ultra-wide shots from an iPhone or Android phone: Dewarp un-stretches people and things at the edges and keeps vertical lines straight (on by itself when the photo says it was taken at 0.5×).</li>
             <li><b>Batch</b> pick several photos and videos at once: tweak any of them, then Export all (each one still gets its own colour balance), saved together to Photos on a phone or as one ZIP.</li>
             <li><b>10-bit, HDR and log</b> HLG / PQ (iPhone, GoPro, Osmo HDR), DJI D-Log M and Apple Log are converted to standard Rec.709 before the tools run; exports are 8-bit SDR.</li>
           </ul>

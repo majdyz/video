@@ -20,7 +20,7 @@ export function EmptyState({ onFiles, onPick, onSample, busy, accept }: { onFile
       <div className="empty__drop">
         <IconFilm size={28} className="empty__icon" aria-hidden="true" />
         <h2 className="empty__title" aria-live="polite">{busy ?? "Open a dive video or photo"}</h2>
-        <p className="empty__sub">MP4 or MOV clips, JPEG, PNG or HEIC photos. Pick one (or several photos) from your camera roll or drop them here; it never leaves this device.</p>
+        <p className="empty__sub">MP4 or MOV clips, JPEG, PNG or HEIC photos. Pick one or several from your camera roll or drop them here; it never leaves this device.</p>
         <div className="empty__actions">
           <button type="button" className="btn btn--strong" onClick={() => (onPick ? onPick("photos") : inputRef.current?.click())} disabled={!!busy}>
             Open video or photo

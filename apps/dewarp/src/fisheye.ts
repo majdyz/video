@@ -9,6 +9,28 @@
  */
 export type Projection = "rectilinear" | "stereographic";
 
+/**
+ * Phone ultra-wide (0.5×) photos and clips: the phone has already removed the
+ * lens's barrel distortion, so the source is rectilinear and what looks
+ * "warped" is perspective stretch (people at the edges wider, round things
+ * oval). The fix re-projects to a general Pannini projection (Sharpless et
+ * al. 2010) along the picture's horizontal: vertical lines and lines through
+ * the centre stay straight, the edges are compressed back to their natural
+ * proportions. `strength` is Pannini's d (0 = unchanged, 1 = conformal at the
+ * horizon, like stereographic sideways). FOV: the diagonal of the 4:3 frame
+ * on the long side, i.e. the 35 mm-equivalent focal length (13 mm → 117.9°),
+ * so a 16:9 crop or a portrait shot uses the same focal length in pixels.
+ */
+export const PHONE_UW_F35 = 13;
+export function fovFromF35(f35: number): number {
+  return (2 * Math.atan(Math.hypot(36, 24) / 2 / f35) * 180) / Math.PI;
+}
+/** Focal length (px) of a rectilinear phone frame of this size for a 4:3-diagonal FOV. */
+export function phoneFocalPx(width: number, height: number, fovDeg: number): number {
+  const L = Math.max(width, height);
+  return Math.hypot(L, 0.75 * L) / 2 / Math.tan((fovDeg * Math.PI) / 360);
+}
+
 /** A calibrated lens as the OpenCV fisheye model states it, at the calibration frame size. */
 export type Lens = {
   width: number;
@@ -38,6 +60,10 @@ export type WarpParams = {
   lens?: Lens;
   /** 1 (default): bicubic, or a box filter over the footprint where the warp shrinks; 0: one bilinear tap. */
   quality?: number;
+  /** Source already rectilinear (phone 0.5×): the stretch fix (Pannini) instead of a fisheye undistort. */
+  rectilinear?: boolean;
+  /** Stretch fix: the picture's horizontal is the frame's y axis (portrait clip stored landscape). */
+  axisY?: boolean;
 };
 
 export type WarpUniforms = {
@@ -47,7 +73,7 @@ export type WarpUniforms = {
   k: [number, number, number, number];
   strength: number;
   zoom: number;
-  /** 0 rectilinear, 1 stereographic, as the shader reads it. */
+  /** 0 rectilinear, 1 stereographic, 2 phone stretch fix (Pannini, d = strength), as the shader reads it. */
   projection: number;
   /** Vertical fisheye focal length (equal to fFish without a calibrated lens). */
   fy: number;
@@ -57,6 +83,8 @@ export type WarpUniforms = {
   thetaMax: number;
   /** Resampling: 1 adaptive bicubic / footprint filter, 0 single bilinear tap. */
   quality: number;
+  /** Stretch fix along the frame's y axis (1) instead of x (0). */
+  axisY?: number;
 };
 
 /** Distorted angle of the Kannala-Brandt polynomial. */
@@ -103,6 +131,13 @@ export function lensDiagonalFov(lens: Lens, width: number, height: number): numb
 }
 
 export function warpUniforms(p: WarpParams): WarpUniforms {
+  if (p.rectilinear) {
+    const f = phoneFocalPx(p.srcWidth, p.srcHeight, p.fovDeg);
+    return {
+      srcSize: [p.srcWidth, p.srcHeight], fFish: f, fOut: f, k: [p.k1, 0, 0, 0], strength: p.strength, zoom: p.zoom,
+      projection: 2, fy: f, center: [p.srcWidth / 2, p.srcHeight / 2], thetaMax: 1.55, quality: p.quality ?? 1, axisY: p.axisY ? 1 : 0,
+    };
+  }
   const halfDiag = Math.hypot(p.srcWidth, p.srcHeight) / 2;
   const halfFov = (p.fovDeg * Math.PI) / 360;
   let fFish = halfDiag / halfFov;
@@ -143,6 +178,11 @@ export function samplePoint(u: WarpUniforms, outX: number, outY: number): [numbe
   const cy = u.srcSize[1] / 2;
   const px = (outX - cx) / u.zoom;
   const py = (outY - cy) / u.zoom;
+  if (u.projection > 1.5) {
+    const ay = !!u.axisY;
+    const [sx, sy] = pannini(ay ? py / u.fOut : px / u.fOut, ay ? px / u.fOut : py / u.fOut, u.strength, u.k[0]);
+    return ay ? [u.center[0] + sy * u.fFish, u.center[1] + sx * u.fy] : [u.center[0] + sx * u.fFish, u.center[1] + sy * u.fy];
+  }
   const r = Math.hypot(px, py);
   if (r === 0) return [cx + (u.center[0] - cx) * u.strength, cy + (u.center[1] - cy) * u.strength];
   // Stereographic keeps local shapes, so a face at the edge stays a face, at the cost of a little bend in the lines.
@@ -154,6 +194,23 @@ export function samplePoint(u: WarpUniforms, outX: number, outY: number): [numbe
   const fy = u.center[1] + (py / r) * u.fy * td;
   // Strength blends between the untouched pixel and the fisheye sample.
   return [cx + px + (fx - (cx + px)) * u.strength, cy + py + (fy - (cy + py)) * u.strength];
+}
+
+/**
+ * Inverse general Pannini (Sharpless): output (x along the compressed axis, y), in focal lengths, to the
+ * rectilinear source direction (tan form), then an optional radial k1 for a source with barrel left in.
+ */
+export function pannini(x: number, y: number, d: number, k1 = 0): [number, number] {
+  const k = (x * x) / ((d + 1) * (d + 1));
+  const dscr = k * k * d * d - (k + 1) * (k * d * d - 1);
+  const clon = (-k * d + Math.sqrt(Math.max(dscr, 0))) / (k + 1);
+  const S = (d + 1) / (d + clon);
+  const lon = Math.max(-1.5, Math.min(1.5, Math.atan2(x, S * clon)));
+  let sx = Math.tan(lon), sy = y / S / Math.cos(lon);
+  const m = 1 + k1 * (sx * sx + sy * sy);
+  sx *= m;
+  sy *= m;
+  return [sx, sy];
 }
 
 /**

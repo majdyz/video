@@ -44,6 +44,7 @@ uniform float projection;
 uniform float fy;
 uniform vec2 center;
 uniform float thetaMax;
+uniform bool panAxisY;
 ${FOOTAGE_GLSL}
 in vec2 v_mid;
 in vec2 v_id;
@@ -61,10 +62,26 @@ vec2 codedToDisplay(vec2 c) {
   if (u_rot == 3) return vec2(c.y, 1.0 - c.x);
   return c;
 }
+// Phone 0.5× stretch fix: inverse general Pannini (d = strength) along x, rectilinear source (fisheye.ts pannini).
+vec2 pannini(vec2 p) {
+  vec2 q = p / fOut;
+  if (panAxisY) q = q.yx;
+  float d = strength;
+  float kk = q.x * q.x / ((d + 1.0) * (d + 1.0));
+  float dscr = kk * kk * d * d - (kk + 1.0) * (kk * d * d - 1.0);
+  float clon = (-kk * d + sqrt(max(dscr, 0.0))) / (kk + 1.0);
+  float S = (d + 1.0) / (d + clon);
+  float lon = clamp(atan(q.x, S * clon), -1.5, 1.5);
+  vec2 s = vec2(tan(lon), q.y / S / cos(lon));
+  s *= 1.0 + k.x * dot(s, s);
+  if (panAxisY) s = s.yx;
+  return center + s * vec2(fFish, fy);
+}
 // Rectilinear output pixel -> fisheye source pixel (apps/dewarp/src/fisheye.ts samplePoint).
 vec2 dewarp(vec2 outPx) {
   vec2 c = srcSize * 0.5;
   vec2 p = (outPx - c) / zoom;
+  if (projection > 1.5) return pannini(p);
   float r = length(p);
   if (r < 0.5) return mix(c, center, strength);
   float theta0 = projection > 0.5 ? 2.0 * atan(r / (2.0 * fOut)) : atan(r / fOut);
@@ -152,7 +169,7 @@ export class GeometryRenderer {
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error("geometry link: " + gl.getProgramInfoLog(prog));
     this.prog = prog;
     gl.useProgram(prog);
-    const names = ["u_tex", "u_rot", "u_texCoded", "u_split", "u_dewarp", "srcSize", "fFish", "fOut", "k", "strength", "zoom", "projection", "fy", "center", "thetaMax", "u_footage"];
+    const names = ["u_tex", "u_rot", "u_texCoded", "u_split", "u_dewarp", "srcSize", "fFish", "fOut", "k", "strength", "zoom", "projection", "fy", "center", "thetaMax", "panAxisY", "u_footage"];
     this.loc = Object.fromEntries(names.map((n) => [n, gl.getUniformLocation(prog, n)]));
 
     this.vao = gl.createVertexArray()!;
@@ -276,6 +293,7 @@ export class GeometryRenderer {
       gl.uniform1f(L.fy, d.fy);
       gl.uniform2f(L.center, d.center[0], d.center[1]);
       gl.uniform1f(L.thetaMax, d.thetaMax);
+      gl.uniform1i(L.panAxisY, d.axisY ? 1 : 0);
     }
     gl.drawElements(gl.TRIANGLES, GRID_W * GRID_H * 6, gl.UNSIGNED_SHORT, 0);
     gl.bindVertexArray(null);

@@ -23,7 +23,7 @@ struct U {
   b: vec4<f32>,   // srcSize.xy, fFish, fOut
   k: vec4<f32>,
   c: vec4<f32>,   // strength, zoom, projection, fy
-  d: vec4<f32>,   // center.xy, thetaMax, -
+  d: vec4<f32>,   // center.xy, thetaMax, pannini axis (1 = y)
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var samp: sampler;
@@ -49,6 +49,20 @@ fn codedToDisplay(c: vec2<f32>, rot: i32) -> vec2<f32> {
   if (rot == 3) { return vec2<f32>(c.y, 1.0 - c.x); }
   return c;
 }
+fn pannini(p: vec2<f32>) -> vec2<f32> {
+  let fOut = u.b.w; let d = u.c.x; let axisY = u.d.w > 0.5;
+  var q = p / fOut;
+  if (axisY) { q = q.yx; }
+  let kk = q.x * q.x / ((d + 1.0) * (d + 1.0));
+  let dscr = kk * kk * d * d - (kk + 1.0) * (kk * d * d - 1.0);
+  let clon = (-kk * d + sqrt(max(dscr, 0.0))) / (kk + 1.0);
+  let S = (d + 1.0) / (d + clon);
+  let lon = clamp(atan2(q.x, S * clon), -1.5, 1.5);
+  var s = vec2<f32>(tan(lon), q.y / S / cos(lon));
+  s = s * (1.0 + u.k.x * dot(s, s));
+  if (axisY) { s = s.yx; }
+  return u.d.xy + s * vec2<f32>(u.b.z, u.c.w);
+}
 fn dewarp(outPx: vec2<f32>) -> vec2<f32> {
   let srcSize = u.b.xy;
   let fFish = u.b.z; let fOut = u.b.w;
@@ -56,6 +70,7 @@ fn dewarp(outPx: vec2<f32>) -> vec2<f32> {
   let center = u.d.xy; let thetaMax = u.d.z;
   let c = srcSize * 0.5;
   let p = (outPx - c) / zoom;
+  if (projection > 1.5) { return pannini(p); }
   let r = length(p);
   if (r < 0.5) { return mix(c, center, strength); }
   let theta0 = select(atan(r / fOut), 2.0 * atan(r / (2.0 * fOut)), projection > 0.5);
@@ -266,7 +281,7 @@ export class GpuGeometryRenderer {
       u.set([d.srcSize[0], d.srcSize[1], d.fFish, d.fOut], 4);
       u.set([d.k[0], d.k[1], d.k[2], d.k[3]], 8);
       u.set([d.strength, d.zoom, d.projection, d.fy], 12);
-      u.set([d.center[0], d.center[1], d.thetaMax, 0], 16);
+      u.set([d.center[0], d.center[1], d.thetaMax, d.axisY ?? 0], 16);
     }
     dev.queue.writeBuffer(this.uniformBuf, 0, u);
     const enc = dev.createCommandEncoder();

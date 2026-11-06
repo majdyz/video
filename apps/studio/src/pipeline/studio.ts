@@ -29,12 +29,15 @@ import { GeometryRenderer, type GeometryRenderOptions, type GeometrySource } fro
 import { GpuGeometryRenderer } from "./geometry-gpu.ts";
 import type { GeometryParams, QuarterTurns } from "./geometry-math.ts";
 import type { ClipInfo } from "./probe.ts";
-import { colourSettings, DEFAULT_TOOLS, exportSuffix, solveParams, type ColourLook, type ToolsState } from "./tools.ts";
+import { colourSettings, DEFAULT_TOOLS, exportSuffix, profileDefaults, solveParams, type ColourLook, type DewarpState, type ToolsState } from "./tools.ts";
+
+const PHONE_UW_DEFAULTS = profileDefaults("phone-ultra-wide");
 import { activeCuts, lockWithCuts, lookIndexAt, topUpTimes, visibleSegments, type Segments } from "./segments.ts";
 import { bobbingNote, stabInfo, stabSummary, type StabInfo } from "./stab-info.ts";
 import { seekVideo, waitForEvent, waitForFirstFrame, type VideoWithRVFC } from "./video.ts";
 import { decodePhoto, encodeJpeg, isPhotoFile, photoLimits } from "./photo.ts";
 import { readExif, withExif } from "./photo-exif.ts";
+import { photoCamera, photoTags } from "./phone-lens.ts";
 import { canvasFrameFix } from "@dive-tools/shared/frame-orientation.ts";
 import { releaseExportBlob } from "@dive-tools/shared/output-sink.ts";
 import { exportSettingsKey } from "./export-key.ts";
@@ -1018,6 +1021,8 @@ export class Studio {
     if (e) e.settings = this.settingsAt(this.video?.currentTime ?? 0);
     // The profile samples what the colour engine is fed: a new framing makes them stale for later top-ups.
     if (next.dewarp !== prev.dewarp || next.stabilise.enabled !== prev.stabilise.enabled) { this.sampleCache = []; this.profileEpoch++; this.engine?.forgetProfile(); }
+    // Dewarp switched off (on) on a 0.5× photo: 0.5× photos stop (start again) getting the fix by themselves.
+    if (this.snap.kind === "photo" && this.snap.camera?.profileId === "phone-ultra-wide" && next.dewarp.enabled !== prev.dewarp.enabled) this.phoneAutoOff = !next.dewarp.enabled;
     const info = this.snap.info;
     if (info && (next.dewarp !== prev.dewarp || !this.dewarpU)) void this.updateDewarp();
     const video = this.snap.kind === "video";
@@ -1049,18 +1054,40 @@ export class Studio {
     this.repaint();
   }
 
+  /**
+   * Dewarp settings for the open file: the tool as set, or, for a photo whose EXIF says 0.5× ultra-wide while
+   * Dewarp is off, Phone 0.5× by itself (a batch fixes its 0.5× shots without the user opening each); the user
+   * switching Dewarp off on such a photo stops that.
+   */
+  private dewarpFor(): DewarpState | null {
+    const t = this.tools.dewarp;
+    if (t.enabled) return t;
+    if (this.snap.kind === "photo" && this.snap.camera?.profileId === "phone-ultra-wide" && !this.phoneAutoOff) {
+      return { ...t, ...PHONE_UW_DEFAULTS, enabled: true, projection: "rectilinear", autoZoom: true };
+    }
+    return null;
+  }
+  private phoneAutoOff = false;
+  /** The user switched Dewarp off on a 0.5× photo: later 0.5× photos don't turn it back on. */
+  get phoneFixOff(): boolean {
+    return this.phoneAutoOff;
+  }
+
   private async updateDewarp(): Promise<void> {
     const info = this.snap.info;
     if (!info) return;
-    if (!this.tools.dewarp.enabled) {
+    const t = this.dewarpFor();
+    if (!t) {
       this.dewarpU = null;
       return;
     }
     const gen = this.gen;
     const mod = this.dewarpMod ?? (this.dewarpMod = await loadDewarp());
     if (gen !== this.gen || !this.snap.info) return;
-    const t = this.tools.dewarp;
-    this.dewarpU = t.enabled ? mod.dewarpUniforms(t, this.snap.info.codedW, this.snap.info.codedH, this.snap.camera) : null;
+    // Phone 0.5× on a photo whose EXIF names the main / tele camera (a batch mixes lenses): left as is.
+    const skip = t.profile === "phone-ultra-wide" && !!this.snap.camera?.notUltraWide;
+    const rotated = this.snap.info.rot === 1 || this.snap.info.rot === 3;
+    this.dewarpU = t.enabled && !skip ? mod.dewarpUniforms(t, this.snap.info.codedW, this.snap.info.codedH, this.snap.camera, rotated) : null;
     if (this.snap.kind === "photo") this.schedulePhotoAnalysis();
     this.repaint();
   }
@@ -1313,6 +1340,12 @@ export class Studio {
       const { bitmap, original } = await decodePhoto(file, photoLimits(isWebKit(), e.backend.kind));
       if (gen !== this.gen) return bitmap.close();
       this.photo = bitmap;
+      // Which camera (the phone's 0.5× ultra-wide gets Dewarp's Phone 0.5× stretch fix).
+      const tags = photoTags(readExif(new Uint8Array(await file.arrayBuffer())));
+      if (gen !== this.gen) return;
+      const camera = photoCamera(tags, original);
+      if (tags.make || tags.focal35) console.info(`[photo] ${[tags.make, tags.model].filter(Boolean).join(" ")}: ${camera.evidence.join(", ")}${camera.profileId ? " → Phone 0.5×" : ""}`);
+      this.set({ camera });
       const ps = Math.min(1, PHOTO_PREVIEW_PX / Math.max(bitmap.width, bitmap.height));
       this.photoPreview = ps < 1
         ? await createImageBitmap(bitmap, { resizeWidth: Math.round(bitmap.width * ps), resizeHeight: Math.round(bitmap.height * ps), resizeQuality: "high" })
@@ -1430,7 +1463,7 @@ export class Studio {
   }
 
   private geometryActive(): boolean {
-    return this.stabActive() || (this.tools.dewarp.enabled && !!this.dewarpU) || this.footageActive();
+    return this.stabActive() || !!this.dewarpU || this.footageActive();
   }
 
   /** Geometry-pass options for an upright source (the <video>, a still from it, a photo). */
@@ -1458,7 +1491,7 @@ export class Studio {
       stab: this.stabActive() ? this.motion!.planWarpFn(this.analysis!, this.path!, t, info.displayW, info.displayH) : null,
       // With gyro data and Dewarp on, the gyro warp renders rectilinear through the clip's own
       // lens model (rotation-exact): the separate lens pass would undo the lens twice.
-      dewarp: this.tools.dewarp.enabled && !this.gyroRectilinear() ? this.dewarpU : null,
+      dewarp: !this.gyroRectilinear() ? this.dewarpU : null,
     };
   }
 
@@ -2130,7 +2163,9 @@ export class Studio {
   private outName(ext: string): string {
     const base = (this.snap.fileName ?? "clip").replace(/\.[^.]+$/, "");
     const trimmed = this.snap.kind === "video" && this.trim ? "-trimmed" : "";
-    return `${base}-${exportSuffix({ ...this.tools, stabilise: { ...this.tools.stabilise, enabled: this.tools.stabilise.enabled && this.snap.kind === "video" } })}${trimmed}.${ext}`;
+    // A photo Phone 0.5× leaves as is (main camera) isn't "dewarped".
+    const dewarped = this.snap.kind === "photo" ? !!this.dewarpU : this.tools.dewarp.enabled;
+    return `${base}-${exportSuffix({ ...this.tools, dewarp: { ...this.tools.dewarp, enabled: dewarped }, stabilise: { ...this.tools.stabilise, enabled: this.tools.stabilise.enabled && this.snap.kind === "video" } })}${trimmed}.${ext}`;
   }
 
   private beginExport(): AbortController {

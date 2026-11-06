@@ -21,6 +21,7 @@ import {
 import type { StabStatus } from "../pipeline/studio.ts";
 import type { ClipInfo } from "../pipeline/probe.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
+import { photoLensHint } from "../pipeline/phone-lens.ts";
 import { Chips, Segmented, Slider, Switch } from "./controls";
 import { IconColour, IconDewarp, IconSpark, IconStabilise } from "./icons";
 
@@ -66,9 +67,12 @@ export function toolStatus({ tool, tools, stab, info, colourProfiled, photo, cam
   if (tool === "colour" && enabled) status = colourProfiled ? <span className="status-good">{photo ? "Balanced for this photo" : "Scene-locked to this clip"}</span> : <span className="status-live">Reading the water…</span>;
   const detected = cameraLabel(camera);
   if (tool === "dewarp" && detected) status = <span className="status-good">Detected: {detected}</span>;
-  const unrecognised = tool === "dewarp" ? unrecognisedCameraHint(camera) : null;
+  const phoneFix = tool === "dewarp" && enabled && tools.dewarp.profile === "phone-ultra-wide";
+  const unrecognised = tool !== "dewarp" || phoneFix ? null : photo ? photoLensHint(camera, info ? { w: info.displayW, h: info.displayH } : null) : unrecognisedCameraHint(camera);
+  if (phoneFix && !detected) status = <span className="status-good">Phone 0.5×: edges un-stretched, vertical lines kept straight</span>;
   if (unrecognised) status = <span className="status-live">{unrecognised}</span>;
   if (tool === "dewarp" && enabled && info && profileAspectMismatch(tools.dewarp.profile, info.codedW, info.codedH)) status = <span className="status-warn">Calibrated for a different aspect ratio</span>;
+  if (tool === "dewarp" && enabled && tools.dewarp.profile === "phone-ultra-wide" && camera?.notUltraWide) status = <span className="status-live">Not a 0.5× shot{detected ? ` (${detected})` : ""}: left as it is</span>;
   // Gyro stabilisation + Dewarp: the gyro warp straightens through the clip's own lens model.
   const gyroLens = tool === "dewarp" && enabled && tools.stabilise.enabled && stab.state === "ready" && stab.info?.mode === "gyro";
   if (gyroLens) status = <span className="status-good">{detected ? `Detected: ${detected}` : stab.info?.camera} · gyro lens model</span>;
@@ -277,11 +281,13 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog }: {
   const up = (patch: Partial<typeof d>) => setTools((t) => ({ ...t, dewarp: { ...t.dewarp, ...patch } }));
   return (
     <div className="adv">
-      <div className="adv__field">
-        <span className="adv__label">Projection</span>
-        <Segmented label="Projection" value={d.projection} onChange={(v) => up({ projection: v })}
-          items={[{ id: "rectilinear", label: "Straight lines" }, { id: "stereographic", label: "Natural shapes" }]} />
-      </div>
+      {d.profile !== "phone-ultra-wide" && (
+        <div className="adv__field">
+          <span className="adv__label">Projection</span>
+          <Segmented label="Projection" value={d.projection} onChange={(v) => up({ projection: v })}
+            items={[{ id: "rectilinear", label: "Straight lines" }, { id: "stereographic", label: "Natural shapes" }]} />
+        </div>
+      )}
       <div className="adv__field adv__field--row">
         <span className="adv__label">Auto-fit zoom <small>no black corners</small></span>
         <Switch checked={d.autoZoom} onChange={(v) => up({ autoZoom: v })} label="Auto-fit zoom" />

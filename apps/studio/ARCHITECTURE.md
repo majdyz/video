@@ -514,3 +514,26 @@ photo (a video export is aborted). Output: phones with
 (`shareGroups`, one tap each: share needs a user gesture), else a stored
 ZIP (`pipeline/zip.ts`, CRCs streamed in 8 MB slices, up to 2 GB) or one
 download per file. Native shell: each file saved to Photos.
+
+## Phone 0.5× (ultra-wide) stretch fix
+
+Phone ultra-wide photos are already rectilinear (iPhone "Lens Correction"
+and Android do the undistort); what looks warped is perspective stretch at
+the edges (people wider, round things oval). Dewarp's "Phone 0.5×" profile
+(`profiles.ts` `phone-ultra-wide`, `rectilinear: true`) re-projects to a
+general Pannini projection along the picture's horizontal
+(`fisheye.ts` `pannini`, projection 2 in both geometry shaders): vertical
+lines and lines through the centre stay straight, edges get their
+proportions back. Strength is Pannini's d (0 = unchanged, 1 = conformal at
+the horizon); 70 by default, tuned on real 0.5× group shots. The focal
+length comes from EXIF's 35 mm equivalent (else 13 mm), taken on the long
+side's 4:3 frame so 16:9 crops and portrait shots match; a clip stored a
+quarter turn from upright runs the fix along the frame's y (`axisY`).
+Auto-fit zoom crops the curved edges (≈ 1.25× at 70).
+
+Detection (`pipeline/phone-lens.ts`, from the photo's EXIF): 35 mm
+equivalent 10–18 mm, an "ultra wide" lens model, or a phone make with a
+focal length under 2.6 mm → Phone 0.5× turns on (and, with Dewarp off,
+still applies to such photos in a batch unless the user switched it off on
+one); a phone's main / tele camera is left as is even with Phone 0.5× on;
+no EXIF (messengers strip it) → only a hint on phone-sized photos.
