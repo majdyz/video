@@ -2984,59 +2984,20 @@ export class Studio {
 
   /** Photo: render once at full resolution and encode a JPEG. */
   private async exportPhoto(): Promise<void> {
-    const e = this.engine, bmp = this.photo, info = this.snap.info;
+    const bmp = this.photo, info = this.snap.info;
     if (!bmp || !info || this.exporting) return;
-    // A settings change still waiting to re-analyse the photo, or its analysis in flight: the export takes its result.
-    if (this.photoAnalyseTimer && this.tools.colour.enabled && e) {
-      clearTimeout(this.photoAnalyseTimer);
-      this.photoAnalyseTimer = 0;
-      void this.analysePhoto();
-    }
-    const analysing = this.photoAnalysing;
+    const analysing = this.photoAnalysisDue();
     this.beginExport();
     const started = performance.now();
     let failure: unknown = null;
     try {
       const W = info.displayW, H = info.displayH;
-      const colourOn = this.tools.colour.enabled && !!e;
-      if (colourOn && analysing) {
+      if (this.tools.colour.enabled && this.engine && analysing) {
         this.setExp({ detail: "Reading the water…" });
         await analysing;
       }
       this.setExp({ state: "running", detail: `${W}×${H}`, progress: 0.2 });
-      let src: VideoFrame | HTMLCanvasElement;
-      if (colourOn) {
-        e!.split = 0;
-        this.uploadToEngine(bmp, 0, false, [W, H]);
-        e!.setPreviewScale(1);
-        // WebGL2: the canvas itself is drawn below, so no capture (nor its benchmark) at photo size.
-        const be = e!.backend as unknown as { setCaptureMode?: (m: "auto" | "canvas") => void };
-        if (e!.backend.kind === "webgl2") be.setCaptureMode?.("canvas");
-        try {
-          src = await e!.renderToFrame(0, 0, undefined);
-        } finally {
-          if (e!.backend.kind === "webgl2") be.setCaptureMode?.("auto");
-        }
-        // WebGL2 backend: draw the canvas itself (it holds the full-size render); WebKit draws
-        // a VideoFrame wrapped from a WebGL canvas upside down.
-        if (e!.backend.kind === "webgl2") {
-          src.close();
-          src = e!.backend.canvas;
-        }
-      } else {
-        const geo = this.geo!;
-        geo.resize(W, H);
-        geo.render(bmp, this.geoParams(0, 0), { texCoded: false, split: null });
-        src = geo.canvas;
-      }
-      this.setExp({ progress: 0.6 });
-      await this.emitFrame(src);
-      const encoded = await encodeJpeg(src, W, H);
-      // The browser's encoder writes no EXIF: carry the original's over (date, GPS, camera), orientation baked in.
-      const exif = this.file ? readExif(new Uint8Array(await this.file.arrayBuffer())) : null;
-      const blob = exif ? new Blob([withExif(new Uint8Array(await encoded.arrayBuffer()), exif, { width: W, height: H }) as BlobPart], { type: "image/jpeg" }) : encoded;
-      console.info(`[export] photo ${W}x${H}, EXIF ${exif ? "kept" : "none in source"}`);
-      if (typeof VideoFrame !== "undefined" && src instanceof VideoFrame) src.close();
+      const blob = await this.renderPhotoJpeg(bmp, W, H, () => this.setExp({ progress: 0.6 }));
       this.setExp({
         state: "done",
         progress: 1,
@@ -3053,8 +3014,92 @@ export class Studio {
     }
   }
 
+  /** A settings change still waiting to re-analyse the photo starts now; the analysis in flight (an export takes its result). */
+  private photoAnalysisDue(): Promise<void> | null {
+    if (this.photoAnalyseTimer && this.tools.colour.enabled && this.engine) {
+      clearTimeout(this.photoAnalyseTimer);
+      this.photoAnalyseTimer = 0;
+      void this.analysePhoto();
+    }
+    return this.photoAnalysing;
+  }
+
+  /** The open photo through the tools at W×H, as a JPEG with the original's EXIF. */
+  private async renderPhotoJpeg(bmp: ImageBitmap, W: number, H: number, rendered?: () => void): Promise<Blob> {
+    const e = this.engine;
+    const colourOn = this.tools.colour.enabled && !!e;
+    let src: VideoFrame | HTMLCanvasElement;
+    if (colourOn) {
+      e!.split = 0;
+      this.uploadToEngine(bmp, 0, false, [W, H]);
+      e!.setPreviewScale(1);
+      // WebGL2: the canvas itself is drawn below, so no capture (nor its benchmark) at photo size.
+      const be = e!.backend as unknown as { setCaptureMode?: (m: "auto" | "canvas") => void };
+      if (e!.backend.kind === "webgl2") be.setCaptureMode?.("canvas");
+      try {
+        src = await e!.renderToFrame(0, 0, undefined);
+      } finally {
+        if (e!.backend.kind === "webgl2") be.setCaptureMode?.("auto");
+      }
+      // WebGL2 backend: draw the canvas itself (it holds the full-size render); WebKit draws
+      // a VideoFrame wrapped from a WebGL canvas upside down.
+      if (e!.backend.kind === "webgl2") {
+        src.close();
+        src = e!.backend.canvas;
+      }
+    } else {
+      const geo = this.geo!;
+      geo.resize(W, H);
+      geo.render(bmp, this.geoParams(0, 0), { texCoded: false, split: null });
+      src = geo.canvas;
+    }
+    try {
+      rendered?.();
+      await this.emitFrame(src);
+      const encoded = await encodeJpeg(src, W, H);
+      // The browser's encoder writes no EXIF: carry the original's over (date, GPS, camera), orientation baked in.
+      const exif = this.file ? readExif(new Uint8Array(await this.file.arrayBuffer())) : null;
+      const blob = exif ? new Blob([withExif(new Uint8Array(await encoded.arrayBuffer()), exif, { width: W, height: H }) as BlobPart], { type: "image/jpeg" }) : encoded;
+      console.info(`[export] photo ${W}x${H}, EXIF ${exif ? "kept" : "none in source"}`);
+      return blob;
+    } finally {
+      if (typeof VideoFrame !== "undefined" && src instanceof VideoFrame) src.close();
+    }
+  }
+
+  /**
+   * Batch photos (ui/batch.tsx): the open photo, rendered and encoded like a
+   * single photo export (its own colour analysis, the current tools), without
+   * the export sheet's state. Throws when no photo is open.
+   */
+  async renderOpenPhoto(): Promise<{ blob: Blob; name: string; width: number; height: number }> {
+    const bmp = this.photo, info = this.snap.info;
+    if (this.snap.kind !== "photo" || this.snap.phase !== "ready" || !bmp || !info) throw new Error("The photo didn't open");
+    if (this.exporting) throw new Error("An export is already running");
+    const analysing = this.photoAnalysisDue();
+    if (analysing) await analysing;
+    if (bmp !== this.photo) throw new Error("The photo changed");
+    this.exporting = true;
+    this.previewOn = false;
+    try {
+      const blob = await this.renderPhotoJpeg(bmp, info.displayW, info.displayH);
+      return { blob, name: this.outName("jpg"), width: info.displayW, height: info.displayH };
+    } finally {
+      this.exporting = false;
+      this.repaint();
+    }
+  }
+
   cancelExport(): void {
     this.exportAbort?.abort();
+  }
+
+  /** Batch: the finished export handed over (the caller releases it); the sheet's state back to idle. */
+  takeExportResult(): ExportResult | null {
+    if (this.exporting) return null;
+    const r = this.snap.exp.state === "done" ? this.snap.exp.result : null;
+    if (r) this.set({ exp: IDLE_EXPORT });
+    return r;
   }
 
   dismissExport(): void {

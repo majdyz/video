@@ -491,3 +491,26 @@ off), `?dock=open|closed` (phone dock).
   edges.
 * One headless run logged "WebGL: too many errors" after ~20 minutes idle
   post-export; not reproduced in a 60 s idle run.
+
+## Batch (several photos / videos at once)
+
+A multi-select or drop of 2+ files (`App.openFiles`, `pipeline/batch.ts`
+`splitBatch`) becomes a strip of thumbnails under the picture
+(`ui/batch.tsx` `BatchStrip`); tapping one opens it in the Studio as usual,
+so the tools (one shared `ToolsState`) are tweaked on any of them and apply
+to all. Export opens `BatchSheet`: every file is opened in turn with
+`Studio.open` (its own colour analysis / scene lock, motion analysis) and
+exported through the single-file path, strictly one at a time, so only one
+file's bitmaps, decoder and GPU textures exist at once:
+
+* photos: `Studio.renderOpenPhoto()` (the body of `exportPhoto`, shared via
+  `renderPhotoJpeg`: full-resolution JPEG, EXIF carried over);
+* videos: `Studio.exportVideo()` then `takeExportResult()` (the batch holds
+  the file and releases it with `releaseExportBlob` when the sheet closes).
+
+A file that fails is skipped and listed; Cancel stops after the current
+photo (a video export is aborted). Output: phones with
+`navigator.canShare({files})` share in groups of ≤10 files / ≤90 MB
+(`shareGroups`, one tap each: share needs a user gesture), else a stored
+ZIP (`pipeline/zip.ts`, CRCs streamed in 8 MB slices, up to 2 GB) or one
+download per file. Native shell: each file saved to Photos.

@@ -12,6 +12,8 @@ import { deviceFacts, isWeakDevice } from "./pipeline/device.ts";
 import type { FeedbackContext } from "./pipeline/feedback.ts";
 import { SubjectOutlines } from "./ui/subjects";
 import { ExportSheet } from "./ui/export-sheet";
+import { BatchSheet, BatchStrip, makeThumb, type BatchItem } from "./ui/batch";
+import { kindOf, splitBatch } from "./pipeline/batch.ts";
 import { EmptyState } from "./ui/empty";
 import { Sheet } from "./ui/sheet";
 import { IntroSheet, introDue, markIntroSeen } from "./ui/intro";
@@ -91,6 +93,12 @@ export default function App() {
   const [immersive, setImmersive] = useState(false);
   const [tapPulse, setTapPulse] = useState<{ u: number; v: number; t: number } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
+  /** Several photos opened at once (ui/batch.tsx): the strip under the picture, Export all. Null for one clip / photo. */
+  const [batch, setBatch] = useState<BatchItem[] | null>(null);
+  /** Bumped per new batch: restarts its thumbnails. */
+  const [batchKey, setBatchKey] = useState(0);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   /** First visit: the three-step intro (ui/intro.tsx); About reopens it. */
   const [introOpen, setIntroOpen] = useState(introDue);
@@ -221,11 +229,57 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [ready, photo, exporting, studio]);
 
-  const openFile = (f: File) => {
+  const openOne = (f: File) => {
     setSplit(0.5);
     setSelLook(0);
-    void studio.open(f);
+    return studio.open(f);
   };
+  const openFile = (f: File) => {
+    setBatch(null);
+    void openOne(f);
+  };
+  /** A pick or drop of several files: the photos and videos become a batch (the strip; Export exports them all). */
+  const openFiles = (list: FileList | File[] | null | undefined) => {
+    const files = [...(list ?? [])];
+    if (files.length <= 1) {
+      if (files[0]) openFile(files[0]);
+      return;
+    }
+    const { media, skipped } = splitBatch(files);
+    setNotice(skipped ? `${skipped} file${skipped > 1 ? "s" : ""} left out: not a photo or video.` : null);
+    if (media.length <= 1) {
+      if (media[0]) openFile(media[0]);
+      return;
+    }
+    setBatch(media.map((file) => ({ file, kind: kindOf(file), thumb: null })));
+    setBatchKey((k) => k + 1);
+    void openOne(media[0]);
+  };
+  // Batch thumbnails, one decode at a time; their URLs go with the batch.
+  const batchRef = useRef(batch);
+  batchRef.current = batch;
+  useEffect(() => {
+    const items = batchRef.current;
+    if (!items) return;
+    let live = true;
+    const urls: string[] = [];
+    void (async () => {
+      for (const it of items) {
+        if (!live) break;
+        if (it.thumb) continue;
+        const url = await makeThumb(it.file);
+        if (!url) continue;
+        if (!live) { URL.revokeObjectURL(url); break; }
+        urls.push(url);
+        setBatch((b) => b && b.map((x) => (x.file === it.file ? { ...x, thumb: url } : x)));
+      }
+    })();
+    return () => {
+      live = false;
+      for (const u of urls) URL.revokeObjectURL(u);
+    };
+  }, [batchKey]);
+  const inBatch = !!batch && batch.length > 1 && s.phase !== "empty";
   const openSample = () => {
     setSplit(0.5);
     setSelLook(0);
@@ -335,7 +389,9 @@ export default function App() {
 
   // Photos have no timeline: name and size instead.
   const bar = s.phase !== "empty" && (
-    <div className={`viewer__bar${photo ? "" : " viewer__bar--video"}`}>
+    <>
+    {inBatch && <BatchStrip items={batch!} active={studio.clipFile} onSelect={(f) => void openOne(f)} disabled={exporting || batchOpen} />}
+    {!(inBatch && photo) && <div className={`viewer__bar${photo ? "" : " viewer__bar--video"}`}>
       {photo ? (
         <div className="photo-meta">
           <span className="photo-meta__name">{s.fileName}</span>
@@ -348,14 +404,15 @@ export default function App() {
           onCuts={(cuts, commit) => studio.setSegments({ cuts, looks: studio.getSnapshot().segments.looks }, commit)}
           onRemoveCut={removeSplit} />
       )}
-    </div>
+    </div>}
+    </>
   );
 
   const exportBtn = (
-    <button type="button" className="btn btn--primary export-btn" onClick={() => { studio.pause(); setExportOpen(true); }} disabled={!ready || !s.canExport || colourPending}
+    <button type="button" className="btn btn--primary export-btn" onClick={() => { studio.pause(); if (inBatch) setBatchOpen(true); else setExportOpen(true); }} disabled={!ready || !s.canExport || colourPending}
       title={colourPending ? `Export unlocks once the colour analysis of this ${photo ? "photo" : "clip"} is done` : undefined}>
       {colourPending ? <span className="pill__dot" aria-hidden="true" /> : <IconExport size={18} />}
-      <span>{colourPending ? (wide ? "Reading the water…" : "Analysing") : "Export"}</span>
+      <span>{colourPending ? (wide ? "Reading the water…" : "Analysing") : inBatch ? (wide ? `Export all ${batch!.length}` : `Export ${batch!.length}`) : "Export"}</span>
     </button>
   );
   const subjectsOn = !!panelTools.colour.subjectPop && tools.colour.enabled;
@@ -456,7 +513,7 @@ export default function App() {
             showPlayHint={ready && !photo && !s.busy && !exporting && !selectActive}
             resetKey={`${s.fileName}:${s.info?.displayW}x${s.info?.displayH}`}
           >
-            {s.phase === "empty" && <EmptyState accept={ACCEPT} onFile={openFile} onPick={native ? pick : undefined} onSample={openSample} busy={s.busy} />}
+            {s.phase === "empty" && <EmptyState accept={ACCEPT} onFiles={openFiles} onPick={native ? pick : undefined} onSample={openSample} busy={s.busy} />}
             {s.phase !== "empty" && pill && !selectActive && (
               <div className="pill" role="status"><span className="pill__dot" aria-hidden="true" />{pill}</div>
             )}
@@ -535,7 +592,14 @@ export default function App() {
         )}
       </main>
 
-      {crashToast && !s.error && (
+      {notice && !s.error && (
+        <div className="toast" role="status">
+          <IconWarning size={18} />
+          <span>{notice}</span>
+          <button type="button" className="icon-btn icon-btn--quiet" aria-label="Dismiss" onClick={() => setNotice(null)}><IconClose size={16} /></button>
+        </div>
+      )}
+      {crashToast && !s.error && !notice && (
         <div className="toast" role="status">
           <IconWarning size={18} />
           <span>The page crashed last time.</span>
@@ -553,8 +617,12 @@ export default function App() {
 
       <video ref={videoRef} className="source-video" muted playsInline aria-hidden="true" />
       <input ref={motionLogRef} type="file" accept=".gcsv,.csv,text/csv" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) studio.setMotionLog(f); }} />
-      <input ref={fileInputRef} type="file" accept={ACCEPT} hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) openFile(f); }} />
+      <input ref={fileInputRef} type="file" accept={ACCEPT} multiple hidden onChange={(e) => { const files = [...(e.target.files ?? [])]; e.target.value = ""; openFiles(files); }} />
 
+      {batch && (
+        <BatchSheet open={batchOpen} onClose={() => setBatchOpen(false)} onSingle={() => { setBatchOpen(false); setExportOpen(true); }}
+          studio={studio} snap={s} items={batch} setItems={(fn) => setBatch((b) => (b ? fn(b) : b))} tools={tools} openItem={openOne} />
+      )}
       <ExportSheet open={exportOpen} onClose={() => { setExportOpen(false); if (s.exp.state === "done" || s.exp.state === "error") studio.dismissExport(); }} studio={studio} snap={s} tools={tools} />
 
       <IntroSheet open={introOpen} onClose={closeIntro}
@@ -578,6 +646,7 @@ export default function App() {
             <li><b>Stabilise</b> feature tracking with an L1-optimal camera path and wobble suppression.</li>
             <li><b>Dewarp</b> calibrated fisheye lens profiles (Gyroflow, CC0) to straight lines.</li>
             <li><b>Photos</b> JPEG, PNG and HEIC (where the browser reads it) get Colour and Dewarp, saved as a full-resolution JPEG that keeps the original's date, location and camera details.</li>
+            <li><b>Batch</b> pick several photos and videos at once: tweak any of them, then Export all (each one still gets its own colour balance), saved together to Photos on a phone or as one ZIP.</li>
             <li><b>10-bit, HDR and log</b> HLG / PQ (iPhone, GoPro, Osmo HDR), DJI D-Log M and Apple Log are converted to standard Rec.709 before the tools run; exports are 8-bit SDR.</li>
           </ul>
           <p className="about__fine">
