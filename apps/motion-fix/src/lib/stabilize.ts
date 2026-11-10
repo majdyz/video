@@ -56,9 +56,17 @@ export type StabilizeParams = {
   zoomRate?: number;
   /** L1 fidelity weight override (default PATH_FIDELITY; Grundmann 0.1). */
   fidelityWeight?: number;
+  /** Time scale (s) of the low-passed camera the fidelity pulls toward (default PATH_ANCHOR_SEC; 0 = the raw camera). */
+  anchorSec?: number;
 };
 
-export const DEFAULT_PARAMS: StabilizeParams = { smoothing: 0.8, maxCrop: 0.15 };
+/**
+ * maxCrop 0.10 (zoom cap 1.25): with the low-passed fidelity anchor the path
+ * spends its budget on bobbing, and past ~8 % per side the scratch set gains
+ * little (bob 10.8 -> 11.0 px on the wreck, 5.8 -> 5.7 on the drift clip) for
+ * +0.03 zoom; 0.15 let calm-looking clips sit at zoom 1.26-1.34.
+ */
+export const DEFAULT_PARAMS: StabilizeParams = { smoothing: 0.8, maxCrop: 0.1 };
 
 /**
  * L1 fidelity weight (pull toward the real camera). Grundmann's 0.1 lets the
@@ -72,6 +80,61 @@ export const DEFAULT_PARAMS: StabilizeParams = { smoothing: 0.8, maxCrop: 0.15 }
 export const PATH_FIDELITY = 1;
 /** Zoom drift limit for the visual path (zoom units per second); 0 = rolling-window zoom. */
 export const PATH_ZOOM_RATE = 0.025;
+
+/**
+ * Low-pass the fidelity pulls toward (Gaussian σ in seconds at smoothing 1,
+ * scaled by the smoothing; 0 = the raw camera, as in Motion Fix v2/v3).
+ * Pulling toward the raw camera made every move slower than the fidelity's
+ * break-even (~0.5 Hz at weight 1) part of the "intended" path, which is
+ * exactly the fin-kick bob and surge of dive footage: the old path removed
+ * shake above 3 Hz and left the 0.3-3 Hz band as it was (scene trajectory
+ * in that band, 640-px units: drift clip 14.9 -> 14.0 px, Red Sea reef
+ * 13.7 -> 13.1, wreck 13.8 -> 14.1). Toward a 1 s low-pass the same LP takes
+ * that band down to 5.7 / 7.4 / 11.0 px and still follows pans (wander speed
+ * within ~10 %); scripts/band-eval.ts measures it.
+ */
+export const PATH_ANCHOR_SEC = 1;
+
+/**
+ * Zero-phase local-linear low-pass of the camera path, per parameter
+ * (Gaussian-weighted linear fit around each frame). Unlike a plain Gaussian
+ * it reproduces a steady pan exactly, also at the clip's ends, so the anchor
+ * only departs from the camera where the camera wobbles about its own trend.
+ */
+export function lowPassPath(path: Similarity[], sigma: number): Similarity[] {
+  const n = path.length;
+  if (sigma <= 0.05 || n < 3) return path.map((p) => ({ ...p }));
+  const r = Math.max(1, Math.ceil(3 * sigma));
+  const kernel = new Float64Array(2 * r + 1);
+  for (let i = -r; i <= r; i++) kernel[i + r] = Math.exp(-(i * i) / (2 * sigma * sigma));
+  const out: Similarity[] = [];
+  const val = (u: number, c: number): number => {
+    const p = path[u];
+    return c === 0 ? p.a : c === 1 ? p.b : c === 2 ? p.tx : p.ty;
+  };
+  for (let t = 0; t < n; t++) {
+    let s0 = 0;
+    let s1 = 0;
+    let s2 = 0;
+    const sy = [0, 0, 0, 0];
+    const sxy = [0, 0, 0, 0];
+    for (let i = Math.max(-r, -t); i <= Math.min(r, n - 1 - t); i++) {
+      const k = kernel[i + r];
+      s0 += k;
+      s1 += k * i;
+      s2 += k * i * i;
+      for (let c = 0; c < 4; c++) {
+        const v = val(t + i, c);
+        sy[c] += k * v;
+        sxy[c] += k * i * v;
+      }
+    }
+    const det = s0 * s2 - s1 * s1;
+    const est = sy.map((y, c) => (Math.abs(det) > 1e-12 ? (s2 * y - s1 * sxy[c]) / det : y / s0));
+    out.push({ a: est[0], b: est[1], tx: est[2], ty: est[3] });
+  }
+  return out;
+}
 
 /** Keyframe spacing of the wobble suppression (Grundmann 2011 uses 30). */
 export const WOBBLE_KEYFRAME_INTERVAL = 30;
@@ -444,7 +507,21 @@ export function computeStabilizedPath(analysis: MotionAnalysis, params: Stabiliz
   }
   const hw = (analysis.width * unit) / 2;
   const hh = (analysis.height * unit) / 2;
+  // Fidelity anchor A_t = C_t ∘ C̄_t⁻¹: the warp that shows the low-passed
+  // camera C̄ (analysis units).
+  const anchorSigma = (params.anchorSec ?? PATH_ANCHOR_SEC) * smoothing * analysis.frameRate;
+  let anchor: Similarity[] | undefined;
+  if (anchorSigma > 0.5) {
+    const cum: Similarity[] = [];
+    for (let t = 0; t < n; t++) {
+      const c = readSim(analysis.cumulative, t);
+      cum.push({ a: c.a, b: c.b, tx: c.tx * unit, ty: c.ty * unit });
+    }
+    const smooth = lowPassPath(cum, anchorSigma);
+    anchor = cum.map((c, t) => compose(c, invert(smooth[t])));
+  }
   const sol: PathSolution = solvePath({
+    anchor,
     motions,
     halfWidth: hw,
     halfHeight: hh,
