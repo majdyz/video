@@ -24,7 +24,7 @@ import {
   WebMOutputFormat,
   type StreamTargetChunk,
 } from "mediabunny";
-import { openOutputSink, type OutputSink } from "./output-sink";
+import { openOutputSink, releaseExportBlob, type OutputSink } from "./output-sink";
 
 type CanvasWithCapture = HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream };
 
@@ -142,9 +142,25 @@ export async function exportRealtime(
   const captureFps = Math.max(1, Math.round(fps * rate));
   const stream = (canvas as CanvasWithCapture).captureStream!(captureFps);
   const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: bitrate });
-  const chunks: Blob[] = [];
+  // The recording streams into private storage as it arrives (one chunk a second), not into page memory:
+  // a minute of 4K at the source bitrate is 300–600 MB, which on an iPhone was enough to get the tab reloaded.
+  const recSink: OutputSink = await openOutputSink(opts.opfsPrefix + "rec");
+  let recPos = 0;
+  let recWrites: Promise<void> = Promise.resolve();
+  let recError: unknown = null;
   recorder.ondataavailable = (ev) => {
-    if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+    const data = ev.data;
+    if (!data || data.size === 0) return;
+    recWrites = recWrites.then(async () => {
+      if (recError) return;
+      try {
+        const bytes = new Uint8Array(await data.arrayBuffer());
+        await recSink.write(bytes, recPos);
+        recPos += bytes.byteLength;
+      } catch (e) {
+        recError ??= e;
+      }
+    });
   };
   log(`realtime capture → ${mime}, ${Math.round(bitrate / 1e6)} Mbps, ${captureFps} fps${rate < 1 ? ` (playback ×${rate}, re-timed to ${fps} fps)` : ""}`);
 
@@ -232,6 +248,8 @@ export async function exportRealtime(
     await stopped;
   } catch (e) {
     finish();
+    await recWrites.catch(() => undefined);
+    await recSink.discard().catch(() => undefined);
     throw e;
   } finally {
     signal?.removeEventListener("abort", onAbort);
@@ -241,21 +259,30 @@ export async function exportRealtime(
     video.playbackRate = wasRate;
     for (const t of stream.getTracks()) t.stop();
   }
-  throwIfAborted(signal);
-  const recordedMs = performance.now() - t0;
-  const recorded = new Blob(chunks, { type: mime.split(";")[0] });
-  if (recorded.size < 1024) throw new Error("The recorder produced no video (canvas capture unsupported here)");
-  log(`recorded ${(recorded.size / 1048576).toFixed(1)} MB in ${(recordedMs / 1000).toFixed(1)} s`);
+  let recorded: Blob | null = null;
+  try {
+    await recWrites;
+    if (recError) throw recError;
+    throwIfAborted(signal);
+    const recordedMs = performance.now() - t0;
+    recorded = await recSink.finish(mime.split(";")[0]);
+    if (recorded.size < 1024) throw new Error("The recorder produced no video (canvas capture unsupported here)");
+    log(`recorded ${(recorded.size / 1048576).toFixed(1)} MB in ${(recordedMs / 1000).toFixed(1)} s (${recSink.kind === "file" ? "on-device storage" : "memory"})`);
 
-  // Remux: recorded video packets + original audio packets → MP4 (or WebM
-  // when the recorded codec can't live in MP4).
-  const r0 = performance.now();
-  log(`first rendered frame at ${(firstFrameSec ?? 0).toFixed(3)} s`);
-  // The output ends where the range does: no audio, and no stray recorded frame, past it.
-  const limit = range ? Math.max(0, range.end - (firstFrameSec ?? range.start)) : Infinity;
-  const { blob, audioIncluded, codec } = await remux(recorded, file, firstFrameSec ?? from, rate, fps, opts.opfsPrefix, signal, log, limit);
-  onProgress(1);
-  return { blob, audioIncluded, codec, recordedMs, remuxMs: performance.now() - r0 };
+    // Remux: recorded video packets + original audio packets → MP4 (or WebM
+    // when the recorded codec can't live in MP4).
+    const r0 = performance.now();
+    log(`first rendered frame at ${(firstFrameSec ?? 0).toFixed(3)} s`);
+    // The output ends where the range does: no audio, and no stray recorded frame, past it.
+    const limit = range ? Math.max(0, range.end - (firstFrameSec ?? range.start)) : Infinity;
+    const { blob, audioIncluded, codec } = await remux(recorded, file, firstFrameSec ?? from, rate, fps, opts.opfsPrefix, signal, log, limit);
+    onProgress(1);
+    return { blob, audioIncluded, codec, recordedMs, remuxMs: performance.now() - r0 };
+  } finally {
+    // The recording's temporary file (the remux has its own output file).
+    if (recorded) await releaseExportBlob(recorded).catch(() => undefined);
+    else await recSink.discard().catch(() => undefined);
+  }
 }
 
 async function remux(

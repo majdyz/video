@@ -171,6 +171,9 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
               {!photo && <div><dt>Length</dt><dd>{snap.trim ? `${selectionLabel(snap.trim, duration)} · ${formatTimecode(snap.trim.start)}–${formatTimecode(snap.trim.end)}` : formatTime(duration)}</dd></div>}
               {photo && snap.photoLimited && <div><dt>Note</dt><dd>Original is {snap.photoLimited.w}×{snap.photoLimited.h}; this browser renders at most {outSize}</dd></div>}
             </dl>
+            {!photo && bigSource && studio.exportCrashedLastTime && (
+              <p className="export__note" role="status">The last export closed the page: this phone ran out of memory. Exporting at 1080p needs much less.</p>
+            )}
             {resumable ? (
               <>
                 <button type="button" className="btn btn--primary btn--block" onClick={() => void studio.exportVideo()}>
@@ -182,6 +185,9 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
               <button type="button" className="btn btn--primary btn--block" onClick={() => void studio.exportVideo()}>
                 <IconExport size={18} /> {photo ? "Export photo" : "Export video"}
               </button>
+            )}
+            {!photo && bigSource && studio.exportCrashedLastTime && (
+              <button type="button" className="btn btn--secondary btn--block" onClick={() => void studio.exportVideo({ maxLongEdge: 1920 })}>Export at 1080p</button>
             )}
             <p className="export__note">
               {photo ? "Rendered on this device at full resolution. Nothing is uploaded."
