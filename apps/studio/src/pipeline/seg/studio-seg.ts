@@ -7,7 +7,7 @@ import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts"
 import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
 import { aiCrashed, crumb, lastCrash } from "../crumbs.ts";
-import { isWeakDevice } from "../device.ts";
+import { deviceFacts, isMobile, isWeakDevice } from "../device.ts";
 import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
 import { confWeight, maskSize, SEG, type SegObject } from "./track.ts";
@@ -537,6 +537,24 @@ export class SubjectSeg {
       this.hibernated = true;
       this.onHibernate?.();
     }, SEG_HIBERNATE_MS);
+  }
+
+  /**
+   * An export is about to render with the pass done: on a phone the model goes now instead of 15 s later (the AI
+   * worker's heap, ~1 GB in WebKit, plus a 4K export's frames were enough to get the tab reloaded). The masks stay;
+   * a later tap wakes the model as after any hibernation. A pass still running (the user exported without waiting)
+   * is left alone.
+   */
+  releaseForExport(): void {
+    if (!isMobile(deviceFacts())) return;
+    if (this.busy || !this.model || !this.live || !this.replayable || this.waking) return;
+    clearTimeout(this.hibTimer);
+    crumb("ai: hibernate (export)");
+    segLog("export starting: shutting the model down (masks kept)");
+    this.model.dispose();
+    this.model = null;
+    this.hibernated = true;
+    this.onHibernate?.();
   }
 
   /** After a hibernation: a fresh worker, the clip's session again and every input replayed (it re-tracks; the masks

@@ -55,3 +55,12 @@ export function sessionCrumbs(): string[] {
     return [];
   }
 }
+
+/**
+ * Whether a crashed session died in a video export (its last step an export start or progress step, not its end):
+ * on a phone that is the export running out of memory, typically at 4K. Pure (the steps as startCrumbs kept them).
+ */
+export function exportCrashed(steps: readonly string[] | null): boolean {
+  const last = steps?.[steps.length - 1];
+  return !!last && /^\S+ export (start|\d+%)/.test(last);
+}

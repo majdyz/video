@@ -14,8 +14,10 @@
 // (colour right after first paint, mediabunny when a clip opens, motion when
 // Stabilise is switched on, the lens maths when Dewarp is).
 
-import { crumb } from "./crumbs.ts";
+import { crumb, exportCrashed, lastCrash } from "./crumbs.ts";
 import { isRealtimeExportSupported, isWebCodecsSupported, isWebKit } from "./env.ts";
+import { deviceFacts, isMobile } from "./device.ts";
+import { realtimeSteps } from "./realtime-steps.ts";
 import { bitrateFromSource, pickBitrate } from "@dive-tools/shared/recorder.ts";
 import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validate.ts";
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
@@ -71,8 +73,11 @@ const PREVIEW_MAX_PX = 1600;
 const PREVIEW_ZOOM_MAX_PX = 4096;
 const PHOTO_PREVIEW_PX = 2048;
 const OPFS_PREFIX = "studio-export-";
-/** Live export frames for the stage / sheet: a few a second. */
-const LIVE_EVERY_MS = 250;
+/**
+ * Live export frames for the stage / sheet: a few a second (once a second on phones, where each is a scaled copy
+ * of a full-size frame taken from the export's own time).
+ */
+const LIVE_EVERY_MS = typeof navigator !== "undefined" && isMobile(deviceFacts()) ? 1000 : 250;
 /** WebKit's offline export measures its speed over this long (after a warm-up) before committing to it. */
 const REALTIME_CHECK_MS = 3000;
 /** Filmstrip under the trim handles: this many thumbnails, this tall (px), decoded once per clip. */
@@ -239,7 +244,7 @@ const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message
 
 /**
  * `?rt=1` / `?rt=0` force the real-time recorder / the offline exporter. Unforced, WebKit runs offline and falls
- * back to the recorder when offline turns out slower than real time (its canvas capture was ~10 fps there before
+ * back to the recorder when offline runs well below real time and a recorder speed beats it (realtimeSteps; its canvas capture was ~10 fps there before
  * the WebGL2 buffer readback).
  */
 function wantRealtime(): boolean | null {
@@ -290,6 +295,8 @@ export class Studio {
   private geo: GeometryRenderer | null = null;
   /** WebKit: this clip's offline export falls back to the real-time recorder when it runs slower than real time. */
   private rtFallback = false;
+  /** Speed (× real time) the offline export ran at when it handed over to the recorder: the recorder only tries speeds that beat it. */
+  private offlineSpeed: number | null = null;
   /** The geometry pass in the colour engine's own GL context (WebGL2 backend): draws straight into its source. */
   /** Bumped whenever the profile samples go stale (a framing change): a profile run in flight retakes them. */
   private profileEpoch = 0;
@@ -1317,6 +1324,7 @@ export class Studio {
     const forced = wantRealtime();
     const canRt = isRealtimeExportSupported(e.backend.canvas);
     this.rtFallback = false;
+    this.offlineSpeed = null;
     if (forced !== null) return forced && canRt ? "realtime" : "offline";
     // `?rtprobe=1`: the same on any engine (tests the handover off WebKit).
     if ((isWebKit() || new URLSearchParams(location.search).get("rtprobe") === "1") && canRt) {
@@ -2186,6 +2194,8 @@ export class Studio {
   }
 
   private finishExport(err: unknown): void {
+    crumb(err ? `export ${err instanceof DOMException && err.name === "AbortError" ? "cancelled" : "failed"}` : "export done");
+    if (!err) this.exportCrashedLastTime = false;
     if (err) {
       if (err instanceof DOMException && err.name === "AbortError") this.set({ exp: IDLE_EXPORT });
       else this.setExp({ state: "error", message: err instanceof Error ? err.message : String(err) });
@@ -2201,6 +2211,12 @@ export class Studio {
     return !!this.engine;
   }
 
+  /**
+   * The last session died while exporting a video (crumbs.ts): on a phone, out of memory. The export sheet offers
+   * the lighter 1080p export first for a larger clip (until an export here finishes).
+   */
+  exportCrashedLastTime = exportCrashed(lastCrash());
+
   /** The open clip (the export sheet looks up a resumable export of it). */
   get clipFile(): File | null {
     return this.file;
@@ -2213,7 +2229,7 @@ export class Studio {
   }
 
   async exportVideo(req: ExportRequest = {}): Promise<void> {
-    crumb(`export start (${this.snap.exportMode})`);
+    crumb(`export start (${this.snap.exportMode}${this.snap.info ? `, ${this.snap.info.displayW}×${this.snap.info.displayH}` : ""})`);
     if (this.snap.kind === "photo") return this.exportPhoto();
     const e = this.engine, file = this.file, v = this.video, info = this.snap.info;
     if (!file || !v || !info || this.exporting) return;
@@ -2243,6 +2259,7 @@ export class Studio {
       // (the AI toggle as the user set it: an AI that turned out unavailable still gets its note)
       if (colourOn && this.tools.colour.subjectPop && this.seg.status.on && this.snap.kind === "video") {
         const r = await this.segForExport(ctrl.signal);
+        this.seg.releaseForExport();
         if (r === "engine") {
           this.segExportEngine = true;
           this.segExportNote = "AI subject detection wasn't available for this export: standard subject detection was used.";
@@ -2272,16 +2289,29 @@ export class Studio {
       } else {
         let used = mode;
         let res = mode === "realtime"
-          ? await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl, trim)
+          ? await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl, trim, this.offlineSpeed)
           : await this.runOffline(media, file, bitrate, total, colourOn, ctrl, trim, req, this.rtFallback);
-        if (!res) {
-          // Offline ran slower than real time here: the recorder takes this export and the clip's next ones.
+        if (!res && used === "offline") {
+          // Offline ran well below real time here: the recorder takes this export (and the clip's next ones) at a
+          // playback speed that beats it.
           this.rtFallback = false;
           used = "realtime";
           this.engine?.clearPrecomputed(false);
           this.set({ exportMode: "realtime" });
           this.setExp({ progress: 0, frames: 0, fps: 0, etaSec: null, note: null, profile: null });
-          res = await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl, trim);
+          res = await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl, trim, this.offlineSpeed);
+        }
+        if (!res) {
+          // The recorder couldn't hold any speed that beats offline on this device: offline does the job (every
+          // frame, resumable), now and for the clip's next exports.
+          console.info("[export] the recorder can't beat offline here: exporting offline");
+          used = "offline";
+          this.offlineSpeed = null;
+          this.engine?.clearPrecomputed(false);
+          this.set({ exportMode: "offline" });
+          this.setExp({ progress: 0, frames: 0, fps: 0, etaSec: null, note: null, profile: null });
+          res = await this.runOffline(media, file, bitrate, total, colourOn, ctrl, trim, req, false);
+          if (!res) throw new Error("Export failed");
         }
         console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (${used}), ${res.blob.type}, audio ${res.audioIncluded ? "kept" : "dropped"}`);
         this.setExp({
@@ -2475,7 +2505,7 @@ export class Studio {
     const hashes: string[] | null = new URLSearchParams(location.search).get("framehash") === "1" ? [] : null;
     const started = performance.now();
     let frames = 0;
-    let lastUi = 0, lastLive = 0, liveBusy = false;
+    let lastUi = 0, lastLive = 0, liveBusy = false, crumbDecile = 0;
     // ETA from the work done in this run: a resumed export starts part-way, and paused time doesn't count.
     let startProgress = 0, pausedMs = 0, pausedAt = 0;
     // One frame at a time whenever a canvas is shared between stages (the
@@ -2603,6 +2633,11 @@ export class Studio {
               workerTimes();
               prof.pausedMs = pausedMs;
               this.setExp({ frames, fps, progress, etaSec: eta, detail: `${fi.displayWidth}×${fi.displayHeight} · ${fps.toFixed(1)} fps`, profile: prof.summary() });
+              const decile = Math.floor(progress * 10);
+              if (decile > crumbDecile) {
+                crumbDecile = decile;
+                crumb(`export ${decile * 10}% (${fi.displayWidth}×${fi.displayHeight}, ${fps.toFixed(1)} fps)`);
+              }
               // Speed check (WebKit): clip seconds per wall second over ~3 s after a warm-up (first analyses, the
               // capture benchmark, the person model loading), once; slower than real time hands over.
               if (bailBelowRealtime && !bailed) {
@@ -2612,8 +2647,12 @@ export class Studio {
                   const speed = (fi.outTimeSec - speedFrom.out) / ((now - speedFrom.wall - (pausedMs - speedFrom.paused)) / 1000);
                   bailBelowRealtime = false;
                   console.info(`[export] offline runs at ${speed.toFixed(2)}× real time`);
-                  if (speed < 1 && total - fi.outTimeSec > 2) {
-                    console.info("[export] slower than real time: handing over to the real-time recorder");
+                  // The recorder restarts from the beginning (the seconds done here are lost), drops a frame now and
+                  // then and holds the whole export in the foreground: only worth it when one of its playback speeds
+                  // is clearly faster than this.
+                  if (realtimeSteps(speed).length && total - fi.outTimeSec > 2) {
+                    console.info("[export] well below real time: handing over to the real-time recorder");
+                    this.offlineSpeed = speed;
                     bailed = true;
                     run.abort();
                   }
@@ -2922,17 +2961,19 @@ export class Studio {
    * frame rate, restart with the clip slowed down (every frame still lands
    * in the file, re-timed), then at half size.
    */
-  private async runRealtime(media: MediaMod, file: File, v: HTMLVideoElement, info: ClipInfo, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null) {
+  private async runRealtime(media: MediaMod, file: File, v: HTMLVideoElement, info: ClipInfo, bitrate: number, total: number, colourOn: boolean, ctrl: AbortController, trim: TrimRange | null, offlineSpeed: number | null = null) {
     const e = this.engine, geo = this.geo!;
     const canvas = colourOn ? e!.backend.canvas : geo.canvas;
-    const STEPS: { scale: number; rate: number }[] = [
-      { scale: 1, rate: 1 }, { scale: 1, rate: 0.5 }, { scale: 1, rate: 0.25 }, { scale: 0.5, rate: 0.25 },
-    ];
+    // After an offline run measured its speed: only the steps that beat it, at full size (offline keeps it), and
+    // null when none holds (the caller exports offline). Forced (?rt=1): every step, down to half size.
+    const STEPS = realtimeSteps(offlineSpeed);
+    if (!STEPS.length) return null;
     const srcFps = Math.min(60, Math.max(24, Math.round(info.fps || (await media.probeFrameRate(file)))));
     const started = performance.now();
     for (let si = 0; si < STEPS.length; si++) {
       const { scale, rate } = STEPS[si];
-      const canRetry = si < STEPS.length - 1;
+      // After an offline run, a last step that can't hold its speed hands back to offline too.
+      const canRetry = si < STEPS.length - 1 || offlineSpeed !== null;
       const need = srcFps * rate;
       const W = Math.max(2, Math.round(info.displayW * scale)), H = Math.max(2, Math.round(info.displayH * scale));
       const tag = `${rate < 1 ? ` · ${rate === 0.5 ? "½" : "¼"} speed` : ""}${scale < 1 ? ` · ${Math.round(scale * 100)}% size` : ""}`;
@@ -2945,7 +2986,7 @@ export class Studio {
         this.uploadToEngine(v, from, false, [W, H]);
         await e.analyzeNow(true).catch(() => undefined);
       }
-      let rendered = 0;
+      let rendered = 0, crumbDecile = 0;
       let slow = false;
       let lastLive = 0;
       const rtStart = performance.now();
@@ -2967,6 +3008,10 @@ export class Studio {
             const fps = secs > 0.5 ? rendered / secs : 0;
             const remain = Math.max(0, total * (1 - p)) / rate;
             this.setExp({ progress: p, frames: rendered, fps, etaSec: p > 0.01 ? remain : null, detail: `Real time · ${W}×${H}${tag}` });
+            if (Math.floor(p * 10) > crumbDecile) {
+              crumbDecile = Math.floor(p * 10);
+              crumb(`export ${crumbDecile * 10}% (real time ×${rate}, ${W}×${H})`);
+            }
             // Judged against what this step needs; a miss restarts at the next step.
             if (canRetry && secs > 2.5 && fps < need * 0.9 && !slow) {
               slow = true;
@@ -3014,6 +3059,7 @@ export class Studio {
         ctrl.signal.removeEventListener("abort", onOuterAbort);
       }
     }
+    if (offlineSpeed !== null) return null;
     throw new Error("Real-time export could not keep up on this device");
   }
 
