@@ -438,6 +438,13 @@ export type PathProblem = {
   weights?: PathWeights;
   /** Warps for the first `fixed.length` frames, held fixed (window seams). */
   fixed?: Similarity[];
+  /**
+   * Per-frame warp the fidelity term pulls toward (default: identity, i.e.
+   * the real camera). A zero-phase low-pass of the camera here makes the
+   * fidelity indifferent to the band the low-pass removes (bobbing), so the
+   * path can take that out and still follow pans and drifts.
+   */
+  anchor?: Similarity[];
 };
 
 /** Parameter-space linear map of "F ∘ (·)" for a known similarity F. */
@@ -594,8 +601,10 @@ export function solvePathWindow(problem: PathProblem, solver: Partial<L1SolverOp
   // frame edge by about `unit` px too, so all four share one weight.
   for (let t = nFixed; t < n && w.fidelity > 0; t++) {
     const base = 4 * (t - nFixed);
+    const an = problem.anchor ? scaleDown(problem.anchor[t]) : IDENTITY;
+    const target = [an.a, an.b, an.tx, an.ty];
     for (let c = 0; c < 4; c++) {
-      terms.push({ idx: Int32Array.from([base + c]), coef: Float64Array.from([1]), offset: c === 0 ? -1 : 0, weight: w.fidelity * unit });
+      terms.push({ idx: Int32Array.from([base + c]), coef: Float64Array.from([1]), offset: -target[c], weight: w.fidelity * unit });
     }
   }
 
@@ -663,7 +672,8 @@ export function solvePath(problem: PathProblem, windows: Partial<WindowOptions> 
   for (let start = 0; start < n; start += wo.stride) {
     const end = Math.min(n, start + wo.windowSize);
     const fixed = start === 0 ? [] : warps.slice(start, start + wo.pinned);
-    const sol = solvePathWindow({ ...problem, motions: problem.motions.slice(start, end), fixed }, solver);
+    const anchor = problem.anchor?.slice(start, end);
+    const sol = solvePathWindow({ ...problem, motions: problem.motions.slice(start, end), fixed, anchor }, solver);
     for (let t = 0; t < sol.warps.length; t++) warps[start + t] = sol.warps[t];
     objective += sol.objective;
     iterations += sol.iterations;

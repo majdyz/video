@@ -155,7 +155,7 @@ export function colourSettings(c: ColourLook): UserSettings {
  * Motion Fix's DEFAULT_PARAMS, copied so the tool UI doesn't pull the motion
  * solver into the first-load bundle (test/tools.test.ts keeps them equal).
  */
-const STAB_DEFAULTS: StabilizeParams = { smoothing: 0.8, maxCrop: 0.15 };
+const STAB_DEFAULTS: StabilizeParams = { smoothing: 0.8, maxCrop: 0.1 };
 
 export type StabPreset = "gentle" | "steady" | "locked";
 export type StabiliseState = {
@@ -176,7 +176,7 @@ export type StabiliseState = {
 };
 
 export const STAB_PRESETS: (Chip<StabPreset> & { strength: number; maxCrop: number })[] = [
-  { id: "gentle", label: "Gentle", hint: "Keeps intentional motion, least crop", strength: 55, maxCrop: 0.08 },
+  { id: "gentle", label: "Gentle", hint: "Keeps intentional motion, least crop", strength: 55, maxCrop: 0.06 },
   { id: "steady", label: "Steady", hint: "Balanced default", strength: Math.round(STAB_DEFAULTS.smoothing * 100), maxCrop: STAB_DEFAULTS.maxCrop },
   { id: "locked", label: "Locked", hint: "Tripod-like, crops more", strength: 100, maxCrop: 0.25 },
 ];
