@@ -9,6 +9,47 @@ const READBACK_SLOTS = 3;
 
 type Program = { prog: WebGLProgram; loc: Map<string, WebGLUniformLocation | null> };
 
+/**
+ * Export readback as NV12 (BT.709, limited range), packed four bytes to an RGBA8 texel: rows 0..h-1 of the target
+ * hold the luma plane (4 pixels per texel), rows h..1.5h-1 the interleaved CbCr plane (2 chroma pairs per texel,
+ * each the mean of a 2×2 block). Row m of the target is row m of the image (top-down), so the bytes readPixels
+ * returns are an NV12 frame as is: 12 bits a pixel instead of 32, and the encoder gets the format it encodes.
+ */
+const GLSL_NV12 = `#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D u_src;
+uniform ivec2 u_size;
+out vec4 o;
+const vec3 K = vec3(0.2126, 0.7152, 0.0722);
+vec3 px(int x, int y) { return texelFetch(u_src, ivec2(x, u_size.y - 1 - y), 0).rgb; }
+float luma(vec3 c) { return (16.0 + 219.0 * dot(c, K)) / 255.0; }
+vec2 chroma(vec3 c) {
+  float y = dot(c, K);
+  return (vec2(128.0) + 224.0 * vec2((c.b - y) / 1.8556, (c.r - y) / 1.5748)) / 255.0;
+}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  int x = p.x * 4;
+  if (p.y < u_size.y) {
+    o = vec4(luma(px(x, p.y)), luma(px(x + 1, p.y)), luma(px(x + 2, p.y)), luma(px(x + 3, p.y)));
+  } else {
+    int y = (p.y - u_size.y) * 2;
+    vec3 a = (px(x, y) + px(x + 1, y) + px(x, y + 1) + px(x + 1, y + 1)) * 0.25;
+    vec3 b = (px(x + 2, y) + px(x + 3, y) + px(x + 2, y + 1) + px(x + 3, y + 1)) * 0.25;
+    o = vec4(chroma(a), chroma(b));
+  }
+}`;
+
+/** NV12 export readback unless `?yuv=0` (RGBA bytes, the encoder converts). */
+function nv12Wanted(): boolean {
+  try {
+    return typeof location === "undefined" || new URLSearchParams(location.search).get("yuv") !== "0";
+  } catch {
+    return true;
+  }
+}
+
 export class WebGL2Backend implements GpuBackend {
   readonly kind = "webgl2";
   readonly canvas: HTMLCanvasElement;
@@ -592,13 +633,27 @@ export class WebGL2Backend implements GpuBackend {
   private forceCapture: "canvas" | "readback" | null = null;
   /** Human-readable result of the capture benchmark (diagnostics). */
   captureBench = "";
-  private readbackRing: { pbo: WebGLBuffer; busy: boolean }[] = [];
+  private readbackRing: { pbo: WebGLBuffer; busy: boolean; size: number }[] = [];
+  /**
+   * Host copy of a readback, reused frame after frame: the VideoFrame constructor copies the bytes, so one
+   * buffer serves every slot (the copy-out and the wrap run back to back, synchronously). A fresh 33 MB array
+   * per 4K frame was ~1 GB/s of garbage, which WebKit on iPhone collects too late (tab reloads mid-export).
+   */
+  private readbackHost: Uint8Array<ArrayBuffer> | null = null;
+  /** NV12 packing pass (GLSL_NV12): its program, the canvas copy it reads and the packed target. */
+  private nv12: { prog: Program; src: WebGLTexture; srcFbo: WebGLFramebuffer; out: WebGLTexture; outFbo: WebGLFramebuffer; w: number; h: number } | null = null;
+  private nv12Failed = false;
+  /** The capture benchmark found the RGBA readback faster on this device (or `?yuv=0`): no NV12 pass. */
+  private nv12Off = false;
+  /** Pixel format of the export readback frames (diagnostics). */
+  readbackFormat: "RGBA" | "NV12" = "RGBA";
   private flipTarget: { rb: WebGLRenderbuffer; fbo: WebGLFramebuffer; w: number; h: number } | null = null;
 
   /** Sets the capture path for the next export: "auto" re-benchmarks; "bitmap" (a WebGPU path) means "canvas" here. */
   setCaptureMode(mode: "auto" | "canvas" | "bitmap" | "readback"): void {
     this.forceCapture = mode === "auto" ? null : mode === "readback" ? "readback" : "canvas";
     this.capture = null;
+    this.nv12Off = false;
   }
 
   async renderToFrame(timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
@@ -611,11 +666,12 @@ export class WebGL2Backend implements GpuBackend {
     this.lastDrawMs = t1 - t0;
     if (this.capture === null) {
       const forced = this.forceCapture ?? (typeof location !== "undefined" ? new URLSearchParams(location.search).get("capture") : null);
-      if (forced === "canvas" || forced === "readback") {
+      if (forced === "canvas") {
         this.capture = forced;
         this.captureBench = `forced ${forced}`;
       } else {
-        const f = await this.benchmarkCapture(timestampUs, durationUs);
+        // Forced readback still times its two formats (RGBA, NV12).
+        const f = await this.benchmarkCapture(timestampUs, durationUs, forced === "readback");
         this.lastCaptureMs = performance.now() - t1;
         this.stageMs.capture += this.lastCaptureMs;
         return f;
@@ -632,14 +688,14 @@ export class WebGL2Backend implements GpuBackend {
    * exporter overlaps them), keeps the faster, and returns this frame. Every capture of the canvas is issued
    * before the first await: another frame may draw into the canvas once this call yields.
    */
-  private async benchmarkCapture(timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
+  private async benchmarkCapture(timestampUs: number, durationUs: number | undefined, readbackOnly = false): Promise<VideoFrame> {
     const N = 3;
-    const results: string[] = [];
+    const results: string[] = readbackOnly ? ["forced readback"] : [];
     let canvasMs = Infinity, readbackMs = Infinity;
     let frame: VideoFrame | null = null;
     // The render finished first, so neither path is charged the GPU time of the draw (the first capture would be).
     this.gpuSync();
-    try {
+    if (!readbackOnly) try {
       const t0 = performance.now();
       for (let i = 0; i < N; i++) {
         const f = new VideoFrame(this.canvas, { timestamp: timestampUs, duration: durationUs });
@@ -651,24 +707,49 @@ export class WebGL2Backend implements GpuBackend {
     } catch (e) {
       results.push(`canvas failed (${(e as Error).message.split("\n")[0].slice(0, 50)})`);
     }
+    // Readbacks: RGBA, then NV12 where it can run (all issued before the first await, so all read this frame; the GPU
+    // runs them in order, so each set's time is from the previous set's end). The faster format is kept.
+    const w = this.canvas.width, h = this.canvas.height;
+    this.nv12Off = true;
     const t0 = performance.now();
-    const reads = Array.from({ length: N }, () => this.captureReadback(timestampUs, durationUs));
-    const done = await Promise.allSettled(reads);
-    const ok = done.filter((r): r is PromiseFulfilledResult<VideoFrame> => r.status === "fulfilled").map((r) => r.value);
-    if (ok.length === N) {
-      readbackMs = (performance.now() - t0) / N;
-      results.push(`readback ${readbackMs.toFixed(1)} ms`);
-    } else {
+    const rgbaReads = Array.from({ length: N }, () => this.captureReadback(timestampUs, durationUs));
+    this.nv12Off = false;
+    const nv12Reads = this.nv12Targets(w, h) ? Array.from({ length: N }, () => this.captureReadback(timestampUs, durationUs)) : [];
+    const settle = async (reads: Promise<VideoFrame>[], from: () => number) => {
+      const done = await Promise.allSettled(reads);
+      const end = performance.now();
+      const ok = done.filter((r): r is PromiseFulfilledResult<VideoFrame> => r.status === "fulfilled").map((r) => r.value);
       const err = done.find((r): r is PromiseRejectedResult => r.status === "rejected")?.reason as Error | undefined;
-      results.push(`readback failed (${(err?.message ?? "?").split("\n")[0].slice(0, 50)})`);
-    }
-    this.capture = readbackMs < canvasMs ? "readback" : "canvas";
+      return { ok, err, end, ms: ok.length === reads.length && reads.length ? (end - from()) / reads.length : Infinity };
+    };
+    const rgba = await settle(rgbaReads, () => t0);
+    const nv12 = await settle(nv12Reads, () => rgba.end);
+    readbackMs = Math.min(rgba.ms, nv12.ms);
+    if (rgba.ms < Infinity) results.push(`readback ${rgba.ms.toFixed(1)} ms`);
+    else results.push(`readback failed (${(rgba.err?.message ?? "?").split("\n")[0].slice(0, 50)})`);
+    if (nv12Reads.length) results.push(nv12.ms < Infinity ? `NV12 readback ${nv12.ms.toFixed(1)} ms` : `NV12 failed (${(nv12.err?.message ?? "?").split("\n")[0].slice(0, 50)})`);
+    // NV12 unless clearly slower: it is the encoder's own format with the colour matrix stated (WebKit's RGBA
+    // conversion, in Playwright WebKit, encoded BT.601 into a stream the file calls BT.709: reds and blues 2–12 levels off),
+    // and frames waiting for the encoder hold 12 bits a pixel instead of 32.
+    const useNv12 = nv12.ms <= rgba.ms * 1.5;
+    this.nv12Off = !useNv12;
+    this.capture = readbackOnly || readbackMs < canvasMs ? "readback" : "canvas";
     this.captureBench = results.join(", ");
-    console.info(`WebGL2 capture bench: ${this.captureBench} → ${this.capture}`);
-    // The frame itself: both paths hold the same pixels of this one picture.
-    const keep = this.capture === "readback" ? ok.shift()! : frame;
-    for (const f of ok) f.close();
+    console.info(`WebGL2 capture bench: ${this.captureBench} → ${this.capture}${this.capture === "readback" ? (useNv12 ? " (NV12)" : " (RGBA)") : ""}`);
+    // The frame itself: every path holds the same pixels of this one picture.
+    const chosen = useNv12 ? nv12.ok : rgba.ok;
+    const keep = this.capture === "readback" ? chosen.shift()! : frame;
+    for (const f of [...rgba.ok, ...nv12.ok]) if (f !== keep) f.close();
     if (keep !== frame) frame?.close();
+    // The benchmark's extra readback buffers (two formats in flight): back to the export's ring size.
+    const gl = this.gl;
+    while (this.readbackRing.length > READBACK_SLOTS) {
+      const i = this.readbackRing.findIndex((r) => !r.busy);
+      if (i < 0) break;
+      gl.deleteBuffer(this.readbackRing[i].pbo);
+      this.readbackRing.splice(i, 1);
+    }
+    if (!useNv12) this.releaseNv12();
     if (!keep) throw new Error("export capture failed");
     return keep;
   }
@@ -687,6 +768,8 @@ export class WebGL2Backend implements GpuBackend {
     const gl = this.gl;
     for (const r of this.readbackRing) if (!r.busy) gl.deleteBuffer(r.pbo);
     this.readbackRing = this.readbackRing.filter((r) => r.busy);
+    this.readbackHost = null;
+    this.releaseNv12();
     if (this.flipTarget && !this.readbackRing.length) {
       gl.deleteRenderbuffer(this.flipTarget.rb);
       gl.deleteFramebuffer(this.flipTarget.fbo);
@@ -694,21 +777,80 @@ export class WebGL2Backend implements GpuBackend {
     }
   }
 
+  private releaseNv12(): void {
+    const n = this.nv12;
+    if (!n) return;
+    const gl = this.gl;
+    gl.deleteProgram(n.prog.prog);
+    gl.deleteTexture(n.src);
+    gl.deleteTexture(n.out);
+    gl.deleteFramebuffer(n.srcFbo);
+    gl.deleteFramebuffer(n.outFbo);
+    this.nv12 = null;
+  }
+
+  /** The NV12 pass's targets at w×h (null: this size or this GPU can't take it, RGBA readback then). */
+  private nv12Targets(w: number, h: number): NonNullable<WebGL2Backend["nv12"]> | null {
+    if (this.nv12Off || this.nv12Failed || w % 4 !== 0 || h % 2 !== 0 || !nv12Wanted()) return null;
+    if (this.nv12 && this.nv12.w === w && this.nv12.h === h) return this.nv12;
+    const gl = this.gl;
+    const prog = this.nv12?.prog ?? (() => {
+      try {
+        return this.link(VS, GLSL_NV12, ["u_src", "u_size"]);
+      } catch (e) {
+        console.warn("NV12 readback unavailable:", (e as Error).message);
+        this.nv12Failed = true;
+        return null;
+      }
+    })();
+    if (!prog) return null;
+    if (this.nv12) {
+      gl.deleteTexture(this.nv12.src);
+      gl.deleteTexture(this.nv12.out);
+      gl.deleteFramebuffer(this.nv12.srcFbo);
+      gl.deleteFramebuffer(this.nv12.outFbo);
+    }
+    const target = (tw: number, th: number) => {
+      const tex = this.makeTexture(gl.NEAREST);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, tw, th);
+      const fbo = gl.createFramebuffer()!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return { tex, fbo, ok };
+    };
+    const a = target(w, h), b = target(w / 4, (h * 3) / 2);
+    this.nv12 = { prog, src: a.tex, srcFbo: a.fbo, out: b.tex, outFbo: b.fbo, w, h };
+    if (!a.ok || !b.ok) {
+      console.warn("NV12 readback unavailable: framebuffer incomplete");
+      this.releaseNv12();
+      this.nv12Failed = true;
+      return null;
+    }
+    return this.nv12;
+  }
+
   /** Reads the canvas (drawn just now) into a free pixel-pack buffer at once, then waits for the GPU and wraps the bytes. */
   private async captureReadback(timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
     const gl = this.gl;
     const w = this.canvas.width, h = this.canvas.height;
+    const nv12 = this.nv12Targets(w, h);
+    this.readbackFormat = nv12 ? "NV12" : "RGBA";
+    const bytes = nv12 ? (w * h * 3) / 2 : w * h * 4;
     let slot = this.readbackRing.find((r) => !r.busy);
     if (!slot) {
       // The read must be issued before anything else draws: a slot more rather than a wait.
-      slot = { pbo: gl.createBuffer()!, busy: false };
+      slot = { pbo: gl.createBuffer()!, busy: false, size: bytes };
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
-      gl.bufferData(gl.PIXEL_PACK_BUFFER, w * h * 4, gl.STREAM_READ);
+      gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       this.readbackRing.push(slot);
     }
     slot.busy = true;
     try {
+      if (nv12) return await this.readNv12(nv12, slot, w, h, bytes, timestampUs, durationUs);
       // GL rows run bottom-up: a flipped blit into a same-size target makes them top-down for the frame.
       let ft = this.flipTarget;
       if (!ft || ft.w !== w || ft.h !== h) {
@@ -726,8 +868,10 @@ export class WebGL2Backend implements GpuBackend {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         ft = this.flipTarget = { rb, fbo, w, h };
         for (const r of this.readbackRing) {
+          if (r.busy && r !== slot) continue;
           gl.bindBuffer(gl.PIXEL_PACK_BUFFER, r.pbo);
           gl.bufferData(gl.PIXEL_PACK_BUFFER, w * h * 4, gl.STREAM_READ);
+          r.size = w * h * 4;
         }
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       }
@@ -736,6 +880,10 @@ export class WebGL2Backend implements GpuBackend {
       gl.blitFramebuffer(0, 0, w, h, 0, h, w, 0, gl.COLOR_BUFFER_BIT, gl.NEAREST);
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, ft.fbo);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
+      if (slot.size !== bytes) {
+        gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ);
+        slot.size = bytes;
+      }
       gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, 0);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -752,15 +900,74 @@ export class WebGL2Backend implements GpuBackend {
         poll();
       });
       gl.deleteSync(sync);
-      const px = new Uint8Array(w * h * 4);
+      if (!this.readbackHost || this.readbackHost.byteLength !== w * h * 4) this.readbackHost = new Uint8Array(w * h * 4);
+      const px = this.readbackHost;
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
       gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, px);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       // RGBA (alpha is opaque: the canvas has none): WebKit can't copyTo an RGBX frame ("Unable to copy data").
+      // The constructor copies px (no transfer), so the buffer is free again once it returns.
       return new VideoFrame(px, { format: "RGBA", codedWidth: w, codedHeight: h, timestamp: timestampUs, duration: durationUs });
     } finally {
       slot.busy = false;
     }
+  }
+
+  /** captureReadback's NV12 path: the canvas copied into a texture, packed by GLSL_NV12, read into the slot's buffer. */
+  private async readNv12(n: NonNullable<WebGL2Backend["nv12"]>, slot: { pbo: WebGLBuffer; size: number }, w: number, h: number, bytes: number, timestampUs: number, durationUs: number | undefined): Promise<VideoFrame> {
+    const gl = this.gl;
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
+    // A slot sized for the other format (the size or the format changed between exports).
+    if (slot.size !== bytes) {
+      gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ);
+      slot.size = bytes;
+    }
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, n.srcFbo);
+    gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, n.outFbo);
+    gl.viewport(0, 0, w / 4, (h * 3) / 2);
+    gl.useProgram(n.prog.prog);
+    gl.bindVertexArray(this.vao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, n.src);
+    gl.uniform1i(n.prog.loc.get("u_src")!, 0);
+    gl.uniform2i(n.prog.loc.get("u_size")!, w, h);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindTexture(gl.TEXTURE_2D, this.source);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, n.outFbo);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
+    gl.readPixels(0, 0, w / 4, (h * 3) / 2, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, w, h);
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)!;
+    gl.flush();
+    await new Promise<void>((resolve, reject) => {
+      let tries = 0;
+      const poll = () => {
+        const status = gl.clientWaitSync(sync, 0, 0);
+        if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return resolve();
+        if (status === gl.WAIT_FAILED || ++tries > 15000) return reject(new Error("GPU readback timed out"));
+        setTimeout(poll, 1);
+      };
+      poll();
+    });
+    gl.deleteSync(sync);
+    if (!this.readbackHost || this.readbackHost.byteLength !== bytes) this.readbackHost = new Uint8Array(bytes);
+    const px = this.readbackHost;
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
+    gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, px);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    return new VideoFrame(px, {
+      format: "NV12",
+      codedWidth: w,
+      codedHeight: h,
+      timestamp: timestampUs,
+      duration: durationUs,
+      colorSpace: { primaries: "bt709", transfer: "bt709", matrix: "bt709", fullRange: false },
+    });
   }
 
   private ensureAnalysisTargets(w: number, h: number) {
