@@ -287,3 +287,49 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   await end;
   console.log("session: exclude taps replay as their outcome: ok");
 }
+
+// ---------------------------------------------------------------- the session tracks the trim only
+
+{
+  const { segSpan, scopeServes, logForSpan } = await import("../src/pipeline/seg/studio-seg.ts");
+  // The selection plus a margin each side, inside the clip; untrimmed: the whole clip.
+  assert.deepEqual(segSpan(null, 60), { start: 0, end: 60 });
+  assert.deepEqual(segSpan({ start: 20, end: 30 }, 60), { start: 19.5, end: 30.5 });
+  assert.deepEqual(segSpan({ start: 0.2, end: 59.9 }, 60), { start: 0, end: 60 });
+  // The same selection is served; another one only by a finished pass that contains it.
+  assert.equal(scopeServes(null, null, false), true);
+  assert.equal(scopeServes({ start: 20, end: 30 }, { start: 20, end: 30 }, false), true);
+  assert.equal(scopeServes(null, { start: 20, end: 30 }, false), false, "a whole-clip pass still running is restarted on the selection");
+  assert.equal(scopeServes(null, { start: 20, end: 30 }, true), true, "a finished whole-clip pass has the selection's masks");
+  assert.equal(scopeServes({ start: 20, end: 30 }, { start: 22, end: 28 }, true), true);
+  assert.equal(scopeServes({ start: 20, end: 30 }, { start: 18, end: 28 }, true), false, "the selection grew past the pass");
+  assert.equal(scopeServes({ start: 20, end: 30 }, null, true), false, "the trim was cleared");
+  // A re-scoped session keeps the taps inside its range (and what was done to them), not the engine's seeds.
+  const tap = (id: number, t: number) => ({ op: "add" as const, object: { ...subject(t), id } });
+  const log = [{ op: "seeds" as const, t: 0, objects: [{ ...subject(0), id: 1 }] }, tap(2, 5), tap(3, 25), { op: "remove" as const, id: 1 }, { op: "remove" as const, id: 3 }, { op: "restore" as const, id: 3 }, { op: "remove" as const, id: 2 }];
+  assert.deepEqual(logForSpan(log, { start: 19.5, end: 30.5 }).map((l) => `${l.op}:${l.op === "add" ? l.object.id : l.op === "seeds" ? "s" : l.id}`), ["add:3", "remove:3", "restore:3"]);
+
+  // A session over 20–22 s of a longer clip: its grid, its keyframes and every frame it decodes lie inside the range,
+  // and the pass ends there (the export waits for the selection, not the clip).
+  const f = fake();
+  const r = open(f, segSpan({ start: 20.5, end: 21.5 }, 60), () => []);
+  const end = r.settled();
+  r.s.seeds(20.5, [subject(20.5)]);
+  await end;
+  assert.equal(r.errors.length, 0);
+  assert.equal(r.s.grid.i0, 600);
+  assert.equal(r.s.grid.n, 61);
+  assert.ok(f.reads.every((t) => t >= 20 - 1e-6 && t <= 22 + 1e-6), "nothing outside the range is decoded");
+  assert.ok(Math.min(...r.frames.keys()) <= 15 && Math.max(...r.frames.keys()) === 60, "filled from the selection's start to the range's end");
+  // stop(): closes and waits for the loop (the next session never shares the model with a step under way).
+  const g = fake();
+  const q = open(g, { start: 0, end: 4 }, () => []);
+  q.s.seeds(0, [subject(0)]);
+  await new Promise((res) => setTimeout(res, 5));
+  await q.s.stop();
+  const n = g.encodes;
+  await new Promise((res) => setTimeout(res, 20));
+  assert.equal(g.encodes, n, "a stopped session has left the model");
+  assert.equal(q.idles, 0);
+  console.log("session: tracks the trim only; re-scope keeps the taps: ok");
+}

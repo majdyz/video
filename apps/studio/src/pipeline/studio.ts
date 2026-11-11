@@ -715,12 +715,14 @@ export class Studio {
   private runSeg(): void {
     const v = this.video, file = this.file;
     if (!this.seg.on || !v || !file || this.snap.kind !== "video" || this.exporting) return;
-    void this.seg.start(file, v.duration || this.snap.duration).then((live) => {
+    void this.seg.start(file, v.duration || this.snap.duration, this.segTrim).then((live) => {
       if (!live || this.seg.autos || this.file !== file) return;
       void this.seedAutosCanonical();
     });
   }
 
+  /** The trim the AI session follows: the committed one (applyTrim, an export), not every step of a handle drag. */
+  private segTrim: TrimRange | null = null;
   /** Segment seeds run one after another (each its own canonical frame). */
   private seedChain: Promise<void> = Promise.resolve();
   /**
@@ -739,7 +741,7 @@ export class Studio {
 
   /** Segment 0's seeds: the engine's own subjects on the export range's start (trim start, else 0). */
   private seedAutosCanonical(): Promise<void> {
-    return this.seedSegmentCanonical(0, this.trim?.start ?? 0);
+    return this.seedSegmentCanonical(0, this.segTrim?.start ?? 0);
   }
 
   /**
@@ -751,14 +753,18 @@ export class Studio {
    * session goes on; the engine's masks cover that segment).
    */
   private seedSegmentCanonical(k: number, t: number): Promise<void> {
+    // The session that asked: a newer one (the trim moved, seg.start) seeds itself from its own start.
+    const gen = this.seg.generation;
+    const stale = () => this.file !== file0 || this.seg.generation !== gen;
+    const file0 = this.file;
     const run = this.seedChain.then(async () => {
       const e = this.engine, v = this.video, file = this.file;
-      if (!e || !v || !file || !this.seg.live || this.seg.hasSegment(k, t)) return;
+      if (!e || !v || !file || stale() || !this.seg.live || this.seg.hasSegment(k, t)) return;
       let objs: ReturnType<typeof seedObjects> = [];
       try {
         // Not while the user scrubs: two <video>s seeking at once (plus the analysis) is what phones fall over on.
         await this.scrubIdle();
-        if (this.file !== file) return;
+        if (stale()) return;
         // No frame of the preview's may reach the engine between upload and analysis; one in flight lands first.
         objs = await this.workFrame(t + 1e-3, async (sv) => {
           e.resetTracking();
@@ -776,10 +782,10 @@ export class Studio {
       } catch (err) {
         console.warn(`[seg] segment ${k} seed frame failed`, err);
       }
-      if (this.file !== file) return;
+      if (stale()) return;
       // The engine found nothing (it only looks in open blue water: a manta over a reef): the model looks itself.
       if (!objs.length) objs = await this.seg.autoSeeds(t);
-      if (this.file !== file) return;
+      if (stale()) return;
       await this.seg.seedSegment(k, t, objs);
       console.info(`[seg] seeded segment ${k} on the canonical frame ${t.toFixed(2)} s: ${objs.length} subject(s)`);
       console.info(`[seg] seed prompts ${k}: ${JSON.stringify(objs.map((o) => ({ p: o.prompt.points.map(([x, y]) => [+x.toFixed(3), +y.toFixed(3)]), l: o.prompt.labels, b: o.prompt.box ? [o.prompt.box.x0, o.prompt.box.y0, o.prompt.box.x1, o.prompt.box.y1].map((v) => +v.toFixed(3)) : null })))}`);
@@ -891,7 +897,9 @@ export class Studio {
     if (!v || !file) return "engine";
     const label = (p: number | null) => this.setExp({ detail: p === null ? "Finding subjects… then exporting" : `Finding subjects ${Math.round(p * 100)}%… then exporting` });
     label(null);
-    const live = await this.seg.start(file, v.duration || this.snap.duration);
+    // The selection as it is exported (a drag still settling was applied by exportVideo).
+    this.segTrim = this.trim;
+    const live = await this.seg.start(file, v.duration || this.snap.duration, this.segTrim);
     if (signal.aborted) throw new DOMException("Export cancelled", "AbortError");
     if (!live) return "engine";
     // The engine's own subjects on the canonical frame (as the preview seeds them).
@@ -1469,6 +1477,7 @@ export class Studio {
     clearTimeout(this.trimTimer);
     this.trimTimer = 0;
     this.trim = null;
+    this.segTrim = null;
     this.segs = NO_SEGMENTS;
     this.sampleCache = [];
     this.profileEpoch++;
@@ -1957,6 +1966,9 @@ export class Studio {
         void this.analyseMotion();
       }
     }
+    // The AI session tracks the selection only: one over another range is replaced (seg.start), then seeded again.
+    this.segTrim = this.trim;
+    if (this.seg.on) this.runSeg();
   }
 
   /** Decodes the filmstrip thumbnails once the clip is on screen (idle time; skipped where WebCodecs is missing). */

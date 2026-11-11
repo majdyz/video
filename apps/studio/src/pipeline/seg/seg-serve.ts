@@ -97,15 +97,19 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
       model.drop(r.key);
       post({ ok: true });
     } else if (r.type === "session-open") {
-      session?.close();
+      // The session before (another range of the clip, another clip) leaves the model first: it is not re-entrant.
+      await session?.stop();
       const frames = await openSessionFrames(r.file);
-      const s = new SegSession(model, frames, { start: r.start, end: r.end }, {
-        frames: (items) => emit({ ev: "frames", items }, items.flatMap((x) => [x.alpha.buffer, x.nearQ.buffer, x.depQ.buffer, ...(x.excQ ? [x.excQ.buffer] : [])])),
-        keys: (conf) => emit({ ev: "keys", conf }),
-        progress: (done, total) => emit({ ev: "progress", done, total, heapMB: wasmHeapMB() }),
-        idle: (profile) => emit({ ev: "idle", profile: { ...profile, heapMB: wasmHeapMB() } }),
-        needSeeds: (k, t) => emit({ ev: "seeds", k, t }),
-        rejected: (id) => emit({ ev: "rejected", id }),
+      // Only the open session speaks: one replaced by another range (or closed) may still be inside a step, and its
+      // frames would land on the new session's grid.
+      const mine = () => session === s;
+      const s: SegSession = new SegSession(model, frames, { start: r.start, end: r.end }, {
+        frames: (items) => { if (mine()) emit({ ev: "frames", items }, items.flatMap((x) => [x.alpha.buffer, x.nearQ.buffer, x.depQ.buffer, ...(x.excQ ? [x.excQ.buffer] : [])])); },
+        keys: (conf) => { if (mine()) emit({ ev: "keys", conf }); },
+        progress: (done, total) => { if (mine()) emit({ ev: "progress", done, total, heapMB: wasmHeapMB() }); },
+        idle: (profile) => { if (mine()) emit({ ev: "idle", profile: { ...profile, heapMB: wasmHeapMB() } }); },
+        needSeeds: (k, t) => { if (mine()) emit({ ev: "seeds", k, t }); },
+        rejected: (id) => { if (mine()) emit({ ev: "rejected", id }); },
         // The pass threw (session.ts run): the main thread shows it and shuts this worker down.
         error: (msg) => { if (session === s) session = null; emit({ ev: "error", msg, heapMB: wasmHeapMB() }); },
         // Each breadcrumb carries the WASM heap (it only grows: the step that took it past the phone's limit shows).
@@ -116,8 +120,9 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
     } else if (r.type === "session-busy") {
       post({ ok: true, busy: !!session?.busy });
     } else if (r.type === "session-close") {
-      session?.close();
+      const old = session;
       session = null;
+      await old?.stop();
       post({ ok: true });
     } else if (!session) {
       throw new Error("no session");

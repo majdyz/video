@@ -33,6 +33,8 @@ export const SEG = {
   reachS: 20,
   /** The engine's own subjects are seeded again every this long (s): a long clip is covered in segments. */
   segmentS: 8,
+  /** The session tracks the trim plus this much either side (s; studio-seg.ts segSpan). */
+  scopeMarginS: 0.5,
   /** A segment start that finds no subject (and none carried in) looks again this much later (s). */
   reacquireS: 2,
   /** At a segment start, an earlier subject carries on unless the new seeds cover this share of it. */

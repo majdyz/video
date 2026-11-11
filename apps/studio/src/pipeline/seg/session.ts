@@ -470,8 +470,24 @@ export class SegSession {
     return s.bi < s.bwd.length ? s.bwd[s.bi] : null;
   }
 
-  private async run(): Promise<void> {
-    if (this.running) return;
+  private loop: Promise<void> = Promise.resolve();
+
+  /** Starts the loop unless it is running. */
+  private run(): Promise<void> {
+    if (!this.running) this.loop = this.work();
+    return this.loop;
+  }
+
+  /**
+   * Closes the session and resolves once its loop has left the model: a step under way (seconds on a phone) ends
+   * first, so the session opened next (another range, another clip) never runs the model at the same time.
+   */
+  async stop(): Promise<void> {
+    this.close();
+    await this.loop.catch(() => undefined);
+  }
+
+  private async work(): Promise<void> {
     this.running = true;
     try {
       while (!this.closed) {
