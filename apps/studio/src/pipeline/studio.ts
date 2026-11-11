@@ -1581,8 +1581,10 @@ export class Studio {
     }
   }
 
-  /** `?previewfit=0`: the preview uploads the source at its own size, as before (A/B). */
-  private readonly previewFitOn = typeof location === "undefined" || new URLSearchParams(location.search).get("previewfit") !== "0";
+  /** Opt-in `?previewfit=1`: draw the source into a preview-sized target first. Off by default: the
+   *  video is still uploaded full-size into the geometry pass, so the win is unproven and it adds a
+   *  draw + blit per frame. A/B on iPhone before turning it on. */
+  private readonly previewFitOn = typeof location !== "undefined" && new URLSearchParams(location.search).get("previewfit") === "1";
 
   /**
    * The preview-sized source for a sw×sh picture with no geometry tool on (uploadToEngine), or null to upload it
