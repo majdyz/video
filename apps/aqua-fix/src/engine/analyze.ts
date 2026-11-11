@@ -89,6 +89,16 @@ const WB_R_MAX = 3.5;
 const WB_R_MIN = 1.0;
 const WB_B_MIN = 0.55;
 const WB_B_MAX = 1.5;
+/**
+ * Bounded partial balance (colour review, action 5). The gray-world / sand estimate is taken part of the way
+ * (`strength`, exponent on the gains: the scene is never aimed at grey), the blue gain never falls under `bMin`
+ * (a blue cut on a legitimately blue frame is what turns water salmon), and a frame that is mostly water
+ * (object share of the frame under objLo..objHi) is not neutralised at all. Only the blue floor is on: on the
+ * reference pairs (eval/score.ts) a partial strength of 0.7 and the mostly-water gate both moved the default
+ * style away from the references (13.0 -> 13.2 / 13.3; they leave the water cyan). strength 1, bMin 0.55 and objHi 0
+ * give the balance as it was.
+ */
+export const WB = { strength: 1, bMin: 0.8, objLo: 0, objHi: 0 };
 // Below this share of confident pixels the scene is mostly water and the
 // gray-world assumption is weak: shrink the balance toward identity.
 // A deep or murky scene is far-dominated everywhere: few pixels keep much
@@ -440,6 +450,14 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
   for (let step = 0; step < GUARD_STEPS; step++) {
     if (magentaFraction(J, wbWeight, n, wb) <= MAGENTA_MAX_FRACTION) break;
     wb[0] = Math.max(WB_R_MIN, wb[0] * 0.9);
+  }
+  // Bounded partial correction (WB).
+  {
+    let objShare = 0;
+    for (let i = 0; i < n; i++) objShare += conf[i];
+    const k = WB.strength * (WB.objHi > 0 ? smoothstep(WB.objLo, WB.objHi, objShare / n) : 1);
+    wb[0] = Math.pow(wb[0], k);
+    wb[2] = Math.max(Math.min(1, WB.bMin), Math.pow(wb[2], k));
   }
   // Range compensation only where the range prior actually spreads: on a
   // flat prior its per-pixel noise is all it would act on, and the prior
