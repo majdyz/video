@@ -55,9 +55,15 @@ export const SEG = {
   /** At a segment start that leaves nothing to follow, a subject last seen within this long (s) is followed on to
    * the next look (session.ts carryOver): the tracker knows it again when it comes back, a look may not. */
   lostS: 3,
-  /** The lite (phone) model follows at most this many of the engine's own subjects at a time (every one is a
-   * tracker step per keyframe); taps are always followed. */
+  /** The lite model, and any model on a phone (SessionOptions.autoCap), follows at most this many of the engine's
+   * own subjects at a time (every one is a tracker step per keyframe); taps are always followed. */
   liteAutos: 2,
+  /** A tap's backward steps are read a chunk this long (s) at a time, in one sequential decode (session.ts readBack). */
+  backChunkS: 1,
+  /** Playhead first (session.ts focus): the playhead's subjects are followed this far ahead of it (s)... */
+  peekS: 1,
+  /** ...unless the pass is within this long (s) of getting there itself. */
+  peekSkipS: 2,
   /** At a segment start, an earlier subject carries on unless the new seeds cover this share of it. */
   carryCover: 0.5,
   /** Decoded frames the background session keeps (luma + colour cells, ~70 KB each). */

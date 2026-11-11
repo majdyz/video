@@ -69,8 +69,26 @@ export class EdgeTam {
   /** The 512-px encoder (vision_encoder_lite): the 1024 frame is averaged 2×2 first; its features come out at the 1024 shapes. */
   lite = false;
 
+  /** The graph runs wait for one another (exclusive). */
+  private lock: Promise<unknown> = Promise.resolve();
+
+  /**
+   * Runs fn once every call before it has ended. The model is not re-entrant (one set of encoded features, reused
+   * buffers), and the session already calls it one step at a time; this makes it a property of the model instead
+   * of its callers (two graphs running at once on a phone's GPU is also twice the memory).
+   */
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.lock.then(fn);
+    this.lock = run.catch(() => undefined);
+    return run;
+  }
+
   /** RGBA 1024×1024 (the upright frame stretched) → features of the frame the next steps run on. */
-  async encode(rgba: Uint8ClampedArray): Promise<void> {
+  encode(rgba: Uint8ClampedArray): Promise<void> {
+    return this.exclusive(() => this.encodeNow(rgba));
+  }
+
+  private async encodeNow(rgba: Uint8ClampedArray): Promise<void> {
     const S = this.lite ? 512 : 1024, n = S * S;
     if (this.pixels?.length !== 3 * n) this.pixels = new Float32Array(3 * n);
     const px = this.pixels;
@@ -116,7 +134,11 @@ export class EdgeTam {
    * prompted step of an empty session is its conditioning frame; later prompts (the flow guard) are
    * non-conditioning, as in transformers' streaming.
    */
-  async step(key: string, frame: number, points: [number, number][] | null, labels: number[] | null, reverse: boolean): Promise<{ logits: Float32Array; lw: number; lh: number; score: number; iou: number }> {
+  step(key: string, frame: number, points: [number, number][] | null, labels: number[] | null, reverse: boolean): Promise<{ logits: Float32Array; lw: number; lh: number; score: number; iou: number }> {
+    return this.exclusive(() => this.stepNow(key, frame, points, labels, reverse));
+  }
+
+  private async stepNow(key: string, frame: number, points: [number, number][] | null, labels: number[] | null, reverse: boolean): Promise<{ logits: Float32Array; lw: number; lh: number; score: number; iou: number }> {
     const F = this.feats;
     if (!F) throw new Error("encode first");
     const ort = this.ort;
@@ -171,7 +193,11 @@ export class EdgeTam {
    * The mask a prompt gives on the encoded frame alone (no memory read or written): the decoder only, for scoring
    * candidate points (SegSession.autoSeeds).
    */
-  async probe(points: [number, number][], labels: number[]): Promise<{ logits: Float32Array; lw: number; lh: number; score: number; iou: number }> {
+  probe(points: [number, number][], labels: number[]): Promise<{ logits: Float32Array; lw: number; lh: number; score: number; iou: number }> {
+    return this.exclusive(() => this.probeNow(points, labels));
+  }
+
+  private async probeNow(points: [number, number][], labels: number[]): Promise<{ logits: Float32Array; lw: number; lh: number; score: number; iou: number }> {
     const F = this.feats;
     if (!F) throw new Error("encode first");
     const ort = this.ort;

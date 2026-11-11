@@ -16,11 +16,11 @@ export function startCrumbs(build: string): void {
     if (previous) console.warn("[crumbs] the last session ended unexpectedly:\n" + previous.join("\n"));
   } catch { /* no storage */ }
   try {
-    aiDied = localStorage.getItem(AI_KEY) === "1";
+    aiDied = crashedProvider(localStorage.getItem(AI_KEY));
     localStorage.removeItem(AI_KEY);
   } catch { /* no storage */ }
   aiBusy = false;
-  aiShown = null;
+  aiShown = undefined;
   crumb(`start build ${build} · ${navigator.userAgent.replace(/^Mozilla\/5\.0 /, "").slice(0, 90)}`);
   addEventListener("pagehide", () => { crumb(DONE); writeAi(true); });
   addEventListener("pageshow", (e) => { if ((e as PageTransitionEvent).persisted) crumb("back from cache"); writeAi(); });
@@ -33,17 +33,33 @@ export function startCrumbs(build: string): void {
 // page died: AI steps are throttled, and taps, the colour profile, a subject's track pass and the export write their
 // own steps during a pass, so "the last step was an AI step" missed most deaths in a pass (and the next session
 // walked into the same crash), while a page swiped away mid-pass counted as one.
+//
+// The flag's value is what the model ran on ("webgpu" or "wasm"): a page that died with the model on the GPU gets
+// the model on WASM next time (studio-seg.ts), and only one that died on WASM has nothing left to fall back to.
 const AI_KEY = "studio.aiWorking";
-let aiDied = false;
+export type AiProvider = "webgpu" | "wasm";
+let aiDied: AiProvider | null = null;
 let aiBusy = false;
-let aiShown: boolean | null = null;
+let aiOn: AiProvider = "wasm";
+/** What the flag in storage is now (null: cleared; undefined: not written yet this session). */
+let aiShown: AiProvider | null | undefined = undefined;
+
+/**
+ * What a flag left in storage says the model ran on when the page died (null: no flag, it ended cleanly). Builds
+ * before the provider was kept wrote "1": read as WASM (no fallback: AI turns off, as it did then). Pure.
+ */
+export function crashedProvider(flag: string | null): AiProvider | null {
+  if (!flag) return null;
+  return flag === "webgpu" ? "webgpu" : "wasm";
+}
 
 function writeAi(closing = false): void {
   const on = aiBusy && !closing && (typeof document === "undefined" || document.visibilityState !== "hidden");
-  if (on === aiShown) return;
-  aiShown = on;
+  const v = on ? aiOn : null;
+  if (v === aiShown) return;
+  aiShown = v;
   try {
-    if (on) localStorage.setItem(AI_KEY, "1");
+    if (v) localStorage.setItem(AI_KEY, v);
     else localStorage.removeItem(AI_KEY);
   } catch { /* full or blocked */ }
 }
@@ -51,16 +67,24 @@ function writeAi(closing = false): void {
 /**
  * The AI model starts (true) or stops (false) working: loading, opening a clip, tracking, answering a tap. Kept in
  * localStorage while true and the page is visible; cleared when the work ends (idle, hibernation, the worker shut
- * down) and when the page is hidden or closed. Cheap to call often (it writes only on a change).
+ * down) and when the page is hidden or closed. Cheap to call often (it writes only on a change). `provider`: what
+ * the model runs on from now (kept until told otherwise): while it loads, what it is meant to run on; once it has,
+ * what it got.
  */
-export function aiWorking(on: boolean): void {
+export function aiWorking(on: boolean, provider?: AiProvider): void {
   aiBusy = on;
+  if (provider) aiOn = provider;
   writeAi();
+}
+
+/** What the model ran on when the last session's page died on screen with it at work (null: it did not). */
+export function aiCrashedOn(): AiProvider | null {
+  return aiDied;
 }
 
 /** The last session's page died on screen with the AI model at work (the flag was still set at start-up). */
 export function aiCrashedLast(): boolean {
-  return aiDied;
+  return aiDied !== null;
 }
 
 /** One step (kept short: it is written synchronously). */

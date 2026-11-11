@@ -6,8 +6,8 @@
 import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts";
 import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
-import { aiCrashedLast, aiProfile, aiWorking, crumb } from "../crumbs.ts";
-import { deviceFacts, isMobile, isWeakDevice } from "../device.ts";
+import { aiCrashedOn, aiProfile, aiWorking, crumb } from "../crumbs.ts";
+import { deviceFacts, isMobile, isWeakDevice, segRuntime } from "../device.ts";
 import { segFps, segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
 import { confWeight, mapPrompt, maskSize, SEG, type SegObject } from "./track.ts";
@@ -36,6 +36,36 @@ function writePref(on: boolean): void {
   try {
     localStorage.setItem(PREF_KEY, on ? "1" : "0");
   } catch { /* private mode: this session only */ }
+}
+
+/** Per device: the page died with the model on WebGPU, so the model runs on WASM here (device.ts segRuntime). */
+const FORCE_WASM_KEY = "deepfix.subjectPop.segForceWasm";
+let forceWasmNow = false;
+
+function readForceWasm(): boolean {
+  try {
+    return forceWasmNow || localStorage.getItem(FORCE_WASM_KEY) === "1";
+  } catch {
+    return forceWasmNow;
+  }
+}
+
+function writeForceWasm(on: boolean): void {
+  forceWasmNow = on;
+  try {
+    if (on) localStorage.setItem(FORCE_WASM_KEY, "1");
+    else localStorage.removeItem(FORCE_WASM_KEY);
+  } catch { /* private mode: this session only */ }
+}
+
+/**
+ * What a session that died with the model at work (crumbs.ts aiCrashedOn) means for this one. On WebGPU: AI stays
+ * as it was and the model moves to WASM for good (forceWasm); on WASM, or on WebGPU when it had already been moved
+ * to WASM (it fell back there and died all the same): nothing is left to fall back to, AI turns off. Pure.
+ */
+export function crashOutcome(on: boolean, died: "webgpu" | "wasm" | null, forcedWasm: boolean): { on: boolean; crashed: boolean; forceWasm: boolean } {
+  if (died === "webgpu" && !forcedWasm) return { on, crashed: false, forceWasm: true };
+  return { on: on && !died, crashed: on && !!died, forceWasm: forcedWasm };
 }
 
 
@@ -341,6 +371,12 @@ export class SegLive {
     this.conf = c;
   }
 
+  /** The frame at clip time t has its masks (or its answer that there are none). */
+  has(t: number): boolean {
+    const i = Math.round(t * SEG.sampleHz) - this.i0;
+    return i >= 0 && i < this.n && !!this.frames[i];
+  }
+
   /** Bytes held (the run-length coded maps). */
   get bytes(): number {
     return this.frames.reduce((s, f) => s + (f ? f.alpha.byteLength + f.nearQ.byteLength + f.depQ.byteLength + (f.excQ?.byteLength ?? 0) : 0), 0);
@@ -466,14 +502,14 @@ export function profileLine(p: Record<string, number>, ep = ""): string {
   ].join(" · ");
 }
 
+/** The engine's own subjects followed at a time on a phone, whatever the model runs on (session.ts autoCap): each
+ * is a tracker step, with its memory bank, per keyframe. Elsewhere the session's own default. */
+function autoCap(): number | undefined {
+  return isMobile(deviceFacts()) ? SEG.liteAutos : undefined;
+}
+
 /** A finished pass's worker (the model's ~800 MB of WASM heap) is shut down after this long idle (ms). */
 export const SEG_HIBERNATE_MS = 15000;
-
-/** Safari / any WebKit browser (iPhone browsers all are). */
-function isWebKit(): boolean {
-  const ua = navigator.userAgent;
-  return /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg|Android/.test(ua);
-}
 
 function errText(e: unknown): string {
   return (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 120);
@@ -517,7 +553,14 @@ export class SubjectSeg {
     let on = readPref();
     // The page died while the model worked last time (a phone out of memory): AI starts off, once; turning it on again
     // is the user's call (and a crash after that turns it off again).
-    const crashed = on && aiCrashedLast();
+    // On WebGPU: the model runs on WASM from now on instead, and AI stays on (only a crash on WASM turns it off).
+    const out = crashOutcome(on, aiCrashedOn(), readForceWasm());
+    const crashed = out.crashed;
+    if (out.forceWasm && !readForceWasm()) {
+      writeForceWasm(true);
+      this.gpuDiedLast = true;
+      crumb("ai: crashed on webgpu last time; wasm from now on");
+    }
     if (crashed) {
       on = false;
       writePref(false);
@@ -547,23 +590,30 @@ export class SubjectSeg {
     if (this.model) return Promise.resolve(this.model);
     if (this.loading) return this.loading;
     this.set({ phase: "download", progress: 0 });
-    crumb("ai: model load");
+    // Where the model runs (device.ts segRuntime): WebGPU where there is one, on WebKit from Safari / iOS 26 and with
+    // the lite encoder; else the worker with the plain WASM runtime (the WebGPU build's, twice the WebAssembly, was
+    // the pass's memory peak at start-up: +130 MB in Chromium). `?seggpu=1` forces WebGPU (and forgets a crash on it
+    // before), `?seggpu=0` WASM. Not right after a crash on WebGPU, though: the reload a phone does by itself has
+    // the same address, and would crash again (the session after that one is forced again).
+    const q = new URLSearchParams(location.search);
+    const param = this.gpuDiedLast && q.get("seggpu") === "1" ? null : q.get("seggpu");
+    if (param === "1") writeForceWasm(false);
+    const rt = segRuntime({ ua: navigator.userAgent, gpu: "gpu" in navigator, param, avoidGpu: readForceWasm(), mobile: isMobile(deviceFacts()) });
+    // `?seglite=1 | 0`: the lite / the full encoder whatever the device (to compare them on one).
+    const lite = q.get("seglite") === "0" ? false : rt.lite || q.get("seglite") === "1";
+    crumb(`ai: model load (${rt.wasm ? "wasm" : "webgpu"}${lite ? " lite" : ""}: ${rt.why})`);
     // "AI working" (crumbs.ts): set while the model loads, a clip opens, a request is out or the pass runs; cleared
-    // when the session is idle, hibernated, failed or closed. A page that dies with it set starts with AI off.
-    aiWorking(true);
+    // when the session is idle, hibernated, failed or closed. A page that dies with it set starts with the model on
+    // WASM when it was on WebGPU, else with AI off.
+    aiWorking(true, rt.wasm ? "wasm" : "webgpu");
     this.loading = (async () => {
-      // Where the model can only run on WASM, the worker with the plain WASM runtime: the WebGPU build's (twice the
-      // WebAssembly) start-up was the pass's memory peak (+130 MB in Chromium).
-      // `?seggpu=1`: try WebGPU on WebKit anyway (iOS 26 Safari ships WebGPU; the crash above was iOS 18.7).
-      const q = new URLSearchParams(location.search);
-      const forceWasm = isWebKit() && q.get("seggpu") !== "1";
-      const m = new WorkerSegModel(forceWasm || !("gpu" in navigator));
+      const m = new WorkerSegModel(rt.wasm);
       try {
-        // WebGPU in iPhone Safari crashed the page on the first frames (crash log, 31 Oct, iOS 18.7): WebKit runs
-        // the model on WASM.
-        await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: forceWasm ? "wasm" : "auto", lite: forceWasm || q.get("seglite") === "1" });
+        await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: rt.wasm ? "wasm" : "auto", lite });
         m.onEvent = (e) => this.onEvent(e);
         this.model = m;
+        // What it got (WebGPU falls back to WASM in the worker when no adapter comes).
+        aiWorking(true, m.info?.ep.startsWith("webgpu") ? "webgpu" : "wasm");
         crumb(`ai: model ready (${m.info?.ep ?? "?"}, ${m.info?.threads ?? "?"} threads, heap ${m.info?.heapMB ?? "?"} MB)`);
         this.set({ phase: "ready", progress: null });
         return m;
@@ -583,6 +633,8 @@ export class SubjectSeg {
     return this.loading;
   }
 
+  /** The session before this one died with the model on WebGPU (the model was moved to WASM at start-up). */
+  private gpuDiedLast = false;
   private crumbTens = -1;
   /** Model steps at the last profile written (onEvent idle). */
   private profiledSteps = -1;
@@ -607,6 +659,7 @@ export class SubjectSeg {
       this.cache = null;
     } else if (e.ev === "progress") {
       this.busy = e.done < e.total;
+      if (!e.taps) this.tapDone();
       const tens = e.total ? Math.floor((10 * e.done) / e.total) : 0;
       if (tens !== this.crumbTens) { this.crumbTens = tens; crumb(`ai: pass ${tens * 10}% (${e.done}/${e.total}) · heap ${e.heapMB ?? "?"} MB`); }
       this.set({ phase: "tracking", progress: e.total ? e.done / e.total : null });
@@ -620,6 +673,7 @@ export class SubjectSeg {
       this.onRejected?.();
     } else if (e.ev === "idle") {
       this.busy = false;
+      this.tapDone();
       this.passDone = this.autos !== null;
       segLog(`session idle: ${live.filled}/${live.n} frames filled, ${(live.bytes / 1e6).toFixed(1)} MB`);
       this.lastProfile = e.profile;
@@ -638,6 +692,46 @@ export class SubjectSeg {
       this.idleWaiters = [];
       for (const r of w) r();
     }
+  }
+
+  /**
+   * A tap is with the session and not followed through yet (from the tap to the first progress without a tap left,
+   * or the idle). The studio holds its own heavy work on the paused frame back meanwhile (the engine's analysis: on
+   * a phone the tap's tracking and its decoder are all the page's memory can take), and catches up after (onTapDone).
+   */
+  tapBusy = false;
+  onTapDone: (() => void) | null = null;
+  private tapDone(): void {
+    if (!this.tapBusy || this.inflight) return;
+    this.tapBusy = false;
+    this.onTapDone?.();
+  }
+
+  /** The session is at work: the pass is running, or a tap is with it. */
+  get working(): boolean {
+    return this.busy || this.tapBusy || this.inflight > 0;
+  }
+
+  /**
+   * Playhead first: the user is paused at clip time t where the pass has not been yet. `objs`: the engine's subjects
+   * on that frame (the session's own search when none). The session follows them from there for a moment, ahead of
+   * the pass (session.ts focus), so the frame on screen shows AI masks within seconds; they are provisional, and
+   * the finished pass (what an export waits for) is the same with or without them. Not in the log: nothing to replay.
+   */
+  async focus(t: number, objs: SegObject[]): Promise<void> {
+    const live = this.live, model = this.model;
+    if (!this.wantsFocus(t) || !live || !model) return;
+    const taken = await model.sessionFocus(t, objs, true).catch(() => false);
+    if (!taken) return;
+    crumb(`ai: peek ${t.toFixed(2)}s`);
+    this.lastActivity = performance.now();
+  }
+
+  /** focus(t) would do something: a pass under way that has not filled the frame at t, and no tap in its way. */
+  wantsFocus(t: number): boolean {
+    if (!this.on || !this.live || !this.model || this.hibernated || this.waking || this.opening) return false;
+    if (this.autos === null || this.passDone || this.tapBusy || this.inflight) return false;
+    return t >= this.span.start - 1e-6 && t <= this.span.end + 1e-6 && !this.live.has(t);
   }
 
   /** Called when the pass failed in the worker (fail): the studio tells the user and drops its seed-frame video. */
@@ -663,6 +757,7 @@ export class SubjectSeg {
     this.live = null;
     this.cache = null;
     this.busy = false;
+    this.tapBusy = false;
     this.hibernated = false;
     // The clip's session is gone with its worker: nothing of it is kept, so turning AI off and on again (or the
     // next clip) starts a clean one instead of a session that believes its seeds were already given.
@@ -732,7 +827,7 @@ export class SubjectSeg {
       // The replay re-tracks the clip: at work until its idle.
       aiWorking(true);
       const span = this.span;
-      await model.sessionOpen(file, span.start, span.end, segFps());
+      await model.sessionOpen(file, span.start, span.end, segFps(), autoCap());
       if (this.file !== file || this.span !== span) return false;
       this.hibernated = false;
       for (const l of this.log) {
@@ -807,7 +902,7 @@ export class SubjectSeg {
       try {
         crumb("ai: session open");
         aiWorking(true);
-        const info = await model.sessionOpen(file, span.start, span.end, segFps());
+        const info = await model.sessionOpen(file, span.start, span.end, segFps(), autoCap());
         crumb(`ai: session ${info.width}x${info.height}, ${info.n} frames`);
         if (this.file !== file || this.span !== span) return null;
         this.live = new SegLive(info);
@@ -874,8 +969,10 @@ export class SubjectSeg {
     const object: SegObject & { id: number } = { id, kind: "include", t, prompt: toSource ? mapPrompt(shown, toSource) : shown };
     this.log.push({ op: "add", object });
     aiWorking(true);
+    this.tapBusy = true;
+    this.inflight++;
     // False: the worker failed meanwhile (fail has told the user).
-    if (!(await this.model.sessionAdd(object).then(() => true, () => false))) return false;
+    if (!(await this.model.sessionAdd(object).then(() => true, () => false).finally(() => { this.inflight--; }))) { this.tapBusy = false; return false; }
     this.undoOps.push({ kind: "added", id });
     this.onChange();
     return true;
@@ -890,10 +987,11 @@ export class SubjectSeg {
     clearTimeout(this.hibTimer);
     crumb(`ai: exclude ${t.toFixed(2)}s`);
     this.inflight++;
+    this.tapBusy = true;
     aiWorking(true);
     const r = await this.model.sessionExclude(id, t, u, v).catch(() => null).finally(() => { this.inflight--; });
     // Null: the worker failed in or before the tap's own step (fail has told the user).
-    if (!r) return null;
+    if (!r) { this.tapBusy = false; return null; }
     // The tap's outcome depends on the masks tracked when it came, so the log keeps what it resolved to, not the tap:
     // a subject taken out, or an exclude object added (excludeOutcome). Replayed, either gives the same masks, so the
     // session can still hibernate and be released for an export (it used to stay awake for good after one exclude).
@@ -948,6 +1046,7 @@ export class SubjectSeg {
     this.seededSegs = new Set();
     this.undoOps = [];
     this.busy = false;
+    this.tapBusy = false;
     this.log = [];
     this.hibernated = false;
     this.passDone = false;
