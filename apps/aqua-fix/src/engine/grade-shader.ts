@@ -127,10 +127,9 @@ const float SB_HUE = ${SEABED.hue.toFixed(4)};
 const float SB_CHROMA = ${SEABED.chroma.toFixed(4)};
 const float SB_KEEP = ${SEABED.keep.toFixed(4)};
 const float SB_LIFT = ${SEABED.lift.toFixed(4)};
-const float SB_RING = ${SEABED.ring.toFixed(4)};
-const float SB_REGION = ${SEABED.regionK.toFixed(4)};
-const float SB_LO = ${SEABED.lo.toFixed(4)};
-const float SB_SPAN = ${SEABED.span.toFixed(4)};
+const float SB_GRID = ${SEABED.grid.toFixed(1)};
+const float SB_W_LO = ${SEABED.wLo.toFixed(4)};
+const float SB_W_HI = ${SEABED.wHi.toFixed(4)};
 const float SB_Y0 = ${SEABED.y0.toFixed(4)};
 const float SB_Y1 = ${SEABED.y1.toFixed(4)};
 const float WP_CMIN = ${WARM_POP.cMin.toFixed(4)};
@@ -559,23 +558,30 @@ vec2 warmPop(float L, vec2 ab, float k) {
   float al = dot(ab, wh);
   return wh * mix(al, Ct, k) + (ab - wh * al) * pow(max(0.0, 1.0 - k), WP_SIDE);
 }
-// Seabed recovery (SEABED, params.ts): how much a pixel is sand / reef (brightness over the water level, its own or
-// its region's from a ring of the low-res guide) rather than open water.
-float seabedT(float L) {
-  float lw = p[25].y, lb = max(p[25].z, p[25].y + 0.05);
-  return smoothstepf(lw + SB_LO * (lb - lw), lw + (SB_LO + SB_SPAN) * (lb - lw), L);
+// Seabed recovery (SEABED, params.ts): how much of the ground around a pixel is lit seabed rather than open water,
+// read from the analysis' coarse grid (p27–p35, SB_GRID² cell means) with a quadratic B-spline and a soft ramp. The
+// pixel's own brightness has no say: a dark stone and the sand it lies on share one weight, and it fades with the
+// ground's brightness (distance). Mirrors apply.ts seabedW.
+float seabedCell(int i, int j) {
+  int n = int(SB_GRID);
+  int k = clamp(j, 0, n - 1) * n + clamp(i, 0, n - 1);
+  vec4 r = p[27 + k / 4];
+  int m = k - 4 * (k / 4);
+  return m == 0 ? r.x : m == 1 ? r.y : m == 2 ? r.z : r.w;
 }
-float seabedW(vec2 uv, float L) {
-  ivec2 sz = textureSize(u_data2, 0);
+float seabedW(vec2 uv) {
+  vec2 g = uv * SB_GRID - 0.5;
+  vec2 c = floor(g + 0.5);
+  vec2 f = g - c;
+  ivec2 ic = ivec2(c);
+  vec3 wx = vec3(0.5 * (0.5 - f.x) * (0.5 - f.x), 0.75 - f.x * f.x, 0.5 * (0.5 + f.x) * (0.5 + f.x));
+  vec3 wy = vec3(0.5 * (0.5 - f.y) * (0.5 - f.y), 0.75 - f.y * f.y, 0.5 * (0.5 + f.y) * (0.5 + f.y));
   float acc = 0.0;
-  for (int k = 0; k < 8; k++) {
-    float a = float(k) * 0.7853982;
-    vec2 q = clamp(uv + SB_RING * vec2(cos(a), sin(a)), vec2(0.0), vec2(1.0));
-    ivec2 ij = min(ivec2(q * vec2(sz)), sz - 1);
-    acc += seabedT(linearToOklab(max(texelFetch(u_data2, ij, 0).xyz, vec3(0.0))).x);
+  for (int j = 0; j < 3; j++) {
+    for (int i = 0; i < 3; i++) acc += wx[i] * wy[j] * seabedCell(ic.x + i - 1, ic.y + j - 1);
   }
   // The seabed lies below: the top of the frame (bright water toward the surface) is spared, softly.
-  return max(seabedT(L), min(1.0, SB_REGION * acc / 8.0)) * smoothstepf(SB_Y0, SB_Y1, uv.y);
+  return smoothstepf(SB_W_LO, SB_W_HI, acc) * smoothstepf(SB_Y0, SB_Y1, uv.y);
 }
 float popLift(float L, float P) { return L + SP_LIFT * P * p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
 // Hue guard: on the subject (weight w) the output hue stays within SUBJECT_POP.hueMax of the source pixel's hue.
@@ -817,7 +823,8 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   lk.yz = richLook(lk, p[23].z);
   // Seabed recovery: sand and reef to a warm neutral (and a little lighter) where the water left no red.
   if (p[25].x > 0.0) {
-    float sb = seabedW(uv, lab0.x) * p[25].x;
+    // A pixel whose own colour escaped the cast (yellow coral, an orange fish: vividW) is not the red-less ground.
+    float sb = seabedW(uv) * (1.0 - vividW) * p[25].x;
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
@@ -1165,22 +1172,29 @@ fn warmPop(L: f32, ab: vec2<f32>, k: f32) -> vec2<f32> {
   let al = dot(ab, wh);
   return wh * mix(al, Ct, k) + (ab - wh * al) * pow(max(0.0, 1.0 - k), WP_SIDE);
 }
-fn seabedT(L: f32) -> f32 {
-  let lw = params.p[25].y;
-  let lb = max(params.p[25].z, params.p[25].y + 0.05);
-  return smoothstepf(lw + SB_LO * (lb - lw), lw + (SB_LO + SB_SPAN) * (lb - lw), L);
+fn seabedCell(i: i32, j: i32) -> f32 {
+  let n = i32(SB_GRID);
+  let k = clamp(j, 0, n - 1) * n + clamp(i, 0, n - 1);
+  let r = params.p[27 + k / 4];
+  let m = k - 4 * (k / 4);
+  if (m == 0) { return r.x; }
+  if (m == 1) { return r.y; }
+  if (m == 2) { return r.z; }
+  return r.w;
 }
-fn seabedW(uv: vec2<f32>, L: f32) -> f32 {
-  let sz = vec2<i32>(textureDimensions(u_data2, 0));
+fn seabedW(uv: vec2<f32>) -> f32 {
+  let g = uv * SB_GRID - vec2<f32>(0.5);
+  let c = floor(g + vec2<f32>(0.5));
+  let f = g - c;
+  let ic = vec2<i32>(c);
+  let wx = vec3<f32>(0.5 * (0.5 - f.x) * (0.5 - f.x), 0.75 - f.x * f.x, 0.5 * (0.5 + f.x) * (0.5 + f.x));
+  let wy = vec3<f32>(0.5 * (0.5 - f.y) * (0.5 - f.y), 0.75 - f.y * f.y, 0.5 * (0.5 + f.y) * (0.5 + f.y));
   var acc = 0.0;
-  for (var k = 0; k < 8; k++) {
-    let a = f32(k) * 0.7853982;
-    let q = clamp(uv + SB_RING * vec2<f32>(cos(a), sin(a)), vec2<f32>(0.0), vec2<f32>(1.0));
-    let ij = min(vec2<i32>(q * vec2<f32>(sz)), sz - vec2<i32>(1));
-    acc += seabedT(linearToOklab(max(textureLoad(u_data2, ij, 0).xyz, vec3<f32>(0.0))).x);
+  for (var j = 0; j < 3; j++) {
+    for (var i = 0; i < 3; i++) { acc += wx[i] * wy[j] * seabedCell(ic.x + i - 1, ic.y + j - 1); }
   }
   // The seabed lies below: the top of the frame (bright water toward the surface) is spared, softly.
-  return max(seabedT(L), min(1.0, SB_REGION * acc / 8.0)) * smoothstepf(SB_Y0, SB_Y1, uv.y);
+  return smoothstepf(SB_W_LO, SB_W_HI, acc) * smoothstepf(SB_Y0, SB_Y1, uv.y);
 }
 fn popLift(L: f32, P: f32) -> f32 { return L + SP_LIFT * P * params.p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
 fn popHue(ab: vec2<f32>, abSrc: vec2<f32>, w: f32) -> vec2<f32> {
@@ -1375,7 +1389,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   lk = vec3(lk.x, waterTint(lk.yz, params.p[26].w, p[22].w));
   lk = vec3(lk.x, richLook(lk, p[23].z));
   if (params.p[25].x > 0.0) {
-    let sb = seabedW(uv, lab0.x) * params.p[25].x;
+    let sb = seabedW(uv) * (1.0 - vividW) * params.p[25].x;
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2<f32>(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.

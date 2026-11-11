@@ -300,16 +300,26 @@ export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.
 /**
  * Seabed recovery: under water that has taken all the red (8-bit red ~0 even on white sand), no gain can bring the
  * colour back; the sand and reef are given a warm neutral instead (the way a dive colour fixer synthesises red),
- * while open water keeps its blue. A pixel counts as seabed by brightness over the frame's water level (its own and
- * its region's: a ring of the low-res guide, so dark rocks inside bright sand go too); `need` comes from how little
- * red the bright pixels have (redLo..redHi of green), only when the frame's bottom third is brighter than its top
- * (bandLo..bandHi of Oklab L: a seabed below; open water is lit from above); open water (backdrop validity) is spared.
+ * while open water keeps its blue. `need` comes from how little red the bright pixels have (redLo..redHi of green),
+ * only when the frame's bottom third is brighter than its top (bandLo..bandHi of Oklab L: a seabed below; open water
+ * is lit from above); open water (backdrop validity) is spared.
+ *
+ * Where: a pixel counts as seabed by the ground around it, never by itself. The analysis measures, on a coarse grid
+ * over the frame (`grid` × `grid` cells, GradeParams.seabedGrid), the share of lit seabed in each cell (brightness
+ * over the frame's water level, a wide ramp: lo/span of Lb − Lw); the shader reads that grid with a smooth
+ * (quadratic B-spline) interpolation and a soft ramp (`wLo..wHi`: ground that is half lit sand, half dark stone or
+ * weed, is seabed in full). It used to be the larger of the pixel's own brightness ramp and a small ring of the
+ * guide map's: dark stones lying on bright sand went neutral with it, the same stones a little further off (dimmer
+ * sand, or just past the ring) stayed blue, and the sand itself switched from neutral to blue along a visible line
+ * where its brightness crossed the ramp (user clip, 11 Nov: "the stone, some goes to blue some goes to grey
+ * depending it's on top of the sand or the water background"). Now one material at one distance gets one weight,
+ * and the weight has no detail finer than a cell (a sixth of the frame): the seabed fades into the blue with
+ * distance, and nothing in it can draw a boundary or flicker with the grain. A pixel whose own source colour is far
+ * from the water's (VIVID: yellow coral, an orange fish) is not red-less ground and keeps its colour.
  *   hue/chroma  the neutral's tint (Oklab, warm sand); keep: share of the pixel's own chroma kept at full strength;
- *   lift        Oklab L added at full strength (sand reads white, not grey); ring: guide ring radius (uv); regionK:
- *               how strongly a bright region carries its dark parts; lo/span: the brightness ramp between water and
- *               bright (shares of Lb − Lw).
+ *   lift        Oklab L added at full strength (sand reads white, not grey); y0/y1: the top of the frame is spared.
  */
-export const SEABED = { hue: (75 * Math.PI) / 180, chroma: 0.02, keep: 0.15, lift: 0.06, ring: 0.06, regionK: 1.6, lo: 0.25, span: 0.5, redLo: 0.12, redHi: 0.35, bandLo: -0.1, bandHi: -0.02, y0: 0.2, y1: 0.5 };
+export const SEABED = { hue: (75 * Math.PI) / 180, chroma: 0.02, keep: 0.15, lift: 0.06, grid: 6, wLo: 0, wHi: 0.55, lo: 0.1, span: 0.8, redLo: 0.12, redHi: 0.35, bandLo: -0.1, bandHi: -0.02, y0: 0.2, y1: 0.5 };
 
 export const WARM_POP = { hue: (78 * Math.PI) / 180, cMin: 0.05, cMax: 0.075, keep: 0.4, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3, side: 4, castLo: 0.015, castHi: 0.045 };
 
@@ -1046,6 +1056,8 @@ export type GradeParams = {
   frameBlack?: number;
   seabedLw?: number;
   seabedLb?: number;
+  /** Seabed recovery: share of lit seabed per cell of a SEABED.grid² grid over the upright frame (row-major, top-left first; analyze.ts seabedGridOf). Follows the frame, never clip-locked. */
+  seabedGrid?: number[];
 };
 
 export const IDENTITY_PARAMS: GradeParams = {
@@ -1167,6 +1179,7 @@ export const CLAHE_BINS = 32;
  *  p23: temporal history valid (backend), temporal layer on (engine), Vivid amount (vividAmountOf), Subject pop Strength
  *  p25: Seabed amount, water L, bright L, Blue water amount (blueAmountOf)
  *  p26: Noise reduction level, its history valid, hold, "Water colour" hue rotation (waterTintOf)
+ *  p27–p35: Seabed grid (SEABED.grid² cells, row-major; GradeParams.seabedGrid)
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -1227,6 +1240,8 @@ export function packUniforms(
   // hold (set by the engine: the same frame drawn again, the history must not advance), Water colour (below)
   u[104] = noiseLevelOf(settings);
   u[107] = waterTintOf(settings); // p26.w: "Water colour" hue rotation (WATER_TINT)
+  // p27–p35: Seabed grid (zeros without one: no seabed anywhere).
+  if (params.seabedGrid && params.seabedGrid.length === SEABED.grid * SEABED.grid) u.set(params.seabedGrid, 108);
   return u;
 }
 
@@ -1323,6 +1338,7 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     frameBlack: m(a.frameBlack ?? a.hazeBlack, b.frameBlack ?? b.hazeBlack),
     seabedLw: m(a.seabedLw ?? 0, b.seabedLw ?? 0),
     seabedLb: m(a.seabedLb ?? 1, b.seabedLb ?? 1),
+    seabedGrid: a.seabedGrid && b.seabedGrid && a.seabedGrid.length === b.seabedGrid.length ? a.seabedGrid.map((x, i) => m(x, b.seabedGrid![i])) : b.seabedGrid,
     backdropFit: a.backdropFit && b.backdropFit && a.backdropFit.length === b.backdropFit.length ? a.backdropFit.map((x, i) => m(x, b.backdropFit![i])) : b.backdropFit,
   };
 }

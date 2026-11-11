@@ -47,7 +47,7 @@ export function lockParams(l: GradeParams, p: GradeParams, lockRange = false): G
   const fit = p.backdropFit ?? l.backdropFit;
   // Seabed recovery follows the frame (a clip that swims from the sand into the blue): its median over a scene was
   // nothing whenever most of the scene was open water.
-  const sb = { seabedNeed: p.seabedNeed ?? l.seabedNeed, seabedLw: p.seabedLw ?? l.seabedLw, seabedLb: p.seabedLb ?? l.seabedLb };
+  const sb = { seabedNeed: p.seabedNeed ?? l.seabedNeed, seabedLw: p.seabedLw ?? l.seabedLw, seabedLb: p.seabedLb ?? l.seabedLb, seabedGrid: p.seabedGrid ?? l.seabedGrid };
   // Haze lift: never more than this frame's own lifted black allows (LOCK_LIFT).
   const own = p.frameBlack ?? p.hazeBlack;
   const k = LOCK_LIFT.margin > 0 && l.hazeBlack > 1e-6 ? Math.min(1, (LOCK_LIFT.margin * own) / l.hazeBlack) : 1;

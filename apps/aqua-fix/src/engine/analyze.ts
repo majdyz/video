@@ -703,11 +703,13 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     const tb = topN > 0 && botN > 0 ? botL / botN - topL / topN : 0;
     seabedNeed *= smoothstep(SEABED.bandLo, SEABED.bandHi, tb);
   }
+  const seabedGrid = seabedGridOf(okL, w, h, seabedLw, seabedLb);
   const params: GradeParams = {
     toneGamma,
     seabedNeed,
     seabedLw,
     seabedLb,
+    seabedGrid,
     binf,
     betaB,
     cB,
@@ -1046,6 +1048,27 @@ function percentiles(v: Float32Array, qs: number[]): number[] {
     out.push(lo + Math.min(b, BINS - 1) / scale);
   }
   return out;
+}
+
+/**
+ * Seabed recovery's "where" (SEABED, params.ts): the share of lit seabed in each cell of a SEABED.grid² grid over
+ * the upright frame (row-major). Lit = Oklab L over the frame's water level `lw` on the ramp lo/span of `lb` − `lw`
+ * (0 at the water's lightness, 1 toward the bright). Cell means of the whole thumbnail: nothing finer than a cell
+ * reaches the shader, and nothing is sampled sparsely, so the weight cannot flicker with stones or grain passing
+ * under a sample.
+ */
+export function seabedGridOf(okL: ArrayLike<number>, w: number, h: number, lw: number, lb: number): number[] {
+  const G = SEABED.grid, out = new Array<number>(G * G).fill(0), cnt = new Array<number>(G * G).fill(0);
+  const hi = Math.max(lb, lw + 0.05), e0 = lw + SEABED.lo * (hi - lw), e1 = lw + (SEABED.lo + SEABED.span) * (hi - lw);
+  for (let y = 0; y < h; y++) {
+    const gy = Math.min(G - 1, Math.floor((y * G) / h));
+    for (let x = 0; x < w; x++) {
+      const k = gy * G + Math.min(G - 1, Math.floor((x * G) / w));
+      out[k] += smoothstep(e0, e1, okL[y * w + x]);
+      cnt[k]++;
+    }
+  }
+  return out.map((v, k) => (cnt[k] > 0 ? v / cnt[k] : 0));
 }
 
 function boxBlur(src: Float32Array, w: number, h: number, r: number, out: Float32Array = new Float32Array(w * h), tmp: Float32Array = new Float32Array(w * h)): Float32Array {

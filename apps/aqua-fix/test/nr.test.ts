@@ -43,7 +43,7 @@ const rms = (a: Float32Array, b: Float32Array, pick: (x: number, y: number) => b
 // --- settings and uniforms
 assert.equal(DEFAULT_SETTINGS.noiseReduction, "auto");
 assert.deepEqual([noiseLevelOf({}), noiseLevelOf({ noiseReduction: "off" }), noiseLevelOf({ noiseReduction: "auto" }), noiseLevelOf({ noiseReduction: "strong" })], [1, 0, 1, 2]);
-assert.equal(UNIFORM_FLOATS, 108);
+assert.equal(UNIFORM_FLOATS, 144);
 assert.equal(TEMPORAL.scale, 8);
 
 // --- lum and block flow: a picture shifted by one low-resolution texel is found
