@@ -594,6 +594,13 @@ export class SubjectSeg {
     this.cache = null;
     this.busy = false;
     this.hibernated = false;
+    // The clip's session is gone with its worker: nothing of it is kept, so turning AI off and on again (or the
+    // next clip) starts a clean one instead of a session that believes its seeds were already given.
+    this.file = null;
+    this.autos = null;
+    this.seededSegs = new Set();
+    this.log = [];
+    this.undoOps = [];
     this.clipFailed = true;
     this.set({ phase: "unavailable", progress: null, note: `AI detection stopped on this clip; using standard detection (${errText(msg)})` });
     const w = this.idleWaiters;
