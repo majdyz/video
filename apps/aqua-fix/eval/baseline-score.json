@@ -1,0 +1,519 @@
+{
+ "note": "CPU reference (apply.ts) incl. Seabed recovery; person segmentation, AI subjects and the temporal layer are not simulated. Default style = Vivid + Seabed 0.6 (the studio default).",
+ "config": {
+  "defaultStyle": "vivid",
+  "scorePx": 200,
+  "clipW": 160,
+  "every": 0.5,
+  "secs": 8
+ },
+ "summary": {
+  "reference": {
+   "source": 18.86,
+   "natural": 14.46,
+   "vivid": 13.71,
+   "blue": 10.62,
+   "waterHueErr": 43.05,
+   "L50Err": 8.44,
+   "L5Err": 5.3,
+   "warmCErr": 5.41
+  },
+  "harm": {
+   "dE": 3.48,
+   "dEMax": 14.05
+  },
+  "stability": {
+   "lightStd": 2,
+   "lightJump": 4.64,
+   "wbStd": 2.33,
+   "wbSwing": 0.54,
+   "expSwing": 0.02
+  },
+  "diagnostics": {
+   "waterWarm": 0.98,
+   "chroma": 0.82
+  }
+ },
+ "pairs": {
+  "IMG_9552": {
+   "source": 17.46,
+   "swd": {
+    "natural": 12.98,
+    "vivid": 10,
+    "blue": 15.92
+   },
+   "out": {
+    "waterHue": 208.37,
+    "L50": 40.34,
+    "L5": 2.67,
+    "warmC": 15.74
+   },
+   "ref": {
+    "waterHue": 240.64,
+    "L50": 34.63,
+    "L5": 3.61,
+    "warmC": 22.03
+   },
+   "err": {
+    "waterHue": 32.27,
+    "L50": 5.71,
+    "L5": 0.94,
+    "warmC": 6.28
+   }
+  },
+  "h0": {
+   "source": 15.87,
+   "swd": {
+    "natural": 14.65,
+    "vivid": 14.42,
+    "blue": 10.38
+   },
+   "out": {
+    "waterHue": 238.72,
+    "L50": 30.52,
+    "L5": 14.78,
+    "warmC": 7.1
+   },
+   "ref": {
+    "waterHue": 273.65,
+    "L50": 40.54,
+    "L5": 19.42,
+    "warmC": 6.21
+   },
+   "err": {
+    "waterHue": 34.93,
+    "L50": 10.02,
+    "L5": 4.63,
+    "warmC": 0.89
+   }
+  },
+  "h1": {
+   "source": 17.88,
+   "swd": {
+    "natural": 16.6,
+    "vivid": 16.4,
+    "blue": 7.23
+   },
+   "out": {
+    "waterHue": 198.19,
+    "L50": 30.34,
+    "L5": 2.1,
+    "warmC": 11.06
+   },
+   "ref": {
+    "waterHue": 269.82,
+    "L50": 21.16,
+    "L5": 0.79,
+    "warmC": 8.39
+   },
+   "err": {
+    "waterHue": 71.64,
+    "L50": 9.18,
+    "L5": 1.31,
+    "warmC": 2.67
+   }
+  },
+  "h2": {
+   "source": 20.43,
+   "swd": {
+    "natural": 18.87,
+    "vivid": 18.42,
+    "blue": 8.94
+   },
+   "out": {
+    "waterHue": 181.83,
+    "L50": 37.31,
+    "L5": 13.82,
+    "warmC": 9.2
+   },
+   "ref": {
+    "waterHue": 274.09,
+    "L50": 35.4,
+    "L5": 6.23,
+    "warmC": 22.71
+   },
+   "err": {
+    "waterHue": 92.26,
+    "L50": 1.91,
+    "L5": 7.59,
+    "warmC": 13.51
+   }
+  },
+  "u1_freediver_cyan": {
+   "source": 23.99,
+   "swd": {
+    "natural": 16.22,
+    "vivid": 16.65,
+    "blue": 16.65
+   },
+   "out": {
+    "waterHue": 228.89,
+    "L50": 44.19,
+    "L5": 22.44,
+    "warmC": 7.54
+   },
+   "ref": {
+    "waterHue": 253.83,
+    "L50": 26.52,
+    "L5": 11.42,
+    "warmC": null
+   },
+   "err": {
+    "waterHue": 24.94,
+    "L50": 17.67,
+    "L5": 11.02,
+    "warmC": null
+   }
+  },
+  "u3_freediver_green": {
+   "source": 34.58,
+   "swd": {
+    "natural": 21.88,
+    "vivid": 19.3,
+    "blue": 9.5
+   },
+   "out": {
+    "waterHue": 216.22,
+    "L50": 42.36,
+    "L5": 18.05,
+    "warmC": 9.44
+   },
+   "ref": {
+    "waterHue": 269.12,
+    "L50": 33.84,
+    "L5": 10.67,
+    "warmC": null
+   },
+   "err": {
+    "waterHue": 52.9,
+    "L50": 8.52,
+    "L5": 7.39,
+    "warmC": null
+   }
+  },
+  "u5_nurseshark": {
+   "source": 14.13,
+   "swd": {
+    "natural": 7.67,
+    "vivid": 7.7,
+    "blue": 9.57
+   },
+   "out": {
+    "waterHue": 269.37,
+    "L50": 44.96,
+    "L5": 10.89,
+    "warmC": 5.28
+   },
+   "ref": {
+    "waterHue": 281.13,
+    "L50": 34.67,
+    "L5": 5.68,
+    "warmC": 1.82
+   },
+   "err": {
+    "waterHue": 11.76,
+    "L50": 10.28,
+    "L5": 5.2,
+    "warmC": 3.46
+   }
+  },
+  "u7_seafan_top": {
+   "source": 6.53,
+   "swd": {
+    "natural": 6.8,
+    "vivid": 6.8,
+    "blue": 6.8
+   },
+   "out": {
+    "waterHue": 265.86,
+    "L50": 29.09,
+    "L5": 8.7,
+    "warmC": 28.92
+   },
+   "ref": {
+    "waterHue": 289.59,
+    "L50": 24.89,
+    "L5": 4.35,
+    "warmC": 34.59
+   },
+   "err": {
+    "waterHue": 23.72,
+    "L50": 4.2,
+    "L5": 4.35,
+    "warmC": 5.67
+   }
+  }
+ },
+ "clips": {
+  "blue_whaleshark": {
+   "id": "blue_whaleshark",
+   "category": "open_blue_big",
+   "frames": 16,
+   "shots": 1,
+   "dE": 11.25,
+   "dEMax": 12.58,
+   "lightStd": 0.69,
+   "lightJump": 1.48,
+   "wbStd": 1.69,
+   "wbSwing": 1.55,
+   "expSwing": 0,
+   "waterWarm": 0,
+   "chroma": 0.79
+  },
+  "cave_spring_surface_to_under": {
+   "id": "cave_spring_surface_to_under",
+   "category": "cenote_cave_sunbeams",
+   "frames": 16,
+   "shots": 3,
+   "dE": 22.24,
+   "dEMax": 29.51,
+   "lightStd": 2.23,
+   "lightJump": 5.22,
+   "wbStd": 2.85,
+   "wbSwing": 0.8,
+   "expSwing": 0.22,
+   "waterWarm": 0.01,
+   "chroma": 0.62
+  },
+  "divers_shallow_reef": {
+   "id": "divers_shallow_reef",
+   "category": "divers",
+   "frames": 16,
+   "shots": 1,
+   "dE": 9.79,
+   "dEMax": 13.8,
+   "lightStd": 1.28,
+   "lightJump": 1.01,
+   "wbStd": 6.2,
+   "wbSwing": 1.1,
+   "expSwing": 0,
+   "waterWarm": 2.7,
+   "chroma": 0.79
+  },
+  "divers_wreck_cabo": {
+   "id": "divers_wreck_cabo",
+   "category": "divers",
+   "frames": 16,
+   "shots": 1,
+   "dE": 4.71,
+   "dEMax": 5.3,
+   "lightStd": 0.87,
+   "lightJump": 1.16,
+   "wbStd": 1.32,
+   "wbSwing": 0,
+   "expSwing": 0,
+   "waterWarm": 0,
+   "chroma": 0.7
+  },
+  "graded_blueholes_sunbeams": {
+   "id": "graded_blueholes_sunbeams",
+   "category": "graded",
+   "frames": 16,
+   "shots": 2,
+   "dE": 1.79,
+   "dEMax": 2.84,
+   "lightStd": 0.25,
+   "lightJump": 0.54,
+   "wbStd": 0.46,
+   "wbSwing": 0.62,
+   "expSwing": 0,
+   "waterWarm": 0,
+   "chroma": 0.98
+  },
+  "graded_noaa_samoa": {
+   "id": "graded_noaa_samoa",
+   "category": "graded",
+   "frames": 16,
+   "shots": 1,
+   "dE": 0.67,
+   "dEMax": 0.81,
+   "lightStd": 0.07,
+   "lightJump": 0.11,
+   "wbStd": 0.1,
+   "wbSwing": 0,
+   "expSwing": 0,
+   "waterWarm": 0,
+   "chroma": 1.01
+  },
+  "graded_noaa_wreck": {
+   "id": "graded_noaa_wreck",
+   "category": "graded",
+   "frames": 16,
+   "shots": 2,
+   "dE": 6.51,
+   "dEMax": 9.88,
+   "lightStd": 1.37,
+   "lightJump": 5.17,
+   "wbStd": 1.96,
+   "wbSwing": 0.5,
+   "expSwing": 0,
+   "waterWarm": 1.46,
+   "chroma": 1.01
+  },
+  "graded_oceana_lionfish": {
+   "id": "graded_oceana_lionfish",
+   "category": "graded",
+   "frames": 16,
+   "shots": 1,
+   "dE": 0.61,
+   "dEMax": 0.73,
+   "lightStd": 0.18,
+   "lightJump": 0.59,
+   "wbStd": 0.26,
+   "wbSwing": 0,
+   "expSwing": 0,
+   "waterWarm": 0,
+   "chroma": 0.99
+  },
+  "graded_usvi_promo": {
+   "id": "graded_usvi_promo",
+   "category": "graded",
+   "frames": 16,
+   "shots": 4,
+   "dE": 6.89,
+   "dEMax": 11.61,
+   "lightStd": 0.6,
+   "lightJump": 2.75,
+   "wbStd": 1.92,
+   "wbSwing": 0.24,
+   "expSwing": 0,
+   "waterWarm": 0.5,
+   "chroma": 0.97
+  },
+  "green_reservoir_divers": {
+   "id": "green_reservoir_divers",
+   "category": "green_murky",
+   "frames": 16,
+   "shots": 2,
+   "dE": 14.36,
+   "dEMax": 30.81,
+   "lightStd": 5.79,
+   "lightJump": 15.29,
+   "wbStd": 5.65,
+   "wbSwing": 1.8,
+   "expSwing": 0.18,
+   "waterWarm": 0,
+   "chroma": 0.46
+  },
+  "reef_anemonefish": {
+   "id": "reef_anemonefish",
+   "category": "reef_colour",
+   "frames": 16,
+   "shots": 1,
+   "dE": 2.62,
+   "dEMax": 2.83,
+   "lightStd": 0.35,
+   "lightJump": 1.4,
+   "wbStd": 0.21,
+   "wbSwing": 0,
+   "expSwing": 0,
+   "waterWarm": 0.01,
+   "chroma": 1.08
+  },
+  "sand_flounder": {
+   "id": "sand_flounder",
+   "category": "sand_seagrass",
+   "frames": 16,
+   "shots": 2,
+   "dE": 11.6,
+   "dEMax": 22.62,
+   "lightStd": 8.67,
+   "lightJump": 25.08,
+   "wbStd": 1.52,
+   "wbSwing": 0.07,
+   "expSwing": 0,
+   "waterWarm": 0,
+   "chroma": 0.76
+  },
+  "school_sardines": {
+   "id": "school_sardines",
+   "category": "schools",
+   "frames": 16,
+   "shots": 1,
+   "dE": 11.99,
+   "dEMax": 15.76,
+   "lightStd": 1.67,
+   "lightJump": 2.27,
+   "wbStd": 3.99,
+   "wbSwing": 0.52,
+   "expSwing": 0,
+   "waterWarm": 3.74,
+   "chroma": 0.77
+  },
+  "tilt_reef_to_blue_barracuda": {
+   "id": "tilt_reef_to_blue_barracuda",
+   "category": "camera_motion_tilt",
+   "frames": 16,
+   "shots": 1,
+   "dE": 16.74,
+   "dEMax": 21.48,
+   "lightStd": 8.84,
+   "lightJump": 15.35,
+   "wbStd": 5.51,
+   "wbSwing": 1.23,
+   "expSwing": 0,
+   "waterWarm": 1.14,
+   "chroma": 0.64
+  },
+  "topside_blacktip_shallows": {
+   "id": "topside_blacktip_shallows",
+   "category": "topside",
+   "frames": 16,
+   "shots": 1,
+   "dE": 0.78,
+   "dEMax": 0.81,
+   "lightStd": 0.03,
+   "lightJump": 0.1,
+   "wbStd": 0.01,
+   "wbSwing": 0,
+   "expSwing": 0,
+   "waterWarm": 0,
+   "chroma": 1.04
+  },
+  "topside_manta_surface": {
+   "id": "topside_manta_surface",
+   "category": "topside",
+   "frames": 16,
+   "shots": 1,
+   "dE": 1.73,
+   "dEMax": 2.18,
+   "lightStd": 0.85,
+   "lightJump": 2.16,
+   "wbStd": 0.43,
+   "wbSwing": 0,
+   "expSwing": 0,
+   "waterWarm": 0,
+   "chroma": 0.97
+  },
+  "topside_whaleshark_boat": {
+   "id": "topside_whaleshark_boat",
+   "category": "topside",
+   "frames": 16,
+   "shots": 1,
+   "dE": 8.87,
+   "dEMax": 14.05,
+   "lightStd": 0.97,
+   "lightJump": 2.47,
+   "wbStd": 5.23,
+   "wbSwing": 0.72,
+   "expSwing": 0,
+   "waterWarm": 3.1,
+   "chroma": 0.86
+  },
+  "user_drift": {
+   "id": "user_drift",
+   "category": "user",
+   "frames": 16,
+   "shots": 1,
+   "dE": 13.34,
+   "dEMax": 15.69,
+   "lightStd": 1.3,
+   "lightJump": 1.36,
+   "wbStd": 2.65,
+   "wbSwing": 0.65,
+   "expSwing": 0,
+   "waterWarm": 4.93,
+   "chroma": 0.36
+  }
+ }
+}

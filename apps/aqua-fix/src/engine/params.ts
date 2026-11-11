@@ -848,6 +848,8 @@ export type GradeParams = {
   blueGate?: number;
   /** Seabed recovery (SEABED): how much red is missing (0..1), and the frame's water / bright Oklab L. */
   seabedNeed?: number;
+  /** Tone target (analyze.ts TONE): gamma on the graded Oklab lightness, ≥ 1 (1 = off). */
+  toneGamma?: number;
   seabedLw?: number;
   seabedLb?: number;
 };
@@ -1023,6 +1025,7 @@ export function packUniforms(
   u[101] = params.seabedLw ?? 0;
   u[102] = params.seabedLb ?? 1;
   u[103] = blueAmountOf(params, settings); // p25.w: Blue water amount
+  u[99] = Math.max(1, params.toneGamma ?? 1); // p24.w: tone-target gamma on the graded lightness (analyze.ts TONE)
   u[96] = 1; // p24.x: Subject pop lift direction (set per frame by the engine, seg-overlay.ts popDirection)
   // p24.y: an AI subject overlay is on this frame (set by the engine): the AI alone weights the pop (grade-shader toneWeight)
   return u;
@@ -1117,6 +1120,7 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     vividGate: m(a.vividGate ?? 1, b.vividGate ?? 1),
     blueGate: m(a.blueGate ?? a.vividGate ?? 1, b.blueGate ?? b.vividGate ?? 1),
     seabedNeed: m(a.seabedNeed ?? 0, b.seabedNeed ?? 0),
+    toneGamma: m(a.toneGamma ?? 1, b.toneGamma ?? 1),
     seabedLw: m(a.seabedLw ?? 0, b.seabedLw ?? 0),
     seabedLb: m(a.seabedLb ?? 1, b.seabedLb ?? 1),
     backdropFit: a.backdropFit && b.backdropFit && a.backdropFit.length === b.backdropFit.length ? a.backdropFit.map((x, i) => m(x, b.backdropFit![i])) : b.backdropFit,

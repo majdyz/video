@@ -783,6 +783,8 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
     float sb = seabedW(uv, lab0.x) * p[25].x;
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
+  // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
+  if (p[24].w > 1.0) lk.x = pow(max(lk.x, 0.0), p[24].w);
   // The warm chroma may exceed the source-relative cap (a cyan shark has little to start from).
   vec3 o1 = oklabToLinear(capChroma(lk, max(max(cSrc, wk * WP_CMIN * 1.5), bl.w)));
   vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
@@ -1308,6 +1310,8 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     let sb = seabedW(uv, lab0.x) * params.p[25].x;
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2<f32>(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
+  // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
+  if (params.p[24].w > 1.0) { lk = vec3(pow(max(lk.x, 0.0), params.p[24].w), lk.yz); }
   let o1 = oklabToLinear(capChroma(lk, max(max(cSrc, wk * WP_CMIN * 1.5), bl.w)));
   let o2 = fitToGamut(o1 * detailRatio(src, lin));
   let outS = linearToSrgb(o2);

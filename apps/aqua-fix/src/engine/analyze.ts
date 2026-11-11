@@ -89,6 +89,16 @@ const WB_R_MAX = 3.5;
 const WB_R_MIN = 1.0;
 const WB_B_MIN = 0.55;
 const WB_B_MAX = 1.5;
+/**
+ * Bounded partial balance (colour review, action 5). The gray-world / sand estimate is taken part of the way
+ * (`strength`, exponent on the gains: the scene is never aimed at grey), the blue gain never falls under `bMin`
+ * (a blue cut on a legitimately blue frame is what turns water salmon), and a frame that is mostly water
+ * (object share of the frame under objLo..objHi) is not neutralised at all. Only the blue floor is on: on the
+ * reference pairs (eval/score.ts) a partial strength of 0.7 and the mostly-water gate both moved the default
+ * style away from the references (13.0 -> 13.2 / 13.3; they leave the water cyan). strength 1, bMin 0.55 and objHi 0
+ * give the balance as it was.
+ */
+export const WB = { strength: 1, bMin: 0.8, objLo: 0, objHi: 0 };
 // Below this share of confident pixels the scene is mostly water and the
 // gray-world assumption is weak: shrink the balance toward identity.
 // A deep or murky scene is far-dominated everywhere: few pixels keep much
@@ -114,6 +124,13 @@ const KEY_EXPOSURE_MIN = 0.75;
 const EXPOSURE_MAX = 1.35;
 const HIGHLIGHT_CEILING = 0.86;
 const LEVELS_MIX = 0.5;
+/**
+ * Tone target (colour review, action 2). The user's own grades are low-key (median L* 26–35) with the whites kept:
+ * a gamma on the graded Oklab lightness, not a gain. `target` is the Oklab L the frame's median is aimed at,
+ * `strength` the share of the way there, `max` the largest gamma (darkening only: a dark frame is left alone);
+ * strength 0 turns the stage off (gamma 1). Fitted on the 8 reference pairs with eval/score.ts.
+ */
+export const TONE = { target: 0.4, strength: 0.7, max: 1.35 };
 const LEVELS_WHITE_MIN = 0.65;
 const CLAHE_CLIP = 2.0;
 // Highlight shoulder: linear luminance above KNEE rolls off toward 1.
@@ -434,6 +451,14 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     if (magentaFraction(J, wbWeight, n, wb) <= MAGENTA_MAX_FRACTION) break;
     wb[0] = Math.max(WB_R_MIN, wb[0] * 0.9);
   }
+  // Bounded partial correction (WB).
+  {
+    let objShare = 0;
+    for (let i = 0; i < n; i++) objShare += conf[i];
+    const k = WB.strength * (WB.objHi > 0 ? smoothstep(WB.objLo, WB.objHi, objShare / n) : 1);
+    wb[0] = Math.pow(wb[0], k);
+    wb[2] = Math.max(Math.min(1, WB.bMin), Math.pow(wb[2], k));
+  }
   // Range compensation only where the range prior actually spreads: on a
   // flat prior its per-pixel noise is all it would act on, and the prior
   // reads bright, red-rich subjects (skin) as nearest — handing exactly the
@@ -550,6 +575,12 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
   }
   void mixY;
   const clahe = buildClahe(enc, w, h);
+  // Tone target (TONE): gamma that takes the levelled frame's median lightness part of the way down to the target.
+  let toneGamma = 1;
+  if (TONE.strength > 0) {
+    const Lmed = Math.cbrt(Math.max(1e-4, SRGB_TO_LINEAR_LUT[Math.round(255 * clamp01(percentiles(enc, [0.5])[0]))]));
+    if (Lmed > TONE.target && Lmed < 0.98) toneGamma = 1 + (Math.min(TONE.max, Math.log(TONE.target) / Math.log(Lmed)) - 1) * TONE.strength;
+  }
 
   // Open water: the stored object map is dilated (the subject moves before
   // the next analysis lands and the map eases); the shaders' per-pixel
@@ -623,6 +654,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     seabedNeed *= smoothstep(SEABED.bandLo, SEABED.bandHi, tb);
   }
   const params: GradeParams = {
+    toneGamma,
     seabedNeed,
     seabedLw,
     seabedLb,
