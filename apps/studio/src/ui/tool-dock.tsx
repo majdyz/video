@@ -12,6 +12,8 @@ import {
   styleFlags,
   styleOf,
   COLOUR_STYLES,
+  NOISE_CHOICES,
+  NOISE_HINT,
   type ToolId,
   type ToolsState,
 } from "../pipeline/tools.ts";
@@ -49,6 +51,7 @@ function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | n
   const c = tools.colour;
   const up = (patch: Partial<typeof c>) => set((t) => ({ ...t, colour: { ...t.colour, ...patch, enabled: true } }));
   const scene = COLOUR_PRESETS.find((p) => p.id === c.preset);
+  const noise = c.noise ?? DEFAULT_COLOUR.noise ?? "auto";
   const ps: Param[] = [
     { id: "strength", label: "Strength", value: pct(c.strength), slider: { value: c.strength, min: 0, max: 100, def: DEFAULT_COLOUR.strength, onChange: (v) => up({ strength: v }) } },
     { id: "scene", label: "Scene", value: scene?.label ?? "Auto", choices: { items: COLOUR_PRESETS, value: c.preset, onChange: (id) => up({ preset: id as typeof c.preset }) } },
@@ -57,6 +60,7 @@ function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | n
     { id: "sat", label: "Saturation", more: true, value: `${Math.round(c.saturation * 100)}%`, slider: { value: c.saturation * 100, min: 0, max: 200, def: 100, format: (v) => `${Math.round(v)}%`, onChange: (v) => up({ saturation: v / 100 }) } },
     { id: "clarity", label: "Clarity", more: true, value: pct(c.clarity * 100), slider: { value: c.clarity * 100, min: 0, max: 100, def: DEFAULT_COLOUR.clarity * 100, onChange: (v) => up({ clarity: v / 100 }) } },
     { id: "haze", label: "Haze", more: true, value: pct(c.veil * 100), slider: { value: c.veil * 100, min: 0, max: 120, def: DEFAULT_COLOUR.veil * 100, onChange: (v) => up({ veil: v / 100 }) } },
+    { id: "noise", label: "Noise", more: true, value: NOISE_CHOICES.find((n) => n.id === noise)?.label ?? "Auto", choices: { items: NOISE_CHOICES, value: noise, onChange: (id) => up({ noise: id as typeof noise }), note: NOISE_HINT } },
   ];
   if (footage && onFootage) {
     const detected = footage.info?.detected ?? "standard";

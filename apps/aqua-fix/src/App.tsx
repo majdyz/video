@@ -444,6 +444,7 @@ export default function App() {
     e.lockRange = new URLSearchParams(location.search).get("lockz") === "1";
     e.personEnabled = new URLSearchParams(location.search).get("person") !== "0";
     e.temporalEnabled = new URLSearchParams(location.search).get("temporal") !== "0";
+    e.noiseReductionEnabled = new URLSearchParams(location.search).get("tnr") !== "0";
     e.followEnabled = new URLSearchParams(location.search).get("follow") !== "0";
     if (new URLSearchParams(location.search).get("lock") !== "0") void profileClip(video, myGen);
   }

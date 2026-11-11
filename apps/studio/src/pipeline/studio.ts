@@ -468,6 +468,8 @@ export class Studio {
       engine.setSubjectOverrides(this.snap.subjectOverrides);
       engine.personEnabled = q.get("person") !== "0";
       engine.temporalEnabled = q.get("temporal") !== "0";
+      // Kill switch for the temporal noise reduction (the Advanced control stays, it just does nothing).
+      engine.noiseReductionEnabled = q.get("tnr") !== "0";
       engine.followEnabled = q.get("follow") !== "0";
       this.engine = engine;
       this.set({ engine: engine.backend.kind });

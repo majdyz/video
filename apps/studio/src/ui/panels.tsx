@@ -15,6 +15,8 @@ import {
   styleFlags,
   styleOf,
   COLOUR_STYLES,
+  NOISE_CHOICES,
+  NOISE_HINT,
   type ToolId,
   type ToolsState,
 } from "../pipeline/tools.ts";
@@ -235,6 +237,10 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog }: {
         <Slider label="Saturation" value={c.saturation * 100} min={0} max={200} defaultValue={100} format={(v) => `${Math.round(v)}%`} onChange={(v) => up({ saturation: v / 100 })} />
         <Slider label="Clarity" value={c.clarity * 100} min={0} max={100} defaultValue={DEFAULT_COLOUR.clarity * 100} onChange={(v) => up({ clarity: v / 100 })} />
         <Slider label="Haze removal" value={c.veil * 100} min={0} max={120} defaultValue={DEFAULT_COLOUR.veil * 100} onChange={(v) => up({ veil: v / 100 })} />
+        <div className="adv__field">
+          <span className="adv__label">Noise reduction <small>{NOISE_HINT}</small></span>
+          <Segmented label="Noise reduction" value={c.noise ?? DEFAULT_COLOUR.noise ?? "auto"} onChange={(v) => up({ noise: v })} items={NOISE_CHOICES} />
+        </div>
         <p className="adv__hint">Strength 50 is the engine's own estimate for this clip; above it the correction is pushed harder (redder reds, whiter sand) at some cost to fidelity.</p>
         <button type="button" className="btn btn--ghost" onClick={() => setTools((t) => ({ ...t, colour: { ...DEFAULT_COLOUR, enabled: t.colour.enabled, vivid: t.colour.vivid, blue: t.colour.blue } }))}>Reset colour</button>
       </div>

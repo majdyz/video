@@ -2,7 +2,7 @@
 // (0..100 on screen) and the advanced rest — and the pure mapping from that
 // state to what each engine reads. No React, no GPU: unit-tested.
 
-import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, type ScenePreset, type UserSettings } from "../../../aqua-fix/src/engine/params.ts";
+import { DEFAULT_SETTINGS, INTENSITY_MAX, SCENE_PRESETS, type NoiseReduction, type ScenePreset, type UserSettings } from "../../../aqua-fix/src/engine/params.ts";
 import type { StabilizeParams } from "../../../motion-fix/src/lib/stabilize.ts";
 import type { SolveParams } from "../../../motion-fix/src/lib/plan.ts";
 import type { Projection } from "../../../dewarp/src/fisheye.ts";
@@ -38,7 +38,17 @@ export type ColourState = {
   vivid?: boolean;
   /** "Blue water" style (with vivid): all water one cobalt blue, warm subjects orange, silver neutral, deeper shadows (BLUE_WATER in the engine; same gate as Vivid). */
   blue?: boolean;
+  /** Noise reduction (Advanced): "auto" (default) follows the clip's measured noise, "strong" pushes harder, "off" skips it. */
+  noise?: NoiseReduction;
 };
+
+/** The Noise reduction choices (engine NR: temporal, before the colour correction). */
+export const NOISE_CHOICES: { id: NoiseReduction; label: string }[] = [
+  { id: "off", label: "Off" },
+  { id: "auto", label: "Auto" },
+  { id: "strong", label: "Strong" },
+];
+export const NOISE_HINT = "Averages grain over time before the colour is corrected; Auto only acts on noisy clips, moving subjects are left alone";
 
 /** The "Subject pop" switch stays hidden until its mask tracking is clean (the engine path ships off; `?pop=1` forces it on for checks). */
 export const SUBJECT_POP_UI = true;
@@ -63,6 +73,7 @@ export const DEFAULT_COLOUR: ColourState = {
   popWarmth: 50,
   seabed: 60,
   vivid: true,
+  noise: "auto",
 };
 
 /** Where an explicit Vivid choice (the main-panel switch) is remembered. */
@@ -146,6 +157,7 @@ export function colourSettings(c: ColourLook): UserSettings {
     seabed: c.vivid ? Math.min(100, Math.max(0, c.seabed ?? DEFAULT_COLOUR.seabed ?? 0)) / 100 : 0,
     vivid: c.vivid ? 1 : 0,
     blue: c.vivid && c.blue ? 1 : 0,
+    noiseReduction: c.noise ?? DEFAULT_COLOUR.noise ?? "auto",
   };
 }
 
