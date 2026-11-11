@@ -1,6 +1,6 @@
 // Before/after on the validation set: the engine before 29 Oct (clip lock
-// alone, snapping at every profiled segment switch) vs now (material anchor +
-// balance follow), replayed on the CPU (clip-sim.ts) over each clip.
+// alone, snapping at every profiled segment switch) vs now (one frozen balance
+// per shot from its material anchor), replayed on the CPU (clip-sim.ts) over each clip.
 //
 //   node --experimental-strip-types apps/aqua-fix/eval/valset.ts <valset dir> <out dir> [--secs 8] [--gw 160] [--every 1] [--only id,id]
 //

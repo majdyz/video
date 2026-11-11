@@ -15,10 +15,10 @@
 // What: a closed loop on one material. Sand (and white rubble) is the
 // material a seabed shot reliably holds. Its target colour is what the lock
 // itself makes of it, measured once per locked shot on the profile's own
-// frames (follow.ts shotTarget: the median over the shot, never pinker than
+// frames (follow.ts shotBalance: the median over the shot, never pinker than
 // ANCHOR.pinkMax past neutral), so the look the lock chose is kept and only
 // the drift around it is taken out.
-// On each analysis thumbnail the bright, grainy, low-chroma pixels on the
+// On each of the profile's thumbnails of the shot the bright, grainy, low-chroma pixels on the
 // cast side of the veil are found (texture keeps smooth open water out, the
 // hue test keeps pink coral out), preferring the bottom 30 % of the frame (the
 // near seabed stays in view through a tilt; far sand carries a different
@@ -26,8 +26,9 @@
 // the *locked* parameters (this frame's maps and range), and the red/blue
 // gain correction that brings their mean output to the target is solved
 // (damped Newton on finite differences, ~64 pixels, a few ms in the worker).
-// The engine eases the balance toward lock × correction (follow.ts); frames
-// without enough sand hold the last correction, a cut resets it.
+// The corrections are pooled into one balance offset per shot (follow.ts
+// shotCurve): frozen, or easing one way through a real change. Nothing
+// follows the frame (the per-frame follow swung the balance within a shot).
 //
 // Not covered: one balance cannot hold near and far sand at once, so as the
 // framing changes their mix the near sand still moves a little (≈3.7 ΔE00 on
@@ -61,7 +62,7 @@ export const ANCHOR = {
   samples: 64,
   /** Neutral sand (Oklab a, b): B = 0.94·G as the analysis' sand reference (SAND_BLUE_TARGET) … */
   neutral: (() => { const [, a, b] = linearToOklab(1, 1, 0.94); return [a, b] as [number, number]; })(),
-  /** … and how far toward red (Oklab a) a shot's target may sit from it (follow.ts shotTarget). */
+  /** … and how far toward red (Oklab a) a shot's target may sit from it (follow.ts shotBalance). */
   pinkMax: 0.006,
   /** Correction clamp (log gain per channel) and the finite-difference step. */
   maxLog: Math.log(1.6),

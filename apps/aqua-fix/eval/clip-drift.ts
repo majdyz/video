@@ -9,15 +9,15 @@
 //   2. per-frame analyses (export: every frame the worker is free, ~`lat`
 //      frames of latency; preview: every ANALYSIS_INTERVAL_MS of media time;
 //      unlocked: preview without the clip lock, as before profiling ends),
-//      the material anchor + balance follow, scene-cut snaps and the
+//      each shot's frozen balance (follow.ts), scene-cut snaps and the
 //      engine's easing (clip-sim.ts mirrors engine.ts),
 //   3. the CPU grade (apply.ts, the shader's reference) every `step`-th frame
 //      at `gw` px wide (up to `--end` seconds).
 // The GPU-only temporal (anti-crawl) layer is not simulated.
-// Ablations (env): SIM_NOFOLLOW=1 (no anchor/follow) with SIM_SNAPSEG=1 (snap at
+// Ablations (env): SIM_NOFOLLOW=1 (the plain lock, no shot balance) with SIM_SNAPSEG=1 (snap at
 // every profiled segment switch) replays the engine before 29 Oct 2026;
 // SIM_LOCKZ=1 also locks the range normalisation; SIM_CLARITY sets the
-// clarity, SIM_VIVID the Vivid amount (0..1; the studio default is 1); SIM_TAU / SIM_WINDOW tune the follow.
+// clarity, SIM_VIVID the Vivid amount (0..1; the studio default is 1).
 //
 // Probes:
 //  - tracked sand (the one to watch): the brightest quarter of the low-chroma

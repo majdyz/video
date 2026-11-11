@@ -8,8 +8,8 @@ import assert from "node:assert/strict";
 import { ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.ts";
 import { applyGrade } from "../src/engine/apply.ts";
 import { linearToSrgb } from "../src/engine/color.ts";
-import { BalanceFollow } from "../src/engine/follow.ts";
-import { DEFAULT_SETTINGS, IDENTITY_PARAMS } from "../src/engine/params.ts";
+import { curveAt, shotCurve, SHOT, type ShotSample } from "../src/engine/follow.ts";
+import { DEFAULT_SETTINGS } from "../src/engine/params.ts";
 import { ClipSim } from "../eval/clip-sim.ts";
 import { analysisSlot } from "../src/engine/lock.ts";
 import { deltaE00, srgb8ToLab } from "../eval/colour-metrics.ts";
@@ -143,28 +143,42 @@ const dAb = (a: number[], b: number[]) => deltaE00(a, [a[0], b[1], b[2]]);
   console.log("ok  a hard cut re-locks within 0.2 s");
 }
 
-// 3. The follow: no evidence → no change; trusted evidence eases (no step); rebase keeps the asked-for balance.
+// 3. The shot's balance is frozen unless its frames move one way (follow.ts shotCurve).
 {
-  const f = new BalanceFollow();
-  const lock = { ...IDENTITY_PARAMS, wb: [2, 1, 0.8] as [number, number, number] };
-  const frameP = { ...IDENTITY_PARAMS };
-  f.update(null, frameP, 0.1);
-  assert.deepEqual(f.log, [0, 0]);
-  const a = { log: [0.2, -0.1] as [number, number], frac: 0.3, before: [0, 0] as [number, number], after: [0, 0] as [number, number] };
-  f.update(a, frameP, 0);
-  assert.deepEqual(f.log, [0.2, -0.1], "a shot starts at its first trusted anchor");
-  f.update({ ...a, log: [0, 0] }, frameP, 0.05);
-  assert.ok(f.log[1] > -0.1 && f.log[1] < -0.05, "the follow eases, it never steps");
-  assert.ok(f.log[0] <= 0.1 + 1e-12, "lagging never leaves more red than the recent frames ask for");
-  // Healthy reds (an orange subject filling the frame) are not evidence.
-  const before = [...f.log];
-  f.update({ ...a, log: [-0.4, 0.4] }, { ...frameP, calm: 0.9 }, 1);
-  assert.deepEqual(f.log, before);
-  const to = { ...lock, wb: [2.5, 1, 0.8] as [number, number, number] };
-  const wb0 = f.apply(lock).wb[0];
-  f.rebase(lock, to);
-  assert.ok(Math.abs(f.apply(to).wb[0] - wb0) < 1e-9, "rebase keeps the balance the follow asks for");
-  console.log("ok  balance follow");
+  const S = (rows: [number, number, number, number?][]): ShotSample[] => rows.map(([t, r, b, w]) => ({ t, log: [r, b], w: w ?? 1 }));
+  const swing = (c: ReturnType<typeof shotCurve>) => { let lo = Infinity, hi = -Infinity; for (let t = 0; t <= 8; t += 0.05) { const v = curveAt(c, t)[0]; lo = Math.min(lo, v); hi = Math.max(hi, v); } return hi - lo; };
+  assert.equal(shotCurve([]), null, "no trusted frame: the plain lock");
+  assert.deepEqual(curveAt(null, 3), [0, 0]);
+  // Estimator noise around one value: one constant, the weighted median; an untrusted outlier counts for nothing.
+  const noise = shotCurve(S([[0.5, 0.05, -0.02], [1.5, -0.03, 0.01], [2.5, 0.04, 0], [3.5, -0.02, 0.02], [4.5, 0.03, -0.01], [5.5, 0.45, -0.4, 0], [6.5, 0.0, 0.01]]));
+  assert.equal(noise!.t.length, 1, "noise must freeze the shot");
+  assert.equal(swing(noise), 0);
+  assert.ok(Math.abs(curveAt(noise, 0)[0]) < 0.05);
+  // The review's whale shark: the follow went +0.47 → −0.47 → ~0 within 8 s. Frames that disagree are no evidence: frozen, near the plain lock.
+  const shark = shotCurve(S([[0.6, 0.4, 0.04], [1.6, -0.4, 0.24], [2.6, -0.42, 0.29], [3.5, -0.4, 0.26], [4.5, -0.02, 0.01], [5.4, 0.01, 0.03], [6.4, -0.27, 0.13], [7.4, -0.13, 0.06]]));
+  assert.equal(swing(shark), 0, "a balance that swings both ways is noise");
+  assert.ok(Math.abs(curveAt(shark, 4)[0]) < 0.15, `disagreeing frames back the offset off toward the lock (${curveAt(shark, 4)[0].toFixed(2)})`);
+  // A step (a diver swims up to the lens): a change of subject, not of the light. Frozen.
+  const step = shotCurve(S([[0.6, -0.25, 0.2], [1.6, -0.21, 0.24], [2.6, -0.19, 0.15], [3.5, 0.26, -0.14], [4.5, 0.23, -0.2], [5.5, 0.24, -0.2]]));
+  assert.equal(swing(step), 0, "a step is not a trend");
+  // A real change (the camera warming through a tilt): one way, slowly, never back.
+  const tilt = shotCurve(S([[0.5, -0.14, 0.07], [1.5, -0.06, 0.03], [2.5, 0.01, 0.0], [3.5, -0.02, 0.01], [4.5, 0.08, -0.04], [5.5, 0.15, -0.08], [6.5, 0.14, -0.08]]));
+  assert.ok(tilt!.t.length > 1, "a one-way change must be followed");
+  let prev = curveAt(tilt, 0)[0];
+  for (let t = 0.05; t <= 8; t += 0.05) {
+    const v = curveAt(tilt, t)[0];
+    assert.ok(v >= prev - 1e-9, "the curve never swings back");
+    assert.ok(v - prev <= SHOT.maxRate * 0.05 + 1e-9, `the curve moves at most ${SHOT.maxRate} log/s`);
+    prev = v;
+  }
+  assert.ok(swing(tilt) > 0.2 && swing(tilt) < 0.32);
+  // Too small to move for, too few well-anchored frames, or frames that barely hold the anchor: frozen.
+  assert.equal(swing(shotCurve(S([[0.5, 0], [1.5, 0.02], [2.5, 0.04], [3.5, 0.06], [4.5, 0.08]].map((x) => [x[0], x[1], 0] as [number, number, number])))), 0);
+  assert.equal(swing(shotCurve(S([[0.5, -0.2, 0], [2.5, 0, 0], [4.5, 0.2, 0]]))), 0);
+  assert.equal(swing(shotCurve(S([[0.5, -0.2, 0, 0.3], [1.5, -0.1, 0, 0.3], [2.5, 0, 0, 0.3], [3.5, 0.1, 0, 0.3], [4.5, 0.2, 0, 0.3]]))), 0);
+  // A function of clip time alone: any order of asking gives the same answer.
+  assert.deepEqual(curveAt(tilt, 3.3), curveAt(tilt, 3.3));
+  console.log("ok  shot balance: frozen on noise, steps and disagreement; slow and one-way on a real change");
 }
 
 // 4. Determinism on clip time: the export analyses one frame per analysis slot of the clip and waits for it, so
