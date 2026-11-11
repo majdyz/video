@@ -40,7 +40,47 @@ export type ColourState = {
   blue?: boolean;
   /** Noise reduction (Advanced): "auto" (default) follows the clip's measured noise, "strong" pushes harder, "off" skips it. */
   noise?: NoiseReduction;
+  /** Tap-to-neutral: the white / grey point the user tapped and the balance offset solved there (null / absent = none). */
+  neutral?: NeutralPick | null;
+  /** "Water colour", −100..100 (0 = auto): the water's hue toward teal (−) or a deeper blue (+); subjects keep theirs. */
+  waterHue?: number;
 };
+
+/**
+ * A tap-to-neutral pick (engine tap.ts): gains on red and blue on top of the clip's automatic balance, where and
+ * when the user tapped (upright 0..1, clip seconds), and whether the engine had to stop short of neutral. `clip`
+ * names the file it was solved on: the offset corrects that clip's balance and is ignored on any other.
+ */
+export type NeutralPick = { r: number; b: number; u: number; v: number; t: number; limited?: boolean; clip: string };
+
+/** The key a pick is tied to. */
+export function clipKeyOf(file: { name: string; size: number; lastModified?: number } | null | undefined): string {
+  return file ? `${file.name}:${file.size}:${file.lastModified ?? 0}` : "";
+}
+
+/** The pick in force on `clip` (undefined = any clip: tests, tools without a file). */
+export function neutralFor(c: Pick<ColourState, "neutral">, clip?: string): NeutralPick | null {
+  const n = c.neutral;
+  return n && (clip === undefined || n.clip === clip) ? n : null;
+}
+
+/** What the engine made of a tap (aqua-fix tap.ts TapSolve), as the UI needs it. */
+export type NeutralResult = { ok: true; gains: [number, number]; limited: boolean } | { ok: false; reason: "dark" | "bright" } | null;
+
+/** The line under the picture after a tap. */
+export function neutralNote(r: NeutralResult): string {
+  if (!r) return "Colour is still reading this frame. Tap again in a moment";
+  if (!r.ok) return r.reason === "dark" ? "Too dark to read there. Tap something brighter" : "That spot is blown out. Tap a white or grey that still has detail";
+  if (!r.limited) return "Balanced to that point";
+  return r.gains[0] === 1 && r.gains[1] === 1 ? "No red left there to balance. Try sand, a tank or bubbles nearer the camera" : "Balanced as far as is safe: that spot has little red left";
+}
+export const NEUTRAL_HINT = "Tap something that should be white or grey";
+
+/** The Water colour slider's value text. */
+export function waterHueLabel(v: number): string {
+  const x = Math.round(v);
+  return x === 0 ? "Auto" : x < 0 ? `Teal ${-x}` : `Blue ${x}`;
+}
 
 /** The Noise reduction choices (engine NR: temporal, before the colour correction). */
 export const NOISE_CHOICES: { id: NoiseReduction; label: string }[] = [
@@ -74,6 +114,8 @@ export const DEFAULT_COLOUR: ColourState = {
   seabed: 60,
   vivid: true,
   noise: "auto",
+  neutral: null,
+  waterHue: 0,
 };
 
 /** Where an explicit Vivid choice (the main-panel switch) is remembered. */
@@ -141,7 +183,10 @@ export function lookOf(c: ColourState): ColourLook {
   return look;
 }
 
-export function colourSettings(c: ColourLook): UserSettings {
+/** `clip`: the open file's key (clipKeyOf); a tap solved on another clip is left out. */
+export function colourSettings(c: ColourLook, clip?: string): UserSettings {
+  const pick = neutralFor(c, clip);
+  const hue = Math.min(100, Math.max(-100, c.waterHue ?? 0)) / 100;
   return {
     ...DEFAULT_SETTINGS,
     preset: c.preset,
@@ -158,6 +203,8 @@ export function colourSettings(c: ColourLook): UserSettings {
     vivid: c.vivid ? 1 : 0,
     blue: c.vivid && c.blue ? 1 : 0,
     noiseReduction: c.noise ?? DEFAULT_COLOUR.noise ?? "auto",
+    ...(pick ? { wbTap: [pick.r, pick.b] as [number, number] } : {}),
+    ...(hue ? { waterHue: hue } : {}),
   };
 }
 

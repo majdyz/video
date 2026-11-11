@@ -5,7 +5,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, tapParams, waterTintOf, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -23,13 +23,13 @@ export type ApplyContext = {
 };
 
 /** The context as gradePixel reads it: intensity already resolved. */
-type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings; /** Seabed recovery amount (seabedAmountOf). */ seabed?: number };
+type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings; /** Seabed recovery amount (seabedAmountOf). */ seabed?: number; /** "Water colour" hue rotation, radians (waterTintOf). */ waterTint?: number };
 
 export function resolveContext(ctx: ApplyContext): PixelContext {
   const hz = ctx.settings.hazeAuto !== false;
-  const params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(ctx.params), pushOf(ctx.settings)), ctx.settings)), ctx.settings);
+  const params = tapParams(lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(ctx.params), pushOf(ctx.settings)), ctx.settings)), ctx.settings), ctx.settings);
   const base = greenSettings(presetSettings(calmSettings(resolveSettings(ctx.settings), params), ctx.settings), params);
-  return { ...ctx, params, settings: { ...lookSettings(hz ? hazeSettings(base, params) : base, params), vivid: vividAmountOf(params, ctx.settings), blue: blueAmountOf(params, ctx.settings) }, seabed: seabedAmountOf(params, ctx.settings) };
+  return { ...ctx, params, settings: { ...lookSettings(hz ? hazeSettings(base, params) : base, params), vivid: vividAmountOf(params, ctx.settings), blue: blueAmountOf(params, ctx.settings) }, seabed: seabedAmountOf(params, ctx.settings), waterTint: waterTintOf(ctx.settings) };
 }
 
 /** Seabed recovery amount as packUniforms sends it (p25.x): setting × missing red × not open water. */
@@ -313,6 +313,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const [, vla, vlb] = linearToOklab(p.veilColor[0], p.veilColor[1], p.veilColor[2]);
   const vln = Math.hypot(vla, vlb) || 1;
   const [na, nb] = clearCast(a * scale, b * scale, vla / vln, vlb / vln, tN / OBJECT_NEUTRAL.mix);
+  // The cast left on the graded colour, before the subject's clearing: what the warm pull is for (WARM_POP.castLo..Hi).
+  const castW = smoothstep(WARM_POP.castLo, WARM_POP.castHi, Math.hypot(a, b) * scale);
   // Lightness stays as graded: shading, counter-shading and highlights are the subject's own.
   const Ls = L;
   const skinned = skinTone(Ls, na, nb, personS);
@@ -333,10 +335,12 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   vv[0] = Lp; vv[1] *= kc; vv[2] *= kc;
   const hn0 = highlightPink(vv[0], vv[1], vv[2]);
   const hn1 = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * objectNeutralOf(p), 0, 1));
-  const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP) * (s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0);
+  const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP) * (s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0) * castW;
   const hn = warmPop(vv[0], hn1[0], hn1[1], wk);
   // Blue water style (opt-in): cobalt water, orange warm subjects, neutral silver, deeper shadows.
   const bl = blueLook(vv[0], hn[0], hn[1], s.blue ?? 0, greenWeight(p));
+  // "Water colour" (WATER_TINT): the water's hue turned toward teal or a deeper blue; subjects keep theirs.
+  [bl[1], bl[2]] = waterTint(bl[1], bl[2], ctx.waterTint ?? 0, greenWeight(p));
   // Saturation by hue (RICH_LOOK; rides on the Vivid amount): richer colour, warm subjects more.
   [bl[1], bl[2]] = richLook(bl[0], bl[1], bl[2], s.vivid ?? 0);
   // Seabed recovery (grade-shader, after the Blue water style): sand and reef to a warm neutral (and a little lighter) where the water left no red.
@@ -368,10 +372,14 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
 }
 
 /** Warm pop (grade-shader warmPop): the subject's chroma toward a warm cream hue (k = weight × warmth). */
-function warmPop(L: number, a: number, b: number, k: number): [number, number] {
+export function warmPop(L: number, a: number, b: number, k: number): [number, number] {
   if (k <= 0) return [a, b];
   const ct = Math.min(WARM_POP.cMax, Math.max(WARM_POP.keep * Math.hypot(a, b), WARM_POP.cMin * smoothstep(WARM_POP.lLo, WARM_POP.lHi, L)));
-  return [a + (Math.cos(WARM_POP.hue) * ct - a) * k, b + (Math.sin(WARM_POP.hue) * ct - b) * k];
+  // Along the warm hue: a linear mix; across it: faded faster, so the pull passes through neutral, never green.
+  const wx = Math.cos(WARM_POP.hue), wy = Math.sin(WARM_POP.hue);
+  const al = a * wx + b * wy, side = Math.pow(Math.max(0, 1 - k), WARM_POP.side);
+  const m = al + (ct - al) * k;
+  return [wx * m + (a - wx * al) * side, wy * m + (b - wy * al) * side];
 }
 
 /** Hue guard (grade-shader popHue): on the subject (weight w) the hue stays within SUBJECT_POP.hueMax of the source's. */
@@ -585,6 +593,25 @@ export function blueLook(L: number, a: number, b: number, v: number, g: number):
   // Deeper shadows (monotone in L).
   const L2 = L * (1 - B.shadowK * v * (1 - smoothstep(0, B.shadowHi, L)));
   return [L2, a2, b2, Math.max(ct * w, Cw * warm)];
+}
+
+/**
+ * "Water colour" (mirrors the shaders; see WATER_TINT in params.ts): (a, b) = graded chroma after the water-hue map,
+ * t = rotation at full water weight (radians, waterTintOf), g = green-water weight. Returns (a, b), same chroma.
+ */
+export function waterTint(a: number, b: number, t: number, g: number): [number, number] {
+  if (t === 0) return [a, b];
+  const B = BLUE_WATER;
+  const C = Math.hypot(a, b);
+  const h = Math.atan2(b, a);
+  const hh = h < 0 ? h + 2 * Math.PI : h;
+  // Water as the water-hue map sees it: the cool side of the warm projection, vegetation and vivid violets kept.
+  const cool = 1 - smoothstep(B.sLo, B.sHi, a * Math.cos(B.warmDir) + b * Math.sin(B.warmDir));
+  const vio = smoothstep(B.vcLo, B.vcHi, C) * smoothstep(B.vio0, B.vio1, hh) * (1 - smoothstep(B.vio2, 2 * Math.PI, hh));
+  const veg = smoothstep(B.vegCLo, B.vegCHi, C) * smoothstep(B.vegIn0, B.vegIn1, hh) * (1 - smoothstep(B.vegOut0, B.vegOut1, hh)) * (1 - B.vegGreen * g);
+  const ang = t * cool * (1 - vio) * (1 - veg);
+  const cs = Math.cos(ang), sn = Math.sin(ang);
+  return [a * cs - b * sn, a * sn + b * cs];
 }
 
 /** Saturation by hue (mirrors the shaders; see RICH_LOOK in params.ts). (L, a, b) = graded colour, v = Vivid amount. Returns (a, b). */

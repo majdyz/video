@@ -5,6 +5,11 @@ import {
   DEFAULT_TOOLS,
   applyStabPreset,
   colourSettings,
+  clipKeyOf,
+  neutralFor,
+  neutralNote,
+  waterHueLabel,
+  lookOf,
   enabledTools,
   exportSuffix,
   processingChain,
@@ -61,6 +66,45 @@ assert.equal(styleOf(DEFAULT_TOOLS.colour), "vivid");
 for (const id of ["natural", "vivid", "blue"] as const) assert.equal(styleOf(styleFlags(id)), id);
 assert.deepEqual(colourSettings({ ...DEFAULT_TOOLS.colour, ...styleFlags("blue") }), { ...DEFAULT_SETTINGS, vivid: 1, blue: 1 });
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, vivid: false, blue: true }).blue, 0, "Blue water rides on Vivid");
+// Manual overrides. No tap and Water colour 0 (the defaults, and a look saved before they existed) add nothing to the
+// engine's settings: the one-tap grade is exactly what it was.
+assert.equal(DEFAULT_TOOLS.colour.neutral ?? null, null);
+assert.equal(DEFAULT_TOOLS.colour.waterHue, 0);
+assert.ok(!("wbTap" in colourSettings(DEFAULT_TOOLS.colour)) && !("waterHue" in colourSettings(DEFAULT_TOOLS.colour)));
+assert.deepEqual(colourSettings({ ...DEFAULT_TOOLS.colour, neutral: undefined, waterHue: undefined }), colourSettings(DEFAULT_TOOLS.colour));
+{
+  const clip = clipKeyOf({ name: "dive.mp4", size: 1234, lastModified: 99 });
+  assert.equal(clip, "dive.mp4:1234:99");
+  assert.equal(clipKeyOf(null), "");
+  const pick = { r: 1.4, b: 0.8, u: 0.3, v: 0.7, t: 2.5, limited: false, clip };
+  const tapped = { ...DEFAULT_TOOLS.colour, neutral: pick };
+  // Tap-to-neutral: the gains go to the engine as they were solved, with the clip's other settings (a split's look too).
+  assert.deepEqual(colourSettings(tapped).wbTap, [1.4, 0.8]);
+  assert.deepEqual(colourSettings(tapped, clip).wbTap, [1.4, 0.8]);
+  assert.deepEqual(colourSettings(lookOf(tapped), clip).wbTap, [1.4, 0.8]);
+  assert.deepEqual(colourSettings(tapped, clip), { ...colourSettings(DEFAULT_TOOLS.colour), wbTap: [1.4, 0.8] });
+  // … and only on the clip it was solved on: another file (the next photo of a batch) gets its own automatic balance.
+  assert.equal(colourSettings(tapped, clipKeyOf({ name: "other.mp4", size: 1234, lastModified: 99 })).wbTap, undefined);
+  assert.equal(neutralFor(tapped, "x"), null);
+  assert.equal(neutralFor(tapped, clip), pick);
+  // Reset (to the defaults) clears it.
+  assert.equal(colourSettings({ ...tapped, neutral: null }, clip).wbTap, undefined);
+  // Water colour: −100..100 on the slider → −1..1 in the engine, clamped; rides with any style.
+  assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, waterHue: -100 }).waterHue, -1);
+  assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, waterHue: 40 }).waterHue, 0.4);
+  assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, waterHue: 400 }).waterHue, 1);
+  assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, vivid: false, waterHue: 50 }).waterHue, 0.5);
+  assert.equal(waterHueLabel(0), "Auto");
+  assert.equal(waterHueLabel(-35), "Teal 35");
+  assert.equal(waterHueLabel(60), "Blue 60");
+  // What a tap tells the user.
+  assert.match(neutralNote({ ok: true, gains: [1.4, 0.8], limited: false }), /Balanced/);
+  assert.match(neutralNote({ ok: true, gains: [2, 0.6], limited: true }), /as far as is safe/);
+  assert.match(neutralNote({ ok: true, gains: [1, 1], limited: true }), /No red left/);
+  assert.match(neutralNote({ ok: false, reason: "dark" }), /dark/);
+  assert.match(neutralNote({ ok: false, reason: "bright" }), /blown out/);
+  assert.match(neutralNote(null), /again/);
+}
 assert.equal(initialStyle("", null), "vivid");
 assert.equal(initialStyle("", "blue"), "blue");
 assert.equal(initialStyle("", "0"), "natural");

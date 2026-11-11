@@ -17,6 +17,8 @@ import {
   COLOUR_STYLES,
   NOISE_CHOICES,
   NOISE_HINT,
+  waterHueLabel,
+  type NeutralPick,
   type ToolId,
   type ToolsState,
 } from "../pipeline/tools.ts";
@@ -167,6 +169,12 @@ function MotionLogField({ name, onChange }: { name: string | null; onChange: (fi
   );
 }
 
+/**
+ * Tap-to-neutral (App owns the pick mode; the pick itself lives in the colour look): whether the picture is waiting
+ * for a tap, the pick in force on this clip, and the switch.
+ */
+export type NeutralControls = { active: boolean; pick: NeutralPick | null; onToggle: () => void; onReset: () => void };
+
 /** Subject pop selection controls (App owns the select mode; the studio keeps the corrections). */
 export type SubjectControls = {
   corrections: number;
@@ -226,12 +234,26 @@ export function SubjectsPanel({ tools, setTools, subjects, colourOn, disabled, p
   );
 }
 
-export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus; onMotionLog?: (file: File | null) => void }) {
+export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, neutral }: { tool: ToolId; tools: ToolsState; setTools: (fn: (t: ToolsState) => ToolsState) => void; stab?: StabStatus; onMotionLog?: (file: File | null) => void; neutral?: NeutralControls }) {
   if (tool === "colour") {
     const c = tools.colour;
     const up = (patch: Partial<typeof c>) => setTools((t) => ({ ...t, colour: { ...t.colour, ...patch } }));
     return (
       <div className="adv">
+        {/* The two manual overrides, for when the automatic colour is off: a white point and the water's hue. */}
+        {neutral && (
+          <div className="adv__field">
+            <span className="adv__label">White point <small aria-live="polite">{neutral.active ? "Tap something in the picture that should be white or grey" : neutral.pick ? (neutral.pick.limited ? "From your tap, as far as is safe" : "From your tap") : "Automatic. Colour off? Pick sand, a tank or bubbles"}</small></span>
+            <div className="adv__actions">
+              <button type="button" className={`btn btn--ghost neutral-btn${neutral.active ? " is-on" : ""}`} aria-pressed={neutral.active} onClick={neutral.onToggle} disabled={!tools.colour.enabled}>
+                {neutral.active ? "Done" : neutral.pick ? "Pick again" : "Pick white point"}
+              </button>
+              {neutral.pick && <button type="button" className="link-btn" onClick={neutral.onReset}>Reset</button>}
+            </div>
+          </div>
+        )}
+        <Slider label="Water colour" value={c.waterHue ?? 0} min={-100} max={100} defaultValue={0} format={waterHueLabel} onChange={(v) => up({ waterHue: Math.abs(v) < 4 ? 0 : v })} />
+        <p className="adv__hint">Turns the water toward teal or a deeper blue. Fish, skin and sand keep their colour.</p>
         <Slider label="Deep-blue look" value={c.look * 100} min={0} max={100} defaultValue={0} onChange={(v) => up({ look: v / 100 })} />
         <p className="adv__hint">A creative grade on top of the correction: darker, water tinted toward deep blue, subjects keep their colour.</p>
         <Slider label="Saturation" value={c.saturation * 100} min={0} max={200} defaultValue={100} format={(v) => `${Math.round(v)}%`} onChange={(v) => up({ saturation: v / 100 })} />

@@ -2187,6 +2187,50 @@ a {
   min-height: 32px;
   padding: 0 var(--s-2);
 }
+/* Tap-to-neutral: a cross-hair cursor while the picture waits for the tap, a small ring where it landed. */
+.is-picking .stage__frame.is-live {
+  cursor: crosshair;
+}
+.neutral-mark {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border-radius: 50%;
+  border: 1.5px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), inset 0 0 0 1px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+.neutral-mark::before,
+.neutral-mark::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.55);
+}
+.neutral-mark::before {
+  width: 40px;
+  height: 1px;
+  margin: -0.5px 0 0 -20px;
+  /* The hairs stop short of the centre: the tapped pixels stay visible. */
+  -webkit-mask: linear-gradient(90deg, #000 0 14px, transparent 14px 26px, #000 26px);
+  mask: linear-gradient(90deg, #000 0 14px, transparent 14px 26px, #000 26px);
+}
+.neutral-mark::after {
+  width: 1px;
+  height: 40px;
+  margin: -20px 0 0 -0.5px;
+  -webkit-mask: linear-gradient(180deg, #000 0 14px, transparent 14px 26px, #000 26px);
+  mask: linear-gradient(180deg, #000 0 14px, transparent 14px 26px, #000 26px);
+}
+.neutral-mark.is-limited {
+  border-style: dashed;
+}
+.neutral-btn.is-on {
+  box-shadow: inset 0 0 0 1.5px var(--line-3);
+}
 .adv__actions {
   display: flex;
   flex-wrap: wrap;

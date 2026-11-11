@@ -140,6 +140,9 @@ const float WP_LLO = ${WARM_POP.lLo.toFixed(4)};
 const float WP_LHI = ${WARM_POP.lHi.toFixed(4)};
 const float WP_WLO = ${WARM_POP.wLo.toFixed(4)};
 const float WP_WHI = ${WARM_POP.wHi.toFixed(4)};
+const float WP_SIDE = ${WARM_POP.side.toFixed(4)};
+const float WP_CAST_LO = ${WARM_POP.castLo.toFixed(4)};
+const float WP_CAST_HI = ${WARM_POP.castHi.toFixed(4)};
 const float SP_CHROMA = ${SUBJECT_POP.chromaFollow.toFixed(4)};
 const float SP_ENGINE = ${SUBJECT_POP.engineKeep.toFixed(4)};
 const float SP_KEEP_LO = ${SUBJECT_POP.keepDarkLo.toFixed(4)};
@@ -391,6 +394,19 @@ vec4 blueLook(vec3 lab, float v, float g) {
   float L2 = lab.x * (1.0 - BW_SHADOW_K * v * (1.0 - smoothstepf(0.0, BW_SHADOW_HI, lab.x)));
   return vec4(L2, ab, max(ct * w, Cw * warm));
 }
+// "Water colour" (see WATER_TINT in params.ts; mirrors apply.ts waterTint): the water's hue turned by t radians. Returns (a, b).
+vec2 waterTint(vec2 ab, float t, float g) {
+  if (t == 0.0) return ab;
+  float C = length(ab);
+  float h = atan(ab.y, ab.x);
+  float hh = h < 0.0 ? h + 6.2831853 : h;
+  float cool = 1.0 - smoothstepf(BW_S_LO, BW_S_HI, dot(ab, vec2(cos(BW_WARM_DIR), sin(BW_WARM_DIR))));
+  float vio = smoothstepf(BW_VC_LO, BW_VC_HI, C) * smoothstepf(BW_VIO0, BW_VIO1, hh) * (1.0 - smoothstepf(BW_VIO2, 6.2831853, hh));
+  float veg = smoothstepf(BW_VEG_C_LO, BW_VEG_C_HI, C) * smoothstepf(BW_VEG_IN0, BW_VEG_IN1, hh) * (1.0 - smoothstepf(BW_VEG_OUT0, BW_VEG_OUT1, hh)) * (1.0 - BW_VEG_GREEN * g);
+  float ang = t * cool * (1.0 - vio) * (1.0 - veg);
+  float cs = cos(ang), sn = sin(ang);
+  return vec2(ab.x * cs - ab.y * sn, ab.x * sn + ab.y * cs);
+}
 // Saturation by hue (see RICH_LOOK in params.ts; mirrors apply.ts richLook). v = Vivid amount. Returns (a, b).
 vec2 richLook(vec3 lab, float v) {
   float C = length(lab.yz);
@@ -538,7 +554,10 @@ float popStrength(vec4 an) { return max(p[16].w, segPop(an)); }
 // Warm pop (WARM_POP): the subject's chroma toward a warm cream hue; k = the subject's weight × warmth.
 vec2 warmPop(float L, vec2 ab, float k) {
   float Ct = min(WP_CMAX, max(WP_KEEP * length(ab), WP_CMIN * smoothstepf(WP_LLO, WP_LHI, L)));
-  return mix(ab, vec2(cos(WP_HUE), sin(WP_HUE)) * Ct, k);
+  // Along the warm hue: a linear mix; across it: faded faster, so the pull passes through neutral, never green.
+  vec2 wh = vec2(cos(WP_HUE), sin(WP_HUE));
+  float al = dot(ab, wh);
+  return wh * mix(al, Ct, k) + (ab - wh * al) * pow(max(0.0, 1.0 - k), WP_SIDE);
 }
 // Seabed recovery (SEABED, params.ts): how much a pixel is sand / reef (brightness over the water level, its own or
 // its region's from a ring of the low-res guide) rather than open water.
@@ -787,11 +806,13 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   lk.yz = popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0));
   // The engine's own masks are blobs reaching past the animal: there the warmth also needs the pixel's own departure
   // from the water (it hugs the animal's outline); an AI mask is the outline already.
-  float wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * (p[24].y > 0.5 ? 1.0 : depart);
+  float wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * (p[24].y > 0.5 ? 1.0 : depart) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);
   lk.yz = warmPop(lk.x, lk.yz, wk);
   // Blue water style (opt-in, p25.w): cobalt water, orange warm subjects, neutral silver, deeper shadows.
   vec4 bl = blueLook(lk, p[25].w, p[22].w);
   lk = bl.xyz;
+  // "Water colour" (p26.w): the water's hue turned toward teal or a deeper blue; subjects keep theirs.
+  lk.yz = waterTint(lk.yz, p[26].w, p[22].w);
   // Saturation by hue (RICH_LOOK; rides on the Vivid amount, p23.z): richer colour, warm subjects more.
   lk.yz = richLook(lk, p[23].z);
   // Seabed recovery: sand and reef to a warm neutral (and a little lighter) where the water left no red.
@@ -1007,6 +1028,20 @@ fn blueLook(lab: vec3<f32>, v: f32, g: f32) -> vec4<f32> {
   let L2 = lab.x * (1.0 - BW_SHADOW_K * v * (1.0 - smoothstepf(0.0, BW_SHADOW_HI, lab.x)));
   return vec4<f32>(L2, ab, max(ct * w, Cw * warm));
 }
+// "Water colour" (mirrors the GLSL / apply.ts waterTint): the water's hue turned by t radians. Returns (a, b).
+fn waterTint(ab: vec2<f32>, t: f32, g: f32) -> vec2<f32> {
+  if (t == 0.0) { return ab; }
+  let C = length(ab);
+  let h = atan2(ab.y, ab.x);
+  let hh = select(h, h + 6.2831853, h < 0.0);
+  let cool = 1.0 - smoothstepf(BW_S_LO, BW_S_HI, dot(ab, vec2<f32>(cos(BW_WARM_DIR), sin(BW_WARM_DIR))));
+  let vio = smoothstepf(BW_VC_LO, BW_VC_HI, C) * smoothstepf(BW_VIO0, BW_VIO1, hh) * (1.0 - smoothstepf(BW_VIO2, 6.2831853, hh));
+  let veg = smoothstepf(BW_VEG_C_LO, BW_VEG_C_HI, C) * smoothstepf(BW_VEG_IN0, BW_VEG_IN1, hh) * (1.0 - smoothstepf(BW_VEG_OUT0, BW_VEG_OUT1, hh)) * (1.0 - BW_VEG_GREEN * g);
+  let ang = t * cool * (1.0 - vio) * (1.0 - veg);
+  let cs = cos(ang);
+  let sn = sin(ang);
+  return vec2<f32>(ab.x * cs - ab.y * sn, ab.x * sn + ab.y * cs);
+}
 // Saturation by hue (mirrors the GLSL / apply.ts richLook). v = Vivid amount. Returns (a, b).
 fn richLook(lab: vec3<f32>, v: f32) -> vec2<f32> {
   let C = length(lab.yz);
@@ -1126,7 +1161,9 @@ fn segPop(an: vec4<f32>) -> f32 { return select(0.0, smoothstepf(SEG_POP_LO, SEG
 fn popStrength(an: vec4<f32>) -> f32 { return max(params.p[16].w, segPop(an)); }
 fn warmPop(L: f32, ab: vec2<f32>, k: f32) -> vec2<f32> {
   let Ct = min(WP_CMAX, max(WP_KEEP * length(ab), WP_CMIN * smoothstepf(WP_LLO, WP_LHI, L)));
-  return mix(ab, vec2<f32>(cos(WP_HUE), sin(WP_HUE)) * Ct, k);
+  let wh = vec2<f32>(cos(WP_HUE), sin(WP_HUE));
+  let al = dot(ab, wh);
+  return wh * mix(al, Ct, k) + (ab - wh * al) * pow(max(0.0, 1.0 - k), WP_SIDE);
 }
 fn seabedT(L: f32) -> f32 {
   let lw = params.p[25].y;
@@ -1331,10 +1368,11 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
   lk = vec3(lk.x, highlightPink(lk.x, lk.yz));
   lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0)));
-  let wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * select(depart, 1.0, p[24].y > 0.5);
+  let wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * select(depart, 1.0, p[24].y > 0.5) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);
   lk = vec3(lk.x, warmPop(lk.x, lk.yz, wk));
   let bl = blueLook(lk, params.p[25].w, p[22].w);
   lk = bl.xyz;
+  lk = vec3(lk.x, waterTint(lk.yz, params.p[26].w, p[22].w));
   lk = vec3(lk.x, richLook(lk, p[23].z));
   if (params.p[25].x > 0.0) {
     let sb = seabedW(uv, lab0.x) * params.p[25].x;
