@@ -3,8 +3,8 @@
 import assert from "node:assert/strict";
 import { assembleMemory, frameIndex, isEmpty, MEM_DIM, MEM_TOKENS, newBank, pruneBank, storeMemory, type MemEntry } from "../src/pipeline/seg/bank.ts";
 import { denseFlow, warp, type Gray } from "../src/pipeline/seg/flow.ts";
-import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, guidedFilter, iou, nearMap, promptFromMask, rleDecode, rleEncode, sdfFeather } from "../src/pipeline/seg/mask.ts";
-import { composeSegStrength, SEG_THICK, waterField } from "../../aqua-fix/src/engine/seg-overlay.ts";
+import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, framePop, guidedFilter, iou, nearMap, promptFromMask, rleDecode, rleEncode, sdfFeather } from "../src/pipeline/seg/mask.ts";
+import { clipPopDirection, composeSegStrength, popDirection, SEG_THICK, waterField } from "../../aqua-fix/src/engine/seg-overlay.ts";
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
 import { SUBJECT_CLEAR } from "../../aqua-fix/src/engine/params.ts";
@@ -318,6 +318,51 @@ const img = (dx: number, dy: number): Gray => {
   for (let k = 1; k < ws.length; k++) assert.ok(ws[k] <= ws[k - 1] + 1e-6, `eases out toward the gap (${ws.map((w) => w.toFixed(2))})`);
   assert.ok(ws[ws.length - 1] < 0.05 && ws[0] > 0.95, "reaches nothing at the edge");
   assert.equal(live.coverage, 0.5);
+}
+
+// Pop direction: one number for the clip. Each filled frame carries its own subject / water contrast (framePop); the
+// live masks hand the engine their mean with every overlay, and the engine takes its lift direction from that alone:
+// the same whichever frames were drawn before (it used to average the frames it had rendered since its last reset,
+// so the preview depended on what was played or scrubbed, and an export decided from its first frames).
+{
+  const w = 64, h = 36, n = w * h;
+  const alpha = new Uint8Array(n), inc = new Float32Array(n);
+  for (let y = 12; y < 24; y++) for (let x = 20; x < 44; x++) { alpha[y * w + x] = 255; inc[y * w + x] = 1; }
+  const near = nearMap(inc, w, h, 6);
+  const lumaOf = (subject: number, water: number) => Float32Array.from(alpha, (a) => (a ? subject : water));
+  const dark = framePop(lumaOf(0.2, 0.6), alpha, near)!, light = framePop(lumaOf(0.7, 0.4), alpha, near)!;
+  assert.ok(dark < -1 && light > 0.5, `a silhouette is negative, a lit subject positive (${dark.toFixed(2)}, ${light.toFixed(2)})`);
+  // In linear light: the ratio of the two sRGB code values, decoded.
+  const lin = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  assert.ok(Math.abs(dark - Math.log(lin(0.2) / lin(0.6))) < 0.02);
+  assert.equal(framePop(lumaOf(0.2, 0.6), new Uint8Array(n), near), null, "no subject: nothing to measure");
+  assert.equal(framePop(lumaOf(0.2, 0.6), alpha, new Float32Array(n)), null, "no water ring: nothing to measure");
+
+  const mw = 16, mh = 9, qw = 4, qh = 3;
+  const frame = (i: number, pop: number | null) => ({ i, alpha: rleEncode(new Uint8Array(mw * mh).fill(255)), nearQ: rleEncode(new Uint8Array(qw * qh).fill(255)), excQ: null, depQ: rleEncode(new Uint8Array(qw * qh)), pop });
+  const live = new SegLive({ mw, mh, i0: 0, n: 60 });
+  assert.equal(live.pop, null, "nothing filled: no measure");
+  live.put([frame(0, -0.6), frame(1, null), frame(2, -0.2)]);
+  assert.ok(Math.abs(live.pop! - -0.4) < 1e-12, "the mean of the frames that have one");
+  assert.equal(live.at(0)!.pop, live.pop, "every overlay carries the clip's number");
+  assert.equal(live.at(2 / 30)!.pop, live.pop);
+  live.put([frame(2, -1.0)]); // a refill replaces a frame's measure
+  assert.ok(Math.abs(live.pop! - -0.8) < 1e-12);
+  // The same frames in another order (a replay, a refill): the same number.
+  const again = new SegLive({ mw, mh, i0: 0, n: 60 });
+  again.put([frame(2, -1.0)]);
+  again.put([frame(1, null), frame(0, -0.6)]);
+  assert.equal(again.pop, live.pop);
+
+  // The engine: an overlay with the clip's number decides alone; the running mean of drawn frames is only for one without.
+  const o = live.at(0)!;
+  assert.equal(clipPopDirection(o, 0.9), popDirection(-0.8), "the frames drawn before do not matter");
+  assert.equal(clipPopDirection(o, null), popDirection(-0.8));
+  assert.equal(clipPopDirection(o, 0.9), -1, "a clearly darker subject is deepened");
+  assert.equal(clipPopDirection({ ...o, pop: null }, -0.9), 1, "no measure: lifted");
+  assert.equal(clipPopDirection({ ...o, pop: undefined }, -0.9), popDirection(-0.9), "no clip number: the running mean");
+  assert.equal(clipPopDirection({ ...o, pop: undefined }, null), 1);
+  assert.equal(clipPopDirection(null, null), 1);
 }
 
 // Run-length coded maps round-trip exactly; a feathered mask codes small.

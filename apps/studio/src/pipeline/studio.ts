@@ -956,7 +956,7 @@ export class Studio {
       const a = pass(o.alpha, o.near, o.depart ?? null);
       const ex = o.exclude ? pass(o.exclude, null, null) : null;
       const ch = (d: Uint8ClampedArray, c: number) => { const f = new Float32Array(w * h); for (let i = 0; i < w * h; i++) f[i] = d[i * 4 + c] / 255; return f; };
-      const out: SegOverlay = { width: w, height: h, alpha: ch(a, 0), near: ch(a, 1), depart: o.depart ? ch(a, 2) : null, exclude: ex ? ch(ex, 0) : null, quality: o.quality };
+      const out: SegOverlay = { width: w, height: h, alpha: ch(a, 0), near: ch(a, 1), depart: o.depart ? ch(a, 2) : null, exclude: ex ? ch(ex, 0) : null, quality: o.quality, pop: o.pop };
       Object.assign(g, { t, o, out });
       return out;
     } catch {

@@ -20,7 +20,7 @@ import { linearToOklab, oklabToLinear } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
 import { BalanceFollow } from "./follow.ts";
 import { AnimalTracker, type AnimalMap, type SubjectOverride, type SubjectSelection } from "./animals.ts";
-import { composeSegStrength, popContrast, popDirection, type SegOverlay } from "./seg-overlay.ts";
+import { clipPopDirection, composeSegStrength, popContrast, type SegOverlay } from "./seg-overlay.ts";
 import {
   CLAHE_BINS,
   CLAHE_TILES_X,
@@ -157,8 +157,9 @@ export class GradeEngine {
   /** AI subject detection overlay (Studio seg/) for the frame being drawn; null = the engine's masks alone. */
   private seg: SegOverlay | null = null;
   /** Subject pop lift direction (uniform p24.x, seg-overlay.ts popDirection): +1 lifts the ML subject, −1 deepens
-   * it (a subject darker than the water around it). Decided from the subject/water contrast averaged over the clip
-   * (popC), so the subject keeps one look as it swims off; reset with the clip. */
+   * it (a subject darker than the water around it). Decided from the subject/water contrast of the whole clip, which
+   * the overlay carries (SegOverlay.pop), so the subject keeps one look as it swims off and the export matches the
+   * preview; for an overlay without it, from the mean over the frames drawn so far (popC; reset with the clip). */
   private popDir = 1;
   private popC = { sum: 0, n: 0 };
   private personWorker: Worker | null = null;
@@ -846,9 +847,14 @@ export class GradeEngine {
     // Per-animal Subject pop strength (data texture 3); none without Subject pop.
     if (this.settings.subjectPop) {
       this.backend.setData(3, this.seg ? composeSegStrength(this.seg, g) : this.animals.strength(this.lastTickSec));
-      const c = this.seg ? popContrast(g, this.seg) : null;
-      if (c !== null) { this.popC.sum += c; this.popC.n++; }
-      this.popDir = this.popC.n ? popDirection(this.popC.sum / this.popC.n) : 1;
+      // The overlay's own clip-wide measure decides the direction when it has one (SegOverlay.pop): a constant, the
+      // same in the preview and the export. Only an overlay without it falls back to the mean over the frames
+      // drawn since the last reset (which depends on what was played, scrubbed or trimmed before).
+      if (this.seg && this.seg.pop === undefined) {
+        const c = popContrast(g, this.seg);
+        if (c !== null) { this.popC.sum += c; this.popC.n++; }
+      }
+      this.popDir = clipPopDirection(this.seg, this.popC.n ? this.popC.sum / this.popC.n : null);
       this.strengthOn = true;
     } else if (this.strengthOn) {
       this.backend.setData(3, { width: 1, height: 1, data: new Float32Array(4) });

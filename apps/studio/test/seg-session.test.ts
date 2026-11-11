@@ -171,6 +171,11 @@ const subject = (t: number): SegObject & { id: number } => ({ id: ids++, kind: "
   assert.equal(frameKey(0.5), frameKey(15 / 30), "a keyframe on the grid shares its grid frame's entry");
   assert.notEqual(frameKey(0.25), frameKey(8 / 30));
   for (let i = 1; i < 300; i++) assert.notEqual(frameKey(i / 30), frameKey((i - 1) / 30));
+  // Every frame with the subject carries its contrast against the water around it (bright on a darker texture here):
+  // the clip's one pop direction comes from their mean (SegLive.pop), not from what the engine happened to draw.
+  const pops = [...r.frames.values()].map((x) => x.pop).filter((p): p is number => typeof p === "number");
+  assert.equal(pops.length, r.frames.size, "a measure on every frame");
+  assert.ok(pops.every((p) => p > 1 && p < 4), `the subject is lighter than the water (${Math.min(...pops).toFixed(2)}..${Math.max(...pops).toFixed(2)})`);
   console.log("session: healthy pass → idle, all frames, each frame its own pixels: ok");
 }
 
@@ -195,6 +200,7 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
     const y = b.get(i);
     assert.ok(y, `${what}: frame ${i} filled`);
     assert.ok(eq(x.alpha, y.alpha) && eq(x.nearQ, y.nearQ) && eq(x.depQ, y.depQ) && eq(x.excQ, y.excQ), `${what}: frame ${i} identical`);
+    assert.equal(y.pop, x.pop, `${what}: frame ${i} measures the same subject / water contrast`);
   }
 };
 

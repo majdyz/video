@@ -19,7 +19,7 @@
 //   for undo), else it is followed as an exclude object (only the tapped part comes out).
 import type { EdgeTam } from "./edgetam.ts";
 import { frameIndex } from "./bank.ts";
-import { cellLab, nearMap, departFromCells, sdfFeather, area, bbox, guidedFilter, iou, promptFromMask, rleDecode, rleEncode } from "./mask.ts";
+import { cellLab, nearMap, departFromCells, framePop, sdfFeather, area, bbox, guidedFilter, iou, promptFromMask, rleDecode, rleEncode } from "./mask.ts";
 import { denseFlow, warp, type Gray } from "./flow.ts";
 import { fillInterval, keyTimes, maskSize, remap, SEG, sigmoidResize, toU8, type Keyframe, type SegObject } from "./track.ts";
 
@@ -59,7 +59,9 @@ function ringContrast(m: Float32Array, cells: Float32Array, w: number, h: number
 
 export type SessionObjectInfo = { id: number; kind: "include" | "exclude"; t: number };
 /** One filled frame's maps, run-length coded (mask.ts rleEncode): alpha on the mask grid, the rest at quarter size. */
-export type SessionFrameOut = { i: number; alpha: Uint8Array; nearQ: Uint8Array; excQ: Uint8Array | null; depQ: Uint8Array };
+/** pop: the frame's subject / water contrast (mask.ts framePop; null: nothing to measure), for the clip's one
+ * Subject pop direction (studio-seg.ts SegLive.pop). */
+export type SessionFrameOut = { i: number; alpha: Uint8Array; nearQ: Uint8Array; excQ: Uint8Array | null; depQ: Uint8Array; pop?: number | null };
 export type SessionProfile = Record<string, number>;
 export type SessionEvents = {
   frames(items: SessionFrameOut[]): void;
@@ -727,7 +729,7 @@ export class SegSession {
     idx.forEach((i, j) => {
       const inc = guidedFilter(lumas[j], remap(filled[j].inc), this.mw, this.mh, gr, SEG.guidedEps);
       const e = filled[j].exc ? guidedFilter(lumas[j], remap(filled[j].exc!), this.mw, this.mh, gr, SEG.guidedEps) : null;
-      out.push(this.product(i, inc, e));
+      out.push(this.product(i, inc, e, lumas[j]));
     });
     this.prof.fillMs += t1 - t0;
     this.prof.productMs += performance.now() - t1;
@@ -736,13 +738,13 @@ export class SegSession {
   }
 
   /** The overlay-ready maps of one frame (feather, near, exclude, water departure; see track.ts SegTrack.at). */
-  private product(i: number, incRaw: Float32Array, excRaw: Float32Array | null): SessionFrameOut {
+  private product(i: number, incRaw: Float32Array, excRaw: Float32Array | null, luma: Float32Array): SessionFrameOut {
     const { mw: w, mh: h } = this;
     const bb = bbox(incRaw, w, h);
     if (!bb && !excRaw) {
       // Nothing here: an empty frame (coded in a few bytes; the overlay is then the engine's alone).
       const z = new Uint8Array(w * h), zq = new Uint8Array(qsize(w) * qsize(h));
-      return { i, alpha: rleEncode(z), nearQ: rleEncode(zq), excQ: null, depQ: rleEncode(zq.fill(255)) };
+      return { i, alpha: rleEncode(z), nearQ: rleEncode(zq), excQ: null, depQ: rleEncode(zq.fill(255)), pop: null };
     }
     const diag = bb ? Math.hypot(bb.x1 - bb.x0 + 1, bb.y1 - bb.y0 + 1) : 0;
     const r = Math.max(SEG.featherMinPx, SEG.featherShare * diag);
@@ -753,7 +755,10 @@ export class SegSession {
     const near = nearMap(incRaw, w, h, nr);
     const cells = this.cellCache.get(frameKey((this.grid.i0 + i) / SEG.sampleHz));
     const depQ = cells ? departFromCells(cells, toU8(incRaw), w, h).data : new Uint8Array(qsize(w) * qsize(h)).fill(255);
-    return { i, alpha: rleEncode(alpha), nearQ: rleEncode(quarter(near, w, h, 4)), excQ: exc ? rleEncode(quarter(exc, w, h, 1)) : null, depQ: rleEncode(depQ) };
+    // The subject against the water around it on this frame: the main thread averages it over the clip for the pop's
+    // one lift direction (the engine used to average whatever frames had been rendered since its last reset).
+    const pop = framePop(luma, alpha, near);
+    return { i, alpha: rleEncode(alpha), nearQ: rleEncode(quarter(near, w, h, 4)), excQ: exc ? rleEncode(quarter(exc, w, h, 1)) : null, depQ: rleEncode(depQ), pop };
   }
 
   private postKeys(): void {

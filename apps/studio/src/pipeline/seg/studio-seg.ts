@@ -249,6 +249,24 @@ export class SegLive {
       this.stats[f.i] = maskStats(rleDecode(f.alpha, this.mw * this.mh), this.mw, this.mh);
     }
     this.qCache.clear();
+    this.popMean = undefined;
+  }
+
+  private popMean: number | null | undefined = undefined;
+  /**
+   * The clip's subject / water contrast: the mean of every filled frame's own measure (session.ts product, mask.ts
+   * framePop), or null when no frame has one. It decides whether Subject pop lifts or deepens the subject
+   * (SegOverlay.pop → the engine's clipPopDirection). A function of the filled frames alone, so once the pass is
+   * done it is one number for the clip: the preview shows the direction the export will have, whatever was played,
+   * scrubbed or trimmed before (the engine used to average the frames it happened to draw).
+   */
+  get pop(): number | null {
+    if (this.popMean === undefined) {
+      let sum = 0, n = 0;
+      for (const f of this.frames) if (f && typeof f.pop === "number") { sum += f.pop; n++; }
+      this.popMean = n ? sum / n : null;
+    }
+    return this.popMean;
   }
 
   /**
@@ -362,7 +380,7 @@ export class SegLive {
       wsum += wk;
     }
     for (let k = 0; k < alpha.length; k++) alpha[k] /= 255 * wsum;
-    return { width: mw, height: mh, alpha, exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ), quality: this.qualityAt(i) };
+    return { width: mw, height: mh, alpha, exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ), quality: this.qualityAt(i), pop: this.pop };
   }
 
   /** Share of the grid filled (0..1). */
