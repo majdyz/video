@@ -14,7 +14,8 @@ type Req =
   | { id: number; type: "step"; key: string; frame: number; points: [number, number][] | null; labels: number[] | null; reverse: boolean }
   | { id: number; type: "drop"; key: string }
   // The background session (session.ts): the clip's own decoder, objects, per-frame masks posted as events.
-  | { id: number; type: "session-open"; file: File; start: number; end: number; fps?: number }
+  | { id: number; type: "session-open"; file: File; start: number; end: number; fps?: number; autoCap?: number }
+  | { id: number; type: "session-focus"; t: number; objects: SegObject[]; search: boolean }
   | { id: number; type: "session-add"; object: SegObject & { id: number } }
   | { id: number; type: "session-remove"; object: number }
   | { id: number; type: "session-restore"; object: number }
@@ -63,13 +64,15 @@ export function serve(ort: typeof OrtNS, webgpu: boolean): void {
  * holds `r`): for the init request that is the four model files, 33 MB the runtime has already copied into its heap.
  */
 function stageTracer(debug: boolean): (stage: string) => void {
-  let stages = 0;
   return (st) => {
     const mb = wasmHeapMB();
     if (debug) console.info(`[seg] heap ${mb} MB after ${st}`);
     if (session && stages++ < 10) emit({ ev: "trace", msg: `${st} · heap ${mb} MB` });
   };
 }
+/** Graph runs traced since the session opened or the last tap (the first ten of each go to the breadcrumbs: a tap
+ * that kills the page leaves the stage it died in). */
+let stages = 0;
 
 async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void> {
   const post = (m: object, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage({ id: r.id, ...m }, transfer);
@@ -106,7 +109,7 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
       const s: SegSession = new SegSession(model, frames, { start: r.start, end: r.end }, {
         frames: (items) => { if (mine()) emit({ ev: "frames", items }, items.flatMap((x) => [x.alpha.buffer, x.nearQ.buffer, x.depQ.buffer, ...(x.excQ ? [x.excQ.buffer] : [])])); },
         keys: (conf) => { if (mine()) emit({ ev: "keys", conf }); },
-        progress: (done, total) => { if (mine()) emit({ ev: "progress", done, total, heapMB: wasmHeapMB() }); },
+        progress: (done, total, taps) => { if (mine()) emit({ ev: "progress", done, total, taps, heapMB: wasmHeapMB() }); },
         idle: (profile) => { if (mine()) emit({ ev: "idle", profile: { ...profile, heapMB: wasmHeapMB() } }); },
         needSeeds: (k, t, search) => { if (mine()) emit({ ev: "seeds", k, t, search }); },
         rejected: (id) => { if (mine()) emit({ ev: "rejected", id }); },
@@ -114,8 +117,9 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
         error: (msg) => { if (session === s) session = null; emit({ ev: "error", msg, heapMB: wasmHeapMB() }); },
         // Each breadcrumb carries the WASM heap (it only grows: the step that took it past the phone's limit shows).
         trace: (msg) => emit({ ev: "trace", msg: `${msg} · heap ${wasmHeapMB()} MB` }),
-      }, { fps: r.fps });
+      }, { fps: r.fps, autoCap: r.autoCap });
       session = s;
+      stages = 0;
       post({ ok: true, width: frames.width, height: frames.height, mw: s.mw, mh: s.mh, i0: s.grid.i0, n: s.grid.n });
     } else if (r.type === "session-busy") {
       post({ ok: true, busy: !!session?.busy });
@@ -131,7 +135,10 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
     } else if (r.type === "session-seeds") {
       session.seeds(r.t, r.objects);
       post({ ok: true });
+    } else if (r.type === "session-focus") {
+      post({ ok: true, taken: session.focus(r.t, r.objects, r.search) });
     } else if (r.type === "session-add") {
+      stages = 0;
       session.add(r.object);
       post({ ok: true, t: session.snap(r.object.t) });
     } else if (r.type === "session-remove") {
@@ -141,6 +148,7 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
       session.restore(r.object);
       post({ ok: true });
     } else if (r.type === "session-exclude") {
+      stages = 0;
       post({ ok: true, ...(await session.excludeAt(r.object, r.t, r.u, r.v)) });
     }
   } catch (e) {

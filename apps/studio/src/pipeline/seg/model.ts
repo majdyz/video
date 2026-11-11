@@ -10,7 +10,7 @@ import { deviceFacts, segThreads } from "../device.ts";
 export type SessionEvent =
   | { ev: "frames"; items: SessionFrameOut[] }
   | { ev: "keys"; conf: { t: number; conf: number }[] }
-  | { ev: "progress"; done: number; total: number; heapMB?: number }
+  | { ev: "progress"; done: number; total: number; taps?: number; heapMB?: number }
   | { ev: "idle"; profile: Record<string, number> }
   | { ev: "seeds"; k: number; t: number; search?: boolean }
   | { ev: "rejected"; id: number }
@@ -177,8 +177,14 @@ export class WorkerSegModel implements SegModel {
   // ------------------------------------------------------------------ background session (session.ts)
 
   /** fps: keyframes a second, fixed (`?segfps=N`); without it the session picks by the model (session.ts). */
-  async sessionOpen(file: File, start: number, end: number, fps?: number): Promise<SessionInfo> {
-    return (await this.call({ type: "session-open", file, start, end, fps })) as unknown as SessionInfo;
+  /** autoCap: the engine's own subjects followed at a time (a phone: SEG.liteAutos whatever the model). */
+  async sessionOpen(file: File, start: number, end: number, fps?: number, autoCap?: number): Promise<SessionInfo> {
+    return (await this.call({ type: "session-open", file, start, end, fps, autoCap })) as unknown as SessionInfo;
+  }
+
+  /** Playhead first (session.ts focus): the subjects of the paused frame at t, followed ahead of the pass. */
+  async sessionFocus(t: number, objects: SegObject[], search: boolean): Promise<boolean> {
+    return !!(await this.call({ type: "session-focus", t, objects, search })).taken;
   }
 
   async sessionAdd(object: SegObject & { id: number }): Promise<number> {

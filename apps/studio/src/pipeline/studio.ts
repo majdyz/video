@@ -576,7 +576,10 @@ export class Studio {
     }
     if (!this.paused()) {
       this.pause();
-      await this.refreshSubjects();
+      // With the AI session at work (its pass, a tap before this one) the tap goes straight to it: the engine's
+      // analysis of the frame, right next to the session taking the tap, was a phone's memory peak (the page
+      // crashed two seconds after a tap, 11 Nov). The frame is analysed once the tap is followed (onTapDone).
+      if (!(this.snap.kind === "video" && this.seg.live && this.seg.working)) await this.refreshSubjects();
     }
     const t = this.snap.kind === "video" ? this.video?.currentTime ?? 0 : 0;
     const before = this.snap.subjectOverrides;
@@ -1011,12 +1014,28 @@ export class Studio {
     const e = this.engine;
     if (!e || !this.paused() || this.exporting || this.snap.phase !== "ready" || !this.tools.colour.enabled) return;
     const t = this.snap.kind === "video" ? this.video?.currentTime ?? 0 : 0;
+    // The AI session is following a tap: the analysis waits for it (seg.onTapDone runs it), the frame is repainted
+    // with what there is.
+    if (this.snap.kind === "video" && this.seg.live && this.seg.tapBusy) { this.repaint(); return; }
     e.setTime(t);
     if (this.snap.kind === "video" && this.video) this.uploadToEngine(this.still ?? this.video, t, true);
     await e.analyzeNow(true).catch(() => undefined);
     this.openWater = e.openWater();
     this.repaint();
-    if (this.snap.kind === "video" && this.seg.on) this.runSeg();
+    if (this.snap.kind === "video" && this.seg.on) { this.runSeg(); this.focusSeg(t); }
+  }
+
+  /**
+   * Playhead first: paused on a frame the AI pass has not reached, the session follows that frame's subjects (the
+   * engine's, from the analysis just made; its own search when there are none) ahead of the pass, so the masks on
+   * screen come within seconds, not when the pass gets there (minutes into a clip on a phone). See SubjectSeg.focus.
+   */
+  private focusSeg(t: number): void {
+    const e = this.engine;
+    if (!e || this.exporting || !this.seg.wantsFocus(t)) return;
+    const found = seedObjects(e.animalMap(), t, e.personBoxesNow());
+    const toSource = this.segToSource(t);
+    void this.seg.focus(t, toSource ? found.map((o) => ({ ...o, prompt: mapPrompt(o.prompt, toSource) })) : found);
   }
 
   private pausedTimer = 0;
@@ -1033,6 +1052,8 @@ export class Studio {
     // The session asks for the next segment's seeds as its tracking reaches it (long clips).
     s.onNeedSeeds = (k, t, search) => { if (k > 0) void this.seedSegmentCanonical(k, t, search); };
     s.onFrames = () => { const now = performance.now(); if (now - last > 250 && this.paused()) { last = now; this.repaint(); } };
+    // A tap has been followed through: the paused frame's analysis that was held back for it.
+    s.onTapDone = () => { if (this.paused() && this.snap.kind === "video") this.schedulePausedAnalysis(); };
     // The pass is done and its worker shut down: the seed-frame <video> (a decoder of its own) goes too.
     s.onHibernate = () => this.dropSeedVideo();
     // The pass failed in the worker (it used to look finished): say so, and the picture goes back to the engine's masks.

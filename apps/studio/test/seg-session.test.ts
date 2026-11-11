@@ -39,7 +39,7 @@ class FakeCanvas {
           data[k] = s * 0.6; data[k + 1] = s * 0.8; data[k + 2] = s; data[k + 3] = 255;
           // The frame's time in the first pixel (the model fake reads it back: which frame was encoded).
         }
-        data[0] = Math.round(t * 10) % 256; data[1] = Math.floor((t * 10) / 256);
+        data[0] = Math.round(t * 100) % 256; data[1] = Math.floor(Math.round(t * 100) / 256);
         return { data };
       },
     };
@@ -56,6 +56,9 @@ type Fake = {
   encodes: number;
   /** Tracker steps so far. */
   steps: number;
+  /** The clip times encoded, in order, and each tracker step's bank key and frame. */
+  encoded: number[];
+  stepped: { key: string; t: number }[];
   failAt: number;
   /** The subject is on screen between these clip times (the model finds nothing outside them). */
   visible: [number, number];
@@ -65,7 +68,7 @@ type Fake = {
 };
 
 function fake(opts: Partial<Pick<Fake, "failAt" | "visible" | "gone">> & { lite?: boolean } = {}): Fake {
-  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, reads: [], encodes: 0, steps: 0, failAt: opts.failAt ?? Infinity, visible: opts.visible ?? [-Infinity, Infinity], gone: opts.gone ?? null, disposed: false };
+  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, reads: [], encodes: 0, steps: 0, encoded: [], stepped: [], failAt: opts.failAt ?? Infinity, visible: opts.visible ?? [-Infinity, Infinity], gone: opts.gone ?? null, disposed: false };
   let encT = 0;
   const lw = 64, lh = 36;
   const mask = (t: number) => {
@@ -78,9 +81,10 @@ function fake(opts: Partial<Pick<Fake, "failAt" | "visible" | "gone">> & { lite?
     timing: { encode: 0, encodes: 0, attend: 0, decoder: 0, memEnc: 0, steps: 0 },
     async encode(rgba: Uint8ClampedArray) {
       if (++f.encodes === f.failAt) throw new Error("failed to allocate a buffer of size 67108864");
-      encT = (rgba[0] + 256 * rgba[1]) / 10;
+      encT = (rgba[0] + 256 * rgba[1]) / 100;
+      f.encoded.push(encT);
     },
-    async step() { f.steps++; return mask(encT); },
+    async step(key: string) { f.steps++; f.stepped.push({ key, t: encT }); return mask(encT); },
     async probe() { return mask(encT); },
     drop() {},
   } as unknown as EdgeTam;
@@ -101,6 +105,9 @@ type Run = {
   log: { t: number; objs: (SegObject & { id: number })[] }[];
   errors: string[];
   idles: number;
+  traces: string[];
+  /** Called on every progress event (taps: tapped objects still being followed). */
+  onProgress: ((done: number, total: number, taps: number) => void) | null;
   /** Resolves at the next idle or error. */
   settled(): Promise<void>;
 };
@@ -110,13 +117,14 @@ function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: numbe
   let wake: (() => void) | null = null;
   const done = () => { const w = wake; wake = null; w?.(); };
   const r: Run = {
-    s: null as unknown as SegSession, frames: new Map(), asked: [], log: [], errors: [], idles: 0,
+    s: null as unknown as SegSession, frames: new Map(), asked: [], log: [], errors: [], idles: 0, traces: [], onProgress: null,
     settled: () => new Promise<void>((res) => { wake = res; }),
   };
   const ev: SessionEvents = {
     frames: (items) => { for (const x of items) r.frames.set(x.i, x); },
     keys: () => undefined,
-    progress: () => undefined,
+    progress: (d, t, taps) => r.onProgress?.(d, t, taps),
+    trace: (msg) => { r.traces.push(msg); },
     idle: () => { r.idles++; done(); },
     rejected: () => undefined,
     needSeeds: (k, t, search) => {
@@ -515,4 +523,164 @@ console.log("session: a subject that leaves and comes back → every frame fille
   assert.equal(f.encodes, 0);
   assert.equal(f.reads.length, 0, "nothing decoded for empty frames");
   console.log("session: nothing to follow → empty frames for the whole range: ok");
+}
+
+
+// ---------------------------------------------------------------- a tap: forward to the end, then backward in chunks
+
+/** Decoder restarts the reads would cost (frames.ts: a read behind the decoder's position, or over 2 s ahead). */
+const restarts = (reads: number[]) => reads.filter((t, i) => i > 0 && (t < reads[i - 1] - 1e-3 || t - reads[i - 1] > 2)).length;
+
+{
+  const f = fake();
+  const r = open(f, { start: 0, end: 8 }, (t) => [subject(t)]);
+  let end = r.settled();
+  r.s.seeds(0, [subject(0)]);
+  await end;
+  const e0 = f.encoded.length, r0 = f.reads.length, t0 = r.traces.length;
+  end = r.settled();
+  r.s.add({ ...subject(4), id: 9000 });
+  await end;
+  assert.equal(r.errors.length, 0);
+  const enc = f.encoded.slice(e0);
+  // The tapped keyframe, then forward to the end of the clip, then back to its start: one turn, where the two
+  // directions used to alternate (every other step a decoder restart, and its fill another).
+  assert.equal(enc[0], 4);
+  const turn = enc.indexOf(Math.max(...enc));
+  assert.equal(enc[turn], 8, "forward to the end of the reach");
+  for (let i = 1; i <= turn; i++) assert.ok(enc[i] > enc[i - 1], `forward step ${i} is later than the one before`);
+  for (let i = turn + 1; i < enc.length; i++) assert.ok(enc[i] < enc[i - 1], `backward step ${i} is earlier than the one before`);
+  assert.equal(enc[enc.length - 1], 0, "back to the start");
+  const steps = f.stepped.filter((x) => x.key.startsWith("9000"));
+  assert.deepEqual(steps.slice(0, 3).map((x) => `${x.key}@${x.t}`), ["9000f@4", "9000b@4", "9000f@4.25"], "both banks start on the tapped frame, on one encode");
+  assert.equal(enc.filter((t) => t === 4).length, 1);
+  assert.equal(enc[turn + 1], 3.75, "the backward list goes on from the tapped keyframe");
+  // Backward, the frames come a chunk (SEG.backChunkS) at a time in one read in time order: a restart a chunk (four
+  // seconds back: four), plus the jump to the tap. Step by step it was two a keyframe (32).
+  const n = restarts(f.reads.slice(r0 - 1));
+  assert.ok(n <= 6, `${n} decoder restarts for the tap`);
+  // Every frame read for the tap is read once (the backward chunk's frames serve its steps and its fills).
+  const mine = f.reads.slice(r0).map(frameKey);
+  assert.equal(new Set(mine).size, mine.length, "no frame decoded twice for the tap");
+  assert.equal(r.frames.size, r.s.grid.n);
+  assert.equal(popped(r.frames), r.s.grid.n);
+  // The breadcrumbs start over with the tap: its first encodes and its turn are in a crash log.
+  const tr = r.traces.slice(t0);
+  assert.match(tr[0], /^tap 9000 include 4\.00s: 17 fwd, 17 back$/);
+  assert.equal(tr.filter((x) => x.startsWith("encode ")).length, 3);
+  assert.ok(tr.some((x) => /^back 3\.00-4\.00s \(4 keys\)$/.test(x)), tr.join(" | "));
+  assert.equal(tr[tr.length - 1], "tap 9000 followed");
+  console.log(`session: a tap → forward to the end, then backward in chunks (${n} decoder restarts): ok`);
+}
+
+// The auto pass stands still while a tap is followed, and the result is the same as with the tap up front.
+{
+  const tap = { ...subject(3), id: 9100 };
+  const f = fake({ lite: true });
+  const r = open(f, { start: 0, end: 6 }, (t) => [subject(t)]);
+  let end = r.settled(), added = -1;
+  const taps: number[] = [];
+  r.onProgress = (_d, _t, n) => {
+    taps.push(n);
+    if (added < 0 && f.encodes >= 3) { added = f.stepped.length; r.s.add(tap); }
+  };
+  r.s.seeds(0, [subject(0)]);
+  await end;
+  assert.ok(added > 0, "the tap came in mid-pass");
+  const after = f.stepped.slice(added).map((x) => x.key.startsWith("9100"));
+  const last = after.lastIndexOf(true);
+  assert.ok(last > 0 && after.slice(0, last + 1).every(Boolean), "no auto step until the tap is followed through");
+  assert.ok(after.length > last + 1, "then the pass goes on");
+  // The main thread's sign that a tap is being followed (it holds its own heavy work back until it reads 0).
+  assert.ok(taps.includes(1), "progress says a tap is being followed");
+  assert.equal(taps[taps.length - 1], 0);
+  assert.equal(taps.lastIndexOf(1) - taps.indexOf(1) + 1, taps.filter((x) => x === 1).length, "in one stretch");
+  const g = fake({ lite: true });
+  const q = open(g, { start: 0, end: 6 }, (t) => [subject(t)]);
+  end = q.settled();
+  q.s.add(tap);
+  q.s.seeds(0, [subject(0)]);
+  await end;
+  sameFrames(q.frames, r.frames, "tap mid-pass / up front");
+  console.log("session: the auto pass waits for a tap; same masks whenever it came: ok");
+}
+
+// ---------------------------------------------------------------- playhead first
+
+{
+  // 14 s on the phone model; the user is paused at 9.1 s when the pass has just begun.
+  const at = 9.1, gi = Math.round(at * 30);
+  const plain = fake({ lite: true });
+  const p = open(plain, { start: 0, end: 14 }, (t) => [subject(t)]);
+  let end = p.settled();
+  p.s.seeds(0, [subject(0)]);
+  await end;
+
+  const f = fake({ lite: true });
+  const r = open(f, { start: 0, end: 14 }, (t) => [subject(t)]);
+  assert.equal(r.s.focus(at, [subject(at)]), false, "not before the pass has its first seeds");
+  let asked = false, shownAt = -1, taken = false, near = true, again = true;
+  const on = () => { const x = r.frames.get(gi); return !!x && rleDecode(x.alpha, 320 * 40).some((a) => a > 127); };
+  r.onProgress = () => {
+    if (!asked) {
+      asked = true;
+      // Where the pass is about to be anyway: nothing to do.
+      near = r.s.focus(1.2, [subject(1.2)]);
+      taken = r.s.focus(at, [subject(at)]);
+      again = r.s.focus(at + 0.05, [subject(at)]);
+    }
+    if (shownAt < 0 && on()) shownAt = f.encodes;
+  };
+  end = r.settled();
+  r.s.seeds(0, [subject(0)]);
+  await end;
+  assert.equal(r.errors.length, 0);
+  assert.equal(near, false, "no peek where the pass is within SEG.peekSkipS");
+  assert.equal(taken, true);
+  assert.equal(again, false, "the same keyframe is looked at once");
+  // The paused frame has its mask after the peek's first steps (keyframes 9 and 9.5 s), not after the 18 keyframes
+  // the pass needs to get there.
+  assert.ok(shownAt > 0 && shownAt <= 4, `the playhead's frame was popped after ${shownAt} encodes`);
+  const order = f.encoded.slice(0, 6);
+  assert.deepEqual(order.slice(1, 4), [9, 9.5, 10], `the peek's keyframes right after the pass's first (${order})`);
+  assert.ok(f.stepped.some((x) => x.key === "-1f"), "followed as a provisional object");
+  // Provisional: the finished pass is the pass without it (keyframes, every frame's maps), so an export is too.
+  assert.deepEqual(r.s.keys, p.s.keys, "the peek adds no keyframe");
+  sameFrames(p.frames, r.frames, "with / without a look at the playhead");
+  assert.equal(r.s.profile().objects, p.s.profile().objects, "no peek object is left");
+  assert.equal(r.s.focus(12, [subject(12)]), false, "nothing to look at once the pass is through");
+  assert.equal(r.s.busy, false);
+
+  // A keyframe just after the playhead: the one before it is stepped too (the playhead's interval gets both ends),
+  // and with no subjects from the engine the model looks itself.
+  const g = fake({ lite: true });
+  const q = open(g, { start: 0, end: 14 }, (t) => [subject(t)]);
+  let did = false, seen = -1;
+  const gj = Math.round(8.8 * 30);
+  q.onProgress = () => {
+    if (!did) { did = true; assert.equal(q.s.focus(8.8, [], true), true); }
+    const x = q.frames.get(gj);
+    if (seen < 0 && x && rleDecode(x.alpha, 320 * 40).some((a) => a > 127)) seen = g.encodes;
+  };
+  end = q.settled();
+  q.s.seeds(0, [subject(0)]);
+  await end;
+  assert.deepEqual(g.encoded.slice(1, 5), [9, 8.5, 9.5, 10], `${g.encoded.slice(0, 6)}`);
+  assert.ok(seen > 0 && seen <= 3, `popped after ${seen} encodes`);
+  sameFrames(p.frames, q.frames, "with / without a look just before a keyframe");
+
+  // A tap on what a peek pops is no "remove the subject" (the peek is in no log and goes): an exclude object.
+  const h = fake({ lite: true });
+  const w = open(h, { start: 0, end: 14 }, (t) => [subject(t)]);
+  let ex: Promise<{ action: string }> | null = null, did2 = false;
+  w.onProgress = () => {
+    if (!did2) { did2 = true; w.s.focus(at, [subject(at)]); }
+    if (!ex && w.frames.has(gi)) ex = w.s.excludeAt(9500, at, subjectX(at), 0.5);
+  };
+  end = w.settled();
+  w.s.seeds(0, [subject(0)]);
+  await end;
+  assert.ok(ex);
+  assert.equal((await ex).action, "exclude");
+  console.log(`session: playhead first → the paused frame popped after ${shownAt} encodes; the finished pass unchanged: ok`);
 }

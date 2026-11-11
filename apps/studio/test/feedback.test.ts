@@ -131,7 +131,10 @@ const ctx = { build: "abc1234", device: ["Device: iPhone", "Screen: 390×844 @3x
   assert.equal(store.has("studio.aiWorking"), false);
   doc.visibilityState = "visible";
   fire("visibilitychange");
-  assert.equal(store.get("studio.aiWorking"), "1");
+  // The flag's value is what the model runs on (seg-runtime.test.ts: a crash on WebGPU falls back to WASM).
+  assert.equal(store.get("studio.aiWorking"), "wasm");
+  aiWorking(true, "webgpu");
+  assert.equal(store.get("studio.aiWorking"), "webgpu");
   aiWorking(false);
   assert.equal(store.has("studio.aiWorking"), false);
   assert.equal(load(), false);
