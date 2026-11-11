@@ -56,6 +56,21 @@ export function serve(ort: typeof OrtNS, webgpu: boolean): void {
   });
 }
 
+/**
+ * The model's stage hook: the first graph runs go to the breadcrumbs with the heap (an iPhone died two steps into a
+ * pass). Made here, at module level, on purpose: the hook lives as long as the model, and a closure made inside
+ * handle() keeps that call's request alive with it (closures of one scope share its variables, and `post` there
+ * holds `r`): for the init request that is the four model files, 33 MB the runtime has already copied into its heap.
+ */
+function stageTracer(debug: boolean): (stage: string) => void {
+  let stages = 0;
+  return (st) => {
+    const mb = wasmHeapMB();
+    if (debug) console.info(`[seg] heap ${mb} MB after ${st}`);
+    if (session && stages++ < 10) emit({ ev: "trace", msg: `${st} · heap ${mb} MB` });
+  };
+}
+
 async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void> {
   const post = (m: object, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage({ id: r.id, ...m }, transfer);
   try {
@@ -68,13 +83,7 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
       const m = Object.fromEntries(Object.entries(r.models).map(([k, v]) => [k, new Uint8Array(v)])) as Record<GraphName, Uint8Array>;
       const failed: string[] = [];
       model = await EdgeTam.create(ort, m, r.bank, eps, failed, !!r.lite);
-      // The first graph runs of a session go to the breadcrumbs with the heap (an iPhone died two steps into a pass).
-      let stages = 0;
-      model.onStage = (st) => {
-        const mb = wasmHeapMB();
-        if (r.debug) console.info(`[seg] heap ${mb} MB after ${st}`);
-        if (session && stages++ < 10) emit({ ev: "trace", msg: `${st} · heap ${mb} MB` });
-      };
+      model.onStage = stageTracer(!!r.debug);
       post({ ok: true, heapMB: wasmHeapMB(), ep: model.ep, tried: eps, failed, webgpu: gpu.ok, f16: gpu.f16, threads: ort.env.wasm.numThreads, coi: typeof crossOriginIsolated !== "undefined" && crossOriginIsolated });
     } else if (!model) {
       throw new Error("not initialised");
