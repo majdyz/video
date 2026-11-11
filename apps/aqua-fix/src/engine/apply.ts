@@ -1,10 +1,11 @@
 // CPU reference of the grade shader. One pixel at a time, same stages and
-// constants as GLSL/WGSL in grade-shader.ts — used by the Node harness and
+// constants as GLSL/WGSL in grade-shader.ts (Seabed recovery included; person
+// segmentation and the temporal layer are inputs the harness leaves empty) — used by the Node harness and
 // the unit tests, never in the render path.
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, HIGHLIGHT_PINK, HAZE_LIFT, boostParams, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, boostParams, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -22,13 +23,35 @@ export type ApplyContext = {
 };
 
 /** The context as gradePixel reads it: intensity already resolved. */
-type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings };
+type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings; /** Seabed recovery amount (seabedAmountOf). */ seabed?: number };
 
 export function resolveContext(ctx: ApplyContext): PixelContext {
   const hz = ctx.settings.hazeAuto !== false;
   const params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(ctx.params), pushOf(ctx.settings)), ctx.settings)), ctx.settings);
   const base = greenSettings(presetSettings(calmSettings(resolveSettings(ctx.settings), params), ctx.settings), params);
-  return { ...ctx, params, settings: { ...lookSettings(hz ? hazeSettings(base, params) : base, params), vivid: vividAmountOf(params, ctx.settings), blue: blueAmountOf(params, ctx.settings) } };
+  return { ...ctx, params, settings: { ...lookSettings(hz ? hazeSettings(base, params) : base, params), vivid: vividAmountOf(params, ctx.settings), blue: blueAmountOf(params, ctx.settings) }, seabed: seabedAmountOf(params, ctx.settings) };
+}
+
+/** Seabed recovery amount as packUniforms sends it (p25.x): setting × missing red × not open water. */
+export function seabedAmountOf(params: GradeParams, settings: UserSettings): number {
+  return clamp(settings.seabed ?? 0, 0, 1) * clamp(params.seabedNeed ?? 0, 0, 1) * (1 - clamp(params.backdrop ?? 0, 0, 1));
+}
+
+/** Seabed ramp (grade-shader seabedT): 0 at the frame's water lightness, 1 toward its bright lightness (Oklab L). */
+function seabedT(p: GradeParams, L: number): number {
+  const lw = p.seabedLw ?? 0, lb = Math.max(p.seabedLb ?? 1, lw + 0.05);
+  return smoothstep(lw + SEABED.lo * (lb - lw), lw + (SEABED.lo + SEABED.span) * (lb - lw), L);
+}
+/** Seabed weight (grade-shader seabedW): the pixel's own ramp or its region's (a ring of 8 guide texels), spared toward the top of the frame. */
+function seabedW(p: GradeParams, d: DepthMap, u: number, v: number, L: number): number {
+  let acc = 0;
+  for (let k = 0; k < 8; k++) {
+    const a = k * 0.7853982;
+    const qx = clamp(u + SEABED.ring * Math.cos(a), 0, 1), qy = clamp(v + SEABED.ring * Math.sin(a), 0, 1);
+    const i = Math.min(d.height - 1, Math.floor(qy * d.height)) * d.width + Math.min(d.width - 1, Math.floor(qx * d.width));
+    acc += seabedT(p, linearToOklab(Math.max(0, d.guide[i * 3]), Math.max(0, d.guide[i * 3 + 1]), Math.max(0, d.guide[i * 3 + 2]))[0]);
+  }
+  return Math.max(seabedT(p, L), Math.min(1, (SEABED.regionK * acc) / 8)) * smoothstep(SEABED.y0, SEABED.y1, v);
 }
 
 /**
@@ -314,6 +337,13 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const hn = warmPop(vv[0], hn1[0], hn1[1], wk);
   // Blue water style (opt-in): cobalt water, orange warm subjects, neutral silver, deeper shadows.
   const bl = blueLook(vv[0], hn[0], hn[1], s.blue ?? 0, greenWeight(p));
+  // Seabed recovery (grade-shader, after the Blue water style): sand and reef to a warm neutral (and a little lighter) where the water left no red.
+  if ((ctx.seabed ?? 0) > 0) {
+    const sbw = seabedW(p, ctx.depth, u, v, lab0[0]) * ctx.seabed!;
+    bl[0] += SEABED.lift * sbw;
+    bl[1] += (Math.cos(SEABED.hue) * SEABED.chroma + SEABED.keep * bl[1] - bl[1]) * sbw;
+    bl[2] += (Math.sin(SEABED.hue) * SEABED.chroma + SEABED.keep * bl[2] - bl[2]) * sbw;
+  }
   const capped = capChroma(bl[0], bl[1], bl[2], Math.max(cSrc, wk * WARM_POP.cMin * 1.5, bl[3]));
   const [r1, g1, b1] = oklabToLinear(bl[0], capped[0], capped[1]);
   void C;
