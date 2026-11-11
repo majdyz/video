@@ -38,6 +38,8 @@ import { clipKeyOf, colourSettings, DEFAULT_TOOLS, exportSuffix, neutralNote, pr
 import type { TapSolve } from "../../../aqua-fix/src/engine/tap.ts";
 
 const PHONE_UW_DEFAULTS = profileDefaults("phone-ultra-wide");
+/** Longest the paused preview is repainted for a lock handover (the crossfade, then the shots' balance landing; ms). */
+const LOCK_FADE_PAINT_MAX_MS = 8000;
 import { activeCuts, lockWithCuts, lookIndexAt, topUpTimes, visibleSegments, type Segments } from "./segments.ts";
 import { bobbingNote, stabInfo, stabSummary, type StabInfo } from "./stab-info.ts";
 import { seekVideo, waitForEvent, waitForFirstFrame, type VideoWithRVFC } from "./video.ts";
@@ -2024,9 +2026,26 @@ export class Studio {
     if (!e || !mod) return;
     const bounds = this.boundaries();
     const lock = lockWithCuts(auto, [...samples].sort((a, b) => a.t - b.t), bounds, mod.medianParams, this.snap.info?.fps || 30);
-    e.lockGlobals(lock);
+    // The preview crossfades from the grade on screen (the provisional one, held while the clip was profiled) to the
+    // lock, about a second, instead of jumping; an export never sees it (beginExport settles it).
+    e.lockGlobals(lock, this.exporting ? 0 : mod.LOCK_FADE_MS);
     this.lastLook = -1;
+    this.paintLockFade();
     if (bounds.length) console.info(`[segments] ${bounds.length + 1} segments (cuts at ${bounds.map((b) => b.toFixed(2)).join(", ")} s): ${lock ? `${lock.length} locked estimate(s)` : "unlocked"}`);
+  }
+
+  private lockFadeRaf = 0;
+  /** Repaints the paused frame while the lock's crossfade runs (the engine fades on the wall clock; a playing clip paints itself). */
+  private paintLockFade(): void {
+    cancelAnimationFrame(this.lockFadeRaf);
+    const gen = this.gen, until = performance.now() + LOCK_FADE_PAINT_MAX_MS;
+    const step = () => {
+      const e = this.engine;
+      if (!e || gen !== this.gen || this.exporting) return;
+      this.repaint();
+      if (e.lockSettling && performance.now() < until) this.lockFadeRaf = requestAnimationFrame(step);
+    };
+    this.lockFadeRaf = requestAnimationFrame(step);
   }
 
   // ------------------------------------------------------------ trim
@@ -2140,6 +2159,10 @@ export class Studio {
       const extra = topUpTimes(times, visibleSegments(this.segs.cuts, span, v.duration));
       const all = [...times, ...extra];
       this.set({ busy: "Profiling colour…" });
+      // One steady provisional grade while the clip is read: the grade on screen now holds until the lock is in
+      // (the engine crossfades to it, lockFrom). Before, the picture kept changing as the samples came in.
+      e.holdGlobals();
+      let locked = false;
       try {
         // Rounds: a framing change (Dewarp / Stabilise toggled, a lens picked) empties the cache mid-run; the samples it
         // threw away are taken again with the new framing, so the lock never comes from fewer frames than planned.
@@ -2168,10 +2191,13 @@ export class Studio {
         this.autoLock = { lock, samples };
         // The user's cuts force a new lock each (segments.ts lockWithCuts); unsplit, this is the automatic lock.
         if (lock) this.lockFrom(lock, [...samples, ...extra.map((t) => this.cachedSample(t)).filter((x) => x !== null)]);
+        locked = !!lock;
         console.info(`[profile] ${lock ? `locked ${lock.length} segment(s)` : "skipped"}: ${samples.length}/${times.length} samples${extra.length ? ` (+${extra.length} for short segments)` : ""}${span ? ` in ${span.start.toFixed(2)}–${span.end.toFixed(2)} s` : ""}`);
         this.profiledSpan = span;
         this.set({ colourProfiled: true });
       } finally {
+        // No lock after all (too few samples, a profile cut short): the frame's own estimate rules again.
+        if (!locked && gen === this.gen) e.releaseHold();
         if (gen === this.gen) {
           this.set({ busy: null });
           crumb("profile done");
@@ -2422,6 +2448,8 @@ export class Studio {
       void releaseExportBlob(old.blob);
     }
     this.exporting = true;
+    // The export grades by the clip alone: a lock crossfade still running in the preview ends here.
+    this.engine?.settleLock();
     this.bar = new ExportBar();
     this.previewOn = false;
     this.video?.pause();

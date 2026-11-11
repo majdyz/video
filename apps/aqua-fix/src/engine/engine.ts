@@ -17,6 +17,7 @@ import { boxGate, PERSON_BOX_MIN_SCORE, type PersonBox } from "./person-gate.ts"
 import { PERSON_DETECT_EVERY, personCountersAt, personPassOf, samePersonCounters, type PersonCounters } from "./person-plan.ts";
 import { ANALYSIS_SLOT_S, analysisSlot, lockParams, type LockSegment } from "./lock.ts";
 import { LockTrack } from "./lock-track.ts";
+import { LockHandover } from "./lock-handover.ts";
 import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput } from "./backend.ts";
 import { linearToOklab, oklabToLinear } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
@@ -210,6 +211,10 @@ export class GradeEngine {
    * when set, per-frame packets keep only their maps and range normalisation.
    */
   private track: LockTrack | null = null;
+  /** From the first frame's grade to the clip lock without a step (lock-handover.ts): the hold while profiling, the crossfade after. */
+  private handover = new LockHandover();
+  /** The lock in force was handed over with a crossfade: its shots' balance, landing later, eases in too. */
+  private fadeBalance = false;
   private pool: Worker[] = [];
   private poolLoad: number[] = [];
   private preId = 0;
@@ -257,18 +262,51 @@ export class GradeEngine {
    * estimate per segment for the rest of the clip; null unlocks. Maps stay
    * per frame. Each shot's balance offset (follow.ts) is then measured in the
    * worker on the profile's thumbnails and comes in a moment later.
+   * `fadeMs` > 0 (a preview): the globals crossfade from what is on screen to the lock over that long (wall clock;
+   * lock-handover.ts) instead of stepping; repaint while `lockSettling`. Unlocking ends a hold or fade at once.
    */
-  lockGlobals(segments: LockSegment[] | null): void {
+  lockGlobals(segments: LockSegment[] | null, fadeMs = 0): void {
+    const shown = this.hasAnalysis ? this.current : null;
     this.track = segments && segments.length > 0 ? new LockTrack(segments) : null;
     this.balanceReq++;
     this.balanceDone?.();
     this.balancePending = this.balanceDone = null;
+    if (!this.track) this.handover.release();
     if (this.track) {
+      this.handover.handOver(shown, performance.now(), fadeMs);
+      this.fadeBalance = fadeMs > 0 && shown !== null;
       this.track.advance(this.lastTickSec, true);
       this.current = this.applyLock(this.current);
       if (this.target) this.target = this.applyLock(this.target);
       this.requestBalance();
     }
+  }
+
+  /**
+   * The clip profile starts: until the lock arrives (lockGlobals) the globals on screen now stay in force, so the
+   * provisional grade is one steady picture whatever plays or is sampled meanwhile (lock-handover.ts). Under a lock
+   * already in force (a top-up profile) nothing changes. `releaseHold` when the profile ends without a lock.
+   */
+  holdGlobals(): void {
+    this.handover.hold(this.hasAnalysis ? this.current : null);
+  }
+
+  /** The profile ended without a lock: the frame's own estimate rules again (eased as ever). */
+  releaseHold(): void {
+    if (this.handover.isHolding) this.handover.release();
+  }
+
+  /** True while the handover to a lock is still moving the picture (the crossfade, or the shots' balance yet to land): a paused preview repaints meanwhile. */
+  get lockSettling(): boolean {
+    return this.track !== null && (this.handover.pending || this.balancePending !== null);
+  }
+
+  /** Ends a running crossfade at once: the lock in force whole (an export grades by the clip alone). */
+  settleLock(): void {
+    this.handover.settle();
+    this.fadeBalance = false;
+    if (this.hasAnalysis) this.current = this.applyLock(this.current);
+    if (this.target) this.target = this.applyLock(this.target);
   }
 
   /** Forgets the profile thumbnails (a new clip, or a new colour input for the same clip). */
@@ -292,8 +330,10 @@ export class GradeEngine {
 
   private onBalance(r: BalanceReply): void {
     if (r.id !== this.balanceReq || !this.track) return;
+    // In force at once, or through the handover's crossfade when one was asked for (a paused frame has no ticks to
+    // ease over: the fade runs on the wall clock): from what is on screen, never a step.
+    if (this.fadeBalance && this.hasAnalysis) this.handover.rebase(this.current, performance.now());
     this.track.curves = r.shots.map((x) => x?.curve ?? null);
-    // In force at once (the clip was just profiled; a paused frame has no ticks to ease over).
     this.current = this.applyLock(this.current);
     if (this.target) this.target = this.applyLock(this.target);
     this.dirtyData = true;
@@ -336,7 +376,9 @@ export class GradeEngine {
 
   /** `p` under the lock in force at the engine's clock: the lock's globals, the frame's own range and maps. */
   private applyLock(p: GradeParams): GradeParams {
-    const l = this.lockedAt(this.lastTickSec);
+    // The lock's globals through the handover (lock-handover.ts): the held provisional grade while the clip is
+    // profiled, the crossfade to the lock after; outside both, the lock itself (or nothing).
+    const l = this.handover.globals(this.lockedAt(this.lastTickSec), performance.now());
     return l ? lockParams(l, p, this.lockRange) : p;
   }
 
@@ -520,7 +562,7 @@ export class GradeEngine {
     // a profiled change without a cut comes in with the picture, a shot's balance holds or eases one way. They are
     // imposed on every tick, never eased; only the frame's own range and maps ease (smooth).
     this.track?.advance(timeSec);
-    if (this.track && this.hasAnalysis) this.current = this.applyLock(this.current);
+    if ((this.track || this.handover.isHolding) && this.hasAnalysis) this.current = this.applyLock(this.current);
     this.smooth(dt);
     // Analyses follow clip time, not the wall clock: one per analysis slot of
     // the clip (analysisSlot), the same frames the export analyses, so preview
@@ -706,6 +748,14 @@ export class GradeEngine {
     this.stats.analysisMs = packet.ms;
     this.workerMs.analysis += packet.ms;
     this.workerMs.analyses++;
+    // A sample taken out of playback order (clip profile, a subject's track pass) is of another frame than the one
+    // on screen: it goes to whoever asked and leaves the picture alone. (It used to pass through here like a frame
+    // of the preview: every profile sample became the grade's target, or, when it looked like a scene cut, was
+    // snapped to, maps and all, so the first load showed the grade wandering while the clip was profiled.)
+    if (this.rawReq && this.hasAnalysis) {
+      this.settle(raw, null);
+      return;
+    }
     const cut = this.lastMean !== null && meanDiff(this.lastMean, packet.mean) > SCENE_CUT_MEAN_DIFF;
     this.lastMean = packet.mean;
     // Subject pop: per-animal tracking, stability and fades (animals.ts); a cut starts over.
@@ -723,6 +773,8 @@ export class GradeEngine {
     if (cut) this.noteSceneCut(this.lastTickSec);
     this.track?.noteFrame(packet.mean, this.lastTickSec);
     if (!this.hasAnalysis || cut) {
+      // Profiling (hold): a new picture takes its own provisional grade, once.
+      this.handover.rehold(packet.params, cut);
       if (cut) {
         this.stats.sceneCuts++;
         this.backend.resetTemporal?.();
@@ -894,6 +946,8 @@ export class GradeEngine {
    */
   setTime(timeSec: number): void {
     this.lastTickSec = timeSec;
+    // A paused frame has no ticks: the handover's crossfade (wall clock) moves on with each repaint.
+    if (this.track && this.hasAnalysis && this.handover.pending) this.current = this.applyLock(this.current);
     this.checkJump();
   }
 
@@ -1008,6 +1062,9 @@ export class GradeEngine {
     this.lastSlot = Number.NaN;
     this.lastTickSec = 0;
     this.track?.reset();
+    // A crossfade in flight ends here (an export starts from the lock itself); a hold waits for the next estimate.
+    this.handover.settle();
+    this.fadeBalance = false;
     this.settle({ id: -1 } as AnalysisPacket, null);
     this.personReqId++;
     this.personInflight = false;
