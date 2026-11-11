@@ -3,18 +3,14 @@
 // easing of params / maps. Kept deliberately close to engine.ts; Subject pop
 // and person segmentation are off (their defaults for a clip without people).
 import { analyzeThumbnail, ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.ts";
-import { inCutWindow, noteCut, segmentAt, type LockSegment } from "../src/engine/lock.ts";
 import { analysisSlot, lockParams } from "../src/engine/lock.ts";
-import { BalanceFollow, FOLLOW, sceneTrust, shotTarget } from "../src/engine/follow.ts";
-// Tuning experiments: SIM_TAU / SIM_WINDOW override the follow's ease and median span.
-if (process.env.SIM_TAU) FOLLOW.tau = parseFloat(process.env.SIM_TAU);
-if (process.env.SIM_WINDOW) FOLLOW.window = parseInt(process.env.SIM_WINDOW);
-import { anchorCorrection, type AnchorResult } from "../src/engine/anchor.ts";
+import { LockTrack } from "../src/engine/lock-track.ts";
+import { curveAt, shotBalance } from "../src/engine/follow.ts";
 import { profileTimes, segmentProfile, type ProfileSample } from "../src/engine/profile.ts";
 import { lerpParams, type ClaheLuts, type DepthMap, type FrameAnalysis, type GradeParams, type Vec3 } from "../src/engine/params.ts";
 
 export type SimMode = "export" | "preview" | "unlocked";
-type Analysed = FrameAnalysis & { anchor: AnchorResult | null; sentLock: GradeParams | null };
+type Analysed = FrameAnalysis;
 
 const TAU_PARAMS_S = 0.6;
 const TAU_MAPS_S = 0.4;
@@ -23,8 +19,8 @@ const TAU_CONF_OPEN_S = 0.05;
 const SCENE_CUT_MEAN_DIFF = 0.16;
 
 export class ClipSim {
-  locked: LockSegment[] | null = null;
-  cutSeen = new Map<number, number>();
+  /** The clip lock (lock-track.ts): one frozen estimate per shot, its balance curve, the cuts seen. */
+  track: LockTrack | null = null;
   current: GradeParams | null = null;
   target: GradeParams | null = null;
   fields: Float32Array | null = null;
@@ -42,11 +38,9 @@ export class ClipSim {
   /** Analyses in flight: frame they were taken from and frame they land on. */
   pending: { at: number; lands: number; a: Analysed }[] = [];
   cuts: number[] = [];
-  follow = new BalanceFollow();
-  /** Anchor target per locked segment (follow.ts shotTarget). */
+  /** Anchor target per locked segment (follow.ts shotBalance; diagnostics). */
   targets: ([number, number] | null)[] = [];
-  lastPacketTick = 0;
-  /** Ablations (options, else env): SIM_NOFOLLOW=1 drops the balance follow, SIM_SNAPSEG=1 snaps every segment switch (the old engine). */
+  /** Ablations (options, else env): SIM_NOFOLLOW=1 drops the shots' balance curves (the plain lock), SIM_SNAPSEG=1 holds each estimate to the end of its window and snaps (the old engine). */
   private noFollow: boolean;
   private snapSeg: boolean;
   /** Per-frame analyses shared between simulations of the same clip (the analysis does not depend on the engine state). */
@@ -82,26 +76,28 @@ export class ClipSim {
       const a = this.analyzeFrame(f, thumbs);
       samples.push({ t, params: a.params, mean: a.mean });
     }
-    this.locked = segmentProfile(samples, SCENE_CUT_MEAN_DIFF);
-    // Anchor targets per segment from the profile's own thumbnails (engine.requestTargets → worker shotTarget).
-    const segs = this.locked;
-    this.targets = !segs || this.noFollow ? [] : segs.map((s, i) => {
-      const lo = i === 0 ? -Infinity : s.from, hi = i + 1 < segs.length ? segs[i + 1].from : Infinity;
-      const px = samples.filter((x) => x.t >= lo && x.t < hi).map((x) => thumbs[Math.min(thumbs.length - 1, Math.round(x.t * this.fps))]);
-      return shotTarget(px, ANALYSIS_W, ANALYSIS_H, s.params);
+    let segs = segmentProfile(samples, SCENE_CUT_MEAN_DIFF);
+    if (segs && this.snapSeg) segs = segs.map((x) => ({ ...x, means: undefined }));
+    this.track = segs ? new LockTrack(segs) : null;
+    // Each shot's balance from the profile's own thumbnails of it (engine.requestBalance → worker shotBalance).
+    const bal = !segs || this.noFollow ? [] : segs.map((x, i) => {
+      const lo = i === 0 ? -Infinity : x.from, hi = i + 1 < segs.length ? segs[i + 1].from : Infinity;
+      const inside = samples.filter((y) => y.t >= lo && y.t < hi);
+      return shotBalance(inside.map((y) => thumbs[Math.min(thumbs.length - 1, Math.round(y.t * this.fps))]), inside.map((y) => y.t), ANALYSIS_W, ANALYSIS_H, x.params);
     });
-    const tg = this.targets.map((t) => (t ? `${t[0].toFixed(3)},${t[1].toFixed(3)}` : "none")).join(" | ");
-    return `${samples.length} samples → ${this.locked ? `${this.locked.length} segment(s) at ${this.locked.map((s) => s.from.toFixed(2)).join(", ")}` : "no lock"}; sample wb_r ${samples.map((s) => s.params.wb[0].toFixed(2)).join(" ")}; anchor targets ${tg || "-"}`;
+    this.targets = bal.map((x) => x?.target ?? null);
+    if (this.track) this.track.curves = bal.map((x) => x?.curve ?? null);
+    const tg = bal.map((x) => (x ? `${x.target[0].toFixed(3)},${x.target[1].toFixed(3)} samples ${x.samples.map((y) => `${y.t.toFixed(1)}s:${y.log[0].toFixed(2)}/${y.log[1].toFixed(2)}(${y.w.toFixed(1)})`).join(" ")} curve ${x.curve ? x.curve.t.map((t, k) => `${t.toFixed(1)}s:${x.curve!.r[k].toFixed(2)}/${x.curve!.b[k].toFixed(2)}`).join(" ") : "-"}` : "none")).join(" | ");
+    return `${samples.length} samples → ${segs ? `${segs.length} segment(s) at ${segs.map((x) => x.from.toFixed(2)).join(", ")}` : "no lock"}; sample wb_r ${samples.map((x) => x.params.wb[0].toFixed(2)).join(" ")}; shot balance ${tg || "-"}`;
   }
 
+  /** The locked estimate in force at `t` (with its shot's balance curve), or null when unlocked. */
   private lockedAt(t: number): GradeParams | null {
-    return this.locked ? segmentAt(this.locked, this.cutSeen, t).params : null;
+    return this.track ? this.track.paramsAt(t, !this.noFollow) : null;
   }
   private applyLock(p: GradeParams): GradeParams {
     const l = this.lockedAt(this.lastTick);
-    if (!l) return p;
-    const q = lockParams(l, p, process.env.SIM_LOCKZ === "1");
-    return this.noFollow ? q : this.follow.apply(q);
+    return l ? lockParams(l, p, process.env.SIM_LOCKZ === "1") : p;
   }
   /** Experiment: re-express a packet's z map in the locked range normalisation. */
   private remapZ(fields: Float32Array, p: GradeParams): Float32Array {
@@ -112,41 +108,32 @@ export class ClipSim {
     return fields;
   }
   segmentIndex(): number {
-    if (!this.locked) return -1;
-    return this.locked.indexOf(segmentAt(this.locked, this.cutSeen, this.lastTick));
+    return this.track ? this.track.index(this.lastTick) : -1;
   }
 
   private analyse(f: number, thumbs: Uint8ClampedArray[]): Analysed {
-    const a0 = this.analyzeFrame(f, thumbs);
-    // The engine sends the lock in force with the request; the worker solves the anchor under it.
-    const seg = this.locked ? segmentAt(this.locked, this.cutSeen, f / this.fps) : null;
-    const target = seg ? this.targets[this.locked!.indexOf(seg)] ?? null : null;
-    const l = seg && target ? seg.params : null;
-    const a: Analysed = { ...a0, sentLock: l, anchor: l && target && !this.noFollow && sceneTrust(a0.params) > 0 ? anchorCorrection(thumbs[f], ANALYSIS_W, ANALYSIS_H, lockParams(l, a0.params), a0.depth, a0.clahe, target) : null };
+    const a = this.analyzeFrame(f, thumbs);
     const p = a.params;
     this.paramLog.push([f, (f / this.fps).toFixed(3), "analysis", p.wb[0], p.wb[2], p.exposure, p.black, p.white, p.zLo, p.zHi, p.zMean, ...p.binf, p.calm ?? 0, p.calmTone ?? 0, p.haze, p.backdrop ?? 0].map((x) => (typeof x === "number" ? +x.toFixed(4) : x)).join(",") + "," + (this.current ? [this.current.wb[0], this.current.wb[2], this.current.exposure, this.current.zLo, this.current.zHi].map((x) => x.toFixed(4)).join(",") : ",,,,"));
-    this.paramLog[this.paramLog.length - 1] += "," + (a.anchor ? [a.anchor.frac, ...a.anchor.log, ...a.anchor.before, ...a.anchor.after].map((x) => x.toFixed(4)).join(",") : ",,,,,,") + "," + this.follow.log.map((x) => x.toFixed(4)).join(",");
+    // The per-frame anchor columns went with the per-frame follow (left empty); the last two are the shot's balance offset in force.
+    const off = this.track && !this.noFollow ? curveAt(this.track.curves[this.track.index(f / this.fps)], f / this.fps) : [0, 0];
+    this.paramLog[this.paramLog.length - 1] += ",,,,,,,," + off.map((x) => x.toFixed(4)).join(",");
     return a;
   }
 
-  private onPacket(a: Analysed): void {
+  private onPacket(a: Analysed, snap = false): void {
     const m = a.mean;
     const cut = this.lastMean !== null && Math.abs(this.lastMean[0] - m[0]) + Math.abs(this.lastMean[1] - m[1]) + Math.abs(this.lastMean[2] - m[2]) > SCENE_CUT_MEAN_DIFF;
     this.lastMean = m;
     if (cut) {
       this.cuts.push(this.lastTick);
-      if (this.locked) noteCut(this.locked, this.cutSeen, this.lastTick);
+      this.track?.noteCut(this.lastTick);
     }
-    const l = this.lockedAt(this.lastTick);
-    if (!this.current || cut) this.follow.reset();
-    if (l) {
-      let anchor = a.anchor;
-      if (anchor && a.sentLock && a.sentLock !== l) anchor = { ...anchor, log: [anchor.log[0] + Math.log(a.sentLock.wb[0] / l.wb[0]), anchor.log[1] + Math.log(a.sentLock.wb[2] / l.wb[2])] };
-      this.follow.update(anchor, a.params, this.current && !cut ? this.lastTick - this.lastPacketTick : 0);
-    }
-    this.lastPacketTick = this.lastTick;
-    if (!this.current || cut) this.snapTo(a);
-    else {
+    this.track?.noteFrame(m, this.lastTick);
+    if (!this.current || cut || snap) {
+      this.track?.advance(this.lastTick, true);
+      this.snapTo(a);
+    } else {
       this.target = this.applyLock(a.params);
       this.fieldsT = this.remapZ(fieldsRGBA(a.depth), a.params);
       this.guideT = guideRGBA(a.depth);
@@ -168,25 +155,12 @@ export class ClipSim {
 
   private tick(t: number): void {
     const dt = Math.max(0, Math.min(0.5, t - this.lastTick));
-    const prev = this.lockedAt(this.lastTick);
     this.lastTick = t;
-    const next = this.lockedAt(t);
-    if (prev !== next && next && prev && this.current) {
-      const seg = segmentAt(this.locked!, this.cutSeen, t);
-      const fol = (q: GradeParams) => (this.noFollow ? q : this.follow.apply(q));
-      if (!seg.window || this.cutSeen.has(this.locked!.indexOf(seg)) || this.snapSeg) {
-        // A cut: snap the globals to the new estimate.
-        this.current = fol(lockParams(next, this.current));
-        if (this.target) this.target = fol(lockParams(next, this.target));
-      } else {
-        // Same shot, the profile just saw it change: ease over.
-        this.follow.rebase(prev, next);
-        const base = this.target ?? this.current;
-        this.target = this.noFollow ? lockParams(next, base) : this.follow.apply(lockParams(next, base));
-      }
-    }
+    this.track?.advance(t);
+    // The lock's globals are a function of the clip time: imposed, never eased (only the frame's own range and maps ease).
+    if (this.current) this.current = this.applyLock(this.current);
     if (dt <= 0 || !this.current) return;
-    if (this.target) this.current = lerpParams(this.current, this.target, 1 - Math.exp(-dt / TAU_PARAMS_S));
+    if (this.target) this.current = this.applyLock(lerpParams(this.current, this.target, 1 - Math.exp(-dt / TAU_PARAMS_S)));
     const am = 1 - Math.exp(-dt / TAU_MAPS_S);
     const ac = 1 - Math.exp(-dt / TAU_CLAHE_S);
     const open = Math.min(1, Math.max(0, this.current.backdrop ?? 0));
@@ -205,12 +179,10 @@ export class ClipSim {
     if (this.mode === "export") {
       // engine.analyzeDue: one analysis per clip-time slot, awaited before the frame is drawn
       // (snapping on the first frame and inside a profiled cut window). No timing enters.
-      const snap = f === 0 || (this.locked ? inCutWindow(this.locked, this.cutSeen, t) : false);
+      const snap = f === 0 || (this.track ? this.track.inCutWindow(t) : false);
       if (snap || slot !== this.lastSlot) {
         this.lastSlot = slot;
-        const a = this.analyse(f, thumbs);
-        this.onPacket(a);
-        if (snap) this.snapTo(a);
+        this.onPacket(this.analyse(f, thumbs), snap);
       }
       this.tick(t);
     } else {

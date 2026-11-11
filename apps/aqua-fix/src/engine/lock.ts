@@ -1,14 +1,16 @@
 // Clip-lock segment selection (pure, no GPU): which locked estimate is in
 // force at a media time, given where each segment's cut was actually seen.
-import type { GradeParams } from "./params.ts";
+import type { GradeParams, Vec3 } from "./params.ts";
 
 /**
  * One locked estimate from `from` onward. Profiling only samples the clip
  * every ~0.5–1 s, so a cut is known to lie somewhere inside `window` (the two
  * sample times around it): the segment then takes over when the per-frame
- * analysis actually sees the cut inside that window, or at the window's end.
+ * analysis actually sees the cut inside that window, or at the window's end
+ * (lock-track.ts: without a cut it comes in with the picture). `means`: the
+ * mean colour of the profile samples either side of the window.
  */
-export type LockSegment = { from: number; params: GradeParams; window?: [number, number] };
+export type LockSegment = { from: number; params: GradeParams; window?: [number, number]; means?: [Vec3, Vec3] };
 
 /** When segment `index` takes over: at its observed cut, else at the end of its window, else at `from`. */
 export function switchTime(s: LockSegment, index: number, cutSeen: ReadonlyMap<number, number>): number {
