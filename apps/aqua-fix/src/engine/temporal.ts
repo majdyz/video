@@ -495,11 +495,11 @@ void main() {
         a0 += r.m0 * r.inside; al += r.ml * r.inside; lum += r.lum * r.inside; tex += tx4 * r.inside; n += r.inside;
       }
       if (n * 2.0 < float(NR_T * NR_T) || lum < NR_LUM_LO * n || lum > NR_LUM_HI * n || a0 < NR_DEAD * n) continue;
-      float flat = 1.0 - smoothstep(NR_TEX_LO, NR_TEX_HI, tex / n);
+      float flatW = 1.0 - smoothstep(NR_TEX_LO, NR_TEX_HI, tex / n);
       float r0 = (a0 / n + NR_EPS) / NR_EPS, rl = (al / n + NR_EPS) / NR_EPS;
-      float q0 = flat / (r0 * r0 * r0 * r0), ql = flat / (rl * rl * rl * rl);
-      float wt = flat * max(0.0, 1.0 - abs(lum / n * float(NR_BINS - 1) - bin));
-      G0 += q0; Gl += ql; GN += flat;
+      float q0 = flatW / (r0 * r0 * r0 * r0), ql = flatW / (rl * rl * rl * rl);
+      float wt = flatW * max(0.0, 1.0 - abs(lum / n * float(NR_BINS - 1) - bin));
+      G0 += q0; Gl += ql; GN += flatW;
       S0 += wt * q0; Sl += wt * ql; N += wt;
     }
   }
@@ -545,13 +545,13 @@ fn nrLum(l: vec2<i32>, hi: vec2<i32>) -> f32 { return textureLoad(u_tpLum, clamp
         a0 += r.m0 * r.inside; al += r.ml * r.inside; lum += r.lum * r.inside; tex += tx4 * r.inside; n += r.inside;
       } }
       if (n * 2.0 < f32(NR_T * NR_T) || lum < NR_LUM_LO * n || lum > NR_LUM_HI * n || a0 < NR_DEAD * n) { continue; }
-      let flat = 1.0 - smoothstep(NR_TEX_LO, NR_TEX_HI, tex / n);
+      let flatW = 1.0 - smoothstep(NR_TEX_LO, NR_TEX_HI, tex / n);
       let r0 = (a0 / n + NR_EPS) / NR_EPS;
       let rl = (al / n + NR_EPS) / NR_EPS;
-      let q0 = flat / (r0 * r0 * r0 * r0);
-      let ql = flat / (rl * rl * rl * rl);
-      let wt = flat * max(0.0, 1.0 - abs(lum / n * f32(NR_BINS - 1) - bin));
-      G0 += q0; Gl += ql; GN += flat;
+      let q0 = flatW / (r0 * r0 * r0 * r0);
+      let ql = flatW / (rl * rl * rl * rl);
+      let wt = flatW * max(0.0, 1.0 - abs(lum / n * f32(NR_BINS - 1) - bin));
+      G0 += q0; Gl += ql; GN += flatW;
       S0 += wt * q0; Sl += wt * ql; N += wt;
     } }
   }
