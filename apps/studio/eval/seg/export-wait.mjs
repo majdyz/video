@@ -23,11 +23,8 @@ for (let i = 0; i < 40; i++) { const ok = await p.evaluate(() => crossOriginIsol
 await p.waitForLoadState("load");
 await p.setInputFiles("input[type=file]", clip);
 await p.waitForFunction(() => window.studio?.getSnapshot().phase === "ready" && window.studio.getSnapshot().colourProfiled && !window.studio.getSnapshot().busy, null, { timeout: 300000 });
-await p.getByRole("button", { name: /Advanced/ }).first().click(); await p.waitForTimeout(800);
-const pop = p.getByRole("switch", { name: /Subject pop/ });
-if ((await pop.getAttribute("aria-checked")) !== "true") { await pop.click(); await p.waitForTimeout(500); }
-const ai = p.getByRole("switch", { name: /AI subject detection/ });
-if ((await ai.getAttribute("aria-checked")) !== "true") await ai.click();
+// Subject pop + AI through the studio API (the UI moved from Advanced to the tool dock).
+await p.evaluate(() => { const s = window.studio; s.pause(); s.setTools({ ...s.tools, colour: { ...s.tools.colour, subjectPop: true } }); s.setSegEnabled(true); });
 const seg = () => p.evaluate(() => ({ ...window.studio.getSnapshot().seg, cov: window.studio.seg.live?.coverage ?? null, autos: window.studio.seg.autos?.length ?? null }));
 if (MODE === "after") {
   // The preview's own pass: model, session, the engine's subjects seeded, every step done.
@@ -45,12 +42,14 @@ if (MODE === "after") {
 }
 console.log(ts(), "export starts", JSON.stringify(await seg()), "playing", await p.evaluate(() => !window.studio.video.paused));
 const lines = [];
+const prog = [];
 const dl = p.waitForEvent("download", { timeout: 7200000 }).catch(() => null);
-await p.getByRole("button", { name: /^Export$/ }).first().click(); await p.waitForTimeout(1500);
-const go = p.getByRole("button", { name: /^(Export|Save|Start|Export video).*/ }).last(); if (await go.count()) await go.click();
+// Straight through the studio API (a sheet in the UI can sit over the Export button).
+await p.evaluate(() => { void window.studio.exportVideo(); }); await p.waitForTimeout(1500);
 let pausedSeen = null;
 for (let i = 0; i < 14400; i++) {
-  const e = await p.evaluate(() => { const x = window.studio.getSnapshot().exp; return { state: x.state, detail: x.detail, note: x.note, playing: !window.studio.video.paused }; });
+  const e = await p.evaluate(() => { const x = window.studio.getSnapshot().exp; return { state: x.state, detail: x.detail, note: x.note, progress: x.progress, playing: !window.studio.video.paused }; });
+  prog.push(e.progress);
   if (pausedSeen === null && e.state !== "idle") pausedSeen = !e.playing;
   const l = `${e.state} ${e.detail}${e.note ? " | " + e.note : ""}`;
   if (lines[lines.length - 1]?.l !== l) { lines.push({ s: ts(), l }); if (/Finding|done|error/.test(l) || lines.length < 8) console.log(ts(), l); }
@@ -61,7 +60,9 @@ for (let i = 0; i < 14400; i++) {
 const hashes = await p.evaluate(() => window.exportFrameHashes ?? null);
 const save = p.getByRole("button", { name: /^Save$/ });
 if (await save.count() && await save.first().isVisible()) { await save.first().click(); const d = await dl; if (d) await d.saveAs(`${out}/${MODE}.mp4`); }
-const res = { mode: MODE, frames: hashes?.length ?? 0, first: hashes?.[0], last: hashes?.[hashes.length - 1], playbackPausedAtExport: pausedSeen, sheet: lines.filter((x, i) => i < 4 || /Finding|note|done|error|\|/.test(x.l)).slice(0, 40), log: logs.filter((l) => /\[export\]|\[seg\]|PAGEERROR/.test(l)).slice(0, 40), hashes };
+const back = prog.reduce((a, v, i) => (i && v < prog[i - 1] - 1e-6 ? a + 1 : a), 0);
+console.log("progress steps back:", back, "max", Math.max(...prog).toFixed(3), "samples", prog.length);
+const res = { mode: MODE, progressBack: back, frames: hashes?.length ?? 0, first: hashes?.[0], last: hashes?.[hashes.length - 1], playbackPausedAtExport: pausedSeen, sheet: lines.filter((x, i) => i < 4 || /Finding|note|done|error|\|/.test(x.l)).slice(0, 40), log: logs.filter((l) => /\[export\]|\[seg\]|PAGEERROR/.test(l)).slice(0, 40), hashes };
 fs.writeFileSync(`${out}/${MODE}.json`, JSON.stringify(res, null, 1));
 console.log(ts(), "RESULT", JSON.stringify({ mode: MODE, frames: res.frames, first: res.first, last: res.last, playbackPausedAtExport: pausedSeen }));
 await b.close();
