@@ -391,13 +391,18 @@ export const TEMPORAL = {
  * leaves clean footage alone.
  */
 export const NR = {
-  refineTaps: 4,
+  // While the gate is shut for every luminance bin the reduction idles: frames pass through untouched and only
+  // every idleEvery-th one is measured (a copy of the frame before it stands in for the history). The first
+  // measurement that opens the gate starts the reduction on that frame; while open, every idleEvery-th
+  // measurement may shut it again.
+  idleEvery: 8,
+  refineTaps: 3,
   refineStep: 2,
   refineBias: 0.3 / 255,
   blockLo: 0.75,
   blockHi: 1.15,
-  tilesX: 24,
-  tilesY: 14,
+  tilesX: 16,
+  tilesY: 9,
   tileTaps: 4,
   texLo: 3 / 255,
   texHi: 6 / 255,
@@ -407,7 +412,7 @@ export const NR = {
   lumHi: 0.98,
   dead: 0.15 / 255,
   bins: 6,
-  binMin: 8,
+  binMin: 4,
   binMax: 1.5,
   eMax: 6 / 255,
   c0Lo: 2.5,
@@ -420,6 +425,19 @@ export const NR = {
   auto: { w: 0.7, gateLo: 1.5 / 255, gateHi: 3.5 / 255 },
   strong: { w: 0.8, gateLo: 0.75 / 255, gateHi: 2.0 / 255 },
 };
+
+/** Blend weight toward the history before the per-pixel tests: the level's strength × the noise gate at noise e0 (0 when off). */
+export function nrStrength(level: number, e0: number): number {
+  if (level < 0.5) return 0;
+  const c = level > 1.5 ? NR.strong : NR.auto;
+  const t = Math.min(1, Math.max(0, (e0 - c.gateLo) / (c.gateHi - c.gateLo)));
+  return c.w * t * t * (3 - 2 * t);
+}
+/** Whether the gate is open in any luminance bin of `levels` (nrLevel's layout, or the level target's texels: e0 first, `stride` floats per bin). */
+export function nrOpen(level: number, levels: ArrayLike<number>, stride = 2): boolean {
+  for (let b = 0; b < NR.bins; b++) if (nrStrength(level, levels[b * stride]) > 0) return true;
+  return false;
+}
 
 /**
  * Vivid objects keep their colour: a pixel that is strongly chromatic in the

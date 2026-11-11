@@ -5,7 +5,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -970,12 +970,7 @@ export function nrLevelAt(levels: Float32Array, Y: number): [number, number] {
   return [levels[i * 2] + (levels[i * 2 + 2] - levels[i * 2]) * t, levels[i * 2 + 1] + (levels[i * 2 + 3] - levels[i * 2 + 1]) * t];
 }
 
-/** Blend weight toward the history before the per-pixel tests: the level's strength × the noise gate (0 when off). */
-export function nrStrength(level: number, e0: number): number {
-  if (level < 0.5) return 0;
-  const c = level > 1.5 ? NR.strong : NR.auto;
-  return c.w * smoothstep(c.gateLo, c.gateHi, e0);
-}
+export { nrStrength, nrOpen };
 
 /** The two motion tests of a pixel (NR): 1 = within the noise, 0 = a real change. */
 export function nrKeep(m0: number, ml: number, e0: number, el: number): number {
@@ -1023,7 +1018,8 @@ export function rgbOf(rgba: ArrayLike<number>, w: number, h: number): Float32Arr
 
 /**
  * The temporal NR as the backends run it, frame after frame: lum → flow → level → blend, the result kept as the
- * next frame's history (lum → flow → refine, against the previous frame's levels → level → blend). `step` returns the denoised source (rgb floats) the grade then reads.
+ * next frame's history (lum → flow → refine, against the previous frame's levels → level → blend), idling
+ * while the gate is shut exactly as backend-webgl2.ts does. `step` returns the denoised source (rgb floats) the grade then reads.
  */
 export class TemporalNR {
   private lumPrev: Float32Array | null = null;
@@ -1039,10 +1035,15 @@ export class TemporalNR {
   private readonly opts: { refine?: boolean; bits?: number };
   constructor(opts: { refine?: boolean; bits?: number } = {}) { this.opts = opts; }
 
-  /** Forgets the history (scene cut, seek). */
+  /** Idle (NR.idleEvery): the gate was shut at the last measurement, frames pass through untouched. */
+  idle = true;
+  private count = NR.idleEvery - 2;
+
+  /** Forgets the history (scene cut, seek); an idle reduction measures again on the next two frames. */
   reset(): void {
     this.lumPrev = null;
     this.hist = null;
+    if (this.idle) this.count = NR.idleEvery - 2;
   }
 
   step(rgba: ArrayLike<number>, w: number, h: number, level: number): Float32Array {
@@ -1052,12 +1053,30 @@ export class TemporalNR {
     const lum = tpLum(src, w, h);
     const block = this.lumPrev ? tpFlow(lum, this.lumPrev, lw, lh) : new Float32Array(lw * lh * 3);
     this.lumPrev = lum;
-    const flow = nrRefine(src, level < 0.5 ? null : this.hist, block, this.levels, w, h, this.opts.refine !== false);
+    this.weight = 0;
+    if (level < 0.5) { this.hist = null; this.levels = new Float32Array(NR.bins * 2); this.flow = null; return src; }
+    const bits = this.opts.bits ?? 10, M = NR.idleEvery;
+    if (this.idle) {
+      // Shut gate: every idleEvery-th frame is measured against a copy of the frame before it; the rest cost nothing.
+      const phase = this.count++ % M;
+      if (phase === M - 2) { this.hist = nrBlend(src, null, block, this.levels, level, w, h, bits); return src; }
+      if (phase !== M - 1 || !this.hist) { this.hist = null; return src; }
+      const flow = nrRefine(src, this.hist, block, this.levels, w, h, this.opts.refine !== false);
+      this.flow = flow;
+      this.levels = nrLevel(src, this.hist, flow, lum, w, h);
+      if (!nrOpen(level, this.levels)) { this.hist = null; return src; }
+      this.idle = false;
+      this.count = 0;
+      return (this.hist = nrBlend(src, this.hist, flow, this.levels, level, w, h, bits, this));
+    }
+    const flow = nrRefine(src, this.hist, block, this.levels, w, h, this.opts.refine !== false);
     this.flow = flow;
-    if (level < 0.5) { this.hist = null; this.levels = new Float32Array(NR.bins * 2); return src; }
     this.levels = this.hist ? nrLevel(src, this.hist, flow, lum, w, h) : new Float32Array(NR.bins * 2);
-    const out = nrBlend(src, this.hist, flow, this.levels, level, w, h, this.opts.bits ?? 10, this);
+    const measured = this.hist !== null;
+    const out = nrBlend(src, this.hist, flow, this.levels, level, w, h, bits, this);
     this.hist = out;
+    // Open: every idleEvery-th measured frame checks whether the gate has shut.
+    if (measured && ++this.count % M === 0 && !nrOpen(level, this.levels)) { this.idle = true; this.count = 0; this.hist = null; }
     return out;
   }
 }

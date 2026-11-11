@@ -20,6 +20,9 @@
 //               of the source-vs-history difference)
 //   6. nr     — at the canvas size: the source blended with the history at the refined displacement, weighted
 //               per pixel by the level and two motion tests; next frame's history, and the grade's source
+// While the gate is shut in every bin the WebGL2 backend idles (NR.idleEvery): passes 4-6 are skipped and the
+// grade reads the source, except for one one-tap copy and one measurement every idleEvery frames. The WebGPU
+// backend (opt-in) runs the passes on every frame.
 //
 // Texture-space convention: every temporal texture is rendered with the same
 // full-screen triangle as the grade, so in WebGL2 its rows run bottom-up
@@ -578,6 +581,8 @@ ${NR_CONSTS_GLSL}
 ${NR_SRC_GLSL}
 ${NR_PROBE_GLSL}
 void main() {
+  // No history (a first frame, or the idle copy): the source as it is, one tap.
+  if (p[26].y < 0.5) { o_color = vec4(nrSrc(gl_FragCoord.xy / vec2(textureSize(u_nrPrev, 0))), 1.0); return; }
   NrProbe r = nrProbe(ivec2(gl_FragCoord.xy));
   float w = 0.0;
   if (p[26].y > 0.5 && p[26].x > 0.5) {
@@ -603,6 +608,7 @@ ${NR_CONSTS_WGSL}
 ${NR_SRC_WGSL}
 ${NR_PROBE_WGSL}
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
+  if (params.p[26].y < 0.5) { return vec4(nrSrc(in.pos.xy / vec2<f32>(textureDimensions(u_nrPrev))), 1.0); }
   let r = nrProbe(vec2<i32>(in.pos.xy));
   var w = 0.0;
   if (params.p[26].y > 0.5 && params.p[26].x > 0.5) {

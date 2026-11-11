@@ -1,7 +1,7 @@
 import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput, FULL_RECT, type Rect } from "./backend.ts";
 import { GLSL_FRAGMENT, GLSL_DOWNSCALE_FRAGMENT, GLSL_COMPOSITE, GLSL_VERTEX as VS } from "./shaders.ts";
 import { GLSL_NR, GLSL_NR_LEVEL, GLSL_NR_REFINE, GLSL_TP_FIELD, GLSL_TP_FLOW, GLSL_TP_LUM } from "./temporal.ts";
-import { NR, TEMPORAL } from "./params.ts";
+import { NR, TEMPORAL, nrOpen } from "./params.ts";
 import { waitForSync } from "./fence-poll.ts";
 
 
@@ -108,6 +108,10 @@ export class WebGL2Backend implements GpuBackend {
   private nrIdx = 0;
   private nrWritten = false;
   private nrHist = false;
+  /** Idle: the gate was shut at the last measurement (NR.idleEvery); nrCount counts frames toward the next one. */
+  private nrIdle = true;
+  private nrCount = NR.idleEvery - 2;
+  private readonly nrLevels = new Float32Array(NR.bins * 4);
   /** RGB10_A2 history (false: the device cannot draw into it, RGBA8 instead). */
   private nr10 = true;
   // Compare wipe (GLSL_COMPOSITE): the "before" picture when it is not the
@@ -187,6 +191,8 @@ export class WebGL2Backend implements GpuBackend {
     this.tpValid = false;
     this.nrWritten = false;
     this.nrHist = false;
+    // Idle: measure again on the next two frames (a new shot may be noisy).
+    if (this.nrIdle) this.nrCount = NR.idleEvery - 2;
   }
 
   private tpTarget(w: number, h: number, fmt: "half" | "rgba8" | "rgb10"): WebGLTexture {
@@ -230,6 +236,7 @@ export class WebGL2Backend implements GpuBackend {
     this.nrFbo = null;
     this.nrWritten = false;
     this.nrHist = false;
+    if (this.nrIdle) this.nrCount = NR.idleEvery - 2;
   }
 
   /** (Re)creates the noise reduction targets for the current sizes (after tpEnsure). */
@@ -261,52 +268,112 @@ export class WebGL2Backend implements GpuBackend {
     return true;
   }
 
-  /**
-   * Runs the noise reduction passes (refine, level, nr) after the temporal passes; the grade then reads
-   * nr[nrIdx]. The history advances with the picture: a frame drawn again (p26.z, set by the engine: the same
-   * media time, e.g. a setting changed while paused) is denoised again from the same history, not from itself.
-   */
-  private nrPasses(): void {
+  private nrValid(v: boolean): void {
     const gl = this.gl;
-    const t = this.nrTex!, f = this.nrFbo!;
-    if (this.nrWritten && this.uniforms[106] < 0.5) {
-      this.nrIdx = 1 - this.nrIdx;
-      this.nrHist = true;
-    } else if (!this.nrWritten) this.nrHist = false;
-    const cur = this.nrIdx, prev = 1 - cur;
-    this.uniforms[105] = this.nrHist ? 1 : 0;
+    this.uniforms[105] = v ? 1 : 0;
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
     gl.bufferSubData(gl.UNIFORM_BUFFER, 105 * 4, this.uniforms.subarray(105, 106));
     gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, this.uniformBuf);
     gl.bindVertexArray(this.vao);
-    // 4. refine (low size)
+  }
+
+  /** Passes 4 and 5: the refined flow, then the noise levels, against the history nr[1 − nrIdx]. */
+  private nrMeasure(): void {
+    const gl = this.gl;
+    const t = this.nrTex!, f = this.nrFbo!, hist = t.out[1 - this.nrIdx];
     gl.bindFramebuffer(gl.FRAMEBUFFER, f.flow);
     gl.viewport(0, 0, this.tpLowW, this.tpLowH);
     gl.useProgram(this.nrRefine.prog);
     this.bindTex(0, this.source, this.nrRefine, "u_source");
     this.bindTex(4, this.tpTex!.flow, this.nrRefine, "u_tpFlow");
-    this.bindTex(5, t.out[prev], this.nrRefine, "u_nrPrev");
-    this.bindTex(6, t.level, this.nrRefine, "u_nrLevel"); // the previous frame's levels
+    this.bindTex(5, hist, this.nrRefine, "u_nrPrev");
+    this.bindTex(6, t.level, this.nrRefine, "u_nrLevel"); // the previous measurement's levels
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    // 5. level (one texel per luminance bin)
     gl.bindFramebuffer(gl.FRAMEBUFFER, f.level);
     gl.viewport(0, 0, NR.bins, 1);
     gl.useProgram(this.nrLevel.prog);
     this.bindTex(0, this.source, this.nrLevel, "u_source");
     this.bindTex(4, t.flow, this.nrLevel, "u_nrFlow");
-    this.bindTex(5, t.out[prev], this.nrLevel, "u_nrPrev");
+    this.bindTex(5, hist, this.nrLevel, "u_nrPrev");
     this.bindTex(6, this.tpTex!.lum[this.tpIdx], this.nrLevel, "u_tpLum");
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    // 6. nr (canvas size)
-    gl.bindFramebuffer(gl.FRAMEBUFFER, f.out[cur]);
+  }
+
+  /** Whether the gate is open in any luminance bin: the level target read back (bins × 1 texels; a small synchronous read, at the idle cadence only). */
+  private nrGateOpen(): boolean {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.nrFbo!.level);
+    // The export readback may have left a pixel-pack buffer bound: this read goes to memory.
+    const pack = gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING) as WebGLBuffer | null;
+    if (pack) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    gl.readPixels(0, 0, NR.bins, 1, gl.RGBA, gl.FLOAT, this.nrLevels);
+    if (pack) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pack);
+    return nrOpen(this.uniforms[104], this.nrLevels, 4);
+  }
+
+  /** Pass 6 into nr[nrIdx]: the blend with the history, or (history not valid) a copy of the source. */
+  private nrDraw(): void {
+    const gl = this.gl;
+    const t = this.nrTex!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.nrFbo!.out[this.nrIdx]);
     gl.viewport(0, 0, this.nrW, this.nrH);
     gl.useProgram(this.nrProg.prog);
     this.bindTex(0, this.source, this.nrProg, "u_source");
     this.bindTex(4, t.flow, this.nrProg, "u_nrFlow");
-    this.bindTex(5, t.out[prev], this.nrProg, "u_nrPrev");
+    this.bindTex(5, t.out[1 - this.nrIdx], this.nrProg, "u_nrPrev");
     this.bindTex(6, t.level, this.nrProg, "u_nrLevel");
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     this.nrWritten = true;
+  }
+
+  /**
+   * Runs the noise reduction after the temporal passes; true when nr[nrIdx] then holds the frame the grade
+   * should read (false: the grade reads the source itself).
+   *
+   * Idle (the gate was shut at the last measurement; apply.ts TemporalNR mirrors this): nothing runs, except
+   * that of every NR.idleEvery frames one is copied as a history and the next is measured against it; a
+   * measurement that opens the gate starts the reduction on that frame. Open: refine, level and the blend
+   * every frame, and every idleEvery-th measurement may shut the gate again.
+   *
+   * The history advances with the picture: a frame drawn again (p26.z, set by the engine: the same media time,
+   * e.g. a setting changed while paused) is denoised again from the same history, not from itself.
+   */
+  private nrPasses(): boolean {
+    const hold = this.uniforms[106] > 0.5, M = NR.idleEvery;
+    if (this.nrIdle) {
+      if (hold) return false;
+      const phase = this.nrCount++ % M;
+      if (phase === M - 2) {
+        this.nrValid(false);
+        this.nrDraw();
+        return false;
+      }
+      if (phase !== M - 1 || !this.nrWritten) { this.nrWritten = false; return false; }
+      this.nrIdx = 1 - this.nrIdx;
+      this.nrValid(true);
+      this.nrMeasure();
+      if (!this.nrGateOpen()) { this.nrWritten = false; return false; }
+      this.nrIdle = false;
+      this.nrCount = 0;
+      this.nrHist = true;
+      this.nrDraw();
+      return true;
+    }
+    if (this.nrWritten && !hold) {
+      this.nrIdx = 1 - this.nrIdx;
+      this.nrHist = true;
+    } else if (!this.nrWritten) this.nrHist = false;
+    this.nrValid(this.nrHist);
+    this.nrMeasure();
+    this.nrDraw();
+    if (this.nrHist && !hold && ++this.nrCount % M === 0 && !this.nrGateOpen()) {
+      // Shut: this frame's blend already had no weight; the next ones pass through.
+      this.nrIdle = true;
+      this.nrCount = 0;
+      this.nrWritten = false;
+      this.nrHist = false;
+    }
+    return true;
   }
 
   /** (Re)creates the temporal targets for the current sizes; false when the layer is off. */
@@ -624,16 +691,10 @@ export class WebGL2Backend implements GpuBackend {
     const tp = this.uniforms[93] > 0.5 && this.tpEnsure();
     if (!tp) this.tpValid = false;
     // Noise reduction (p26.x) rides on the layer's flow: its targets exist only while it is on.
-    const nr = tp && this.nrOn && this.uniforms[104] > 0.5 && this.nrEnsure();
-    if (!nr) {
+    const want = tp && this.nrOn && this.uniforms[104] > 0.5 && this.nrEnsure();
+    if (!want) {
       if (this.nrTex) this.nrRelease();
       this.nrWritten = false;
-      if (this.uniforms[104] !== 0) {
-        // The grade must read the source itself.
-        this.uniforms[104] = 0;
-        gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
-        gl.bufferSubData(gl.UNIFORM_BUFFER, 104 * 4, this.uniforms.subarray(104, 105));
-      }
     }
     let ts = this.syncProfile ? performance.now() : 0;
     if (tp) this.tpPasses();
@@ -642,7 +703,13 @@ export class WebGL2Backend implements GpuBackend {
       gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
       gl.bufferSubData(gl.UNIFORM_BUFFER, 92 * 4, this.uniforms.subarray(92, 93));
     }
-    if (nr) this.nrPasses();
+    // Idle (gate shut) or off: the grade reads the source itself.
+    const nr = want && this.nrPasses();
+    if (!nr && this.uniforms[104] !== 0) {
+      this.uniforms[104] = 0;
+      gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
+      gl.bufferSubData(gl.UNIFORM_BUFFER, 104 * 4, this.uniforms.subarray(104, 105));
+    }
     if (this.syncProfile) {
       this.gpuSync();
       const now = performance.now();
