@@ -79,12 +79,12 @@ export function initialVivid(search: string, saved: string | null): boolean {
   return DEFAULT_COLOUR.vivid !== false;
 }
 
-/** The colour style picker: Natural (no look), Vivid, Blue water (Vivid + BLUE_WATER). */
+/** The colour style picker: Natural (no look), Vivid (the default; carries the cobalt water-hue map at WATER_HUE.amount), Blue water (the map in full). */
 export type ColourStyle = "natural" | "vivid" | "blue";
 export const COLOUR_STYLES: Chip<ColourStyle>[] = [
   { id: "natural", label: "Natural", hint: "Natural correction only" },
   { id: "vivid", label: "Vivid", hint: "Deep blue water, white sand, rich blacks, bright sun" },
-  { id: "blue", label: "Blue water", hint: "All water one cobalt blue, warm subjects, deeper shadows" },
+  { id: "blue", label: "Blue water", hint: "The cobalt water in full: all water one blue, warm subjects, deeper shadows" },
 ];
 
 export function styleOf(c: { vivid?: boolean; blue?: boolean }): ColourStyle {

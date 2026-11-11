@@ -41,10 +41,11 @@ export type UserSettings = {
    */
   vivid?: number;
   /**
-   * "Blue water" style, 0..1 (opt-in, default 0; see BLUE_WATER): on top of
-   * Vivid, all water (green and teal included) goes to one cobalt blue, warm
-   * subjects more orange, silver/white subjects neutral, shadows deeper.
-   * A per-pixel function of the graded colour only (no masks).
+   * "Blue water" style, 0..1 (see BLUE_WATER): on top of Vivid, all water
+   * (green and teal included) goes to one cobalt blue, warm subjects more
+   * orange, silver/white subjects neutral, shadows deeper. Vivid alone already
+   * carries this mapping at WATER_HUE.amount (the default look); 1 runs it in
+   * full. A per-pixel function of the graded colour only (no masks).
    */
   blue?: number;
   /** Debug (?hazeauto=0): disables the haze-adaptive default for A/B runs. */
@@ -484,9 +485,12 @@ export const VIVID_LOOK = {
 };
 
 /**
- * "Blue water" style (UserSettings.blue), fitted to the user's human-graded
- * pairs (~/video-data/refs/human-graded-2026-11-01: barracuda, cenote,
- * jellyfish). The graders put ALL water — blue, teal and green alike — on one
+ * The cobalt water-hue map: part of the default look (Vivid, at
+ * WATER_HUE.amount) and the whole of the "Blue water" style (UserSettings.blue).
+ * First fitted to the user's human-graded pairs (~/video-data/refs/
+ * human-graded-2026-11-01: barracuda, cenote, jellyfish), then refitted on all
+ * eight reference pairs (eval/fit-look.ts) as one mapping for every scene.
+ * The graders put ALL water — blue, teal and green alike — on one
  * cobalt blue (Oklab hue 249–256°, chroma 0.07–0.08 median, ≈0.1 at L 0.4–0.5),
  * turn warm subjects more orange (jellyfish 88° → 62°, chroma ×2), leave
  * silver and white subjects neutral and deepen the shadows. Runs after Vivid,
@@ -512,11 +516,11 @@ export const VIVID_LOOK = {
  * Shadows: L ×(1 − shadowK) at black, easing out by `shadowHi` (monotone).
  */
 export const BLUE_WATER = {
-  target: (253 * Math.PI) / 180, // measured: the graded water's Oklab hue (249.3°, 251.2°, 255.9°; mean 252°)
+  target: (258 * Math.PI) / 180, // the graded water's Oklab hue measured 249–256° on three pairs; the fit on all eight lands a little bluer
   mix: 0.9,
   warmDir: (45 * Math.PI) / 180, // the warm side of the projection (skin, orange, sand, red)
-  sLo: -0.01,
-  sHi: 0.06,
+  sLo: -0.05, // fitted: the ramp ends just past neutral, so sand, whites and skin under a faint cast take (almost) no blue
+  sHi: 0.03, // (ramp widths: the near-grey noise gain stays under 3, test/bluewater.test.ts)
   vcLo: 0.07,
   vcHi: 0.12,
   vio0: (285 * Math.PI) / 180,
@@ -524,20 +528,20 @@ export const BLUE_WATER = {
   vio2: (345 * Math.PI) / 180,
   vegIn0: (60 * Math.PI) / 180, // vegetation (moss, seagrass, algae: yellow-green 80–130° with real chroma) keeps its
   vegIn1: (80 * Math.PI) / 180, // colour; green water sits at 140–200° (the graded cenote / jellyfish) and still turns
-  vegOut0: (125 * Math.PI) / 180,
-  vegOut1: (158 * Math.PI) / 180,
+  vegOut0: (150 * Math.PI) / 180,
+  vegOut1: (195 * Math.PI) / 180, // fitted: shallow sunlit reef the balance leaves grey-green (IMG_9552) keeps its colour instead of turning blue
   vegCLo: 0.02,
-  vegCHi: 0.045,
+  vegCHi: 0.04,
   vegGreen: 0.8, // in green water (red.ts greenWeight) the green is mostly cast: the keep relaxes by this share
   cK: 0.24, // water chroma cK·L (the references: 0.065 at L 0.25, 0.08–0.12 at L 0.4–0.5) …
-  cMax: 0.1, // … capped …
+  cMax: 0.12, // … capped …
   hiLo: 0.55, // … and falling off in bright water (sunlit surface, beams: 0.04 at L 0.8)
   hiHi: 0.85,
-  hiDrop: 0.6,
-  neutralLLo: 0.45, // bright … (wide ramps: a pixel hovering at the edge must not flip between neutral and blue)
-  neutralLHi: 0.75,
-  neutralCLo: 0.02, // … low-chroma pixels are silver / white, not water (the graded barracuda: C 0.02)
-  neutralCHi: 0.08,
+  hiDrop: 0.3,
+  neutralLLo: 0.35, // bright … (wide ramps: a pixel hovering at the edge must not flip between neutral and blue)
+  neutralLHi: 0.6,
+  neutralCLo: 0.015, // … low-chroma pixels are silver / white, not water (the graded barracuda: C 0.02)
+  neutralCHi: 0.05,
   neutralK: 0.8,
   warmHue: (62 * Math.PI) / 180, // measured: the graded jellyfish
   warmIn0: (30 * Math.PI) / 180,
@@ -549,7 +553,7 @@ export const BLUE_WATER = {
   warmLLo: 0.2,
   warmLHi: 0.4,
   warmPull: 0.5,
-  warmGain: 0.7,
+  warmGain: 0.35, // (0.7 fits the jellyfish pair alone and turns sand and warm-cast water orange)
   warmCMax: 0.15,
   shadowK: 0.25,
   shadowHi: 0.4,
@@ -606,33 +610,34 @@ export function vividAmountOf(p: GradeParams, s: UserSettings): number {
  * bottom-minus-top Oklab L; torch-lit caves and night dives measure ≥ −0.05
  * on the valset, the graded cenote −0.41).
  */
-export const BLUE_GATE = { sunLo: -0.15, sunHi: -0.3, sceneLo: -0.3, sceneHi: 0.05, sceneSd: 0.025, sceneCool: 0.02 };
+export const BLUE_GATE = { sunLo: -0.15, sunHi: -0.3 };
 
-/**
- * Scene evidence (analyze.ts) for Blue water: the share of the frame that is
- * open water (smooth — local Oklab L std < sceneSd over 5×5 — and on the cool
- * side, a·cos45° + b·sin45° < sceneCool) minus the engine's mean object
- * confidence. The graders' pairs (water behind the subject) score +0.02 to
- * +0.42 and green open water +0.64; close reef, moss and sand frames −0.14 to
- * −0.55, where tinting the mid-tones blue while the highlights stay neutral
- * turns texture into blue/white speckle — there the style steps back
- * (sceneLo..sceneHi) and Vivid alone remains. Clip-locked, never per pixel.
- */
-export function blueSceneOf(openShare: number, confMean: number): number {
-  return smoothstepP(BLUE_GATE.sceneLo, BLUE_GATE.sceneHi, openShare - confMean);
-}
-
-/** Frame evidence for the Blue water gate (analyze.ts), as vividGateOf, times the scene evidence (blueSceneOf). 1 = full look. */
-export function blueGateOf(veilL: number, veilC: number, lift: number, scene = 1): number {
+/** Frame evidence for the Blue water gate (analyze.ts), as vividGateOf. 1 = full look. No scene term: the mapping is the same for every scene. */
+export function blueGateOf(veilL: number, veilC: number, lift: number): number {
   const G = VIVID_GATE;
   const night = Math.max(smoothstepP(G.veilLLo, G.veilLHi, veilL), smoothstepP(-BLUE_GATE.sunLo, -BLUE_GATE.sunHi, -lift));
   const rov = smoothstepP(G.liftLo, G.liftHi, lift) * (1 - smoothstepP(G.veilCLo, G.veilCHi, veilC));
-  return night * (1 - (1 - G.rovKeep) * rov) * scene;
+  return night * (1 - (1 - G.rovKeep) * rov);
 }
 
-/** The Blue water amount the shader reads (0..1): the user's setting through the gate (graded, topside, night, ROV). */
+/**
+ * The water-hue map in the default look. Vivid carries the cobalt mapping (BLUE_WATER) at `amount`; the Blue water
+ * style runs it at 1. One global, continuous mapping of the graded colour, the same for every scene: no scene gate.
+ * Fitted with BLUE_WATER on the reference pairs (eval/fit-look.ts, leave-one-out reported there).
+ */
+export const WATER_HUE = {
+  amount: 0.5, // the dial between reference distance and do-no-harm: 0.85 fits the pairs best (8.8, harm +0.6), 0.5 keeps harm within +0.3
+  // Do no harm: the map is a larger move than the rest of Vivid, so it stands down sooner on footage that looks
+  // graded or topside (calm.ts scores; Vivid's own ramp is VIVID_GATE.calmLo..calmHi).
+  calmLo: 0.05,
+  calmHi: 0.3,
+};
+
+/** The Blue water amount the shader reads (0..1): Vivid's share (WATER_HUE) or the Blue water style, through the gate (graded, topside, night, ROV). */
 export function blueAmountOf(p: GradeParams, s: UserSettings): number {
-  return Math.min(1, Math.max(0, s.blue ?? 0)) * calmGateOf(p) * Math.min(1, Math.max(0, p.blueGate ?? p.vividGate ?? 1));
+  const c01 = (x: number) => Math.min(1, Math.max(0, x));
+  const calm = c01(Math.max(p.calm ?? 0, p.calmTone ?? 0));
+  return Math.max(c01(s.blue ?? 0), WATER_HUE.amount * c01(s.vivid ?? 0)) * calmGateOf(p) * (1 - smoothstepP(WATER_HUE.calmLo, WATER_HUE.calmHi, calm)) * c01(p.blueGate ?? p.vividGate ?? 1);
 }
 
 function calmGateOf(p: GradeParams): number {
