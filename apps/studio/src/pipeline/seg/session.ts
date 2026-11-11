@@ -312,7 +312,7 @@ export class SegSession {
   private reacquire(k: number): void {
     // (Not within a second of the next start, or of the range's end: nothing is left to follow from there.)
     const t = this.segStarts[k], next = this.segStarts[k + 1] ?? this.base[this.base.length - 1] ?? Infinity;
-    const wait = Math.min(SEG.segmentS, SEG.reacquireS * 2 ** Math.max(0, this.emptyRun - 1));
+    const wait = Math.min(SEG.reacquireMaxS, SEG.reacquireS * 2 ** Math.max(0, this.emptyRun - 1));
     const r = this.snap(t + wait);
     if (r > t + 1e-6 && r < next - SEG.reacquireS / 2) {
       this.segStarts.splice(k + 1, 0, r);

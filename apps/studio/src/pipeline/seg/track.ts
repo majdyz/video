@@ -44,12 +44,14 @@ export const SEG = {
   /** The session tracks the trim plus this much either side (s; studio-seg.ts segSpan). */
   scopeMarginS: 0.5,
   /** A segment start that finds no subject (and none carried in) looks again this much later (s); each further
-   * start in a row that finds none doubles the wait, up to segmentS (2, 4, 8 s: every look is a seek, an analysis
-   * and, when the engine sees nothing, the model's own search)... */
+   * start in a row that finds none doubles the wait, up to reacquireMaxS (2, 4, 4 s: every look is a seek, an
+   * analysis and, when the engine sees nothing, the model's own search; 8 s lost a returning subject for ~3 s on
+   * blue-20s)... */
   reacquireS: 2,
+  reacquireMaxS: 4,
   /** ...and from this many empty starts in a row, the extra starts leave the model's search out (the engine's look
    * only; the regular starts, every segmentS, still search). */
-  reacquireSearches: 2,
+  reacquireSearches: 3,
   /** The lite (phone) model follows at most this many of the engine's own subjects at a time (every one is a
    * tracker step per keyframe); taps are always followed. */
   liteAutos: 2,

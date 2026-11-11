@@ -227,7 +227,7 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   await end;
   assert.equal(a.errors.length, 0);
   assert.deepEqual(a.log.map((l) => l.t), [0, 2, 6, 8], "segment starts as tracking met them (two inserted, the wait doubling)");
-  assert.deepEqual(a.asked.map((x) => x.search), [true, false, true], "the second extra start in a row asks for the engine's subjects only");
+  assert.deepEqual(a.asked.map((x) => x.search), [true, true, true], "extra starts keep the model's search until SEG.reacquireSearches (3) empty ones in a row");
   assert.deepEqual(a.log.map((l) => l.objs.length), [0, 0, 1, 1]);
   assert.ok(a.frames.size > 0);
 
@@ -411,18 +411,18 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
 // ---------------------------------------------------------------- a clip with nothing to follow
 
 {
-  // 30 s, no subject anywhere: looked through at 0, 2, 6 s, then at the regular starts only (8, 16, 24 s), where it
-  // used to be every 2 s (15 looks); the model's search is asked for at the first two and the regular ones.
+  // 30 s, no subject anywhere: looked through at 0, 2, 6 s, then every 4 s (SEG.reacquireMaxS) where it used to be
+  // every 2 s (15 looks, now 9); the model's search is left out of extra starts after three empty ones in a row.
   const f = fake({ visible: [100, 200] });
   const r = open(f, { start: 0, end: 30 }, () => []);
   const end = r.settled();
   r.s.seeds(0, []);
   await end;
   assert.equal(r.errors.length, 0);
-  assert.deepEqual(r.asked.map((x) => x.t), [2, 6, 8, 16, 24]);
-  assert.deepEqual(r.asked.map((x) => x.search), [true, false, true, true, true]);
+  assert.deepEqual(r.asked.map((x) => x.t), [2, 6, 8, 12, 16, 20, 24, 28]);
+  assert.deepEqual(r.asked.map((x) => x.search), [true, true, true, false, true, false, true, false]);
   assert.equal(f.encodes, 0, "no model run without a subject");
-  console.log("session: empty clip → the looks back off (2, 4, 8 s): ok");
+  console.log("session: empty clip → the looks back off (2, 4, 4 s): ok");
 }
 
 // ---------------------------------------------------------------- the lite model follows two automatic subjects
