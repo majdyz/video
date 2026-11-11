@@ -1,6 +1,6 @@
 // AI subject detection, the track pass and the mask at any clip time (Subject pop, `seg`).
 //
-// Pass (runPass): every prompted subject is followed by the EdgeTAM memory tracker over keyframes 6 per clip second
+// Pass (runPass): every prompted subject is followed by the EdgeTAM memory tracker over keyframes SEG.fps (4) per clip second
 // (frame index = 30 Hz frame number, see bank.ts), forward and back from its prompt. Between two keyframes of one
 // direction a flow guard compares the tracker's mask with the previous keyframe's mask carried along optical flow:
 // a tracker that dropped a subject the flow still sees (< 25% of the carried area) is re-prompted on that frame from
@@ -84,6 +84,21 @@ export const SEG = {
 export type SegPrompt = { points: [number, number][]; labels: number[]; box?: { x0: number; y0: number; x1: number; y1: number } };
 /** A subject to follow: include (pop it) or exclude (never pop it); prompt in upright uv (0..1) at clip time t. */
 export type SegObject = { kind: "include" | "exclude"; t: number; prompt: SegPrompt };
+
+/**
+ * A prompt carried into another uv space by `f` (the studio: from the stabilised / dewarped picture the user taps
+ * and the engine analyses to the upright source frame the session tracks on). Points map one by one; the box
+ * becomes the bounds of its outline's image (corners and edge midpoints: the warp bends straight edges).
+ */
+export function mapPrompt(p: SegPrompt, f: (u: number, v: number) => [number, number]): SegPrompt {
+  const out: SegPrompt = { points: p.points.map(([u, v]) => f(u, v)), labels: p.labels.slice() };
+  if (p.box) {
+    const { x0, y0, x1, y1 } = p.box, xm = (x0 + x1) / 2, ym = (y0 + y1) / 2;
+    const q = [[x0, y0], [xm, y0], [x1, y0], [x1, ym], [x1, y1], [xm, y1], [x0, y1], [x0, ym]].map(([u, v]) => f(u, v));
+    out.box = { x0: Math.min(...q.map((c) => c[0])), y0: Math.min(...q.map((c) => c[1])), x1: Math.max(...q.map((c) => c[0])), y1: Math.max(...q.map((c) => c[1])) };
+  }
+  return out;
+}
 
 export type StepResult = { logits: Float32Array; lw: number; lh: number; score: number; iou: number };
 /** The model side (a worker in the app, the same worker in the eval page). */

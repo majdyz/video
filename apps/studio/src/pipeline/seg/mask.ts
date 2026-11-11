@@ -78,6 +78,33 @@ export function nearMap(inc: Float32Array, w: number, h: number, r: number): Flo
   return boxMean(dilate(bin, w, h, r), w, h, r);
 }
 
+/** sRGB code value (0..255) → linear light. */
+const SRGB_LIN = Float32Array.from({ length: 256 }, (_, i) => { const c = i / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
+
+/** framePop: the subject is alpha over this, the water around it alpha under `out` where the raw near map is over
+ * `near` (the engine's own test on the overlay, aqua-fix seg-overlay.ts popContrast: 0.6 / 0.05 / 0.15 of a near map
+ * stored × 4), with at least `min` texels on either side. */
+export const FRAME_POP = { inside: 0.6, out: 0.05, near: 0.15 / 4, min: 16 };
+
+/**
+ * One frame's subject lightness against the water around it: ln(subject luminance / ring luminance), in linear
+ * light, from the frame's luma (0..1, as decoded), the pop alpha (0..255) and the raw near map on the mask grid.
+ * Null when either side is too small to tell. The session measures every filled frame with it; their mean over the
+ * clip decides whether Subject pop lifts or deepens the subject (aqua-fix seg-overlay.ts popDirection), once for the
+ * clip, the same in the preview and the export.
+ */
+export function framePop(luma: Float32Array, alpha: Uint8Array, near: Float32Array): number | null {
+  const P = FRAME_POP;
+  let ls = 0, ns = 0, lr = 0, nr = 0;
+  for (let i = 0; i < alpha.length; i++) {
+    const a = alpha[i] / 255;
+    if (a > P.inside) { ls += SRGB_LIN[Math.min(255, Math.max(0, Math.round(luma[i] * 255)))]; ns++; }
+    else if (a < P.out && near[i] > P.near) { lr += SRGB_LIN[Math.min(255, Math.max(0, Math.round(luma[i] * 255)))]; nr++; }
+  }
+  if (ns < P.min || nr < P.min || lr <= 0) return null;
+  return Math.log(Math.max(1e-6, ls / ns) / (lr / nr));
+}
+
 /** Square max filter (dilation) of radius r. */
 export function dilate(src: Float32Array, w: number, h: number, r: number): Float32Array {
   const tmp = new Float32Array(w * h), o = new Float32Array(w * h);

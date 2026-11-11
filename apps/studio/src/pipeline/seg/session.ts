@@ -19,7 +19,7 @@
 //   for undo), else it is followed as an exclude object (only the tapped part comes out).
 import type { EdgeTam } from "./edgetam.ts";
 import { frameIndex } from "./bank.ts";
-import { cellLab, nearMap, departFromCells, sdfFeather, area, bbox, guidedFilter, iou, promptFromMask, rleDecode, rleEncode } from "./mask.ts";
+import { cellLab, nearMap, departFromCells, framePop, sdfFeather, area, bbox, guidedFilter, iou, promptFromMask, rleDecode, rleEncode } from "./mask.ts";
 import { denseFlow, warp, type Gray } from "./flow.ts";
 import { fillInterval, keyTimes, maskSize, remap, SEG, sigmoidResize, toU8, type Keyframe, type SegObject } from "./track.ts";
 
@@ -59,7 +59,9 @@ function ringContrast(m: Float32Array, cells: Float32Array, w: number, h: number
 
 export type SessionObjectInfo = { id: number; kind: "include" | "exclude"; t: number };
 /** One filled frame's maps, run-length coded (mask.ts rleEncode): alpha on the mask grid, the rest at quarter size. */
-export type SessionFrameOut = { i: number; alpha: Uint8Array; nearQ: Uint8Array; excQ: Uint8Array | null; depQ: Uint8Array };
+/** pop: the frame's subject / water contrast (mask.ts framePop; null: nothing to measure), for the clip's one
+ * Subject pop direction (studio-seg.ts SegLive.pop). */
+export type SessionFrameOut = { i: number; alpha: Uint8Array; nearQ: Uint8Array; excQ: Uint8Array | null; depQ: Uint8Array; pop?: number | null };
 export type SessionProfile = Record<string, number>;
 export type SessionEvents = {
   frames(items: SessionFrameOut[]): void;
@@ -68,8 +70,12 @@ export type SessionEvents = {
   idle(profile: SessionProfile): void;
   /** A tapped include that came out as the background (the tap missed the animal): dropped. */
   rejected(id: number): void;
-  /** Segment k's seeds are needed (its canonical frame t): tracking waits for session.seeds(k, ...). */
+  /** The seeds of the segment starting at t are needed (k: its index right now, for the logs only): tracking waits
+   * for session.seeds(t, ...). */
   needSeeds(k: number, t: number): void;
+  /** A step, a fill or a queued tap threw (out of memory in the runtime, an unreadable frame): the session has
+   * stopped for good and is closed; no idle follows. The main thread tells the user and shuts the worker down. */
+  error?(msg: string): void;
   /** Breadcrumbs of the heavy steps (the main thread keeps them: a phone that kills the page leaves no log). */
   trace?(msg: string): void;
 };
@@ -80,6 +86,9 @@ type ObjState = {
   auto: boolean;
   /** The segment an auto is in now (carry-over moves it on). */
   seg: number;
+  /** An auto the user took out (remove): still tracked, so the pass stays the same whenever the tap came (it goes
+   * on deciding carry-overs as before), but in no mask. A removed tap just leaves (it affects no other object). */
+  hidden: boolean;
   /** Keyframe time → probability (0..255) on the mask grid, run-length coded. */
   keys: Map<number, Uint8Array>;
   /** Keyframes whose mask is not empty (the confidence curve only counts those). */
@@ -94,6 +103,9 @@ type ObjState = {
 };
 
 const yieldNow = () => new Promise<void>((r) => setTimeout(r, 0));
+
+/** The decoded-frame cache's key for clip time t (0.1 ms steps: grid frames and keyframes that coincide share one). */
+export const frameKey = (t: number) => Math.round(t * 1e4);
 
 export class SegSession {
   readonly mw: number;
@@ -111,10 +123,20 @@ export class SegSession {
   private big: OffscreenCanvas;
   private running = false;
   private closed = false;
-  /** Segment starts (keyframe times; segStarts[0] = the first seeds' frame), seeds received, the one asked for. */
+  /** Why the session stopped (run() threw); null while it is healthy. */
+  failed: string | null = null;
+  /**
+   * Segment starts (keyframe times; segStarts[0] = the first seeds' frame). Everything about a segment is keyed by
+   * its start TIME, never its index: reacquire() splices new starts in as tracking goes, which shifts every later
+   * index, and a replay after a hibernation hands the seeds over before any tracking has happened.
+   */
   private segStarts: number[] = [];
+  /** Start times whose seeds tracking has taken. */
   private seeded = new Set<number>();
-  private asked = -1;
+  /** Seeds handed over (by start time), held until tracking reaches their segment. */
+  private given = new Map<number, (SegObject & { id: number })[]>();
+  /** The start time whose seeds were asked for (NaN: none). */
+  private asked = NaN;
   /** Steps done (for the progress). */
   private stepsDone = 0;
   private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0 };
@@ -154,36 +176,46 @@ export class SegSession {
     const t = this.snap(o.t), reach = SEG.reachS;
     const near = this.keys.filter((k) => Math.abs(k - t) <= reach + 1e-6);
     this.objs.set(o.id, {
-      o: { ...o, t }, auto: false, seg: -1, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null,
+      o: { ...o, t }, auto: false, seg: -1, hidden: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null,
       fwd: near.filter((k) => k >= t - 1e-6), bwd: near.filter((k) => k <= t + 1e-6).reverse(),
     });
     void this.run();
   }
 
   /**
-   * Segment k's seeds (the engine's own subjects on its canonical frame t; may be none). Segment 0 also fixes the
-   * segment grid: its frame, then every SEG.segmentS to the end of the clip.
+   * The seeds of the segment starting at t (the engine's own subjects on its canonical frame; may be none). The
+   * first seeds also fix the segment grid: their frame, then every SEG.segmentS to the end of the clip. The seeds
+   * are held and taken when tracking reaches their segment (takeSeeds), so they may arrive in any order and ahead
+   * of time (a replay hands them all over at once) and the pass is the same.
    */
-  seeds(k: number, t: number, objs: (SegObject & { id: number })[]): void {
-    if (this.seeded.has(k)) return;
-    if (k === 0) {
-      const t0 = this.snap(t), end = this.keys[this.keys.length - 1] ?? t0;
-      this.segStarts = [];
+  seeds(t: number, objs: (SegObject & { id: number })[]): void {
+    if (this.closed) return;
+    const t0 = this.snap(t);
+    if (!this.segStarts.length) {
+      const end = this.keys[this.keys.length - 1] ?? t0;
       for (let s = t0; s <= end + 1e-6; s += SEG.segmentS) this.segStarts.push(this.snap(s));
       this.segStarts = this.segStarts.filter((s, i, a) => i === 0 || s > a[i - 1] + 1e-6);
     }
-    const t0 = this.segStarts[k];
-    if (t0 === undefined) return;
-    this.seeded.add(k);
+    if (this.seeded.has(t0) || this.given.has(t0)) return;
+    this.given.set(t0, objs);
+    void this.run();
+  }
+
+  /** Tracking has reached segment k: its seeds, if they were handed over, become objects. False: not here yet. */
+  private takeSeeds(k: number): boolean {
+    const t0 = this.segStarts[k], objs = this.given.get(t0);
+    if (!objs) return false;
+    this.given.delete(t0);
+    this.seeded.add(t0);
     if (this.waitSince) { this.prof.waitSeedsMs += performance.now() - this.waitSince; this.waitSince = 0; }
     const t1 = this.segStarts[k + 1] ?? this.keys[this.keys.length - 1];
     const span = this.keys.filter((x) => x >= t0 - 1e-6 && x <= t1 + 1e-6);
     for (const o of objs) {
-      this.objs.set(o.id, { o: { ...o, t: t0 }, auto: true, seg: k, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd: span, bwd: [] });
+      this.objs.set(o.id, { o: { ...o, t: t0 }, auto: true, seg: k, hidden: this.gone.delete(o.id), keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd: span, bwd: [] });
     }
     // Nothing seeded and nothing tracked into this segment: look again a little later (re-acquire).
     if (!objs.length && ![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) this.reacquire(k);
-    void this.run();
+    return true;
   }
 
   /**
@@ -196,17 +228,38 @@ export class SegSession {
     if (r > t + 1e-6 && r < next - SEG.reacquireS / 2) this.segStarts.splice(k + 1, 0, r);
   }
 
-  /** Takes an object out (its masks kept for restore); every interval it touched is filled again. */
+  /** Ids removed before their object exists (a replay removes an auto whose seeds are still held): hidden on arrival. */
+  private gone = new Set<number>();
+
+  /**
+   * Takes an object out of the masks (restorable); every interval it touched is filled again. A tap's object
+   * leaves the session; an auto stays and is tracked on, hidden (ObjState.hidden), so the result does not depend on
+   * when in the pass it was removed: a replay that removes it before anything is tracked gives the same masks.
+   */
   remove(id: number): void {
     const s = this.objs.get(id);
-    if (!s) return;
-    this.objs.delete(id);
-    this.trash.set(id, s);
+    if (!s) { if (!this.trash.has(id)) this.gone.add(id); return; }
+    if (s.auto) {
+      if (s.hidden) return;
+      s.hidden = true;
+    } else {
+      this.objs.delete(id);
+      this.trash.set(id, s);
+    }
     this.markObject(s);
     void this.run();
   }
 
   restore(id: number): void {
+    this.gone.delete(id);
+    const h = this.objs.get(id);
+    if (h) {
+      if (!h.hidden) return;
+      h.hidden = false;
+      this.markObject(h);
+      void this.run();
+      return;
+    }
     const s = this.trash.get(id);
     if (!s) return;
     this.trash.delete(id);
@@ -225,7 +278,7 @@ export class SegSession {
     const k = this.snap(t), x = Math.min(this.mw - 1, Math.floor(u * this.mw)), y = Math.min(this.mh - 1, Math.floor(v * this.mh));
     let best: ObjState | null = null, bp = 127;
     for (const s of this.objs.values()) {
-      if (s.o.kind !== "include") continue;
+      if (s.o.kind !== "include" || s.hidden) continue;
       const m = this.key(s, k);
       if (m && m[y * this.mw + x] > bp) { bp = m[y * this.mw + x]; best = s; }
     }
@@ -239,13 +292,19 @@ export class SegSession {
    */
   excludeAt(id: number, t: number, u: number, v: number): Promise<{ action: "removed"; removed: number } | { action: "part" | "exclude" }> {
     // Runs between two tracker steps (the model is not re-entrant).
-    return new Promise((resolve, reject) => {
-      this.ops.push(() => this.excludeNow(id, t, u, v).then(resolve, reject));
+    return this.queue(() => this.excludeNow(id, t, u, v));
+  }
+
+  private ops: { run: () => Promise<void>; fail: (e: Error) => void }[] = [];
+
+  /** Runs fn between two tracker steps (the model is not re-entrant). Its failure fails the session (run's catch). */
+  private queue<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.closed) return Promise.reject(new Error(this.failed ?? "session closed"));
+    return new Promise<T>((resolve, reject) => {
+      this.ops.push({ run: async () => { try { resolve(await fn()); } catch (e) { reject(e); throw e; } }, fail: reject });
       void this.run();
     });
   }
-
-  private ops: (() => Promise<void>)[] = [];
 
   private async excludeNow(id: number, t: number, u: number, v: number): Promise<{ action: "removed"; removed: number } | { action: "part" | "exclude" }> {
     const o = this.objectAt(t, u, v);
@@ -271,20 +330,26 @@ export class SegSession {
     return this.running || this.waiting;
   }
 
-  /** Waiting for the main thread's seeds of segment `asked`. */
+  /** Waiting for the main thread's seeds of the segment starting at `asked`. */
   private get waiting(): boolean {
-    return this.asked >= 0 && !this.seeded.has(this.asked);
+    return !Number.isNaN(this.asked) && !this.seeded.has(this.asked) && !this.given.has(this.asked);
   }
 
   close(): void {
+    if (this.closed) return;
     this.closed = true;
+    for (const op of this.ops.splice(0)) op.fail(new Error("session closed"));
     this.frames.dispose();
   }
 
   // ------------------------------------------------------------------ frames
 
   private async pixels(t: number, need1024: boolean): Promise<{ luma: Float32Array; rgba1024?: Uint8ClampedArray }> {
-    const i = Math.round(t * SEG.sampleHz) - this.grid.i0;
+    // By the frame's own time, not its slot on the 30 Hz fill grid: at 4 keyframes a second every other keyframe
+    // (0.25 s, 0.75 s: "frame 7.5") lies between two grid frames, and rounded to a slot it shared the next grid
+    // frame's entry. Whichever was read first then stood in for the other: a mask one frame stale twice a second,
+    // and a refill (after a tap or an undo) that differed from the first fill with the cache's order.
+    const i = frameKey(t);
     const hit = this.lumaCache.get(i);
     if (hit && !need1024) return { luma: Float32Array.from(hit, (x) => x / 255) };
     const t0 = performance.now();
@@ -331,17 +396,14 @@ export class SegSession {
    * Deterministic for the frame (same seeds whenever and wherever the clip is seeded).
    */
   autoSeeds(t: number): Promise<SegObject[]> {
-    return new Promise((resolve, reject) => {
-      this.ops.push(() => this.autoSeedsNow(t).then(resolve, reject));
-      void this.run();
-    });
+    return this.queue(() => this.autoSeedsNow(t));
   }
 
   private async autoSeedsNow(t0: number): Promise<SegObject[]> {
     const t = this.snap(t0), A = AUTO, { mw: w, mh: h } = this;
     this.ev.trace?.("auto: decode");
     const { rgba1024 } = await this.pixels(t, true);
-    const cells = this.cellCache.get(Math.round(t * SEG.sampleHz) - this.grid.i0);
+    const cells = this.cellCache.get(frameKey(t));
     this.ev.trace?.("auto: encode");
     await this.model.encode(rgba1024!);
     this.ev.trace?.("auto: encoded; probing");
@@ -398,7 +460,7 @@ export class SegSession {
     let left = 0, autosNow = 0;
     for (const s of this.objs.values()) { left += s.fwd.length - s.fi + s.bwd.length - s.bi; if (s.auto) autosNow++; }
     const per = Math.max(1, autosNow) * Math.max(1, Math.round(SEG.segmentS * SEG.fps));
-    for (let k = 0; k < this.segStarts.length; k++) if (!this.seeded.has(k)) left += per;
+    for (const s of this.segStarts) if (!this.seeded.has(s)) left += per;
     if (!this.segStarts.length) left += per;
     return [this.stepsDone, this.stepsDone + left];
   }
@@ -414,7 +476,7 @@ export class SegSession {
     try {
       while (!this.closed) {
         const op = this.ops.shift();
-        if (op) { await op(); await yieldNow(); continue; }
+        if (op) { await op.run(); await yieldNow(); continue; }
         const uk = this.urgent.shift();
         if (uk !== undefined) { await this.fill(uk); await yieldNow(); continue; }
         // Taps first, newest first.
@@ -433,8 +495,9 @@ export class SegSession {
         const t = autos.length ? Math.min(...autos.map((s) => this.nextOf(s)!)) : Infinity;
         const k = this.nextSegment(t);
         if (k !== null) {
-          if (!this.seeded.has(k)) {
-            if (this.asked !== k) { this.asked = k; this.waitSince = performance.now(); this.ev.needSeeds(k, this.segStarts[k]); }
+          if (!this.takeSeeds(k)) {
+            const ts = this.segStarts[k];
+            if (this.asked !== ts) { this.asked = ts; this.waitSince = performance.now(); this.ev.needSeeds(k, ts); }
             break;
           }
           await yieldNow();
@@ -458,10 +521,24 @@ export class SegSession {
         } else break;
         await yieldNow();
       }
+    } catch (e) {
+      // Nothing is left to trust after a throw in here (an allocation that failed leaves the runtime dead): the
+      // session stops and says so, instead of looking like a finished pass.
+      if (!this.closed) this.fail(e);
     } finally {
       this.running = false;
       if (!this.closed && !this.waiting) this.ev.idle(this.profile());
     }
+  }
+
+  private fail(e: unknown): void {
+    const msg = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 160) || "unknown error";
+    this.failed = msg;
+    this.closed = true;
+    const err = new Error(msg);
+    for (const op of this.ops.splice(0)) op.fail(err);
+    try { this.frames.dispose(); } catch { /* already gone */ }
+    this.ev.error?.(msg);
   }
 
   /**
@@ -471,7 +548,7 @@ export class SegSession {
   private nextSegment(t: number): number | null {
     if (!this.segStarts.length) return null;
     for (let k = 0; k < this.segStarts.length; k++) {
-      if (this.seeded.has(k)) continue;
+      if (this.seeded.has(this.segStarts[k])) continue;
       if (this.segStarts[k] <= t + 1e-6) return k;
       return t === Infinity ? k : null;
     }
@@ -617,6 +694,7 @@ export class SegSession {
     const n = this.mw * this.mh, inc = new Float32Array(n);
     let exc: Float32Array | null = null, any = false;
     for (const s of this.objs.values()) {
+      if (s.hidden) continue;
       const m = this.key(s, t);
       if (!m) continue;
       any = true;
@@ -651,7 +729,7 @@ export class SegSession {
     idx.forEach((i, j) => {
       const inc = guidedFilter(lumas[j], remap(filled[j].inc), this.mw, this.mh, gr, SEG.guidedEps);
       const e = filled[j].exc ? guidedFilter(lumas[j], remap(filled[j].exc!), this.mw, this.mh, gr, SEG.guidedEps) : null;
-      out.push(this.product(i, inc, e));
+      out.push(this.product(i, inc, e, lumas[j]));
     });
     this.prof.fillMs += t1 - t0;
     this.prof.productMs += performance.now() - t1;
@@ -660,13 +738,13 @@ export class SegSession {
   }
 
   /** The overlay-ready maps of one frame (feather, near, exclude, water departure; see track.ts SegTrack.at). */
-  private product(i: number, incRaw: Float32Array, excRaw: Float32Array | null): SessionFrameOut {
+  private product(i: number, incRaw: Float32Array, excRaw: Float32Array | null, luma: Float32Array): SessionFrameOut {
     const { mw: w, mh: h } = this;
     const bb = bbox(incRaw, w, h);
     if (!bb && !excRaw) {
       // Nothing here: an empty frame (coded in a few bytes; the overlay is then the engine's alone).
       const z = new Uint8Array(w * h), zq = new Uint8Array(qsize(w) * qsize(h));
-      return { i, alpha: rleEncode(z), nearQ: rleEncode(zq), excQ: null, depQ: rleEncode(zq.fill(255)) };
+      return { i, alpha: rleEncode(z), nearQ: rleEncode(zq), excQ: null, depQ: rleEncode(zq.fill(255)), pop: null };
     }
     const diag = bb ? Math.hypot(bb.x1 - bb.x0 + 1, bb.y1 - bb.y0 + 1) : 0;
     const r = Math.max(SEG.featherMinPx, SEG.featherShare * diag);
@@ -675,9 +753,12 @@ export class SegSession {
     for (let k = 0; k < alpha.length; k++) alpha[k] = Math.round(255 * Math.min(1, Math.max(0, inc[k] * (exc ? 1 - exc[k] : 1))));
     const nr = Math.max(2, Math.round(SEG.nearK * r));
     const near = nearMap(incRaw, w, h, nr);
-    const cells = this.cellCache.get(i);
+    const cells = this.cellCache.get(frameKey((this.grid.i0 + i) / SEG.sampleHz));
     const depQ = cells ? departFromCells(cells, toU8(incRaw), w, h).data : new Uint8Array(qsize(w) * qsize(h)).fill(255);
-    return { i, alpha: rleEncode(alpha), nearQ: rleEncode(quarter(near, w, h, 4)), excQ: exc ? rleEncode(quarter(exc, w, h, 1)) : null, depQ: rleEncode(depQ) };
+    // The subject against the water around it on this frame: the main thread averages it over the clip for the pop's
+    // one lift direction (the engine used to average whatever frames had been rendered since its last reset).
+    const pop = framePop(luma, alpha, near);
+    return { i, alpha: rleEncode(alpha), nearQ: rleEncode(quarter(near, w, h, 4)), excQ: exc ? rleEncode(quarter(exc, w, h, 1)) : null, depQ: rleEncode(depQ), pop };
   }
 
   private postKeys(): void {
@@ -688,7 +769,7 @@ export class SegSession {
     for (const t of this.keys) {
       let num = 0, den = 0;
       for (const s of this.objs.values()) {
-        if (s.o.kind !== "include" || !s.shown.has(t)) continue;
+        if (s.o.kind !== "include" || s.hidden || !s.shown.has(t)) continue;
         const k = s.keys.get(t);
         const a = k ? Math.max(1, area(rleDecode(k, n), 127)) : 1;
         num += a * (s.conf.get(t) ?? 1); den += a;

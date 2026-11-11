@@ -34,6 +34,21 @@ export function weakDevice(f: DeviceFacts): boolean {
   return isIOS(f) && !f.coi;
 }
 
+/**
+ * WASM threads for the AI model (onnxruntime-web). One without cross-origin isolation (no shared memory). One on
+ * iOS whatever the isolation: every thread there is a full Web Worker that loads the whole runtime, the pass's
+ * 1.37 GB peak was measured with four of them on a desktop and never with one, and iPhone Safari kills a tab around
+ * there; what four threads cost on a phone is unmeasured, so iOS stays at one until a device says otherwise. It also
+ * makes a user's first visit (not isolated yet) and their later ones behave alike. `force` (`?segthreads=N`, 1..4)
+ * is for that measurement; it cannot add threads without isolation.
+ */
+export function segThreads(f: Pick<DeviceFacts, "ua" | "touch" | "cores" | "coi">, force?: number | null): number {
+  if (!f.coi) return 1;
+  if (force && Number.isFinite(force)) return Math.min(4, Math.max(1, Math.round(force)));
+  if (isIOS(f)) return 1;
+  return Math.min(4, f.cores || 1);
+}
+
 export function deviceFacts(): DeviceFacts {
   const n = navigator as Navigator & { deviceMemory?: number };
   return { ua: n.userAgent, memory: n.deviceMemory, cores: n.hardwareConcurrency, touch: n.maxTouchPoints, coi: typeof crossOriginIsolated !== "undefined" && crossOriginIsolated };

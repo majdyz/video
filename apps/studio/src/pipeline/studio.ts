@@ -29,7 +29,8 @@ import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometryRenderOptions, type GeometrySource } from "./geometry.ts";
 import { GpuGeometryRenderer } from "./geometry-gpu.ts";
-import type { GeometryParams, QuarterTurns } from "./geometry-math.ts";
+import { outputToUpright, type GeometryParams, type QuarterTurns } from "./geometry-math.ts";
+import { mapPrompt } from "./seg/track.ts";
 import type { ClipInfo } from "./probe.ts";
 import { colourSettings, DEFAULT_TOOLS, exportSuffix, profileDefaults, solveParams, type ColourLook, type DewarpState, type ToolsState } from "./tools.ts";
 
@@ -565,16 +566,26 @@ export class Studio {
       // anywhere else (a missed fin inside the engine's animal, a second animal) adds it.
       const pops = segPopsAt(this.segOverlay(t), u, v);
       const action = pops ? "exclude" : "include";
+      // The tap is on the picture as shown; the session works on the frame as recorded (Stabilise / Dewarp).
+      const toSource = this.segToSource(t);
       if (action === "exclude" && follow >= 0 && list[follow].action === "include") list[follow] = { ...list[follow], action: "exclude" };
       this.subjectUndo[this.subjectUndo.length - 1].ai = true;
       this.set({ subjectNote: null, subjectUndo: this.subjectUndo.length });
       // An include leaves the engine's own corrections alone (its toggle there would have taken the animal out).
       if (action === "exclude") this.setSubjectOverrides(list);
       if (action === "include") {
-        await this.seg.include(t, u, v, this.engine?.personBoxesNow() ?? []);
-        this.set({ subjectNote: "Added" });
+        // False: the tap never reached the session (the AI pass failed; its note is up): nothing to undo.
+        if (await this.seg.include(t, u, v, this.engine?.personBoxesNow() ?? [], toSource)) this.set({ subjectNote: "Added" });
+        else { this.subjectUndo.pop(); this.set({ subjectUndo: this.subjectUndo.length }); }
       } else {
-        const r = await this.seg.exclude(t, u, v);
+        const [su, sv] = toSource ? toSource(u, v) : [u, v];
+        const r = await this.seg.exclude(t, su, sv);
+        if (r === null) {
+          this.subjectUndo.pop();
+          this.setSubjectOverrides(before);
+          this.set({ subjectUndo: this.subjectUndo.length });
+          return id;
+        }
         this.set({ subjectNote: r === "removed" ? "Taken out" : "Part taken out" });
         // A whole subject out: the engine's own selection drops the animal along its path too (else it would tone
         // it where the ML no longer covers it). A part out leaves the engine's animal in.
@@ -741,7 +752,7 @@ export class Studio {
   private seedSegmentCanonical(k: number, t: number): Promise<void> {
     const run = this.seedChain.then(async () => {
       const e = this.engine, v = this.video, file = this.file;
-      if (!e || !v || !file || !this.seg.live || this.seg.hasSegment(k)) return;
+      if (!e || !v || !file || !this.seg.live || this.seg.hasSegment(k, t)) return;
       let objs: ReturnType<typeof seedObjects> = [];
       try {
         // Not while the user scrubs: two <video>s seeking at once (plus the analysis) is what phones fall over on.
@@ -757,7 +768,9 @@ export class Studio {
           // depends on how many analyses happened to run since the reset).
           const found = seedObjects(e.animalMap(), t, e.personBoxesNow());
           e.resetTracking();
-          return found;
+          // The engine analysed the frame after the geometry pass; the session tracks on the frame as recorded.
+          const toSource = this.segToSource(t);
+          return toSource ? found.map((o) => ({ ...o, prompt: mapPrompt(o.prompt, toSource) })) : found;
         }, true);
       } catch (err) {
         console.warn(`[seg] segment ${k} seed frame failed`, err);
@@ -899,6 +912,20 @@ export class Studio {
     return o && this.geometryActive() ? this.mapSegOverlay(o, t) : o;
   }
 
+  /**
+   * With Stabilise / Dewarp on, the picture the user taps and the engine analyses is the frame after the geometry
+   * pass, while the AI session tracks on the upright frame as recorded (mapSegOverlay warps its masks forward for
+   * that reason). This is the way back for prompts: a point on the shown picture at clip time t → the source point
+   * it shows (geometry-math.ts outputToUpright). Null when no warp is on (the two are the same frame). Without it a
+   * tap near the edge of a 10% stabilisation crop landed ~4% of the width off, differently on every frame.
+   */
+  private segToSource(t: number): ((u: number, v: number) => [number, number]) | null {
+    const info = this.snap.info;
+    if (!info || this.snap.kind !== "video" || !this.geometryActive()) return null;
+    const p = this.geoParams(t, info.rot);
+    return p.stab || p.dewarp ? (u, v) => outputToUpright(u, v, p) : null;
+  }
+
   private segGeo: { r: GeometryRenderer; src: HTMLCanvasElement; read: CanvasRenderingContext2D; t: number; o: SegOverlay; out: SegOverlay } | null = null;
   /**
    * The AI masks are made on the upright source frame; with Stabilise / Dewarp on the engine grades the frame after
@@ -929,7 +956,7 @@ export class Studio {
       const a = pass(o.alpha, o.near, o.depart ?? null);
       const ex = o.exclude ? pass(o.exclude, null, null) : null;
       const ch = (d: Uint8ClampedArray, c: number) => { const f = new Float32Array(w * h); for (let i = 0; i < w * h; i++) f[i] = d[i * 4 + c] / 255; return f; };
-      const out: SegOverlay = { width: w, height: h, alpha: ch(a, 0), near: ch(a, 1), depart: o.depart ? ch(a, 2) : null, exclude: ex ? ch(ex, 0) : null, quality: o.quality };
+      const out: SegOverlay = { width: w, height: h, alpha: ch(a, 0), near: ch(a, 1), depart: o.depart ? ch(a, 2) : null, exclude: ex ? ch(ex, 0) : null, quality: o.quality, pop: o.pop };
       Object.assign(g, { t, o, out });
       return out;
     } catch {
@@ -969,6 +996,13 @@ export class Studio {
     s.onFrames = () => { const now = performance.now(); if (now - last > 250 && this.paused()) { last = now; this.repaint(); } };
     // The pass is done and its worker shut down: the seed-frame <video> (a decoder of its own) goes too.
     s.onHibernate = () => this.dropSeedVideo();
+    // The pass failed in the worker (it used to look finished): say so, and the picture goes back to the engine's masks.
+    s.onFailed = () => {
+      // After the frame job in flight (a seed frame may be in the engine right now).
+      this.workChain = this.workChain.then(() => this.dropSeedVideo());
+      this.set({ subjectNote: "AI detection stopped; using standard detection" });
+      this.repaint();
+    };
     return s;
   })();
   /**

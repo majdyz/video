@@ -23,13 +23,32 @@ export type SegOverlay = {
   depart?: Float32Array | null;
   /** How far this frame's mask can be trusted as the whole animal (0..1, studio SegLive.qualityAt): scales the tone. */
   quality?: number;
+  /**
+   * The clip's subject / water contrast (ln ratio, as popContrast), measured by the caller over its whole pass
+   * (studio SegLive.pop), or null when it found nothing to measure. When present, the lift direction is
+   * popDirection of this and nothing else: a constant of the clip, the same in the preview and the export, whatever
+   * was rendered before. Absent: the engine's own running mean over the frames it has drawn (clipPopDirection).
+   */
+  pop?: number | null;
 };
+
+/**
+ * Subject pop lift direction for a frame drawn with overlay `o`: the clip's own measure when the overlay carries one
+ * (SegOverlay.pop; null there = no measure: lift), else from `running`, the mean popContrast of the frames drawn so
+ * far (null: none yet: lift).
+ */
+export function clipPopDirection(o: SegOverlay | null, running: number | null): number {
+  if (o && o.pop !== undefined) return o.pop === null ? 1 : popDirection(o.pop);
+  return running === null ? 1 : popDirection(running);
+}
 
 /**
  * The ML subject's lightness against the water around it, from the analysis guide (linear RGB, RGBA) and the ML
  * overlay: ln(subject luminance / water luminance), the water being the ring the near map reaches outside the mask.
- * Null when either side is too small to tell. The engine averages it over the clip (popDirection of the mean), so the
- * subject's look is decided once, not frame by frame as it swims off into the haze.
+ * Null when either side is too small to tell. Averaged over the clip (popDirection of the mean), so the subject's
+ * look is decided once, not frame by frame as it swims off into the haze. The studio measures the whole clip itself
+ * and hands the mean over (SegOverlay.pop); this per-frame measure only feeds the engine's running mean for an
+ * overlay that comes without one.
  */
 export function popContrast(g: { width: number; height: number; data: Float32Array }, o: SegOverlay): number | null {
   let ls = 0, ns = 0, lr = 0, nr = 0;

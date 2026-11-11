@@ -22,7 +22,7 @@ type Req =
   | { id: number; type: "session-close" }
   | { id: number; type: "session-busy" }
   | { id: number; type: "session-autoseeds"; t: number }
-  | { id: number; type: "session-seeds"; k: number; t: number; objects: (SegObject & { id: number })[] };
+  | { id: number; type: "session-seeds"; t: number; objects: (SegObject & { id: number })[] };
 
 let model: EdgeTam | null = null;
 let session: SegSession | null = null;
@@ -49,6 +49,26 @@ async function webgpuInfo(): Promise<{ ok: boolean; f16: boolean }> {
 export function serve(ort: typeof OrtNS, webgpu: boolean): void {
   if ((self as unknown as { name?: string }).name === "em-pthread") return;
   self.onmessage = (ev: MessageEvent<Req>) => handle(ort, webgpu, ev.data);
+  // A rejection nobody handles would vanish (worker.onerror does not fire for it): it goes to the breadcrumbs.
+  self.addEventListener("unhandledrejection", (ev) => {
+    const why = (ev as PromiseRejectionEvent).reason;
+    emit({ ev: "trace", msg: `unhandled: ${String(why instanceof Error ? why.message : why).slice(0, 120)} · heap ${wasmHeapMB()} MB` });
+  });
+}
+
+/**
+ * The model's stage hook: the first graph runs go to the breadcrumbs with the heap (an iPhone died two steps into a
+ * pass). Made here, at module level, on purpose: the hook lives as long as the model, and a closure made inside
+ * handle() keeps that call's request alive with it (closures of one scope share its variables, and `post` there
+ * holds `r`): for the init request that is the four model files, 33 MB the runtime has already copied into its heap.
+ */
+function stageTracer(debug: boolean): (stage: string) => void {
+  let stages = 0;
+  return (st) => {
+    const mb = wasmHeapMB();
+    if (debug) console.info(`[seg] heap ${mb} MB after ${st}`);
+    if (session && stages++ < 10) emit({ ev: "trace", msg: `${st} · heap ${mb} MB` });
+  };
 }
 
 async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void> {
@@ -63,13 +83,7 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
       const m = Object.fromEntries(Object.entries(r.models).map(([k, v]) => [k, new Uint8Array(v)])) as Record<GraphName, Uint8Array>;
       const failed: string[] = [];
       model = await EdgeTam.create(ort, m, r.bank, eps, failed, !!r.lite);
-      // The first graph runs of a session go to the breadcrumbs with the heap (an iPhone died two steps into a pass).
-      let stages = 0;
-      model.onStage = (st) => {
-        const mb = wasmHeapMB();
-        if (r.debug) console.info(`[seg] heap ${mb} MB after ${st}`);
-        if (session && stages++ < 10) emit({ ev: "trace", msg: `${st} · heap ${mb} MB` });
-      };
+      model.onStage = stageTracer(!!r.debug);
       post({ ok: true, heapMB: wasmHeapMB(), ep: model.ep, tried: eps, failed, webgpu: gpu.ok, f16: gpu.f16, threads: ort.env.wasm.numThreads, coi: typeof crossOriginIsolated !== "undefined" && crossOriginIsolated });
     } else if (!model) {
       throw new Error("not initialised");
@@ -92,6 +106,8 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
         idle: (profile) => emit({ ev: "idle", profile: { ...profile, heapMB: wasmHeapMB() } }),
         needSeeds: (k, t) => emit({ ev: "seeds", k, t }),
         rejected: (id) => emit({ ev: "rejected", id }),
+        // The pass threw (session.ts run): the main thread shows it and shuts this worker down.
+        error: (msg) => { if (session === s) session = null; emit({ ev: "error", msg, heapMB: wasmHeapMB() }); },
         // Each breadcrumb carries the WASM heap (it only grows: the step that took it past the phone's limit shows).
         trace: (msg) => emit({ ev: "trace", msg: `${msg} · heap ${wasmHeapMB()} MB` }),
       });
@@ -108,7 +124,7 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
     } else if (r.type === "session-autoseeds") {
       post({ ok: true, objects: await session.autoSeeds(r.t) });
     } else if (r.type === "session-seeds") {
-      session.seeds(r.k, r.t, r.objects);
+      session.seeds(r.t, r.objects);
       post({ ok: true });
     } else if (r.type === "session-add") {
       session.add(r.object);

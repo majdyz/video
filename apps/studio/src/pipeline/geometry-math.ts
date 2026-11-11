@@ -87,3 +87,22 @@ export function sourcePoint(nx: number, ny: number, p: GeometryParams): [number,
   if (cx < 0 || cy < 0 || cx > 1 || cy > 1) return null;
   return [cx, cy];
 }
+
+/**
+ * The upright source point that output point (nx, ny) shows (sourcePoint, turned back to display orientation and
+ * clamped to the frame): what is under a finger on the stabilised / dewarped picture, in the frame as it was
+ * recorded. The AI session works on that frame (seg/session.ts), so taps and seed prompts made on the corrected
+ * picture go through this first.
+ */
+export function outputToUpright(nx: number, ny: number, p: GeometryParams): [number, number] {
+  const [mx, my] = stabilisedPoint(nx, ny, p);
+  let [cx, cy] = displayToCoded(mx, my, p.rot);
+  if (p.dewarp) {
+    const [w, h] = p.dewarp.srcSize;
+    const [sx, sy] = samplePoint(p.dewarp, cx * w, cy * h);
+    cx = sx / w;
+    cy = sy / h;
+  }
+  const [ux, uy] = codedToDisplay(cx, cy, p.rot);
+  return [Math.min(1, Math.max(0, ux)), Math.min(1, Math.max(0, uy))];
+}

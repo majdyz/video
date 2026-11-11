@@ -4,6 +4,7 @@
 import type { GraphName } from "./edgetam.ts";
 import type { SegModel, SegObject, StepResult } from "./track.ts";
 import type { SessionFrameOut } from "./session.ts";
+import { deviceFacts, segThreads } from "../device.ts";
 
 /** Background-session events from the worker (session.ts). */
 export type SessionEvent =
@@ -13,6 +14,8 @@ export type SessionEvent =
   | { ev: "idle"; profile: Record<string, number> }
   | { ev: "seeds"; k: number; t: number }
   | { ev: "rejected"; id: number }
+  /** The pass threw in the worker and stopped for good (session.ts fail). */
+  | { ev: "error"; msg: string; heapMB?: number }
   | { ev: "trace"; msg: string };
 export type SessionInfo = { width: number; height: number; mw: number; mh: number; i0: number; n: number };
 
@@ -104,6 +107,8 @@ export class WorkerSegModel implements SegModel {
     this.w.onerror = (e) => {
       for (const p of this.waiting.values()) p.rej(new Error(e.message || "segmentation worker failed"));
       this.waiting.clear();
+      // The worker itself fell over (a script error, the runtime aborting): the session is gone with it.
+      this.onEvent?.({ ev: "error", msg: e.message || "segmentation worker failed" });
     };
   }
 
@@ -137,7 +142,8 @@ export class WorkerSegModel implements SegModel {
     }
     void pruneCache(keys);
     const bank = await (await fetch(`${base}bank.json?v=${man.files["bank.json"]?.sha256.slice(0, 16) ?? "0"}`)).json();
-    const threads = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
+    // One thread on iOS, up to four elsewhere when isolated (device.ts segThreads; `?segthreads=N` to measure).
+    const threads = segThreads(deviceFacts(), Number(new URLSearchParams(location.search).get("segthreads")) || null);
     const r = await this.call({ type: "init", models, bank, threads, prefer: opts.prefer ?? "auto", lite, debug: segDebug() }, Object.values(models));
     this.info = { ep: String(r.ep) + (lite ? " lite" : ""), f16: !!r.f16, threads: Number(r.threads), loadMs: performance.now() - t0, bytes: total, heapMB: Number(r.heapMB ?? 0) };
     segLog(`model ready on ${this.info.ep} (tried ${(r.tried as string[]).join(", ")}; WebGPU adapter ${r.webgpu ? "yes" : "no"}, shader-f16 ${r.f16 ? "yes" : "no"}; WASM threads ${this.info.threads}, cross-origin isolated ${r.coi ? "yes" : "no"})`, this.info);
@@ -169,9 +175,9 @@ export class WorkerSegModel implements SegModel {
     return Number((await this.call({ type: "session-add", object })).t);
   }
 
-  /** Segment k's seeds (the engine's own subjects on its canonical frame t; may be none). */
-  async sessionSeeds(k: number, t: number, objects: (SegObject & { id: number })[]): Promise<void> {
-    await this.call({ type: "session-seeds", k, t, objects });
+  /** The seeds of the segment starting at t (the engine's own subjects on its canonical frame; may be none). */
+  async sessionSeeds(t: number, objects: (SegObject & { id: number })[]): Promise<void> {
+    await this.call({ type: "session-seeds", t, objects });
   }
 
   /** Subjects the model finds by itself on frame t (session.ts autoSeeds). */

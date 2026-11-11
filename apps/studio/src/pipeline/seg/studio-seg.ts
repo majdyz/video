@@ -6,17 +6,17 @@
 import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts";
 import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
-import { aiCrashed, crumb, lastCrash } from "../crumbs.ts";
+import { aiCrashedLast, aiWorking, crumb } from "../crumbs.ts";
 import { deviceFacts, isMobile, isWeakDevice } from "../device.ts";
 import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
-import { confWeight, maskSize, SEG, type SegObject } from "./track.ts";
+import { confWeight, mapPrompt, maskSize, SEG, type SegObject } from "./track.ts";
 import type { SessionFrameOut } from "./session.ts";
 
 const PREF_KEY = "deepfix.subjectPop.ai";
 export type SegPhase = "off" | "download" | "starting" | "ready" | "tracking" | "unavailable";
 /** weak: a phone the model is a poor fit for (device.ts); AI is off there with a line saying why. crashed: the last
- * session died while the model worked (crumbs.ts aiCrashed), so AI was turned off for this one (until turned on). */
+ * session died while the model worked (crumbs.ts aiCrashedLast), so AI was turned off for this one (until turned on). */
 export type SegStatus = { on: boolean; phase: SegPhase; progress: number | null; note: string | null; weak?: boolean; crashed?: boolean };
 
 export const WEAK_DEVICE_NOTE = "AI detection starts off on this phone: the model is slow here and can run out of memory. Turn it on to try it";
@@ -249,6 +249,24 @@ export class SegLive {
       this.stats[f.i] = maskStats(rleDecode(f.alpha, this.mw * this.mh), this.mw, this.mh);
     }
     this.qCache.clear();
+    this.popMean = undefined;
+  }
+
+  private popMean: number | null | undefined = undefined;
+  /**
+   * The clip's subject / water contrast: the mean of every filled frame's own measure (session.ts product, mask.ts
+   * framePop), or null when no frame has one. It decides whether Subject pop lifts or deepens the subject
+   * (SegOverlay.pop → the engine's clipPopDirection). A function of the filled frames alone, so once the pass is
+   * done it is one number for the clip: the preview shows the direction the export will have, whatever was played,
+   * scrubbed or trimmed before (the engine used to average the frames it happened to draw).
+   */
+  get pop(): number | null {
+    if (this.popMean === undefined) {
+      let sum = 0, n = 0;
+      for (const f of this.frames) if (f && typeof f.pop === "number") { sum += f.pop; n++; }
+      this.popMean = n ? sum / n : null;
+    }
+    return this.popMean;
   }
 
   /**
@@ -362,7 +380,7 @@ export class SegLive {
       wsum += wk;
     }
     for (let k = 0; k < alpha.length; k++) alpha[k] /= 255 * wsum;
-    return { width: mw, height: mh, alpha, exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ), quality: this.qualityAt(i) };
+    return { width: mw, height: mh, alpha, exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ), quality: this.qualityAt(i), pop: this.pop };
   }
 
   /** Share of the grid filled (0..1). */
@@ -373,12 +391,30 @@ export class SegLive {
 
 type UndoOp = { kind: "added"; id: number } | { kind: "removed"; id: number };
 
-/** The session's inputs, in order: replayed into a fresh worker after a hibernation (SubjectSeg.wake). */
-type LogOp =
-  | { op: "seeds"; k: number; t: number; objects: (SegObject & { id: number })[] }
+/**
+ * A segment's identity on the main thread: its start time in ms, or −1 for the clip's first seeds (asked for at the
+ * trim start, which the session snaps to a keyframe). Never the session's segment index: the session splices new
+ * starts into its grid as it tracks (session.ts reacquire), so an index names different segments over time.
+ */
+export function segKey(k: number, t: number): number {
+  return k === 0 ? -1 : Math.round(t * 1000);
+}
+
+/** The session's inputs, in order: replayed into a fresh worker after a hibernation (SubjectSeg.wake). Seeds are
+ * logged by their segment's start time (segKey; session.ts holds them until its tracking gets there). */
+export type LogOp =
+  | { op: "seeds"; t: number; objects: (SegObject & { id: number })[] }
   | { op: "add"; object: SegObject & { id: number } }
   | { op: "remove"; id: number }
   | { op: "restore"; id: number };
+
+/**
+ * What an exclude tap (id, at clip time t, upright uv) came to in the session (session.ts excludeNow), as the log
+ * entry that reproduces it: the subject it removed, or the exclude object the session added for it.
+ */
+export function excludeOutcome(r: { action: "removed"; removed: number } | { action: "part" | "exclude" }, id: number, t: number, u: number, v: number): LogOp {
+  return r.action === "removed" ? { op: "remove", id: r.removed } : { op: "add", object: { id, kind: "exclude", t, prompt: { points: [[u, v]], labels: [1] } } };
+}
 
 /** A finished pass's worker (the model's ~800 MB of WASM heap) is shut down after this long idle (ms). */
 export const SEG_HIBERNATE_MS = 15000;
@@ -408,9 +444,10 @@ export class SubjectSeg {
   /** The engine's automatic subjects, seeded once per clip (autoObjects); null = not yet. */
   autos: SegObject[] | null = null;
   private onChange: () => void;
-  /** Everything the session was given (replayable: no exclude taps, whose outcome depends on the masks so far). */
+  /** Everything the session was given, as what replays to the same masks (an exclude tap as its outcome). */
   private log: LogOp[] = [];
-  private replayable = true;
+  /** Exclude taps the worker has not answered yet: their outcome is not in the log, so the worker stays up. */
+  private inflight = 0;
   private duration = 0;
   /** The pass finished and its worker was shut down; the masks stay in `live`. */
   private hibernated = false;
@@ -424,7 +461,7 @@ export class SubjectSeg {
     let on = readPref();
     // The page died while the model worked last time (a phone out of memory): AI starts off, once; turning it on again
     // is the user's call (and a crash after that turns it off again).
-    const crashed = on && aiCrashed(lastCrash());
+    const crashed = on && aiCrashedLast();
     if (crashed) {
       on = false;
       writePref(false);
@@ -455,6 +492,9 @@ export class SubjectSeg {
     if (this.loading) return this.loading;
     this.set({ phase: "download", progress: 0 });
     crumb("ai: model load");
+    // "AI working" (crumbs.ts): set while the model loads, a clip opens, a request is out or the pass runs; cleared
+    // when the session is idle, hibernated, failed or closed. A page that dies with it set starts with AI off.
+    aiWorking(true);
     this.loading = (async () => {
       // Where the model can only run on WASM, the worker with the plain WASM runtime: the WebGPU build's (twice the
       // WebAssembly) start-up was the pass's memory peak (+130 MB in Chromium).
@@ -477,6 +517,8 @@ export class SubjectSeg {
         return null;
       } finally {
         this.loading = null;
+        // Loaded and waiting (or failed): whoever asked for it marks its own work next (start, wake).
+        aiWorking(false);
       }
     })();
     return this.loading;
@@ -487,7 +529,12 @@ export class SubjectSeg {
   private lastActivity = 0;
   private onEvent(e: SessionEvent): void {
     this.lastActivity = performance.now();
+    // Any sign of the clip's session at work keeps "AI working" set; its idle clears it (a session waiting for seeds
+    // sends no idle: the main thread is then analysing the seed frame for it).
+    if (e.ev === "idle") aiWorking(false);
+    else if (e.ev !== "error" && this.live) aiWorking(true);
     if (e.ev === "trace") { crumb(`ai· ${e.msg}`); return; }
+    if (e.ev === "error") { this.fail(e.msg, e.heapMB); return; }
     const live = this.live;
     if (!live) return;
     if (e.ev === "frames") {
@@ -507,6 +554,8 @@ export class SubjectSeg {
       this.onNeedSeeds?.(e.k, e.t);
     } else if (e.ev === "rejected") {
       segLog(`tap ${e.id} came out as the background; dropped`);
+      // Out of the log too: a replay would track it to the same rejection and say so again.
+      this.log = this.log.filter((l) => !(l.op === "add" && l.object.id === e.id));
       this.onRejected?.();
     } else if (e.ev === "idle") {
       this.busy = false;
@@ -521,16 +570,56 @@ export class SubjectSeg {
     }
   }
 
+  /** Called when the pass failed in the worker (fail): the studio tells the user and drops its seed-frame video. */
+  onFailed: ((msg: string) => void) | null = null;
+  /** "unavailable" because of this clip (its pass failed, or it can't be decoded): the next clip tries again. */
+  private clipFailed = false;
+
+  /**
+   * The pass threw in the worker (session.ts fail: the runtime out of memory, a frame that can't be decoded) or the
+   * worker itself died. It used to look like a finished pass. Now: a breadcrumb, a note under the toggle, the worker
+   * shut down (after an abort it is dead anyway, and its memory is what a phone needs back), and the masks made so
+   * far dropped, so the whole clip is graded with the engine's masks in the preview and the export alike (half a
+   * clip of AI masks next to half of the engine's reads as a fault).
+   */
+  private fail(msg: string, heapMB?: number): void {
+    if (!this.model) return;
+    aiWorking(false);
+    crumb(`ai: pass failed: ${errText(msg)}${heapMB !== undefined ? ` · heap ${heapMB} MB` : ""}`);
+    segLog("pass failed; using the engine's masks", msg);
+    clearTimeout(this.hibTimer);
+    this.model.dispose();
+    this.model = null;
+    this.live = null;
+    this.cache = null;
+    this.busy = false;
+    this.hibernated = false;
+    // The clip's session is gone with its worker: nothing of it is kept, so turning AI off and on again (or the
+    // next clip) starts a clean one instead of a session that believes its seeds were already given.
+    this.file = null;
+    this.autos = null;
+    this.seededSegs = new Set();
+    this.log = [];
+    this.undoOps = [];
+    this.clipFailed = true;
+    this.set({ phase: "unavailable", progress: null, note: `AI detection stopped on this clip; using standard detection (${errText(msg)})` });
+    const w = this.idleWaiters;
+    this.idleWaiters = [];
+    for (const r of w) r();
+    this.onFailed?.(msg);
+  }
+
   /**
    * Phones kill a tab that holds too much: once the pass is done and nothing has asked the model for a while, the
    * worker goes (the masks are a few hundred KB on this side and keep popping). A later tap wakes it (wake).
    */
   private scheduleHibernate(): void {
     clearTimeout(this.hibTimer);
-    if (!this.replayable || !this.live) return;
+    if (!this.live) return;
     this.hibTimer = window.setTimeout(() => {
-      if (this.busy || !this.model || !this.live || !this.replayable || this.waking) return;
+      if (this.busy || !this.model || !this.live || this.waking || this.inflight) return;
       crumb("ai: hibernate");
+      aiWorking(false);
       segLog(`pass done: shutting the model down (masks kept, ${(this.live.bytes / 1e6).toFixed(1)} MB)`);
       this.model.dispose();
       this.model = null;
@@ -547,9 +636,10 @@ export class SubjectSeg {
    */
   releaseForExport(): void {
     if (!isMobile(deviceFacts())) return;
-    if (this.busy || !this.model || !this.live || !this.replayable || this.waking) return;
+    if (this.busy || !this.model || !this.live || this.waking || this.inflight) return;
     clearTimeout(this.hibTimer);
     crumb("ai: hibernate (export)");
+    aiWorking(false);
     segLog("export starting: shutting the model down (masks kept)");
     this.model.dispose();
     this.model = null;
@@ -567,18 +657,20 @@ export class SubjectSeg {
     this.waking = (async () => {
       const model = await this.ensureModel();
       if (!model || !file || this.file !== file) return false;
+      // The replay re-tracks the clip: at work until its idle.
+      aiWorking(true);
       await model.sessionOpen(file, 0, Math.max(0, this.duration));
       if (this.file !== file) return false;
       this.hibernated = false;
       for (const l of this.log) {
-        if (l.op === "seeds") await model.sessionSeeds(l.k, l.t, l.objects);
+        if (l.op === "seeds") await model.sessionSeeds(l.t, l.objects);
         else if (l.op === "add") await model.sessionAdd(l.object);
         else if (l.op === "remove") await model.sessionRemove(l.id);
         else await model.sessionRestore(l.id);
       }
       segLog(`model back: ${this.log.length} input(s) replayed`);
       return true;
-    })().catch((e) => { segLog("model failed to come back", e); return false; }).finally(() => { this.waking = null; });
+    })().catch((e) => { segLog("model failed to come back", e); return false; }).then((ok) => { if (!ok) aiWorking(false); return ok; }).finally(() => { this.waking = null; });
     return this.waking;
   }
 
@@ -608,6 +700,7 @@ export class SubjectSeg {
       if (!model || this.file !== file) return null;
       try {
         crumb("ai: session open");
+        aiWorking(true);
         const info = await model.sessionOpen(file, 0, Math.max(0, duration));
         crumb(`ai: session ${info.width}x${info.height}, ${info.n} frames`);
         if (this.file !== file) return null;
@@ -619,49 +712,73 @@ export class SubjectSeg {
         return this.live;
       } catch (e) {
         segLog("session failed to open; using the engine's masks", e);
+        crumb(`ai: session failed: ${errText(e)}`);
+        this.clipFailed = true;
         this.set({ phase: "unavailable", note: `This clip can't be decoded for AI detection; using standard detection (${errText(e)})` });
         return null;
       } finally {
         this.opening = null;
+        // Open, nothing running yet (the seeds start the pass and mark it).
+        aiWorking(false);
       }
     })();
     return this.opening;
   }
 
-  /** Segment k's seeds: the engine's own subjects on its canonical frame t (none is an answer too). */
+  /**
+   * The seeds of the segment starting at t: the engine's own subjects on its canonical frame (none is an answer
+   * too). k = 0: the clip's first seeds (they fix the segment grid); otherwise the session's index for the segment
+   * when it asked, which is only a label: segments are told apart by their start time (segKey), because the session
+   * inserts new starts as it tracks and a later index then means another segment.
+   */
   async seedSegment(k: number, t: number, objs: SegObject[]): Promise<void> {
-    if (!this.live || this.seededSegs.has(k) || !(await this.wake()) || !this.model) return;
-    this.seededSegs.add(k);
+    if (!this.live || this.hasSegment(k, t) || !(await this.wake()) || !this.model || this.hasSegment(k, t)) return;
+    this.seededSegs.add(segKey(k, t));
     this.lastActivity = performance.now();
     if (k === 0) this.autos = objs;
     const objects = objs.map((o) => ({ ...o, id: this.nextId++ }));
-    this.log.push({ op: "seeds", k, t, objects });
-    await this.model.sessionSeeds(k, t, objects);
+    this.log.push({ op: "seeds", t, objects });
+    aiWorking(true);
+    // A worker that failed meanwhile rejects the call (fail has told the user): nothing to seed.
+    if (!(await this.model.sessionSeeds(t, objects).then(() => true, () => false))) return;
     segLog(`seeded segment ${k} (${t.toFixed(2)} s): ${objs.length} automatic subject(s)`);
   }
   private seededSegs = new Set<number>();
 
-  /** A tap that adds what is missing: a new include object at (t, u, v), followed both ways from the tap. */
-  async include(t: number, u: number, v: number, boxes: readonly PersonBox[]): Promise<void> {
-    if (!this.live || !(await this.wake()) || !this.model) return;
+  /** A tap that adds what is missing: a new include object at (t, u, v), followed both ways from the tap. (u, v)
+   * and the boxes are on the picture as shown; toSource (Stabilise / Dewarp on) takes the prompt to the upright
+   * source frame the session works on (track.ts mapPrompt). */
+  async include(t: number, u: number, v: number, boxes: readonly PersonBox[], toSource: ((u: number, v: number) => [number, number]) | null = null): Promise<boolean> {
+    if (!this.live || !(await this.wake()) || !this.model) return false;
     const id = this.nextId++;
     crumb(`ai: include ${t.toFixed(2)}s`);
-    const object: SegObject & { id: number } = { id, kind: "include", t, prompt: promptFor({ u, v }, boxes) };
+    const shown = promptFor({ u, v }, boxes);
+    const object: SegObject & { id: number } = { id, kind: "include", t, prompt: toSource ? mapPrompt(shown, toSource) : shown };
     this.log.push({ op: "add", object });
-    await this.model.sessionAdd(object);
+    aiWorking(true);
+    // False: the worker failed meanwhile (fail has told the user).
+    if (!(await this.model.sessionAdd(object).then(() => true, () => false))) return false;
     this.undoOps.push({ kind: "added", id });
     this.onChange();
+    return true;
   }
 
-  /** A tap on what the ML pops: removes that subject (most of it under the tap) or just the tapped part. */
+  /** A tap on what the ML pops: removes that subject (most of it under the tap) or just the tapped part. (u, v) on
+   * the upright source frame (the studio maps a tap on a stabilised / dewarped picture back first). */
   async exclude(t: number, u: number, v: number): Promise<"removed" | "part" | "exclude" | null> {
     if (!this.live || !(await this.wake()) || !this.model) return null;
     const id = this.nextId++;
-    // Its outcome depends on the masks tracked so far: a replay could differ, so this session stays awake from now on.
-    this.replayable = false;
     clearTimeout(this.hibTimer);
     crumb(`ai: exclude ${t.toFixed(2)}s`);
-    const r = await this.model.sessionExclude(id, t, u, v);
+    this.inflight++;
+    aiWorking(true);
+    const r = await this.model.sessionExclude(id, t, u, v).catch(() => null).finally(() => { this.inflight--; });
+    // Null: the worker failed in or before the tap's own step (fail has told the user).
+    if (!r) return null;
+    // The tap's outcome depends on the masks tracked when it came, so the log keeps what it resolved to, not the tap:
+    // a subject taken out, or an exclude object added (excludeOutcome). Replayed, either gives the same masks, so the
+    // session can still hibernate and be released for an export (it used to stay awake for good after one exclude).
+    this.log.push(excludeOutcome(r, id, t, u, v));
     crumb(`ai: exclude -> ${r.action}`);
     this.undoOps.push(r.action === "removed" ? { kind: "removed", id: r.removed } : { kind: "added", id });
     segLog(`exclude tap at ${t.toFixed(2)} s: ${r.action}`);
@@ -673,6 +790,7 @@ export class SubjectSeg {
   async autoSeeds(t: number): Promise<SegObject[]> {
     if (!this.live || !(await this.wake()) || !this.model) return [];
     crumb(`ai: auto seeds ${t.toFixed(2)}s`);
+    aiWorking(true);
     this.lastActivity = performance.now();
     const objs = await this.model.sessionAutoSeeds(t).catch((e) => { segLog("auto seeds failed", e); return [] as SegObject[]; });
     crumb(`ai: auto seeds -> ${objs.length}`);
@@ -680,9 +798,9 @@ export class SubjectSeg {
     return objs;
   }
 
-  /** Segment k has had its seeds. */
-  hasSegment(k: number): boolean {
-    return this.seededSegs.has(k);
+  /** The segment starting at t (k = 0: the clip's first) has had its seeds. */
+  hasSegment(k: number, t: number): boolean {
+    return this.seededSegs.has(segKey(k, t));
   }
 
   get canUndo(): boolean {
@@ -694,10 +812,10 @@ export class SubjectSeg {
     const op = this.undoOps.pop();
     if (!op || !(await this.wake()) || !this.model) return false;
     this.log.push(op.kind === "added" ? { op: "remove", id: op.id } : { op: "restore", id: op.id });
-    if (op.kind === "added") await this.model.sessionRemove(op.id);
-    else await this.model.sessionRestore(op.id);
+    aiWorking(true);
+    const ok = await (op.kind === "added" ? this.model.sessionRemove(op.id) : this.model.sessionRestore(op.id)).then(() => true, () => false);
     this.onChange();
-    return true;
+    return ok;
   }
 
   /** A new clip (or no clip): the session closes. */
@@ -711,9 +829,15 @@ export class SubjectSeg {
     this.undoOps = [];
     this.busy = false;
     this.log = [];
-    this.replayable = true;
     this.hibernated = false;
     clearTimeout(this.hibTimer);
+    // The session closes with the clip (a model still loading keeps its mark until it is loaded).
+    if (!this.loading) aiWorking(false);
+    if (this.clipFailed) {
+      // The last clip's pass failed (or it could not be decoded): this one gets its own try.
+      this.clipFailed = false;
+      if (this.status.phase === "unavailable") this.set({ phase: this.status.on ? (this.model ? "ready" : "download") : "off", progress: null, note: null });
+    }
     void this.model?.sessionClose().catch(() => undefined);
     for (const r of this.idleWaiters) r();
     this.idleWaiters = [];
@@ -732,7 +856,11 @@ export class SubjectSeg {
     let last = -1, lastAt = performance.now();
     for (;;) {
       if (o.signal.aborted) throw new DOMException("Export cancelled", "AbortError");
-      if (!(await this.model.sessionBusy())) { this.busy = false; break; }
+      // The pass failed while the export waited (fail): the engine's masks, as the preview now shows.
+      if (!this.live || !this.model) return "engine";
+      const busy = await this.model.sessionBusy().catch(() => null);
+      if (busy === null) return "engine";
+      if (!busy) { this.busy = false; break; }
       const wait = new Promise<void>((r) => this.idleWaiters.push(r));
       await Promise.race([wait, new Promise((r) => setTimeout(r, 500))]);
       const p = this.status.progress;
@@ -742,7 +870,7 @@ export class SubjectSeg {
       lastAt = Math.max(lastAt, this.lastActivity);
       if (performance.now() - lastAt > o.stallMs) { segLog(`export: the AI pass made no progress for ${Math.round(o.stallMs / 1000)} s; exporting with the engine's masks`); return "engine"; }
     }
-    return this.live.filled > 0 ? "ai" : "engine";
+    return this.live && this.live.filled > 0 ? "ai" : "engine";
   }
 
   /** Resolves when the session has nothing left to do (an export waits for it: the same masks as the preview). */
