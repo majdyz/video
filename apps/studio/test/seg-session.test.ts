@@ -54,6 +54,8 @@ type Fake = {
   reads: number[];
   /** Encodes so far; the encode numbered failAt (1-based) throws. */
   encodes: number;
+  /** Tracker steps so far. */
+  steps: number;
   failAt: number;
   /** The subject is on screen between these clip times (the model finds nothing outside them). */
   visible: [number, number];
@@ -61,7 +63,7 @@ type Fake = {
 };
 
 function fake(opts: Partial<Pick<Fake, "failAt" | "visible">> & { lite?: boolean } = {}): Fake {
-  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, reads: [], encodes: 0, failAt: opts.failAt ?? Infinity, visible: opts.visible ?? [-Infinity, Infinity], disposed: false };
+  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, reads: [], encodes: 0, steps: 0, failAt: opts.failAt ?? Infinity, visible: opts.visible ?? [-Infinity, Infinity], disposed: false };
   let encT = 0;
   const lw = 64, lh = 36;
   const mask = (t: number) => {
@@ -76,7 +78,7 @@ function fake(opts: Partial<Pick<Fake, "failAt" | "visible">> & { lite?: boolean
       if (++f.encodes === f.failAt) throw new Error("failed to allocate a buffer of size 67108864");
       encT = (rgba[0] + 256 * rgba[1]) / 10;
     },
-    async step() { return mask(encT); },
+    async step() { f.steps++; return mask(encT); },
     async probe() { return mask(encT); },
     drop() {},
   } as unknown as EdgeTam;
@@ -421,4 +423,27 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   assert.deepEqual(r.asked.map((x) => x.search), [true, false, true, true, true]);
   assert.equal(f.encodes, 0, "no model run without a subject");
   console.log("session: empty clip → the looks back off (2, 4, 8 s): ok");
+}
+
+// ---------------------------------------------------------------- the lite model follows two automatic subjects
+
+{
+  const four = () => [subject(0), subject(0), subject(0), subject(0)];
+  const run = async (lite: boolean) => {
+    const f = fake({ lite });
+    const r = open(f, { start: 0, end: 2 }, () => [], { fps: 2 });
+    let end = r.settled();
+    r.s.seeds(0, four());
+    await end;
+    const autos = f.steps;
+    // A tap is followed whatever the autos are (forward and back from its keyframe: 5 keyframes + the prompt again).
+    end = r.settled();
+    r.s.add({ ...subject(1), id: 7000 });
+    await end;
+    assert.equal(r.errors.length, 0);
+    return { autos, tap: f.steps - autos };
+  };
+  assert.deepEqual(await run(false), { autos: 20, tap: 6 });
+  assert.deepEqual(await run(true), { autos: 10, tap: 6 }, "the first two seeds only; the tap as ever");
+  console.log("session: lite model → at most two automatic subjects, taps kept: ok");
 }

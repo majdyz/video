@@ -284,11 +284,18 @@ export class SegSession {
     if (this.waitSince) { this.prof.waitSeedsMs += performance.now() - this.waitSince; this.waitSince = 0; }
     const t1 = this.segStarts[k + 1] ?? this.base[this.base.length - 1];
     const span = this.stepsBetween(t0, t1, [t0, t1]);
-    for (const o of objs) this.objs.set(o.id, this.newObj({ ...o, t: t0 }, true, k, this.gone.delete(o.id), span.slice(), []));
+    // The seeds come most important first (the engine's largest animals, the model's best finds): the lite model
+    // takes the first SEG.liteAutos.
+    for (const o of objs.slice(0, this.autoCap)) this.objs.set(o.id, this.newObj({ ...o, t: t0 }, true, k, this.gone.delete(o.id), span.slice(), []));
     // Nothing seeded and nothing tracked into this segment: look again a little later (re-acquire).
     if (objs.length) this.emptyRun = 0;
     else if (![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) { this.emptyRun++; this.reacquire(k); }
     return true;
+  }
+
+  /** How many of the engine's own subjects are followed at a time (SEG.liteAutos on the lite model). */
+  private get autoCap(): number {
+    return this.model.lite ? SEG.liteAutos : Infinity;
   }
 
   /** Segment starts in a row that found no subject (takeSeeds). */
@@ -683,16 +690,23 @@ export class SegSession {
     const n = this.mw * this.mh, cover = new Uint8Array(n);
     for (const s of seeds) { const m = this.key(s, t); if (m) for (let i = 0; i < n; i++) if (m[i] > 127) cover[i] = 1; }
     const t1 = this.segStarts[k + 1] ?? this.base[this.base.length - 1];
+    const carry: { s: ObjState; a: number }[] = [];
     for (const s of batch) {
       if (s.seg >= k || s.fi < s.fwd.length) continue;
       const m = this.key(s, t);
       let a = 0, c = 0;
       if (m) for (let i = 0; i < n; i++) if (m[i] > 127) { a++; if (cover[i]) c++; }
-      if (a > SEG.guardMinArea * n && c < SEG.carryCover * a) {
-        s.fwd = [...s.fwd, ...this.stepsBetween(t, t1, [t1]).filter((x) => x > t + 1e-6)];
-        s.seg = k;
-      } else this.model.drop(`${s.o.id}f`);
+      if (a > SEG.guardMinArea * n && c < SEG.carryCover * a) carry.push({ s, a });
+      else this.model.drop(`${s.o.id}f`);
     }
+    // The lite model's limit holds across the start: the new seeds, then the largest subjects carried in.
+    carry.sort((x, y) => y.a - x.a || x.s.o.id - y.s.o.id);
+    const room = Math.max(0, this.autoCap - seeds.length);
+    carry.forEach(({ s }, i) => {
+      if (i >= room) { this.model.drop(`${s.o.id}f`); return; }
+      s.fwd = [...s.fwd, ...this.stepsBetween(t, t1, [t1]).filter((x) => x > t + 1e-6)];
+      s.seg = k;
+    });
     if (![...this.objs.values()].some((s) => s.auto && s.seg === k && this.nextOf(s) !== null)) this.reacquire(k);
   }
 

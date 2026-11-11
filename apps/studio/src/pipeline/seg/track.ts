@@ -50,6 +50,9 @@ export const SEG = {
   /** ...and from this many empty starts in a row, the extra starts leave the model's search out (the engine's look
    * only; the regular starts, every segmentS, still search). */
   reacquireSearches: 2,
+  /** The lite (phone) model follows at most this many of the engine's own subjects at a time (every one is a
+   * tracker step per keyframe); taps are always followed. */
+  liteAutos: 2,
   /** At a segment start, an earlier subject carries on unless the new seeds cover this share of it. */
   carryCover: 0.5,
   /** Decoded frames the background session keeps (luma + colour cells, ~70 KB each). */
