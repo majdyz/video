@@ -1,7 +1,7 @@
 // Geometry stage maths (pure, mirrored by the GLSL in src/pipeline/geometry.ts).
 //   node --experimental-strip-types apps/studio/test/geometry.test.ts
 import assert from "node:assert/strict";
-import { codedToDisplay, displaySize, displayToCoded, sourcePoint, stabilisedPoint, turnsOf, type GeometryParams, type QuarterTurns } from "../src/pipeline/geometry-math.ts";
+import { codedToDisplay, displaySize, displayToCoded, outputToUpright, sourcePoint, stabilisedPoint, turnsOf, type GeometryParams, type QuarterTurns } from "../src/pipeline/geometry-math.ts";
 import { samplePoint, warpUniforms } from "../../dewarp/src/fisheye.ts";
 import { PROFILES } from "../../dewarp/src/profiles.ts";
 
@@ -70,5 +70,27 @@ const mid = [0.5 + (0.25 - 0.5) * 0.9, 0.5];
 const [ex, ey] = samplePoint(u, mid[0] * 1920, mid[1] * 1080);
 near(pc[0], ex / 1920, 1e-9, "combined x");
 near(pc[1], ey / 1080, 1e-9, "combined y");
+
+// The way back for AI prompts (a tap or a seed point on the corrected picture → the upright source point it shows).
+// Nothing on: the same point.
+assert.deepEqual(outputToUpright(0.3, 0.7, base), [0.3, 0.7]);
+// A 10% stabilisation crop (zoom about the centre): a tap near the edge shows a source point ~4% of the width in.
+const crop: GeometryParams = { ...base, stab: (x: number, y: number) => [x * 0.9 + 12, y * 0.9] as const };
+const tap = outputToUpright(0.95, 0.5, crop);
+near(tap[0], 0.5 + (0.45 * 1920 * 0.9 + 12) / 1920, 1e-12, "crop tap x");
+near(tap[1], 0.5, 1e-12, "crop tap y");
+assert.ok(0.95 - tap[0] > 0.035, "the unmapped tap was ~4% of the width off");
+// It agrees with what the renderer samples (sourcePoint), in upright orientation, on a rotated dewarped clip too.
+for (const p of [both, rotParams, { ...rotParams, stab: (x: number, y: number) => [x * 0.92 - 8, y * 0.92 + 5] as const }]) {
+  for (const [x, y] of [[0.2, 0.3], [0.5, 0.5], [0.75, 0.6]]) {
+    const s = sourcePoint(x, y, p)!;
+    const up = codedToDisplay(s[0], s[1], p.rot);
+    const o = outputToUpright(x, y, p);
+    near(o[0], up[0], 1e-12, "upright x");
+    near(o[1], up[1], 1e-12, "upright y");
+  }
+}
+// Off the picture (rendered black): clamped to the frame, never outside it.
+assert.deepEqual(outputToUpright(0.999, 0.5, shift), [1, 0.5]);
 
 console.log("geometry: ok");

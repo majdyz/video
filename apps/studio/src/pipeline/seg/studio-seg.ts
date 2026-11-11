@@ -10,7 +10,7 @@ import { aiCrashed, crumb, lastCrash } from "../crumbs.ts";
 import { deviceFacts, isMobile, isWeakDevice } from "../device.ts";
 import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
-import { confWeight, maskSize, SEG, type SegObject } from "./track.ts";
+import { confWeight, mapPrompt, maskSize, SEG, type SegObject } from "./track.ts";
 import type { SessionFrameOut } from "./session.ts";
 
 const PREF_KEY = "deepfix.subjectPop.ai";
@@ -703,11 +703,14 @@ export class SubjectSeg {
   private seededSegs = new Set<number>();
 
   /** A tap that adds what is missing: a new include object at (t, u, v), followed both ways from the tap. */
-  async include(t: number, u: number, v: number, boxes: readonly PersonBox[]): Promise<boolean> {
+  /** (u, v) and the boxes are on the picture as shown; toSource (Stabilise / Dewarp on) takes the prompt to the
+   * upright source frame the session works on (track.ts mapPrompt). */
+  async include(t: number, u: number, v: number, boxes: readonly PersonBox[], toSource: ((u: number, v: number) => [number, number]) | null = null): Promise<boolean> {
     if (!this.live || !(await this.wake()) || !this.model) return false;
     const id = this.nextId++;
     crumb(`ai: include ${t.toFixed(2)}s`);
-    const object: SegObject & { id: number } = { id, kind: "include", t, prompt: promptFor({ u, v }, boxes) };
+    const shown = promptFor({ u, v }, boxes);
+    const object: SegObject & { id: number } = { id, kind: "include", t, prompt: toSource ? mapPrompt(shown, toSource) : shown };
     this.log.push({ op: "add", object });
     // False: the worker failed meanwhile (fail has told the user).
     if (!(await this.model.sessionAdd(object).then(() => true, () => false))) return false;
@@ -716,7 +719,8 @@ export class SubjectSeg {
     return true;
   }
 
-  /** A tap on what the ML pops: removes that subject (most of it under the tap) or just the tapped part. */
+  /** A tap on what the ML pops: removes that subject (most of it under the tap) or just the tapped part. (u, v) on
+   * the upright source frame (the studio maps a tap on a stabilised / dewarped picture back first). */
   async exclude(t: number, u: number, v: number): Promise<"removed" | "part" | "exclude" | null> {
     if (!this.live || !(await this.wake()) || !this.model) return null;
     const id = this.nextId++;

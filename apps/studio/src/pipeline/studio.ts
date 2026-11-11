@@ -29,7 +29,8 @@ import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometryRenderOptions, type GeometrySource } from "./geometry.ts";
 import { GpuGeometryRenderer } from "./geometry-gpu.ts";
-import type { GeometryParams, QuarterTurns } from "./geometry-math.ts";
+import { outputToUpright, type GeometryParams, type QuarterTurns } from "./geometry-math.ts";
+import { mapPrompt } from "./seg/track.ts";
 import type { ClipInfo } from "./probe.ts";
 import { colourSettings, DEFAULT_TOOLS, exportSuffix, profileDefaults, solveParams, type ColourLook, type DewarpState, type ToolsState } from "./tools.ts";
 
@@ -565,6 +566,8 @@ export class Studio {
       // anywhere else (a missed fin inside the engine's animal, a second animal) adds it.
       const pops = segPopsAt(this.segOverlay(t), u, v);
       const action = pops ? "exclude" : "include";
+      // The tap is on the picture as shown; the session works on the frame as recorded (Stabilise / Dewarp).
+      const toSource = this.segToSource(t);
       if (action === "exclude" && follow >= 0 && list[follow].action === "include") list[follow] = { ...list[follow], action: "exclude" };
       this.subjectUndo[this.subjectUndo.length - 1].ai = true;
       this.set({ subjectNote: null, subjectUndo: this.subjectUndo.length });
@@ -572,10 +575,11 @@ export class Studio {
       if (action === "exclude") this.setSubjectOverrides(list);
       if (action === "include") {
         // False: the tap never reached the session (the AI pass failed; its note is up): nothing to undo.
-        if (await this.seg.include(t, u, v, this.engine?.personBoxesNow() ?? [])) this.set({ subjectNote: "Added" });
+        if (await this.seg.include(t, u, v, this.engine?.personBoxesNow() ?? [], toSource)) this.set({ subjectNote: "Added" });
         else { this.subjectUndo.pop(); this.set({ subjectUndo: this.subjectUndo.length }); }
       } else {
-        const r = await this.seg.exclude(t, u, v);
+        const [su, sv] = toSource ? toSource(u, v) : [u, v];
+        const r = await this.seg.exclude(t, su, sv);
         if (r === null) {
           this.subjectUndo.pop();
           this.setSubjectOverrides(before);
@@ -764,7 +768,9 @@ export class Studio {
           // depends on how many analyses happened to run since the reset).
           const found = seedObjects(e.animalMap(), t, e.personBoxesNow());
           e.resetTracking();
-          return found;
+          // The engine analysed the frame after the geometry pass; the session tracks on the frame as recorded.
+          const toSource = this.segToSource(t);
+          return toSource ? found.map((o) => ({ ...o, prompt: mapPrompt(o.prompt, toSource) })) : found;
         }, true);
       } catch (err) {
         console.warn(`[seg] segment ${k} seed frame failed`, err);
@@ -904,6 +910,20 @@ export class Studio {
   private segOverlay(t: number): SegOverlay | null {
     const o = this.tools.colour.subjectPop && this.snap.kind === "video" && !(this.exporting && this.segExportEngine) ? this.seg.overlayAt(t) : null;
     return o && this.geometryActive() ? this.mapSegOverlay(o, t) : o;
+  }
+
+  /**
+   * With Stabilise / Dewarp on, the picture the user taps and the engine analyses is the frame after the geometry
+   * pass, while the AI session tracks on the upright frame as recorded (mapSegOverlay warps its masks forward for
+   * that reason). This is the way back for prompts: a point on the shown picture at clip time t → the source point
+   * it shows (geometry-math.ts outputToUpright). Null when no warp is on (the two are the same frame). Without it a
+   * tap near the edge of a 10% stabilisation crop landed ~4% of the width off, differently on every frame.
+   */
+  private segToSource(t: number): ((u: number, v: number) => [number, number]) | null {
+    const info = this.snap.info;
+    if (!info || this.snap.kind !== "video" || !this.geometryActive()) return null;
+    const p = this.geoParams(t, info.rot);
+    return p.stab || p.dewarp ? (u, v) => outputToUpright(u, v, p) : null;
   }
 
   private segGeo: { r: GeometryRenderer; src: HTMLCanvasElement; read: CanvasRenderingContext2D; t: number; o: SegOverlay; out: SegOverlay } | null = null;

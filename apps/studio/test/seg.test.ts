@@ -8,7 +8,7 @@ import { composeSegStrength, SEG_THICK, waterField } from "../../aqua-fix/src/en
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
 import { SUBJECT_CLEAR } from "../../aqua-fix/src/engine/params.ts";
-import { confWeight, fillInterval, keyTimes, sampleRange, SEG, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
+import { confWeight, fillInterval, keyTimes, mapPrompt, sampleRange, SEG, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
 import { linearToOklab } from "../../aqua-fix/src/engine/color.ts";
 import { autoObjects, maskStats, ML_OUTLINE_ID, seedObjects, outlineSelection, popComponentBox, promptFor, SegLive, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
 
@@ -158,6 +158,19 @@ const img = (dx: number, dy: number): Gray => {
   const diver = promptFor({ u: 0.5, v: 0.5 }, [{ x: 0.4, y: 0.3, w: 0.2, h: 0.5, score: 0.9 }]);
   assert.deepEqual(diver.box, { x0: 0.4, y0: 0.3, x1: 0.6000000000000001, y1: 0.8 });
   assert.equal(promptFor({ u: 0.1, v: 0.1 }, [{ x: 0.4, y: 0.3, w: 0.2, h: 0.5, score: 0.9 }]).box, undefined);
+  // With Stabilise / Dewarp on, a prompt made on the picture as shown is carried to the source frame the session
+  // tracks on: every point through the map, labels kept, the box as the bounds of its (bent) outline.
+  const toSource = (u: number, v: number): [number, number] => [0.5 + (u - 0.5) * 0.9 + 0.01, 0.5 + (v - 0.5) * 0.9 + 0.2 * (u - 0.5) ** 2];
+  const mapped = mapPrompt({ points: [[0.5, 0.5], [0.9, 0.2]], labels: [1, 0], box: { x0: 0.4, y0: 0.3, x1: 0.6, y1: 0.8 } }, toSource);
+  assert.deepEqual(mapped.points, [toSource(0.5, 0.5), toSource(0.9, 0.2)]);
+  assert.deepEqual(mapped.labels, [1, 0]);
+  const near9 = (a: number, b: number) => assert.ok(Math.abs(a - b) < 1e-9, `${a} vs ${b}`);
+  near9(mapped.box!.x0, toSource(0.4, 0.3)[0]);
+  near9(mapped.box!.x1, toSource(0.6, 0.3)[0]);
+  near9(mapped.box!.y0, toSource(0.5, 0.3)[1]); // the top edge bows: its middle is the highest point
+  near9(mapped.box!.y1, toSource(0.4, 0.8)[1]);
+  assert.equal(mapPrompt(diver, toSource).points.length, 1);
+  assert.equal(mapPrompt({ points: [[0.1, 0.1]], labels: [1] }, toSource).box, undefined);
   // A tap on what the ML pops (at full weight) is an exclude; elsewhere, or with the ML eased out, it is not.
   const alpha = new Float32Array(16), near = new Float32Array(16).fill(1);
   alpha[5] = 1;
