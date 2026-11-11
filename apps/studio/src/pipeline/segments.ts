@@ -151,7 +151,7 @@ export function lookAfterRemove(look: number, k: number): number {
 
 // ------------------------------------------------------------ scene lock
 
-export type LockLike<P> = { from: number; params: P; window?: [number, number] };
+export type LockLike<P> = { from: number; params: P; window?: [number, number]; /** Mean colour of the profile samples either side of the window (aqua-fix lock-track.ts). */ means?: [[number, number, number], [number, number, number]] };
 export type SampleLike<P> = { t: number; params: P };
 
 /**
@@ -183,7 +183,7 @@ export function lockWithCuts<P>(auto: LockLike<P>[] | null, samples: readonly Sa
       const seg: LockLike<P> = { from: atCut ? ps - half : s === -Infinity ? sorted[0].from : s, params };
       if (!atCut && sorted[j].window && s === as) {
         const w0 = Math.max(sorted[j].window![0], ps), w1 = Math.min(sorted[j].window![1], pe);
-        if (w1 > w0) seg.window = [w0, w1];
+        if (w1 > w0) { seg.window = [w0, w1]; if (sorted[j].means) seg.means = sorted[j].means; }
       }
       out.push(seg);
     }

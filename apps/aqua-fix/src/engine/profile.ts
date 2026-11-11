@@ -25,16 +25,21 @@ export function profileTimes(durationSec: number): number[] {
  */
 export function segmentProfile(samples: ProfileSample[], cutDiff: number): LockSegment[] | null {
   if (samples.length < 3) return null;
-  const segs: { from: number; window?: [number, number]; items: ProfileSample[] }[] = [{ from: 0, items: [samples[0]] }];
+  const segs: { from: number; window?: [number, number]; means?: [ProfileSample["mean"], ProfileSample["mean"]]; items: ProfileSample[] }[] =[{ from: 0, items: [samples[0]] }];
   for (let i = 1; i < samples.length; i++) {
     const a = samples[i - 1].mean, b = samples[i].mean;
     const diff = Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
     const wa = samples[i - 1].params.wb, wb = samples[i].params.wb;
     const wbDiff = Math.max(Math.abs(Math.log(wa[0] / wb[0])), Math.abs(Math.log(wa[2] / wb[2])));
-    const cut = diff > 2 * cutDiff || (diff > cutDiff && wbDiff > 0.2);
-    if (cut) segs.push({ from: (samples[i - 1].t + samples[i].t) / 2, window: [samples[i - 1].t, samples[i].t], items: [] });
+    // The change must still be there one sample on: footage whose exposure pumps (caustics, a hunting auto
+    // exposure) jumps between two samples and is back at the next (sand_flounder: 0.32 then 0.155 across both),
+    // and its lone first sample then graded the first second on its own estimate.
+    const next = samples[i + 1]?.mean;
+    const stays = !next || Math.abs(a[0] - next[0]) + Math.abs(a[1] - next[1]) + Math.abs(a[2] - next[2]) > cutDiff;
+    const cut = stays && (diff > 2 * cutDiff || (diff > cutDiff && wbDiff > 0.2));
+    if (cut) segs.push({ from: (samples[i - 1].t + samples[i].t) / 2, window: [samples[i - 1].t, samples[i].t], means: [a, b], items: [] });
     segs[segs.length - 1].items.push(samples[i]);
   }
   for (let i = segs.length - 1; i > 0; i--) if (segs[i].items.length < 2) { segs[i - 1].items.push(...segs[i].items); segs.splice(i, 1); }
-  return segs.map((s) => ({ from: s.from, window: s.window, params: medianParams(s.items.map((x) => x.params)) }));
+  return segs.map((s) => ({ from: s.from, window: s.window, means: s.means, params: medianParams(s.items.map((x) => x.params)) }));
 }
