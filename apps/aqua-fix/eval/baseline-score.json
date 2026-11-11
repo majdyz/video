@@ -26,15 +26,15 @@
    "dEMax": 14.47
   },
   "stability": {
-   "lightStd": 1.77,
-   "lightJump": 4.43,
-   "wbStd": 1.68,
-   "wbSwing": 0.06,
+   "lightStd": 1.81,
+   "lightJump": 4.67,
+   "wbStd": 1.64,
+   "wbSwing": 0.05,
    "expSwing": 0.01
   },
   "diagnostics": {
-   "waterWarm": 0.24,
-   "chroma": 0.92
+   "waterWarm": 0.22,
+   "chroma": 0.94
   }
  },
  "pairs": {
@@ -344,16 +344,16 @@
    "frames": 16,
    "shots": 3,
    "dE": 29.13,
-   "dEMax": 35.57,
+   "dEMax": 35.58,
    "lightStd": 2.19,
-   "lightJump": 4.91,
-   "wbStd": 3.89,
+   "lightJump": 4.87,
+   "wbStd": 3.88,
    "wbSwing": 0.1,
    "expSwing": 0.09,
-   "waterWarm": 0.12,
+   "waterWarm": 0.13,
    "chroma": 0.73,
-   "dL": -30.33,
-   "hiC": 30.28,
+   "dL": -30.32,
+   "hiC": 30.21,
    "hiPink": 5.55
   },
   "divers_shallow_reef": {
@@ -487,18 +487,18 @@
    "category": "green_murky",
    "frames": 16,
    "shots": 2,
-   "dE": 22.53,
-   "dEMax": 40.03,
-   "lightStd": 1.61,
-   "lightJump": 4.15,
-   "wbStd": 2.34,
-   "wbSwing": 0.66,
-   "expSwing": 0.06,
-   "waterWarm": 0.62,
-   "chroma": 0.37,
-   "dL": -24.03,
-   "hiC": 9.81,
-   "hiPink": 0.92
+   "dE": 16.08,
+   "dEMax": 29.14,
+   "lightStd": 2.19,
+   "lightJump": 8.62,
+   "wbStd": 1.69,
+   "wbSwing": 0.45,
+   "expSwing": 0.07,
+   "waterWarm": 0.13,
+   "chroma": 0.69,
+   "dL": -17.82,
+   "hiC": 22.35,
+   "hiPink": 0
   },
   "reef_anemonefish": {
    "id": "reef_anemonefish",

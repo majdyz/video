@@ -10,7 +10,7 @@ import { applyGrade } from "../src/engine/apply.ts";
 import { calmEvidence, calmScores } from "../src/engine/calm.ts";
 import { linearToOklab, srgbToLinear } from "../src/engine/color.ts";
 import { DEFAULT_SETTINGS, type DepthMap, type UserSettings } from "../src/engine/params.ts";
-import { RED, chromaRebuild, greenCastOf, greenNeutral, murkHold, redGuard, warmMaterial } from "../src/engine/red.ts";
+import { RED, chromaRebuild, greenCastOf, greenLitOf, greenNeutral, murkHold, redGuard, warmMaterial } from "../src/engine/red.ts";
 
 const W = ANALYSIS_W, H = ANALYSIS_H;
 function noise(seed: number): number { const s = Math.sin(seed * 12.9898) * 43758.5453; return s - Math.floor(s); }
@@ -233,4 +233,48 @@ const inRect = (x: number, y: number, x0: number, y0: number, x1: number, y1: nu
   assert.ok(lo / k <= ls / k + 0.005, `murk L ${(lo / k).toFixed(3)} vs source ${(ls / k).toFixed(3)}`);
   assert.ok(hue > 30 && hue < 140, `seagrass hue ${hue.toFixed(0)}° stays olive/brown, not lavender`);
   console.log(`ok  murk not lifted (L ${(ls / k).toFixed(3)} → ${(lo / k).toFixed(3)}), seagrass hue ${hue.toFixed(0)}°`);
+}
+
+// 8. Lit green water (a sunlit reservoir: bright saturated green veil, white fins recorded cyan-white) is not murk.
+{
+  // The valset clip's own estimate: green veil, but bright enough to be the lit water body.
+  const binf = [0.043, 0.966, 0.473], veil = [0.05, 0.791, 0.453];
+  assert.equal(greenCastOf(binf, veil), 0, "no murk weight under a bright green veil");
+  assert.ok(greenLitOf(binf, veil) > 0.99, "lit green water");
+  assert.equal(greenLitOf([0.03, 0.27, 0.257], [0.04, 0.38, 0.2]), 0, "coastal green water (veil luminance 0.3) is murk, not lit");
+  assert.equal(greenLitOf([0.02, 0.3, 0.6], [0.02, 0.5, 0.9]), 0, "bright blue water is not green at all");
+  // A frame of it: green water brighter toward the top, a dark diver, two cyan-white fins.
+  const fin = (x: number, y: number) => (Math.abs(x - W * 0.35) < W * 0.06 || Math.abs(x - W * 0.6) < W * 0.06) && y > H * 0.55 && y < H * 0.9;
+  const diver = (x: number, y: number) => Math.hypot((x - W * 0.48) / (W * 0.1), (y - H * 0.35) / (H * 0.22)) < 1;
+  const px = frame((x, y, i) => {
+    const n = (noise(i) - 0.5) * 6;
+    if (fin(x, y)) return [94 + n, 229 + n, 255];
+    if (diver(x, y)) return [38 + n, 70 + n, 60 + n];
+    const k = 1 - 0.25 * (y / H);
+    return [58 * k + n, 208 * k + n, 162 * k + n];
+  });
+  const mean = (out: Uint8ClampedArray, pick: (x: number, y: number) => boolean) => {
+    let L = 0, a = 0, b = 0, c = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (pick(x, y)) { const l = lab(out, y * W + x); L += l[0]; a += l[1]; b += l[2]; c++; }
+    return [L / c, a / c, b / c];
+  };
+  const water = (x: number, y: number) => !fin(x, y) && !diver(x, y) && x > W * 0.75;
+  const vivid = { ...DEFAULT_SETTINGS, vivid: 1, seabed: 0.6 };
+  const now = grade(px, vivid);
+  assert.ok(now.a.params.subLo > 1, "the veil comes off hue-preserving");
+  const f1 = mean(now.out, fin), w1 = mean(now.out, water), w0 = mean(px, water);
+  // Fins: light, and on the blue-white side of neutral: no red or magenta (Oklab a ≤ 0.01).
+  assert.ok(f1[0] > 0.7 && f1[1] < 0.01, `fins stay white, not pink (L ${f1[0].toFixed(2)}, a ${f1[1].toFixed(3)}, b ${f1[2].toFixed(3)})`);
+  // Water: still water-coloured (not grey), no lighter than the source, and not crushed to near-black.
+  assert.ok(Math.hypot(w1[1], w1[2]) > 0.05, `water keeps colour (C ${Math.hypot(w1[1], w1[2]).toFixed(3)})`);
+  assert.ok(w1[0] < w0[0] && w1[0] > 0.4, `water lightness ${w1[0].toFixed(2)} (source ${w0[0].toFixed(2)})`);
+  // The same frame through the murk treatment (the behaviour before): grey water, fins toward pink.
+  const lo = RED.litLo, hi = RED.litHi;
+  RED.litLo = 10; RED.litHi = 11;
+  const was = grade(px, vivid);
+  RED.litLo = lo; RED.litHi = hi;
+  const f0 = mean(was.out, fin), wm = mean(was.out, water);
+  assert.ok(f1[1] < f0[1] - 0.005, `fins less pink than under the murk treatment (a ${f1[1].toFixed(3)} vs ${f0[1].toFixed(3)})`);
+  assert.ok(w1[0] > wm[0] + 0.03, `water less crushed than under the murk treatment (L ${w1[0].toFixed(2)} vs ${wm[0].toFixed(2)})`);
+  console.log("ok  lit green water: no murk weight, white fins, water keeps colour and light");
 }

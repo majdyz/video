@@ -18,7 +18,7 @@
 import { labelAnimals, type AnimalMap } from "./animals.ts";
 import { BACKDROP, backdropObjectness, growSubjects } from "./backdrop.ts";
 import { calmEvidence, calmScores } from "./calm.ts";
-import { RED, greenCastOf } from "./red.ts";
+import { RED, greenCastOf, greenLitOf } from "./red.ts";
 import { SRGB_TO_LINEAR_LUT, linearToOklab, linearToSrgb, luminance, oklabHueDeg } from "./color.ts";
 import {
   CLAHE_BINS,
@@ -315,6 +315,10 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
   // Green water (red.ts): every object shares the green veil's hue, so the hue
   // test calls the whole scene water; there the signal test decides alone.
   const greenObj = greenCastOf(binf, veilColor) * RED.greenObj;
+  // Lit green water (red.ts): the bright green veil comes off hue-preserving on every pixel (per channel it strips
+  // the green from a white object and leaves its blue: pink fins).
+  const subShift = RED.litSub * greenLitOf(binf, veilColor);
+  const subLo = SUB_LO + subShift, subHi = SUB_HI + subShift;
   const J = temp("J", n * 3);
   const conf = temp("conf", n);
   const wbWeight = temp("wbWeight", n);
@@ -335,7 +339,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
       lumBs += Bsub[c] * wl;
     }
     const sig = Math.max(0, (lumI - lumBc) / lumI);
-    const wSub = smoothstep(SUB_LO, SUB_HI, sig) * (1 - hueFarArr[i]);
+    const wSub = smoothstep(subLo, subHi, sig) * (1 - hueFarArr[i]);
     const prop = Math.max(FLOOR_FRAC, 1 - lumBs / lumI);
     for (let c = 0; c < 3; c++) {
       const I = lin[i * 3 + c];
@@ -413,7 +417,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     }
     // Same blend as the shader: per channel where the signal is healthy,
     // proportional (hue-preserving) where it is weak.
-    const wSub = smoothstep(SUB_LO, SUB_HI, Math.max(0, (lumI - lumBc) / lumI)) * (1 - hueFarArr[i]);
+    const wSub = smoothstep(subLo, subHi, Math.max(0, (lumI - lumBc) / lumI)) * (1 - hueFarArr[i]);
     const prop = Math.max(FLOOR_FRAC, 1 - lumBs / lumI);
     for (let c = 0; c < 3; c++) {
       const I = lin[i * 3 + c];
@@ -677,8 +681,8 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     floorFrac: FLOOR_FRAC,
     shadowFloor: SHADOW_FLOOR,
     knee: KNEE,
-    subLo: SUB_LO,
-    subHi: SUB_HI,
+    subLo,
+    subHi,
     calm,
     calmTone,
     backdrop: backdropValidity,
