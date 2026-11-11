@@ -1,12 +1,12 @@
 // The manual override pair: tap-to-neutral (tap.ts, params.ts tapParams) and "Water colour" (WATER_TINT).
 //   node --experimental-strip-types apps/aqua-fix/test/tap.test.ts
 import assert from "node:assert/strict";
-import { applyGrade, gradePixel, resolveContext, waterTint, type ApplyContext } from "../src/engine/apply.ts";
+import { applyGrade, gradePixel, resolveContext, warmPop, waterTint, type ApplyContext } from "../src/engine/apply.ts";
 import { linearToOklab, linearToSrgb, srgbToLinear } from "../src/engine/color.ts";
 import { GRADE_GLSL, GRADE_WGSL } from "../src/engine/grade-shader.ts";
 import { lockParams } from "../src/engine/lock.ts";
-import { BLUE_WATER, CLAHE_BINS, CLAHE_TILES_X, CLAHE_TILES_Y, DEFAULT_SETTINGS, IDENTITY_PARAMS, TAP, WATER_TINT, packUniforms, tapGains, tapParams, waterTintOf, type ClaheLuts, type DepthMap, type GradeParams, type UserSettings } from "../src/engine/params.ts";
-import { TAP_SOLVE, solveTap, tapRect, tapSample } from "../src/engine/tap.ts";
+import { BLUE_WATER, CLAHE_BINS, CLAHE_TILES_X, CLAHE_TILES_Y, DEFAULT_SETTINGS, IDENTITY_PARAMS, TAP, WARM_POP, WATER_TINT, packUniforms, tapGains, tapParams, waterTintOf, type ClaheLuts, type DepthMap, type GradeParams, type UserSettings } from "../src/engine/params.ts";
+import { TAP_SOLVE, correctionOnly, solveTap, tapRect, tapSample } from "../src/engine/tap.ts";
 
 const D = Math.PI / 180;
 const near = (a: number, b: number, eps: number, msg: string) => assert.ok(Math.abs(a - b) <= eps, `${msg}: ${a} vs ${b}`);
@@ -91,26 +91,44 @@ const STYLES: Record<string, UserSettings> = { natural: { ...DEFAULT_SETTINGS },
   console.log("ok  the tap rides on the lock, do-no-harm, the preset and the push");
 }
 
-// 4. The solver: a grey under a cast the estimate left behind grades to neutral, in every style, on the object path
-//    and on the water path, at the default Strength and pushed.
+// 4. The solver: a grey under a cast the estimate left behind is balanced to neutral, on the object path and on the
+//    water path, at the default Strength and pushed. It is solved on the correction alone (correctionOnly), so the
+//    gains are the same in every style, and the looks then treat the point as they treat any grey.
 {
   const grey = srgb([0.3 * 0.5, 0.3, 0.3 * 1.15]); // red halved, blue up: the auto balance (×1.3 red) leaves it cyan
-  for (const [name, style] of Object.entries(STYLES)) for (const conf of [1, 0]) for (const intensity of [1, 1.5]) {
-    const settings = { ...style, intensity };
-    const ctx: ApplyContext = { params: PARAMS, settings, ...maps(grey.map(srgbToLinear), conf) };
-    const before = chromaOf(gradeAt(ctx, grey));
-    const s = solveTap(ctx, grey, 0.5, 0.5);
-    assert.ok(s.ok, "sampled");
-    if (!s.ok) continue;
-    near(s.before, before, 1e-9, "before");
-    assert.ok(before > 0.03, `${name}: a visible cast to begin with (${before})`);
-    assert.ok(!s.limited && s.after <= TAP_SOLVE.done, `${name} conf ${conf} intensity ${intensity}: ${s.before.toFixed(4)} → ${s.after.toFixed(4)} gains ${s.gains}`);
-    // What the solver reports is what the grade renders with those gains.
-    near(chromaOf(gradeAt({ ...ctx, settings: { ...settings, wbTap: s.gains } }, grey)), s.after, 1e-9, "after");
-    assert.ok(s.gains[0] > 1 && s.gains[0] <= TAP.max && s.gains[1] < 1 && s.gains[1] >= 1 / TAP.max, `gains ${s.gains}`);
-    // A second tap replaces the first: an earlier tap in the settings does not change the answer.
-    const again = solveTap({ ...ctx, settings: { ...settings, wbTap: [2.5, 0.5] } }, grey, 0.5, 0.5);
-    assert.deepEqual(again, s);
+  const hueOf = (o: readonly number[]) => { const [, a, b] = linearToOklab(srgbToLinear(o[0]), srgbToLinear(o[1]), srgbToLinear(o[2])); return ((Math.atan2(b, a) / D) % 360 + 360) % 360; };
+  for (const conf of [1, 0]) for (const intensity of [1, 1.5]) {
+    let first: [number, number] | null = null;
+    for (const [name, style] of Object.entries(STYLES)) {
+      const settings = { ...style, intensity };
+      const ctx: ApplyContext = { params: PARAMS, settings, ...maps(grey.map(srgbToLinear), conf) };
+      const corr = { ...ctx, settings: correctionOnly(settings) };
+      const s = solveTap(ctx, grey, 0.5, 0.5);
+      assert.ok(s.ok, "sampled");
+      if (!s.ok) continue;
+      near(s.before, chromaOf(gradeAt(corr, grey)), 1e-9, "before");
+      assert.ok(s.before > 0.03, `${name}: a visible cast to begin with (${s.before})`);
+      assert.ok(!s.limited && s.after <= TAP_SOLVE.done, `${name} conf ${conf} intensity ${intensity}: ${s.before.toFixed(4)} → ${s.after.toFixed(4)} gains ${s.gains}`);
+      // What the solver reports is what the correction renders with those gains.
+      near(chromaOf(gradeAt({ ...corr, settings: { ...corr.settings, wbTap: s.gains } }, grey)), s.after, 1e-9, "after");
+      assert.ok(s.gains[0] > 1 && s.gains[0] <= TAP.max && s.gains[1] < 1 && s.gains[1] >= 1 / TAP.max, `gains ${s.gains}`);
+      // The same gains whatever the style: changing the style after a tap leaves the balance right.
+      first ??= s.gains;
+      assert.deepEqual(s.gains, first, `${name}: gains differ by style`);
+      // A second tap replaces the first: an earlier tap in the settings does not change the answer.
+      assert.deepEqual(solveTap({ ...ctx, settings: { ...settings, wbTap: [2.5, 0.5] } }, grey, 0.5, 0.5), s);
+      // On screen, in this style: the point and its shadow / sunlit side (the same material, darker or lighter:
+      // where the looks act differently, e.g. a subject spared the water's blue) are near neutral, far below the
+      // cast they had, and never green (a tap solved through the looks left their counter-tint there).
+      for (const k of [0.35, 0.6, 1, 1.6]) {
+        const px = srgb(grey.map((c) => Math.min(1, srgbToLinear(c) * k)));
+        const m = maps(grey.map(srgbToLinear), conf);
+        const o0 = gradeAt({ params: PARAMS, settings, ...m }, px), o1 = gradeAt({ params: PARAMS, settings: { ...settings, wbTap: s.gains }, ...m }, px);
+        const c0 = chromaOf(o0), c1 = chromaOf(o1), h1 = hueOf(o1);
+        assert.ok(c1 < 0.035 && c1 < 0.6 * c0, `${name} conf ${conf} ×${k}: chroma ${c0.toFixed(3)} → ${c1.toFixed(3)}`);
+        assert.ok(!(c1 > 0.012 && h1 > 110 && h1 < 185), `${name} conf ${conf} ×${k}: green (${h1.toFixed(0)}°, C ${c1.toFixed(3)})`);
+      }
+    }
   }
   // A point that is neutral already: nothing to do.
   const n = srgb([0.3 / 1.3, 0.3, 0.3]);
@@ -137,8 +155,10 @@ const STYLES: Record<string, UserSettings> = { natural: { ...DEFAULT_SETTINGS },
   assert.deepEqual(solveTap({ params: PARAMS, settings: STYLES.vivid, ...maps([1, 1, 1], 1) }, [1, 0.99, 1], 0.5, 0.5), { ok: false, reason: "bright" });
   // Strength 0 shows the source: nothing a balance can do, nothing changed.
   const grey = srgb([0.15, 0.3, 0.345]);
-  const off = solveTap({ params: PARAMS, settings: { ...STYLES.vivid, intensity: 0 }, ...maps(grey.map(srgbToLinear), 1) }, grey, 0.5, 0.5);
-  assert.ok(off.ok && off.limited && off.gains[0] === 1 && off.gains[1] === 1, JSON.stringify(off));
+  // Strength below the estimate (even 0, which shows the source) does not change the balance: it is solved on the
+  // full correction, and Strength then mixes it in like everything else.
+  const m = maps(grey.map(srgbToLinear), 1);
+  assert.deepEqual(solveTap({ params: PARAMS, settings: { ...STYLES.vivid, intensity: 0 }, ...m }, grey, 0.5, 0.5), solveTap({ params: PARAMS, settings: STYLES.vivid, ...m }, grey, 0.5, 0.5));
   console.log("ok  dead red is soft-limited, dark and clipped points are refused");
 }
 
@@ -227,4 +247,45 @@ const STYLES: Record<string, UserSettings> = { natural: { ...DEFAULT_SETTINGS },
     for (let c = 0; c < 3; c++) assert.ok(Math.abs(sm.o[c] - s0.o[c]) < 1 / 255 && Math.abs(sp.o[c] - s0.o[c]) < 1 / 255, `${name}: skin moved`);
   }
   console.log("ok  in the grade: water turns teal / blue, skin stays, in every style");
+}
+
+// 9. The subject path under a tap. Subject pop's warm pull (WARM_POP) meets what the tap leaves on the water path:
+//    a shadow on sand that the tap turned from blue to teal. A plain mix of teal and cream is green (the patch seen
+//    beside the neutral sand with AI subjects on); the pull now passes through neutral. Blue subjects are as before.
+{
+  const hueOf = (x: readonly number[]) => ((Math.atan2(x[1], x[0]) / D) % 360 + 360) % 360;
+  const ab = (C: number, h: number): [number, number] => [C * Math.cos(h * D), C * Math.sin(h * D)];
+  const green = (o: readonly number[]) => Math.hypot(o[0], o[1]) > 0.02 && hueOf(o) > 112 && hueOf(o) < 200;
+  // Off: exactly the input. Full: the warm cream, whatever came in.
+  assert.deepEqual(warmPop(0.5, ...ab(0.06, 180), 0), ab(0.06, 180));
+  for (const h of [180, 250, 20]) near(hueOf(warmPop(0.5, ...ab(0.06, h), 1)), WARM_POP.hue / D, 1e-6, "full pull");
+  // Teal, cyan and blue-green subjects (the tap's leftovers, green water): from a real weight on, never green; the
+  // chroma stays inside what the pixel and the cream hold.
+  for (const h of [165, 180, 195, 210]) for (const C of [0.03, 0.06, 0.1]) {
+    for (let k = 0; k <= 1.0001; k += 0.05) {
+      const o = warmPop(0.5, ...ab(C, h), k), c = Math.hypot(o[0], o[1]);
+      if (k >= 0.4) assert.ok(!green(o), `teal ${h}° C ${C} at k ${k.toFixed(2)}: ${hueOf(o).toFixed(0)}° C ${c.toFixed(3)}`);
+      // No colour the pixel and the cream do not hold between them; at a soft mask edge the teal only fades.
+      assert.ok(c <= Math.max(C, WARM_POP.cMax) + 1e-12, `chroma at ${h}° k ${k.toFixed(2)}`);
+      if (k <= 0.3) assert.ok(c <= C + 1e-12, `chroma grows at ${h}° k ${k.toFixed(2)}`);
+    }
+    // The old plain mix did go green there (what this guards against).
+    const k = 0.5, ct = Math.min(WARM_POP.cMax, Math.max(WARM_POP.keep * C, WARM_POP.cMin));
+    const old = [C * Math.cos(h * D) * (1 - k) + Math.cos(WARM_POP.hue) * ct * k, C * Math.sin(h * D) * (1 - k) + Math.sin(WARM_POP.hue) * ct * k];
+    if (h <= 195 && C >= 0.06) assert.ok(green(old), `plain mix at ${h}° C ${C}: ${hueOf(old).toFixed(0)}°`);
+  }
+  // A blue subject (straight across from the cream): within a hair of the plain mix.
+  for (const h of [250, 258, 265]) for (const k of [0.25, 0.5, 0.75]) {
+    const C = 0.07, ct = Math.min(WARM_POP.cMax, Math.max(WARM_POP.keep * C, WARM_POP.cMin));
+    const o = warmPop(0.5, ...ab(C, h), k);
+    const old = [C * Math.cos(h * D) * (1 - k) + Math.cos(WARM_POP.hue) * ct * k, C * Math.sin(h * D) * (1 - k) + Math.sin(WARM_POP.hue) * ct * k];
+    assert.ok(Math.hypot(o[0] - old[0], o[1] - old[1]) < 0.006, `blue ${h}° k ${k}: moved ${Math.hypot(o[0] - old[0], o[1] - old[1])}`);
+  }
+  // Both shaders carry the same form.
+  for (const code of [GRADE_GLSL, GRADE_WGSL]) assert.ok(code.includes("pow(max(0.0, 1.0 - k), WP_SIDE)") && /WP_SIDE(: f32)? = 4\.0000/.test(code));
+  // … and it is for a subject that carries a cast: the weight fades out where the graded colour is near neutral
+  // already (a region the tap balanced is not painted cream), and is whole on a cast subject (as before the tap).
+  assert.ok(WARM_POP.castLo >= 0.01 && WARM_POP.castHi <= 0.05, "a blue-cast subject (C ≥ 0.05 as graded) keeps the full pull");
+  assert.ok(GRADE_GLSL.includes("* smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);") && GRADE_WGSL.includes("* smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);"));
+  console.log("ok  the subject's warm pull passes through neutral: a tapped teal shadow is not turned green");
 }

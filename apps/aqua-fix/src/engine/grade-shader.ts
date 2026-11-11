@@ -140,6 +140,9 @@ const float WP_LLO = ${WARM_POP.lLo.toFixed(4)};
 const float WP_LHI = ${WARM_POP.lHi.toFixed(4)};
 const float WP_WLO = ${WARM_POP.wLo.toFixed(4)};
 const float WP_WHI = ${WARM_POP.wHi.toFixed(4)};
+const float WP_SIDE = ${WARM_POP.side.toFixed(4)};
+const float WP_CAST_LO = ${WARM_POP.castLo.toFixed(4)};
+const float WP_CAST_HI = ${WARM_POP.castHi.toFixed(4)};
 const float SP_CHROMA = ${SUBJECT_POP.chromaFollow.toFixed(4)};
 const float SP_ENGINE = ${SUBJECT_POP.engineKeep.toFixed(4)};
 const float SP_KEEP_LO = ${SUBJECT_POP.keepDarkLo.toFixed(4)};
@@ -551,7 +554,10 @@ float popStrength(vec4 an) { return max(p[16].w, segPop(an)); }
 // Warm pop (WARM_POP): the subject's chroma toward a warm cream hue; k = the subject's weight × warmth.
 vec2 warmPop(float L, vec2 ab, float k) {
   float Ct = min(WP_CMAX, max(WP_KEEP * length(ab), WP_CMIN * smoothstepf(WP_LLO, WP_LHI, L)));
-  return mix(ab, vec2(cos(WP_HUE), sin(WP_HUE)) * Ct, k);
+  // Along the warm hue: a linear mix; across it: faded faster, so the pull passes through neutral, never green.
+  vec2 wh = vec2(cos(WP_HUE), sin(WP_HUE));
+  float al = dot(ab, wh);
+  return wh * mix(al, Ct, k) + (ab - wh * al) * pow(max(0.0, 1.0 - k), WP_SIDE);
 }
 // Seabed recovery (SEABED, params.ts): how much a pixel is sand / reef (brightness over the water level, its own or
 // its region's from a ring of the low-res guide) rather than open water.
@@ -800,7 +806,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   lk.yz = popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0));
   // The engine's own masks are blobs reaching past the animal: there the warmth also needs the pixel's own departure
   // from the water (it hugs the animal's outline); an AI mask is the outline already.
-  float wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * (p[24].y > 0.5 ? 1.0 : depart);
+  float wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * (p[24].y > 0.5 ? 1.0 : depart) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);
   lk.yz = warmPop(lk.x, lk.yz, wk);
   // Blue water style (opt-in, p25.w): cobalt water, orange warm subjects, neutral silver, deeper shadows.
   vec4 bl = blueLook(lk, p[25].w, p[22].w);
@@ -1155,7 +1161,9 @@ fn segPop(an: vec4<f32>) -> f32 { return select(0.0, smoothstepf(SEG_POP_LO, SEG
 fn popStrength(an: vec4<f32>) -> f32 { return max(params.p[16].w, segPop(an)); }
 fn warmPop(L: f32, ab: vec2<f32>, k: f32) -> vec2<f32> {
   let Ct = min(WP_CMAX, max(WP_KEEP * length(ab), WP_CMIN * smoothstepf(WP_LLO, WP_LHI, L)));
-  return mix(ab, vec2<f32>(cos(WP_HUE), sin(WP_HUE)) * Ct, k);
+  let wh = vec2<f32>(cos(WP_HUE), sin(WP_HUE));
+  let al = dot(ab, wh);
+  return wh * mix(al, Ct, k) + (ab - wh * al) * pow(max(0.0, 1.0 - k), WP_SIDE);
 }
 fn seabedT(L: f32) -> f32 {
   let lw = params.p[25].y;
@@ -1360,7 +1368,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
   lk = vec3(lk.x, highlightPink(lk.x, lk.yz));
   lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0)));
-  let wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * select(depart, 1.0, p[24].y > 0.5);
+  let wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * select(depart, 1.0, p[24].y > 0.5) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);
   lk = vec3(lk.x, warmPop(lk.x, lk.yz, wk));
   let bl = blueLook(lk, params.p[25].w, p[22].w);
   lk = bl.xyz;

@@ -289,6 +289,13 @@ export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.
  * frame, but the water keeps its colour. (A red gain alone does nothing on a cyan shark: it has almost no red.) The
  * weight is the subject mask's own (tone weight over wLo..wHi), not the pop's strength: the engine's masks pop at half
  * strength and a murky backdrop lowers it further, which left the warmth invisible.
+ * The pull goes through neutral, not through green: the part of the pixel's chroma across the warm hue (for a teal or
+ * cyan pixel, all of it) fades as (1 − k)^`side`, the part along it mixes linearly as before. A plain mix of teal and
+ * cream is green: a subject region that a tap-to-neutral (or green water) had left teal came out as a green patch
+ * beside neutral sand. A blue subject, straight across from the cream, is as it was.
+ * And the pull is for a subject that carries a cast: it fades out where the graded colour (before the subject's cast
+ * clearing) is already near neutral (chroma `castLo..castHi`). A region a tap-to-neutral has balanced has nothing
+ * left to warm; painting it cream at `cMin` showed as a khaki patch on neutral sand wherever a mask covered it.
  */
 /**
  * Seabed recovery: under water that has taken all the red (8-bit red ~0 even on white sand), no gain can bring the
@@ -304,7 +311,7 @@ export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.
  */
 export const SEABED = { hue: (75 * Math.PI) / 180, chroma: 0.02, keep: 0.15, lift: 0.06, ring: 0.06, regionK: 1.6, lo: 0.25, span: 0.5, redLo: 0.12, redHi: 0.35, bandLo: -0.1, bandHi: -0.02, y0: 0.2, y1: 0.5 };
 
-export const WARM_POP = { hue: (78 * Math.PI) / 180, cMin: 0.05, cMax: 0.075, keep: 0.4, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3 };
+export const WARM_POP = { hue: (78 * Math.PI) / 180, cMin: 0.05, cMax: 0.075, keep: 0.4, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3, side: 4, castLo: 0.015, castHi: 0.045 };
 
 export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
 

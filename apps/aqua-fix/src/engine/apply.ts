@@ -313,6 +313,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const [, vla, vlb] = linearToOklab(p.veilColor[0], p.veilColor[1], p.veilColor[2]);
   const vln = Math.hypot(vla, vlb) || 1;
   const [na, nb] = clearCast(a * scale, b * scale, vla / vln, vlb / vln, tN / OBJECT_NEUTRAL.mix);
+  // The cast left on the graded colour, before the subject's clearing: what the warm pull is for (WARM_POP.castLo..Hi).
+  const castW = smoothstep(WARM_POP.castLo, WARM_POP.castHi, Math.hypot(a, b) * scale);
   // Lightness stays as graded: shading, counter-shading and highlights are the subject's own.
   const Ls = L;
   const skinned = skinTone(Ls, na, nb, personS);
@@ -333,7 +335,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   vv[0] = Lp; vv[1] *= kc; vv[2] *= kc;
   const hn0 = highlightPink(vv[0], vv[1], vv[2]);
   const hn1 = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * objectNeutralOf(p), 0, 1));
-  const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP) * (s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0);
+  const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP) * (s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0) * castW;
   const hn = warmPop(vv[0], hn1[0], hn1[1], wk);
   // Blue water style (opt-in): cobalt water, orange warm subjects, neutral silver, deeper shadows.
   const bl = blueLook(vv[0], hn[0], hn[1], s.blue ?? 0, greenWeight(p));
@@ -370,10 +372,14 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
 }
 
 /** Warm pop (grade-shader warmPop): the subject's chroma toward a warm cream hue (k = weight × warmth). */
-function warmPop(L: number, a: number, b: number, k: number): [number, number] {
+export function warmPop(L: number, a: number, b: number, k: number): [number, number] {
   if (k <= 0) return [a, b];
   const ct = Math.min(WARM_POP.cMax, Math.max(WARM_POP.keep * Math.hypot(a, b), WARM_POP.cMin * smoothstep(WARM_POP.lLo, WARM_POP.lHi, L)));
-  return [a + (Math.cos(WARM_POP.hue) * ct - a) * k, b + (Math.sin(WARM_POP.hue) * ct - b) * k];
+  // Along the warm hue: a linear mix; across it: faded faster, so the pull passes through neutral, never green.
+  const wx = Math.cos(WARM_POP.hue), wy = Math.sin(WARM_POP.hue);
+  const al = a * wx + b * wy, side = Math.pow(Math.max(0, 1 - k), WARM_POP.side);
+  const m = al + (ct - al) * k;
+  return [wx * m + (a - wx * al) * side, wy * m + (b - wy * al) * side];
 }
 
 /** Hue guard (grade-shader popHue): on the subject (weight w) the hue stays within SUBJECT_POP.hueMax of the source's. */

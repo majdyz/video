@@ -53,14 +53,28 @@ export function tapRect(u: number, v: number, w: number, h: number): { x: number
 }
 
 /**
+ * The settings the tap is solved under: the correction alone, at full Strength or the user's push. The balance is a
+ * property of the correction, not of the style on top of it: solved through the looks, the gains would also cancel
+ * whatever tint a look gives a neutral on purpose (the cobalt pull on a dark grey, Seabed's warm sand), and that
+ * counter-tint then shows wherever the look acts differently — a subject (Subject pop spares it the water's blue)
+ * turned green next to sand that came out neutral — and again when the style, Seabed or Strength is changed
+ * later. Solved on the correction, a neutral point is neutral before the looks, and each look treats it as it
+ * treats any white or grey (BLUE_WATER / RICH_LOOK leave near-neutrals alone by design).
+ */
+export function correctionOnly(s: UserSettings): UserSettings {
+  return { ...s, intensity: Math.max(1, s.intensity), vivid: 0, blue: 0, look: 0, seabed: 0, subjectPop: false, waterHue: 0, wbTap: undefined };
+}
+
+/**
  * Solves the tap. `ctx` = the frame's grade as rendered (the parameters in force — locked, eased —, the user's
  * settings, the frame's maps); any tap already in the settings is ignored (a second tap replaces the first).
  * `rgb` = the source colour at the point (tapSample), (u, v) its upright position.
  *
  * A damped Newton iteration on the log gains (two unknowns, two equations: Oklab a = b = 0 of the graded point),
  * with a per-channel fixed-point step where the Jacobian says nothing (a channel the grade does not let through).
- * Everything the grade does to that pixel is in the loop — veil removal, the water / object split, the red SNR
- * guard, looks, Seabed, Strength — so the answer is neutral on screen, not just in theory.
+ * Everything the correction does to that pixel is in the loop — veil removal, the water / object split, the red
+ * SNR guard, levels, the chroma ceilings, the push — but not the looks on top (correctionOnly): `before` / `after`
+ * are the chroma of the corrected point, the same whatever style is on.
  */
 export function solveTap(ctx: ApplyContext, rgb: readonly [number, number, number], u: number, v: number): TapSolve {
   const S = TAP_SOLVE;
@@ -70,8 +84,9 @@ export function solveTap(ctx: ApplyContext, rgb: readonly [number, number, numbe
   const bound = Math.log(TAP.max);
   const clampX = (x: number) => Math.min(bound, Math.max(-bound, x));
   type F = { a: number; b: number; c: number; lin: [number, number, number] };
+  const corr = correctionOnly(ctx.settings);
   const at = (x: number, y: number): F => {
-    const settings: UserSettings = { ...ctx.settings, wbTap: [Math.exp(x), Math.exp(y)] };
+    const settings: UserSettings = { ...corr, wbTap: [Math.exp(x), Math.exp(y)] };
     const o = gradePixel(resolveContext({ ...ctx, settings, debug: false, trace: undefined }), rgb[0], rgb[1], rgb[2], u, v);
     const l: [number, number, number] = [srgbToLinear(o[0]), srgbToLinear(o[1]), srgbToLinear(o[2])];
     const [, a, b] = linearToOklab(l[0], l[1], l[2]);
