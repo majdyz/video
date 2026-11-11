@@ -5,7 +5,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, boostParams, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, boostParams, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -337,6 +337,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const hn = warmPop(vv[0], hn1[0], hn1[1], wk);
   // Blue water style (opt-in): cobalt water, orange warm subjects, neutral silver, deeper shadows.
   const bl = blueLook(vv[0], hn[0], hn[1], s.blue ?? 0, greenWeight(p));
+  // Saturation by hue (RICH_LOOK; rides on the Vivid amount): richer colour, warm subjects more.
+  [bl[1], bl[2]] = richLook(bl[0], bl[1], bl[2], s.vivid ?? 0);
   // Seabed recovery (grade-shader, after the Blue water style): sand and reef to a warm neutral (and a little lighter) where the water left no red.
   if ((ctx.seabed ?? 0) > 0) {
     const sbw = seabedW(p, ctx.depth, u, v, lab0[0]) * ctx.seabed!;
@@ -583,6 +585,21 @@ export function blueLook(L: number, a: number, b: number, v: number, g: number):
   // Deeper shadows (monotone in L).
   const L2 = L * (1 - B.shadowK * v * (1 - smoothstep(0, B.shadowHi, L)));
   return [L2, a2, b2, Math.max(ct * w, Cw * warm)];
+}
+
+/** Saturation by hue (mirrors the shaders; see RICH_LOOK in params.ts). (L, a, b) = graded colour, v = Vivid amount. Returns (a, b). */
+export function richLook(L: number, a: number, b: number, v: number): [number, number] {
+  const C = Math.hypot(a, b);
+  if (v <= 0 || C < 1e-6) return [a, b];
+  const R = RICH_LOOK;
+  const h = Math.atan2(b, a);
+  const hh = h < 0 ? h + 2 * Math.PI : h;
+  const warm = smoothstep(R.warmIn0, R.warmIn1, hh) * (1 - smoothstep(R.warmOut0, R.warmOut1, hh));
+  const mag = smoothstep(R.magIn0, R.magIn1, hh) * (1 - smoothstep(R.magOut0, R.magOut1, hh));
+  const tone = smoothstep(R.cLo, R.cHi, C) * smoothstep(R.lLo, R.lHi, L) * (1 - smoothstep(R.hiLo, R.hiHi, L));
+  const g = (R.gain + R.warmGain * warm) * (1 - mag) * tone * v;
+  const k = 1 + g * Math.exp(-C / (R.top + (R.warmTop - R.top) * warm));
+  return [a * k, b * k];
 }
 
 /** Near-white pink guard (mirrors the shaders; see HIGHLIGHT_PINK in params.ts). Returns (a, b). */
