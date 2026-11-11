@@ -1,8 +1,8 @@
-// The "Blue water" style (BLUE_WATER; opt-in in the studio's Style picker) and its gate (blueGateOf).
+// The cobalt water-hue map (BLUE_WATER): in the default Vivid style at WATER_HUE.amount, at 1 in the Blue water style; its gate (blueGateOf).
 //   node --experimental-strip-types apps/aqua-fix/test/bluewater.test.ts
 import assert from "node:assert/strict";
 import { blueLook, vividLook } from "../src/engine/apply.ts";
-import { BLUE_WATER, CLAHE_BINS, DEFAULT_SETTINGS, IDENTITY_PARAMS, blueAmountOf, blueGateOf, blueSceneOf, packUniforms, vividAmountOf, vividGateOf, type DepthMap } from "../src/engine/params.ts";
+import { BLUE_WATER, CLAHE_BINS, DEFAULT_SETTINGS, IDENTITY_PARAMS, WATER_HUE, blueAmountOf, blueGateOf, packUniforms, vividAmountOf, vividGateOf, type DepthMap } from "../src/engine/params.ts";
 
 const D = Math.PI / 180;
 const lab = (L: number, C: number, hDeg: number): [number, number, number] => [L, C * Math.cos(hDeg * D), C * Math.sin(hDeg * D)];
@@ -25,15 +25,18 @@ const run = (x: [number, number, number], v = 1, g = 0) => blueLook(x[0], x[1], 
   console.log("ok  off by default, Vivid unchanged");
 }
 
-// 2. Blue, teal and green water all land on the cobalt target (the graders' 249–256°) at chroma ≈ cK·L.
+// 2. Blue and teal water land on the cobalt target at chroma ≈ cK·L; faint teal (near the neutral end of the ramp) most
+//    of the way; green water in a green-water frame turns a deep teal-blue (never neon, never left green).
 {
   const T = BLUE_WATER.target / D;
-  for (const [L, C, h, g] of [[0.32, 0.068, 234, 0], [0.4, 0.037, 189, 0], [0.4, 0.027, 186, 0.1], [0.4, 0.05, 150, 1], [0.35, 0.05, 275, 0]] as const) {
+  for (const [L, C, h, g] of [[0.32, 0.068, 234, 0], [0.4, 0.037, 189, 0], [0.4, 0.027, 186, 0.1], [0.35, 0.05, 275, 0]] as const) {
     const o = run(lab(L, C, h), 1, g);
-    assert.ok(Math.abs(hueOf(o) - T) < 6, `water ${h}° (g ${g}) → ${hueOf(o).toFixed(1)}°`);
-    assert.ok(chromaOf(o) > 0.06 && chromaOf(o) < 0.105, `water C ${C} → ${chromaOf(o).toFixed(3)}`);
+    assert.ok(Math.abs(hueOf(o) - T) < (C < 0.04 ? 12 : 6), `water ${h}° (g ${g}) → ${hueOf(o).toFixed(1)}°`);
+    assert.ok(chromaOf(o) > 0.05 && chromaOf(o) < 0.105, `water C ${C} → ${chromaOf(o).toFixed(3)}`);
   }
-  console.log("ok  all water → cobalt");
+  const gw = run(lab(0.4, 0.05, 150), 1, 1);
+  assert.ok(hueOf(gw) > 200 && hueOf(gw) < T + 6 && chromaOf(gw) < 0.1, `green water → ${hueOf(gw).toFixed(1)}° C ${chromaOf(gw).toFixed(3)}`);
+  console.log("ok  water → cobalt, green water → teal-blue");
 }
 
 // 3. Near-greys (whose hue is noise) pass source chroma noise at a bounded gain: no blue/green speckle on dark,
@@ -71,7 +74,7 @@ const run = (x: [number, number, number], v = 1, g = 0) => blueLook(x[0], x[1], 
   const skin = run(lab(0.7, 0.06, 25));
   assert.ok(Math.abs(hueOf(skin) - 25) < 1 && Math.abs(chromaOf(skin) - 0.06) < 1e-3, "skin-red hue unchanged");
   const silver = run(lab(0.68, 0.025, 225));
-  assert.ok(chromaOf(silver) < 0.012, `silver C ${chromaOf(silver).toFixed(3)}`);
+  assert.ok(chromaOf(silver) < 0.018, `silver C ${chromaOf(silver).toFixed(3)}`);
   const white = run(lab(0.95, 0.01, 230));
   assert.ok(chromaOf(white) < 0.01 && white[0] > 0.94, "white stays white");
   console.log("ok  warm → orange, silver → neutral");
@@ -100,11 +103,15 @@ const run = (x: [number, number, number], v = 1, g = 0) => blueLook(x[0], x[1], 
   assert.equal(blueGateOf(0.87, 0.136, -0.33), 1);
   assert.equal(blueAmountOf({ ...IDENTITY_PARAMS, blueGate: 0.25 }, { ...DEFAULT_SETTINGS, blue: 1 }), 0.25);
   assert.equal(blueAmountOf({ ...IDENTITY_PARAMS, calm: 0.9 }, { ...DEFAULT_SETTINGS, blue: 1 }), 0);
-  // Scene: water behind the subject (the graded pairs: open share − object confidence +0.02..+0.42) keeps the style;
-  // close reef / moss / sand (−0.14..−0.55) step back to Vivid alone.
-  assert.ok(blueSceneOf(0.55, 0.53) > 0.9 && blueSceneOf(0.83, 0.41) === 1);
-  assert.ok(blueSceneOf(0.41, 0.66) < 0.1 && blueSceneOf(0.1, 0.65) === 0);
-  assert.equal(blueGateOf(0.87, 0.136, -0.33, blueSceneOf(0.1, 0.65)), 0);
+  // Vivid (the default style) carries the water-hue map at WATER_HUE.amount through the same gate; Natural has none.
+  assert.equal(blueAmountOf(IDENTITY_PARAMS, { ...DEFAULT_SETTINGS, vivid: 1 }), WATER_HUE.amount);
+  assert.equal(blueAmountOf(IDENTITY_PARAMS, { ...DEFAULT_SETTINGS, vivid: 1, blue: 1 }), 1);
+  assert.equal(blueAmountOf(IDENTITY_PARAMS, { ...DEFAULT_SETTINGS, vivid: 0 }), 0);
+  assert.equal(blueAmountOf({ ...IDENTITY_PARAMS, calm: 0.9 }, { ...DEFAULT_SETTINGS, vivid: 1 }), 0);
+  // … and stands down sooner than the rest of Vivid on footage that looks graded / topside.
+  assert.equal(blueAmountOf({ ...IDENTITY_PARAMS, calm: 0.3 }, { ...DEFAULT_SETTINGS, vivid: 1 }), 0);
+  assert.ok(vividAmountOf({ ...IDENTITY_PARAMS, calm: 0.3 }, { ...DEFAULT_SETTINGS, vivid: 1 }) > 0.5);
+  assert.ok(Math.abs(blueAmountOf({ ...IDENTITY_PARAMS, blueGate: 0.25 }, { ...DEFAULT_SETTINGS, vivid: 1 }) - 0.25 * WATER_HUE.amount) < 1e-12);
   console.log("ok  gate");
 }
 

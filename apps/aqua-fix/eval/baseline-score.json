@@ -10,43 +10,43 @@
  "summary": {
   "reference": {
    "source": 18.86,
-   "natural": 14.46,
-   "vivid": 13.71,
-   "blue": 10.62,
-   "waterHueErr": 43.05,
-   "L50Err": 8.44,
-   "L5Err": 5.3,
-   "warmCErr": 5.41
+   "natural": 13.72,
+   "vivid": 10.06,
+   "blue": 8.65,
+   "waterHueErr": 17.92,
+   "L50Err": 4.83,
+   "L5Err": 3.34,
+   "warmCErr": 4.94
   },
   "harm": {
-   "dE": 3.48,
-   "dEMax": 14.05
+   "dE": 3.6,
+   "dEMax": 14.02
   },
   "stability": {
-   "lightStd": 2,
-   "lightJump": 4.64,
-   "wbStd": 2.33,
+   "lightStd": 2.23,
+   "lightJump": 4.81,
+   "wbStd": 2.58,
    "wbSwing": 0.54,
    "expSwing": 0.02
   },
   "diagnostics": {
-   "waterWarm": 0.98,
-   "chroma": 0.82
+   "waterWarm": 0.62,
+   "chroma": 0.87
   }
  },
  "pairs": {
   "IMG_9552": {
    "source": 17.46,
    "swd": {
-    "natural": 12.98,
-    "vivid": 10,
-    "blue": 15.92
+    "natural": 11.63,
+    "vivid": 9.25,
+    "blue": 11.38
    },
    "out": {
-    "waterHue": 208.37,
-    "L50": 40.34,
-    "L5": 2.67,
-    "warmC": 15.74
+    "waterHue": 235.19,
+    "L50": 36.2,
+    "L5": 1.2,
+    "warmC": 15.12
    },
    "ref": {
     "waterHue": 240.64,
@@ -55,24 +55,24 @@
     "warmC": 22.03
    },
    "err": {
-    "waterHue": 32.27,
-    "L50": 5.71,
-    "L5": 0.94,
-    "warmC": 6.28
+    "waterHue": 5.44,
+    "L50": 1.58,
+    "L5": 2.42,
+    "warmC": 6.91
    }
   },
   "h0": {
    "source": 15.87,
    "swd": {
-    "natural": 14.65,
-    "vivid": 14.42,
-    "blue": 10.38
+    "natural": 14.48,
+    "vivid": 11.27,
+    "blue": 10.08
    },
    "out": {
-    "waterHue": 238.72,
-    "L50": 30.52,
-    "L5": 14.78,
-    "warmC": 7.1
+    "waterHue": 261.09,
+    "L50": 30.24,
+    "L5": 13.52,
+    "warmC": 5.95
    },
    "ref": {
     "waterHue": 273.65,
@@ -81,24 +81,24 @@
     "warmC": 6.21
    },
    "err": {
-    "waterHue": 34.93,
-    "L50": 10.02,
-    "L5": 4.63,
-    "warmC": 0.89
+    "waterHue": 12.56,
+    "L50": 10.3,
+    "L5": 5.89,
+    "warmC": 0.25
    }
   },
   "h1": {
    "source": 17.88,
    "swd": {
     "natural": 16.6,
-    "vivid": 16.4,
-    "blue": 7.23
+    "vivid": 11.32,
+    "blue": 7.24
    },
    "out": {
-    "waterHue": 198.19,
-    "L50": 30.34,
-    "L5": 2.1,
-    "warmC": 11.06
+    "waterHue": 234.15,
+    "L50": 30.18,
+    "L5": 1.53,
+    "warmC": 8.85
    },
    "ref": {
     "waterHue": 269.82,
@@ -107,24 +107,24 @@
     "warmC": 8.39
    },
    "err": {
-    "waterHue": 71.64,
-    "L50": 9.18,
-    "L5": 1.31,
-    "warmC": 2.67
+    "waterHue": 35.67,
+    "L50": 9.02,
+    "L5": 0.74,
+    "warmC": 0.46
    }
   },
   "h2": {
    "source": 20.43,
    "swd": {
-    "natural": 18.87,
-    "vivid": 18.42,
-    "blue": 8.94
+    "natural": 18.9,
+    "vivid": 14.89,
+    "blue": 11.84
    },
    "out": {
-    "waterHue": 181.83,
-    "L50": 37.31,
-    "L5": 13.82,
-    "warmC": 9.2
+    "waterHue": 234.11,
+    "L50": 35.88,
+    "L5": 11.47,
+    "warmC": 9.36
    },
    "ref": {
     "waterHue": 274.09,
@@ -133,24 +133,24 @@
     "warmC": 22.71
    },
    "err": {
-    "waterHue": 92.26,
-    "L50": 1.91,
-    "L5": 7.59,
-    "warmC": 13.51
+    "waterHue": 39.98,
+    "L50": 0.48,
+    "L5": 5.24,
+    "warmC": 13.35
    }
   },
   "u1_freediver_cyan": {
    "source": 23.99,
    "swd": {
-    "natural": 16.22,
-    "vivid": 16.65,
-    "blue": 16.65
+    "natural": 12.48,
+    "vivid": 10.83,
+    "blue": 12.08
    },
    "out": {
-    "waterHue": 228.89,
-    "L50": 44.19,
-    "L5": 22.44,
-    "warmC": 7.54
+    "waterHue": 257,
+    "L50": 37.48,
+    "L5": 15.05,
+    "warmC": 6.56
    },
    "ref": {
     "waterHue": 253.83,
@@ -159,24 +159,24 @@
     "warmC": null
    },
    "err": {
-    "waterHue": 24.94,
-    "L50": 17.67,
-    "L5": 11.02,
+    "waterHue": 3.17,
+    "L50": 10.96,
+    "L5": 3.64,
     "warmC": null
    }
   },
   "u3_freediver_green": {
    "source": 34.58,
    "swd": {
-    "natural": 21.88,
-    "vivid": 19.3,
-    "blue": 9.5
+    "natural": 21.96,
+    "vivid": 9.99,
+    "blue": 3.79
    },
    "out": {
-    "waterHue": 216.22,
-    "L50": 42.36,
-    "L5": 18.05,
-    "warmC": 9.44
+    "waterHue": 254.48,
+    "L50": 33.06,
+    "L5": 8.4,
+    "warmC": 6.47
    },
    "ref": {
     "waterHue": 269.12,
@@ -185,24 +185,24 @@
     "warmC": null
    },
    "err": {
-    "waterHue": 52.9,
-    "L50": 8.52,
-    "L5": 7.39,
+    "waterHue": 14.64,
+    "L50": 0.78,
+    "L5": 2.27,
     "warmC": null
    }
   },
   "u5_nurseshark": {
    "source": 14.13,
    "swd": {
-    "natural": 7.67,
-    "vivid": 7.7,
-    "blue": 9.57
+    "natural": 6.9,
+    "vivid": 6.09,
+    "blue": 5.95
    },
    "out": {
-    "waterHue": 269.37,
-    "L50": 44.96,
-    "L5": 10.89,
-    "warmC": 5.28
+    "waterHue": 272.99,
+    "L50": 36.03,
+    "L5": 3.53,
+    "warmC": 4.83
    },
    "ref": {
     "waterHue": 281.13,
@@ -211,10 +211,10 @@
     "warmC": 1.82
    },
    "err": {
-    "waterHue": 11.76,
-    "L50": 10.28,
-    "L5": 5.2,
-    "warmC": 3.46
+    "waterHue": 8.14,
+    "L50": 1.36,
+    "L5": 2.16,
+    "warmC": 3.01
    }
   },
   "u7_seafan_top": {
@@ -250,75 +250,75 @@
    "category": "open_blue_big",
    "frames": 16,
    "shots": 1,
-   "dE": 11.25,
-   "dEMax": 12.58,
-   "lightStd": 0.69,
-   "lightJump": 1.48,
-   "wbStd": 1.69,
+   "dE": 20.04,
+   "dEMax": 21.84,
+   "lightStd": 0.89,
+   "lightJump": 1.81,
+   "wbStd": 1.21,
    "wbSwing": 1.55,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 0.79
+   "chroma": 0.81
   },
   "cave_spring_surface_to_under": {
    "id": "cave_spring_surface_to_under",
    "category": "cenote_cave_sunbeams",
    "frames": 16,
    "shots": 3,
-   "dE": 22.24,
-   "dEMax": 29.51,
-   "lightStd": 2.23,
-   "lightJump": 5.22,
-   "wbStd": 2.85,
-   "wbSwing": 0.8,
+   "dE": 28.64,
+   "dEMax": 35.45,
+   "lightStd": 2.28,
+   "lightJump": 5.13,
+   "wbStd": 3.13,
+   "wbSwing": 0.68,
    "expSwing": 0.22,
-   "waterWarm": 0.01,
-   "chroma": 0.62
+   "waterWarm": 0,
+   "chroma": 0.65
   },
   "divers_shallow_reef": {
    "id": "divers_shallow_reef",
    "category": "divers",
    "frames": 16,
    "shots": 1,
-   "dE": 9.79,
-   "dEMax": 13.8,
-   "lightStd": 1.28,
-   "lightJump": 1.01,
-   "wbStd": 6.2,
-   "wbSwing": 1.1,
+   "dE": 15.7,
+   "dEMax": 17.79,
+   "lightStd": 1.4,
+   "lightJump": 1.13,
+   "wbStd": 6.83,
+   "wbSwing": 1.09,
    "expSwing": 0,
-   "waterWarm": 2.7,
-   "chroma": 0.79
+   "waterWarm": 1.95,
+   "chroma": 0.89
   },
   "divers_wreck_cabo": {
    "id": "divers_wreck_cabo",
    "category": "divers",
    "frames": 16,
    "shots": 1,
-   "dE": 4.71,
-   "dEMax": 5.3,
-   "lightStd": 0.87,
-   "lightJump": 1.16,
-   "wbStd": 1.32,
+   "dE": 9.87,
+   "dEMax": 10.51,
+   "lightStd": 1.07,
+   "lightJump": 1.18,
+   "wbStd": 2.3,
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 0.7
+   "chroma": 0.75
   },
   "graded_blueholes_sunbeams": {
    "id": "graded_blueholes_sunbeams",
    "category": "graded",
    "frames": 16,
    "shots": 2,
-   "dE": 1.79,
-   "dEMax": 2.84,
-   "lightStd": 0.25,
-   "lightJump": 0.54,
-   "wbStd": 0.46,
+   "dE": 2.39,
+   "dEMax": 4.2,
+   "lightStd": 0.24,
+   "lightJump": 0.43,
+   "wbStd": 0.43,
    "wbSwing": 0.62,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 0.98
+   "chroma": 0.95
   },
   "graded_noaa_samoa": {
    "id": "graded_noaa_samoa",
@@ -340,15 +340,15 @@
    "category": "graded",
    "frames": 16,
    "shots": 2,
-   "dE": 6.51,
-   "dEMax": 9.88,
+   "dE": 7,
+   "dEMax": 12.2,
    "lightStd": 1.37,
    "lightJump": 5.17,
-   "wbStd": 1.96,
+   "wbStd": 1.92,
    "wbSwing": 0.5,
    "expSwing": 0,
-   "waterWarm": 1.46,
-   "chroma": 1.01
+   "waterWarm": 1.16,
+   "chroma": 1.1
   },
   "graded_oceana_lionfish": {
    "id": "graded_oceana_lionfish",
@@ -370,14 +370,14 @@
    "category": "graded",
    "frames": 16,
    "shots": 4,
-   "dE": 6.89,
-   "dEMax": 11.61,
-   "lightStd": 0.6,
-   "lightJump": 2.75,
-   "wbStd": 1.92,
+   "dE": 6.84,
+   "dEMax": 11.48,
+   "lightStd": 0.66,
+   "lightJump": 2.3,
+   "wbStd": 1.81,
    "wbSwing": 0.24,
    "expSwing": 0,
-   "waterWarm": 0.5,
+   "waterWarm": 0.41,
    "chroma": 0.97
   },
   "green_reservoir_divers": {
@@ -385,15 +385,15 @@
    "category": "green_murky",
    "frames": 16,
    "shots": 2,
-   "dE": 14.36,
-   "dEMax": 30.81,
-   "lightStd": 5.79,
-   "lightJump": 15.29,
-   "wbStd": 5.65,
+   "dE": 18.17,
+   "dEMax": 39.37,
+   "lightStd": 7.67,
+   "lightJump": 16.4,
+   "wbStd": 6.9,
    "wbSwing": 1.8,
    "expSwing": 0.18,
    "waterWarm": 0,
-   "chroma": 0.46
+   "chroma": 0.47
   },
   "reef_anemonefish": {
    "id": "reef_anemonefish",
@@ -415,45 +415,45 @@
    "category": "sand_seagrass",
    "frames": 16,
    "shots": 2,
-   "dE": 11.6,
-   "dEMax": 22.62,
-   "lightStd": 8.67,
-   "lightJump": 25.08,
-   "wbStd": 1.52,
+   "dE": 12.4,
+   "dEMax": 24.76,
+   "lightStd": 8.92,
+   "lightJump": 25.87,
+   "wbStd": 2.41,
    "wbSwing": 0.07,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 0.76
+   "chroma": 0.8
   },
   "school_sardines": {
    "id": "school_sardines",
    "category": "schools",
    "frames": 16,
    "shots": 1,
-   "dE": 11.99,
-   "dEMax": 15.76,
-   "lightStd": 1.67,
-   "lightJump": 2.27,
-   "wbStd": 3.99,
-   "wbSwing": 0.52,
+   "dE": 13.24,
+   "dEMax": 16.13,
+   "lightStd": 1.68,
+   "lightJump": 2.24,
+   "wbStd": 4.26,
+   "wbSwing": 0.49,
    "expSwing": 0,
-   "waterWarm": 3.74,
-   "chroma": 0.77
+   "waterWarm": 2.97,
+   "chroma": 0.95
   },
   "tilt_reef_to_blue_barracuda": {
    "id": "tilt_reef_to_blue_barracuda",
    "category": "camera_motion_tilt",
    "frames": 16,
    "shots": 1,
-   "dE": 16.74,
-   "dEMax": 21.48,
-   "lightStd": 8.84,
-   "lightJump": 15.35,
-   "wbStd": 5.51,
+   "dE": 22.2,
+   "dEMax": 28.27,
+   "lightStd": 9.69,
+   "lightJump": 16.35,
+   "wbStd": 5.32,
    "wbSwing": 1.23,
    "expSwing": 0,
-   "waterWarm": 1.14,
-   "chroma": 0.64
+   "waterWarm": 0.36,
+   "chroma": 0.8
   },
   "topside_blacktip_shallows": {
    "id": "topside_blacktip_shallows",
@@ -490,30 +490,30 @@
    "category": "topside",
    "frames": 16,
    "shots": 1,
-   "dE": 8.87,
-   "dEMax": 14.05,
-   "lightStd": 0.97,
-   "lightJump": 2.47,
-   "wbStd": 5.23,
+   "dE": 8.75,
+   "dEMax": 14.02,
+   "lightStd": 0.99,
+   "lightJump": 2.52,
+   "wbStd": 5.25,
    "wbSwing": 0.72,
    "expSwing": 0,
-   "waterWarm": 3.1,
-   "chroma": 0.86
+   "waterWarm": 1.85,
+   "chroma": 0.85
   },
   "user_drift": {
    "id": "user_drift",
    "category": "user",
    "frames": 16,
    "shots": 1,
-   "dE": 13.34,
-   "dEMax": 15.69,
-   "lightStd": 1.3,
-   "lightJump": 1.36,
-   "wbStd": 2.65,
-   "wbSwing": 0.65,
+   "dE": 13.47,
+   "dEMax": 15.3,
+   "lightStd": 1.72,
+   "lightJump": 1.68,
+   "wbStd": 3.57,
+   "wbSwing": 0.68,
    "expSwing": 0,
-   "waterWarm": 4.93,
-   "chroma": 0.36
+   "waterWarm": 2.48,
+   "chroma": 0.49
   }
  }
 }
