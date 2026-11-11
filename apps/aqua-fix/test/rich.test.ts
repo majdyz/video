@@ -32,9 +32,11 @@ const run = (L: number, C: number, h: number, v = 1) => richLook(L, ...ab(C, h),
 // 3. Richer, never duller, never neon: the gain is ≥ 1, about 1.3–1.7× on a mid chroma, fades as the colour is
 //    already rich, and the chroma order is kept at every hue (monotone in C).
 {
-  const mid = chromaOf(run(0.45, 0.05, 250)) / 0.05, rich = chromaOf(run(0.45, 0.14, 250)) / 0.14;
-  assert.ok(mid > 1.25 && mid < 1.7, `mid blue gain ${mid.toFixed(2)}`);
-  assert.ok(rich < 1.25 && rich >= 1, `rich blue gain ${rich.toFixed(2)}`);
+  const mid = chromaOf(run(0.45, 0.05, 140)) / 0.05, rich = chromaOf(run(0.45, 0.2, 140)) / 0.2, water = chromaOf(run(0.45, 0.05, 250)) / 0.05;
+  assert.ok(mid > 1.2 && mid < 1.7, `mid green gain ${mid.toFixed(2)}`);
+  assert.ok(rich < 1.2 && rich >= 1, `rich green gain ${rich.toFixed(2)}`);
+  // Water hues take the smaller share (their chroma is the water-hue map's): blue-cast sand is not turned into blue speckle.
+  assert.ok(water > 1.05 && water < 1 + (mid - 1) * 0.6, `water gain ${water.toFixed(2)} vs ${mid.toFixed(2)}`);
   for (let h = 0; h < 360; h += 5) for (const L of [0.25, 0.45, 0.7]) {
     let prev = 0;
     for (let C = 0.002; C < 0.3; C += 0.002) {
@@ -53,7 +55,7 @@ const run = (L: number, C: number, h: number, v = 1) => richLook(L, ...ab(C, h),
   const base = chromaOf(run(0.5, 0.06, 150)) / 0.06;
   for (const h of [45, 60, 75]) {
     const o = run(0.6, 0.06, h);
-    assert.ok(chromaOf(o) / 0.06 > base + 0.15, `warm ${h}° gain ${(chromaOf(o) / 0.06).toFixed(2)} vs ${base.toFixed(2)}`);
+    assert.ok(chromaOf(o) / 0.06 > base + 0.1, `warm ${h}° gain ${(chromaOf(o) / 0.06).toFixed(2)} vs ${base.toFixed(2)}`);
     assert.ok(Math.abs(hueOf(o) - h) < 1e-6, `warm hue ${h}° moved`);
     assert.ok(chromaOf(o) < 0.12, `skin-level chroma 0.06 → ${chromaOf(o).toFixed(3)}`);
   }

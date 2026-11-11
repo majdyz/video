@@ -597,7 +597,8 @@ export function richLook(L: number, a: number, b: number, v: number): [number, n
   const warm = smoothstep(R.warmIn0, R.warmIn1, hh) * (1 - smoothstep(R.warmOut0, R.warmOut1, hh));
   const mag = smoothstep(R.magIn0, R.magIn1, hh) * (1 - smoothstep(R.magOut0, R.magOut1, hh));
   const tone = smoothstep(R.cLo, R.cHi, C) * smoothstep(R.lLo, R.lHi, L) * (1 - smoothstep(R.hiLo, R.hiHi, L));
-  const g = (R.gain + R.warmGain * warm) * (1 - mag) * tone * v;
+  const cool = smoothstep(R.coolIn0, R.coolIn1, hh) * (1 - smoothstep(R.magOut0, R.magOut1, hh));
+  const g = (R.gain * (1 - R.coolCut * cool) + R.warmGain * warm) * (1 - mag) * tone * v;
   const k = 1 + g * Math.exp(-C / (R.top + (R.warmTop - R.top) * warm));
   return [a * k, b * k];
 }

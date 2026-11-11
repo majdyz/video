@@ -400,7 +400,8 @@ vec2 richLook(vec3 lab, float v) {
   float warm = smoothstepf(RL_WARM_IN0, RL_WARM_IN1, hh) * (1.0 - smoothstepf(RL_WARM_OUT0, RL_WARM_OUT1, hh));
   float mag = smoothstepf(RL_MAG_IN0, RL_MAG_IN1, hh) * (1.0 - smoothstepf(RL_MAG_OUT0, RL_MAG_OUT1, hh));
   float tone = smoothstepf(RL_C_LO, RL_C_HI, C) * smoothstepf(RL_L_LO, RL_L_HI, lab.x) * (1.0 - smoothstepf(RL_HI_LO, RL_HI_HI, lab.x));
-  float g = (RL_GAIN + RL_WARM_GAIN * warm) * (1.0 - mag) * tone * v;
+  float cool = smoothstepf(RL_COOL_IN0, RL_COOL_IN1, hh) * (1.0 - smoothstepf(RL_MAG_OUT0, RL_MAG_OUT1, hh));
+  float g = (RL_GAIN * (1.0 - RL_COOL_CUT * cool) + RL_WARM_GAIN * warm) * (1.0 - mag) * tone * v;
   return lab.yz * (1.0 + g * exp(-C / (RL_TOP + (RL_WARM_TOP - RL_TOP) * warm)));
 }
 // Near-white pink guard (see HIGHLIGHT_PINK; mirrors apply.ts highlightPink).
@@ -1015,7 +1016,8 @@ fn richLook(lab: vec3<f32>, v: f32) -> vec2<f32> {
   let warm = smoothstepf(RL_WARM_IN0, RL_WARM_IN1, hh) * (1.0 - smoothstepf(RL_WARM_OUT0, RL_WARM_OUT1, hh));
   let mag = smoothstepf(RL_MAG_IN0, RL_MAG_IN1, hh) * (1.0 - smoothstepf(RL_MAG_OUT0, RL_MAG_OUT1, hh));
   let tone = smoothstepf(RL_C_LO, RL_C_HI, C) * smoothstepf(RL_L_LO, RL_L_HI, lab.x) * (1.0 - smoothstepf(RL_HI_LO, RL_HI_HI, lab.x));
-  let g = (RL_GAIN + RL_WARM_GAIN * warm) * (1.0 - mag) * tone * v;
+  let cool = smoothstepf(RL_COOL_IN0, RL_COOL_IN1, hh) * (1.0 - smoothstepf(RL_MAG_OUT0, RL_MAG_OUT1, hh));
+  let g = (RL_GAIN * (1.0 - RL_COOL_CUT * cool) + RL_WARM_GAIN * warm) * (1.0 - mag) * tone * v;
   return lab.yz * (1.0 + g * exp(-C / (RL_TOP + (RL_WARM_TOP - RL_TOP) * warm)));
 }
 fn highlightPink(L: f32, ab: vec2<f32>) -> vec2<f32> {
