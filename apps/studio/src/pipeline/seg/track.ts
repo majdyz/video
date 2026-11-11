@@ -27,6 +27,14 @@ import { area, bbox, DEPART_STEP, departMap, guidedFilter, iou, nearMap, promptF
 export const SEG = {
   /** Keyframes per clip second. */
   fps: 4,
+  /** The same on the lite (phone) model, where a keyframe takes seconds: half as many, with extra ones in between
+   * (back to `fps`) where the tracker and the flow-carried mask disagree (session.ts refine). */
+  liteFps: 2,
+  /** A step whose mask overlaps the flow-carried one by less than this (IoU; the level the confidence starts to
+   * fall at) is a hard one, as is a re-prompted or a runaway step... */
+  adaptAgree: 0.7,
+  /** ...and the object's next this many steps are on the fine grid (1 s at twice liteFps). */
+  adaptHold: 4,
   /** Mask grid: longest side (px). */
   maskLong: 320,
   /** Follow a tapped subject at most this far either side of its prompt (s). */

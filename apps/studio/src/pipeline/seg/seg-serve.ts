@@ -14,7 +14,7 @@ type Req =
   | { id: number; type: "step"; key: string; frame: number; points: [number, number][] | null; labels: number[] | null; reverse: boolean }
   | { id: number; type: "drop"; key: string }
   // The background session (session.ts): the clip's own decoder, objects, per-frame masks posted as events.
-  | { id: number; type: "session-open"; file: File; start: number; end: number }
+  | { id: number; type: "session-open"; file: File; start: number; end: number; fps?: number }
   | { id: number; type: "session-add"; object: SegObject & { id: number } }
   | { id: number; type: "session-remove"; object: number }
   | { id: number; type: "session-restore"; object: number }
@@ -114,7 +114,7 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
         error: (msg) => { if (session === s) session = null; emit({ ev: "error", msg, heapMB: wasmHeapMB() }); },
         // Each breadcrumb carries the WASM heap (it only grows: the step that took it past the phone's limit shows).
         trace: (msg) => emit({ ev: "trace", msg: `${msg} · heap ${wasmHeapMB()} MB` }),
-      });
+      }, { fps: r.fps });
       session = s;
       post({ ok: true, width: frames.width, height: frames.height, mw: s.mw, mh: s.mh, i0: s.grid.i0, n: s.grid.n });
     } else if (r.type === "session-busy") {

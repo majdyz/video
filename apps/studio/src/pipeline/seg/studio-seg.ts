@@ -8,7 +8,7 @@ import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelecti
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
 import { aiCrashedLast, aiWorking, crumb } from "../crumbs.ts";
 import { deviceFacts, isMobile, isWeakDevice } from "../device.ts";
-import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
+import { segFps, segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
 import { confWeight, mapPrompt, maskSize, SEG, type SegObject } from "./track.ts";
 import { spanCovers, type TrimRange } from "../trim.ts";
@@ -700,7 +700,7 @@ export class SubjectSeg {
       // The replay re-tracks the clip: at work until its idle.
       aiWorking(true);
       const span = this.span;
-      await model.sessionOpen(file, span.start, span.end);
+      await model.sessionOpen(file, span.start, span.end, segFps());
       if (this.file !== file || this.span !== span) return false;
       this.hibernated = false;
       for (const l of this.log) {
@@ -775,7 +775,7 @@ export class SubjectSeg {
       try {
         crumb("ai: session open");
         aiWorking(true);
-        const info = await model.sessionOpen(file, span.start, span.end);
+        const info = await model.sessionOpen(file, span.start, span.end, segFps());
         crumb(`ai: session ${info.width}x${info.height}, ${info.n} frames`);
         if (this.file !== file || this.span !== span) return null;
         this.live = new SegLive(info);

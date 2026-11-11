@@ -3,7 +3,7 @@
 //   node --experimental-strip-types apps/studio/test/seg-session.test.ts
 import assert from "node:assert/strict";
 import type { EdgeTam } from "../src/pipeline/seg/edgetam.ts";
-import { frameKey, SegSession, type SessionEvents, type SessionFrameOut, type SessionFrames } from "../src/pipeline/seg/session.ts";
+import { frameKey, SegSession, type SessionEvents, type SessionFrameOut, type SessionFrames, type SessionOptions } from "../src/pipeline/seg/session.ts";
 import type { SegObject } from "../src/pipeline/seg/track.ts";
 import { rleDecode } from "../src/pipeline/seg/mask.ts";
 
@@ -14,7 +14,9 @@ const popped = (frames: Map<number, SessionFrameOut>) => [...frames.values()].fi
 
 /** A frame of the fake clip: a soft texture with a bright square (the subject) at x0 (share of the width). */
 type FakeFrame = { t: number };
-const subjectX = (t: number) => 0.3 + 0.02 * t;
+/** The subject jumps 0.3 of the width at this clip time (no flow can follow it: a hard step for the tracker). */
+let jumpAt = Infinity;
+const subjectX = (t: number) => 0.3 + 0.02 * t + (t >= jumpAt ? 0.3 : 0);
 const inSubject = (u: number, v: number, t: number) => Math.abs(u - subjectX(t)) < 0.1 && Math.abs(v - 0.5) < 0.2;
 
 /** OffscreenCanvas as the session uses it: drawImage of a FakeFrame, read back as RGBA. */
@@ -58,7 +60,7 @@ type Fake = {
   disposed: boolean;
 };
 
-function fake(opts: Partial<Pick<Fake, "failAt" | "visible">> = {}): Fake {
+function fake(opts: Partial<Pick<Fake, "failAt" | "visible">> & { lite?: boolean } = {}): Fake {
   const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, reads: [], encodes: 0, failAt: opts.failAt ?? Infinity, visible: opts.visible ?? [-Infinity, Infinity], disposed: false };
   let encT = 0;
   const lw = 64, lh = 36;
@@ -68,7 +70,7 @@ function fake(opts: Partial<Pick<Fake, "failAt" | "visible">> = {}): Fake {
     return { logits, lw, lh, score: on ? 5 : -5, iou: 0.95 };
   };
   f.model = {
-    lite: false,
+    lite: !!opts.lite,
     timing: { encode: 0, encodes: 0, attend: 0, decoder: 0, memEnc: 0, steps: 0 },
     async encode(rgba: Uint8ClampedArray) {
       if (++f.encodes === f.failAt) throw new Error("failed to allocate a buffer of size 67108864");
@@ -100,7 +102,7 @@ type Run = {
 };
 
 /** A session whose "main thread" answers every request for seeds with `seedsFor(t)` (null: leaves it unanswered). */
-function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: number) => (SegObject & { id: number })[] | null): Run {
+function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: number) => (SegObject & { id: number })[] | null, opts: SessionOptions = {}): Run {
   let wake: (() => void) | null = null;
   const done = () => { const w = wake; wake = null; w?.(); };
   const r: Run = {
@@ -120,7 +122,7 @@ function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: numbe
     },
     error: (msg) => { r.errors.push(msg); done(); },
   };
-  r.s = new SegSession(f.model, f.frames, span, ev);
+  r.s = new SegSession(f.model, f.frames, span, ev, opts);
   return r;
 }
 
@@ -332,4 +334,68 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   assert.equal(g.encodes, n, "a stopped session has left the model");
   assert.equal(q.idles, 0);
   console.log("session: tracks the trim only; re-scope keeps the taps: ok");
+}
+
+// ---------------------------------------------------------------- adaptive keyframes (the lite model)
+
+{
+  const pass = async (f: Fake, end: number, opts: SessionOptions = {}) => {
+    const r = open(f, { start: 0, end }, () => [], opts);
+    const done = r.settled();
+    r.s.seeds(0, [subject(0)]);
+    await done;
+    assert.equal(r.errors.length, 0);
+    assert.equal(r.frames.size, r.s.grid.n, "every grid frame filled");
+    return r;
+  };
+  // A calm clip: the lite model steps twice a second (half the model runs of the full one's four), nothing extra.
+  const full = fake(), lite = fake({ lite: true });
+  await pass(full, 4);
+  const calm = await pass(lite, 4);
+  assert.equal(full.encodes, 17);
+  assert.equal(lite.encodes, 9);
+  assert.equal(calm.s.profile().extraKeys, 0);
+  assert.equal(popped(calm.frames), calm.s.grid.n, "the subject is popped on every frame");
+  // `?segfps=N` fixes the rate (no extra keyframes), on either model.
+  const fixed = fake({ lite: true });
+  await pass(fixed, 4, { fps: 4 });
+  assert.equal(fixed.encodes, 17);
+  const slow = fake();
+  await pass(slow, 4, { fps: 2 });
+  assert.equal(slow.encodes, 9);
+
+  // The subject jumps at 1.1 s: the step at 1.5 s disagrees with what the flow carried, and the next second is
+  // tracked on the fine grid (1.75 s and 2.25 s on top of the regular 2 s and 2.5 s), then twice a second again.
+  jumpAt = 1.1;
+  const hard = fake({ lite: true });
+  const a = await pass(hard, 4);
+  assert.equal(a.s.profile().extraKeys, 2);
+  assert.deepEqual(a.s.keys, [0, 0.5, 1, 1.5, 1.75, 2, 2.25, 2.5, 3, 3.5, 4]);
+  assert.equal(hard.encodes, 11);
+
+  // A tap whose keyframe (0.75 s) the autos do not have, and the autos' extra keyframes the tap may not have: every
+  // object is in every keyframe's mask (carried there along the flow), whichever was tracked first. Tap after the
+  // pass, and tap and seeds up front (a replay), end with the same frames, the subject popped on all of them.
+  const auto = subject(0), tap = { ...subject(0.8), id: 5000 };
+  const f1 = fake({ lite: true });
+  const one = open(f1, { start: 0, end: 4 }, () => []);
+  let end = one.settled();
+  one.s.seeds(0, [auto]);
+  await end;
+  end = one.settled();
+  one.s.add(tap);
+  await end;
+  assert.ok(one.s.keys.includes(0.75), "the tap's own keyframe");
+  assert.ok(one.s.profile().carried > 0, "objects without a keyframe there are carried to it");
+  assert.equal(popped(one.frames), one.s.grid.n, "no object drops out at another's keyframe");
+  const f2 = fake({ lite: true });
+  const two = open(f2, { start: 0, end: 4 }, () => []);
+  end = two.settled();
+  two.s.add(tap);
+  two.s.seeds(0, [auto]);
+  await end;
+  assert.deepEqual(two.s.keys, one.s.keys);
+  sameFrames(one.frames, two.frames, "tap before / after the pass");
+  jumpAt = Infinity;
+  console.log("session: lite model → 2 keyframes a second, extra ones where the flow disagrees; order-independent: ok");
 }
