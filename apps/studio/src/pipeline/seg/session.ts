@@ -102,6 +102,9 @@ type ObjState = {
 
 const yieldNow = () => new Promise<void>((r) => setTimeout(r, 0));
 
+/** The decoded-frame cache's key for clip time t (0.1 ms steps: grid frames and keyframes that coincide share one). */
+export const frameKey = (t: number) => Math.round(t * 1e4);
+
 export class SegSession {
   readonly mw: number;
   readonly mh: number;
@@ -340,7 +343,11 @@ export class SegSession {
   // ------------------------------------------------------------------ frames
 
   private async pixels(t: number, need1024: boolean): Promise<{ luma: Float32Array; rgba1024?: Uint8ClampedArray }> {
-    const i = Math.round(t * SEG.sampleHz) - this.grid.i0;
+    // By the frame's own time, not its slot on the 30 Hz fill grid: at 4 keyframes a second every other keyframe
+    // (0.25 s, 0.75 s: "frame 7.5") lies between two grid frames, and rounded to a slot it shared the next grid
+    // frame's entry. Whichever was read first then stood in for the other: a mask one frame stale twice a second,
+    // and a refill (after a tap or an undo) that differed from the first fill with the cache's order.
+    const i = frameKey(t);
     const hit = this.lumaCache.get(i);
     if (hit && !need1024) return { luma: Float32Array.from(hit, (x) => x / 255) };
     const t0 = performance.now();
@@ -394,7 +401,7 @@ export class SegSession {
     const t = this.snap(t0), A = AUTO, { mw: w, mh: h } = this;
     this.ev.trace?.("auto: decode");
     const { rgba1024 } = await this.pixels(t, true);
-    const cells = this.cellCache.get(Math.round(t * SEG.sampleHz) - this.grid.i0);
+    const cells = this.cellCache.get(frameKey(t));
     this.ev.trace?.("auto: encode");
     await this.model.encode(rgba1024!);
     this.ev.trace?.("auto: encoded; probing");
@@ -744,7 +751,7 @@ export class SegSession {
     for (let k = 0; k < alpha.length; k++) alpha[k] = Math.round(255 * Math.min(1, Math.max(0, inc[k] * (exc ? 1 - exc[k] : 1))));
     const nr = Math.max(2, Math.round(SEG.nearK * r));
     const near = nearMap(incRaw, w, h, nr);
-    const cells = this.cellCache.get(i);
+    const cells = this.cellCache.get(frameKey((this.grid.i0 + i) / SEG.sampleHz));
     const depQ = cells ? departFromCells(cells, toU8(incRaw), w, h).data : new Uint8Array(qsize(w) * qsize(h)).fill(255);
     return { i, alpha: rleEncode(alpha), nearQ: rleEncode(quarter(near, w, h, 4)), excQ: exc ? rleEncode(quarter(exc, w, h, 1)) : null, depQ: rleEncode(depQ) };
   }

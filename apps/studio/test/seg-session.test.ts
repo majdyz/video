@@ -3,7 +3,7 @@
 //   node --experimental-strip-types apps/studio/test/seg-session.test.ts
 import assert from "node:assert/strict";
 import type { EdgeTam } from "../src/pipeline/seg/edgetam.ts";
-import { SegSession, type SessionEvents, type SessionFrameOut, type SessionFrames } from "../src/pipeline/seg/session.ts";
+import { frameKey, SegSession, type SessionEvents, type SessionFrameOut, type SessionFrames } from "../src/pipeline/seg/session.ts";
 import type { SegObject } from "../src/pipeline/seg/track.ts";
 import { rleDecode } from "../src/pipeline/seg/mask.ts";
 
@@ -162,7 +162,16 @@ const subject = (t: number): SegObject & { id: number } => ({ id: ids++, kind: "
   assert.equal(r.errors.length, 0);
   assert.equal(r.idles, 1);
   assert.equal(r.frames.size, r.s.grid.n, "every grid frame filled");
-  console.log("session: healthy pass → idle, all frames: ok");
+  // Keyframes are 4 a second, the fill grid 30: the keyframe at 0.25 s lies between grid frames 7 and 8. Each has its
+  // own pixels (the keyframe used to share grid frame 8's cache slot, so frame 8 was filled from the keyframe's).
+  const read = (t: number) => f.reads.some((x) => Math.abs(x - t) < 1e-9);
+  assert.ok(read(0.25), "the keyframe at 0.25 s is decoded");
+  assert.ok(read(8 / 30), "grid frame 8 is decoded itself");
+  assert.ok(read(0.75) && read(23 / 30), "and the next pair");
+  assert.equal(frameKey(0.5), frameKey(15 / 30), "a keyframe on the grid shares its grid frame's entry");
+  assert.notEqual(frameKey(0.25), frameKey(8 / 30));
+  for (let i = 1; i < 300; i++) assert.notEqual(frameKey(i / 30), frameKey((i - 1) / 30));
+  console.log("session: healthy pass → idle, all frames, each frame its own pixels: ok");
 }
 
 // The model's own search (a queued request) failing fails the session too, and its caller is answered.

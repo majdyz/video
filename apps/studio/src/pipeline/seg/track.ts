@@ -1,6 +1,6 @@
 // AI subject detection, the track pass and the mask at any clip time (Subject pop, `seg`).
 //
-// Pass (runPass): every prompted subject is followed by the EdgeTAM memory tracker over keyframes 6 per clip second
+// Pass (runPass): every prompted subject is followed by the EdgeTAM memory tracker over keyframes SEG.fps (4) per clip second
 // (frame index = 30 Hz frame number, see bank.ts), forward and back from its prompt. Between two keyframes of one
 // direction a flow guard compares the tracker's mask with the previous keyframe's mask carried along optical flow:
 // a tracker that dropped a subject the flow still sees (< 25% of the carried area) is re-prompted on that frame from
