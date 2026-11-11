@@ -6,9 +6,17 @@ export const BRAND = {
   beta: true,
   /** Where "Open a GitHub issue" in Send feedback goes (owner/repo). */
   issues: "majdyz/video",
-  /** Tip jar (Ko-fi / Buy Me a Coffee / GitHub Sponsors URL). Empty: no support link anywhere. */
+  /** Tip jar for everyone (Ko-fi / Buy Me a Coffee URL). Empty: no support link anywhere (unless donateId applies). */
   donate: "",
+  /** Indonesian tip jar (Trakteer / Saweria: QRIS, e-wallets) for phones set to Indonesian; falls back to `donate`. */
+  donateId: "",
 };
+
+/** The support link for this browser's language (empty: none). */
+export function donateUrl(langs: readonly string[] = typeof navigator === "undefined" ? [] : navigator.languages ?? [navigator.language]): string {
+  const indonesian = langs.some((l) => /^(id|in)\b/i.test(l));
+  return (indonesian && BRAND.donateId) || BRAND.donate || BRAND.donateId;
+}
 
 /**
  * The bundled sample clip. CC0 (public domain dedication), so no attribution

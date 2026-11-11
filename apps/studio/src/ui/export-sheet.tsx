@@ -6,7 +6,7 @@ import { IconDownload, IconExport, IconShare, IconWarning } from "./icons";
 import { formatTime } from "./timeline";
 import { formatTimecode, selectionLabel } from "../pipeline/trim.ts";
 import { visibleSegments } from "../pipeline/segments.ts";
-import { BRAND } from "../brand.ts";
+import { BRAND, donateUrl } from "../brand.ts";
 import { isNativeShell } from "../native/registry.ts";
 
 const loadNative = () => import("../native/bridge.ts");
@@ -239,9 +239,9 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
               </button>
             </div>
             {saveNote && <p className="export__note" role="status">{saveNote}</p>}
-            {BRAND.donate && (
+            {donateUrl() && (
               <p className="export__support">
-                Free to use. Enjoying it? <a href={BRAND.donate} target="_blank" rel="noopener noreferrer">Support DiveGrade ☕</a>
+                Free to use. Enjoying it? <a href={donateUrl()} target="_blank" rel="noopener noreferrer">Support DiveGrade ☕</a>
               </p>
             )}
             {DEBUG && exp.profile && <p className="export__note mono" data-testid="export-profile">{exp.profile}</p>}

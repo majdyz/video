@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { Studio } from "./pipeline/studio.ts";
 import { segStatusText } from "./pipeline/seg/studio-seg.ts";
 import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, enabledTools, initialStyle, lookOf, profileDefaults, savedVivid, styleFlags, styleOf, subjectPopVisible, type ToolId, type ToolsState } from "./pipeline/tools.ts";
-import { BRAND, SAMPLE } from "./brand.ts";
+import { BRAND, SAMPLE, donateUrl } from "./brand.ts";
 import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
 import { AdvancedControls, SubjectsPanel, TOOL_ICON, ToolPanel, toolStatus } from "./ui/panels";
@@ -645,10 +645,10 @@ export default function App() {
             <button type="button" className="btn btn--ghost" onClick={openFeedback}>Send feedback</button>
             <button type="button" className="btn btn--ghost" onClick={() => { setAboutOpen(false); setIntroOpen(true); }}>How it works</button>
           </div>
-          {BRAND.donate && (
+          {donateUrl() && (
             <p className="about__support">
               DiveGrade is free. If it saved a dive, you can{" "}
-              <a href={BRAND.donate} target="_blank" rel="noopener noreferrer">buy the developer a coffee ☕</a>.
+              <a href={donateUrl()} target="_blank" rel="noopener noreferrer">buy the developer a coffee ☕</a>.
             </p>
           )}
           <div className="adv__field">
