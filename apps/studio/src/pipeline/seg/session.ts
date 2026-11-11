@@ -76,8 +76,9 @@ export type SessionEvents = {
   /** A tapped include that came out as the background (the tap missed the animal): dropped. */
   rejected(id: number): void;
   /** The seeds of the segment starting at t are needed (k: its index right now, for the logs only): tracking waits
-   * for session.seeds(t, ...). */
-  needSeeds(k: number, t: number): void;
+   * for session.seeds(t, ...). search: false when the model's own search (autoSeeds) is not worth it there (an
+   * extra start after SEG.reacquireSearches empty ones in a row): the engine's subjects only. */
+  needSeeds(k: number, t: number, search: boolean): void;
   /** A step, a fill or a queued tap threw (out of memory in the runtime, an unreadable frame): the session has
    * stopped for good and is closed; no idle follows. The main thread tells the user and shuts the worker down. */
   error?(msg: string): void;
@@ -285,18 +286,32 @@ export class SegSession {
     const span = this.stepsBetween(t0, t1, [t0, t1]);
     for (const o of objs) this.objs.set(o.id, this.newObj({ ...o, t: t0 }, true, k, this.gone.delete(o.id), span.slice(), []));
     // Nothing seeded and nothing tracked into this segment: look again a little later (re-acquire).
-    if (!objs.length && ![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) this.reacquire(k);
+    if (objs.length) this.emptyRun = 0;
+    else if (![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) { this.emptyRun++; this.reacquire(k); }
     return true;
   }
 
+  /** Segment starts in a row that found no subject (takeSeeds). */
+  private emptyRun = 0;
+  /** Extra starts (reacquire) that ask for the engine's subjects only (SEG.reacquireSearches). */
+  private noSearch = new Set<number>();
+
   /**
-   * Segment k has no subject: a new segment start SEG.reacquireS later (canonical: a function of the grid alone), so
-   * the main thread looks for the engine's subjects again before the next regular start.
+   * Segment k has no subject: a new segment start a little later (canonical: a function of the grid and of what the
+   * starts before found), so the main thread looks for subjects again before the next regular start. The wait
+   * doubles with every empty start in a row (SEG.reacquireS, up to SEG.segmentS): a clip with nothing to follow was
+   * looked through every 2 s, each look a seek, an analysis and the model's 12-point search.
    */
   private reacquire(k: number): void {
-    const t = this.segStarts[k], next = this.segStarts[k + 1] ?? Infinity;
-    const r = this.snap(t + SEG.reacquireS);
-    if (r > t + 1e-6 && r < next - SEG.reacquireS / 2) { this.segStarts.splice(k + 1, 0, r); this.activate(r); }
+    // (Not within a second of the next start, or of the range's end: nothing is left to follow from there.)
+    const t = this.segStarts[k], next = this.segStarts[k + 1] ?? this.base[this.base.length - 1] ?? Infinity;
+    const wait = Math.min(SEG.segmentS, SEG.reacquireS * 2 ** Math.max(0, this.emptyRun - 1));
+    const r = this.snap(t + wait);
+    if (r > t + 1e-6 && r < next - SEG.reacquireS / 2) {
+      this.segStarts.splice(k + 1, 0, r);
+      this.activate(r);
+      if (this.emptyRun >= SEG.reacquireSearches) this.noSearch.add(r);
+    }
   }
 
   /** Ids removed before their object exists (a replay removes an auto whose seeds are still held): hidden on arrival. */
@@ -601,7 +616,7 @@ export class SegSession {
         if (k !== null) {
           if (!this.takeSeeds(k)) {
             const ts = this.segStarts[k];
-            if (this.asked !== ts) { this.asked = ts; this.waitSince = performance.now(); this.ev.needSeeds(k, ts); }
+            if (this.asked !== ts) { this.asked = ts; this.waitSince = performance.now(); this.ev.needSeeds(k, ts, !this.noSearch.has(ts)); }
             break;
           }
           await yieldNow();

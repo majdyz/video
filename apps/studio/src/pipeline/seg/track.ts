@@ -43,8 +43,13 @@ export const SEG = {
   segmentS: 8,
   /** The session tracks the trim plus this much either side (s; studio-seg.ts segSpan). */
   scopeMarginS: 0.5,
-  /** A segment start that finds no subject (and none carried in) looks again this much later (s). */
+  /** A segment start that finds no subject (and none carried in) looks again this much later (s); each further
+   * start in a row that finds none doubles the wait, up to segmentS (2, 4, 8 s: every look is a seek, an analysis
+   * and, when the engine sees nothing, the model's own search)... */
   reacquireS: 2,
+  /** ...and from this many empty starts in a row, the extra starts leave the model's search out (the engine's look
+   * only; the regular starts, every segmentS, still search). */
+  reacquireSearches: 2,
   /** At a segment start, an earlier subject carries on unless the new seeds cover this share of it. */
   carryCover: 0.5,
   /** Decoded frames the background session keeps (luma + colour cells, ~70 KB each). */

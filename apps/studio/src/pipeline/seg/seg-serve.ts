@@ -108,7 +108,7 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
         keys: (conf) => { if (mine()) emit({ ev: "keys", conf }); },
         progress: (done, total) => { if (mine()) emit({ ev: "progress", done, total, heapMB: wasmHeapMB() }); },
         idle: (profile) => { if (mine()) emit({ ev: "idle", profile: { ...profile, heapMB: wasmHeapMB() } }); },
-        needSeeds: (k, t) => { if (mine()) emit({ ev: "seeds", k, t }); },
+        needSeeds: (k, t, search) => { if (mine()) emit({ ev: "seeds", k, t, search }); },
         rejected: (id) => { if (mine()) emit({ ev: "rejected", id }); },
         // The pass threw (session.ts run): the main thread shows it and shuts this worker down.
         error: (msg) => { if (session === s) session = null; emit({ ev: "error", msg, heapMB: wasmHeapMB() }); },

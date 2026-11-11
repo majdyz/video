@@ -12,7 +12,7 @@ export type SessionEvent =
   | { ev: "keys"; conf: { t: number; conf: number }[] }
   | { ev: "progress"; done: number; total: number; heapMB?: number }
   | { ev: "idle"; profile: Record<string, number> }
-  | { ev: "seeds"; k: number; t: number }
+  | { ev: "seeds"; k: number; t: number; search?: boolean }
   | { ev: "rejected"; id: number }
   /** The pass threw in the worker and stopped for good (session.ts fail). */
   | { ev: "error"; msg: string; heapMB?: number }

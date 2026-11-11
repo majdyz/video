@@ -92,7 +92,7 @@ function fake(opts: Partial<Pick<Fake, "failAt" | "visible">> & { lite?: boolean
 type Run = {
   s: SegSession;
   frames: Map<number, SessionFrameOut>;
-  asked: { k: number; t: number }[];
+  asked: { k: number; t: number; search: boolean }[];
   /** The seeds this run's "main thread" answered with, in order (what a replay hands over). */
   log: { t: number; objs: (SegObject & { id: number })[] }[];
   errors: string[];
@@ -115,8 +115,8 @@ function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: numbe
     progress: () => undefined,
     idle: () => { r.idles++; done(); },
     rejected: () => undefined,
-    needSeeds: (k, t) => {
-      r.asked.push({ k, t });
+    needSeeds: (k, t, search) => {
+      r.asked.push({ k, t, search });
       const objs = seedsFor(t);
       if (objs) setTimeout(() => { r.log.push({ t, objs }); r.s.seeds(t, objs); }, 0);
     },
@@ -211,7 +211,7 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
 };
 
 // A clip whose subject only shows up at 3 s: the first segments find nothing, so the session inserts extra segment
-// starts (2 s, 4 s) between the regular ones (0 s, 8 s) as it tracks. A replay hands every seed over up front, before
+// starts (2 s, then 4 s later: 6 s) between the regular ones (0 s, 8 s) as it tracks. A replay hands every seed over up front, before
 // any tracking, when those extra starts do not exist yet: with seeds matched by index they landed on the wrong
 // frames or were dropped, and the session then waited for ever for a segment the main thread had already answered.
 {
@@ -224,7 +224,8 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   a.s.seeds(0, a.log[0].objs);
   await end;
   assert.equal(a.errors.length, 0);
-  assert.deepEqual(a.log.map((l) => l.t), [0, 2, 4, 8], "segment starts as tracking met them (two inserted)");
+  assert.deepEqual(a.log.map((l) => l.t), [0, 2, 6, 8], "segment starts as tracking met them (two inserted, the wait doubling)");
+  assert.deepEqual(a.asked.map((x) => x.search), [true, false, true], "the second extra start in a row asks for the engine's subjects only");
   assert.deepEqual(a.log.map((l) => l.objs.length), [0, 0, 1, 1]);
   assert.ok(a.frames.size > 0);
 
@@ -403,4 +404,21 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   sameFrames(one.frames, two.frames, "tap before / after the pass");
   jumpAt = Infinity;
   console.log("session: lite model → 2 keyframes a second, extra ones where the flow disagrees; order-independent: ok");
+}
+
+// ---------------------------------------------------------------- a clip with nothing to follow
+
+{
+  // 30 s, no subject anywhere: looked through at 0, 2, 6 s, then at the regular starts only (8, 16, 24 s), where it
+  // used to be every 2 s (15 looks); the model's search is asked for at the first two and the regular ones.
+  const f = fake({ visible: [100, 200] });
+  const r = open(f, { start: 0, end: 30 }, () => []);
+  const end = r.settled();
+  r.s.seeds(0, []);
+  await end;
+  assert.equal(r.errors.length, 0);
+  assert.deepEqual(r.asked.map((x) => x.t), [2, 6, 8, 16, 24]);
+  assert.deepEqual(r.asked.map((x) => x.search), [true, false, true, true, true]);
+  assert.equal(f.encodes, 0, "no model run without a subject");
+  console.log("session: empty clip → the looks back off (2, 4, 8 s): ok");
 }

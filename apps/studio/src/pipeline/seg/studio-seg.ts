@@ -587,8 +587,8 @@ export class SubjectSeg {
       if (tens !== this.crumbTens) { this.crumbTens = tens; crumb(`ai: pass ${tens * 10}% (${e.done}/${e.total}) · heap ${e.heapMB ?? "?"} MB`); }
       this.set({ phase: "tracking", progress: e.total ? e.done / e.total : null });
     } else if (e.ev === "seeds") {
-      segLog(`segment ${e.k} seeds asked for (${e.t.toFixed(2)} s)`);
-      this.onNeedSeeds?.(e.k, e.t);
+      segLog(`segment ${e.k} seeds asked for (${e.t.toFixed(2)} s${e.search === false ? ", engine only" : ""})`);
+      this.onNeedSeeds?.(e.k, e.t, e.search !== false);
     } else if (e.ev === "rejected") {
       segLog(`tap ${e.id} came out as the background; dropped`);
       // Out of the log too: a replay would track it to the same rejection and say so again.
@@ -716,8 +716,8 @@ export class SubjectSeg {
   }
 
   /** The session asks for segment k's seeds (the engine's own subjects on its canonical frame t): the studio answers
-   * with seedSegment. */
-  onNeedSeeds: ((k: number, t: number) => void) | null = null;
+   * with seedSegment. search: false = without the model's own search (autoSeeds) when the engine finds none. */
+  onNeedSeeds: ((k: number, t: number, search: boolean) => void) | null = null;
   /** The last pass's profile (where its time went; session.ts). */
   lastProfile: Record<string, number> | null = null;
 

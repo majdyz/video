@@ -752,7 +752,7 @@ export class Studio {
    * tracks start over (its next analysis picks up the frame on screen). A frame that can't be read seeds nothing (the
    * session goes on; the engine's masks cover that segment).
    */
-  private seedSegmentCanonical(k: number, t: number): Promise<void> {
+  private seedSegmentCanonical(k: number, t: number, search = true): Promise<void> {
     // The session that asked: a newer one (the trim moved, seg.start) seeds itself from its own start.
     const gen = this.seg.generation;
     const stale = () => this.file !== file0 || this.seg.generation !== gen;
@@ -784,7 +784,8 @@ export class Studio {
       }
       if (stale()) return;
       // The engine found nothing (it only looks in open blue water: a manta over a reef): the model looks itself.
-      if (!objs.length) objs = await this.seg.autoSeeds(t);
+      // (Not at an extra start after several empty ones in a row: session.ts reacquire.)
+      if (!objs.length && search) objs = await this.seg.autoSeeds(t);
       if (stale()) return;
       await this.seg.seedSegment(k, t, objs);
       console.info(`[seg] seeded segment ${k} on the canonical frame ${t.toFixed(2)} s: ${objs.length} subject(s)`);
@@ -1002,7 +1003,7 @@ export class Studio {
     let last = 0;
     s.onRejected = () => this.set({ subjectNote: "Nothing there: tap the animal" });
     // The session asks for the next segment's seeds as its tracking reaches it (long clips).
-    s.onNeedSeeds = (k, t) => { if (k > 0) void this.seedSegmentCanonical(k, t); };
+    s.onNeedSeeds = (k, t, search) => { if (k > 0) void this.seedSegmentCanonical(k, t, search); };
     s.onFrames = () => { const now = performance.now(); if (now - last > 250 && this.paused()) { last = now; this.repaint(); } };
     // The pass is done and its worker shut down: the seed-frame <video> (a decoder of its own) goes too.
     s.onHibernate = () => this.dropSeedVideo();
