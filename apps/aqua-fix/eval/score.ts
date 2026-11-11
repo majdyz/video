@@ -17,7 +17,8 @@
 //  3. Stability per shot. The harm clips plus a fixed set of difficult clips: within each locked shot, the standard
 //     deviation over time of the grade's own lightness shift (median L* out − source) and balance shift (mean a*, b*
 //     out − source), the largest step of the lightness shift between samples 0.5 s apart, and how far the balance
-//     and exposure parameters move. Lower is steadier.
+//     and exposure parameters move. Lower is steadier. Diagnostics per clip: dL* (mean lightness shift; a crush reads
+//     strongly negative) and the output chroma / pink share of the source's brightest 2 % (white fins must stay neutral).
 //
 // What the CPU reference renders: every stage of the shader including Seabed recovery; person segmentation, AI
 // subjects and the temporal layer are inputs the harness leaves empty (as in the app for a clip without people and
@@ -34,6 +35,7 @@ import * as analyzeModule from "../src/engine/analyze.ts";
 import { analyzeThumbnail, ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.ts";
 import { applyGrade } from "../src/engine/apply.ts";
 import * as paramsModule from "../src/engine/params.ts";
+import * as redModule from "../src/engine/red.ts";
 import { DEFAULT_SETTINGS, type UserSettings } from "../src/engine/params.ts";
 import { ClipSim } from "./clip-sim.ts";
 import { deltaE00, halve, hueDiff, labOf, quantile, regionStats, srgb8ToLab, swd, type Lab } from "./colour-metrics.ts";
@@ -49,11 +51,11 @@ const BEFORE = opt("before", "");
 const BASELINE = opt("baseline", path.join(HERE, "baseline-score.json"));
 const JOBS = parseInt(opt("jobs", "2"));
 const SECS = parseFloat(opt("secs", "8"));
-// Tuning experiments: --tune TONE.target=0.07,TONE.strength=0.5 overrides fields of the engine's exported tuning objects (analyze.ts, params.ts).
+// Tuning experiments: --tune TONE.target=0.07,TONE.strength=0.5 overrides fields of the engine's exported tuning objects (analyze.ts, params.ts, red.ts).
 const TUNE = opt("tune", "");
 for (const kv of TUNE.split(",").filter(Boolean)) {
   const [key, val] = kv.split("="), [obj, field] = key.split(".");
-  const o = (analyzeModule as unknown as Record<string, Record<string, unknown>>)[obj] ?? (paramsModule as unknown as Record<string, Record<string, unknown>>)[obj];
+  const o = (analyzeModule as unknown as Record<string, Record<string, unknown>>)[obj] ?? (paramsModule as unknown as Record<string, Record<string, unknown>>)[obj] ?? (redModule as unknown as Record<string, Record<string, unknown>>)[obj];
   if (!o || !(field in o)) throw new Error(`--tune: no ${key}`);
   o[field] = val === "null" ? null : parseFloat(val);
 }
@@ -158,6 +160,10 @@ type ClipScore = {
   wbSwing: number; expSwing: number;
   /** Share of the source's water-coloured pixels that come out warm or magenta (%), and output/source mean chroma. */
   waterWarm: number; chroma: number;
+  /** Mean lightness shift (median L* out − source): a large negative value on a bright clip is a crush. */
+  dL: number;
+  /** The source's brightest 2 % (white fins, sand, foam): their mean output chroma (C*ab; neutral = low) and the share that comes out pink or magenta (%). */
+  hiC: number; hiPink: number;
 };
 
 function decode(file: string, vf: string, w: number, h: number): Uint8ClampedArray[] {
@@ -182,6 +188,7 @@ function scoreClip(c: { id: string; category: string; file: string }): ClipScore
   type S = { seg: number; dL: number; da: number; db: number; wbR: number; wbB: number; exp: number };
   const samples: S[] = [];
   let dESum = 0, dEMax = 0, water = 0, warm = 0, cOut = 0, cSrc = 0;
+  let hiN = 0, hiC = 0, hiPink = 0;
   for (let f = 0; f < thumbs.length; f++) {
     sim.step(f, thumbs);
     if (f % step) continue;
@@ -199,6 +206,15 @@ function scoreClip(c: { id: string; category: string; file: string }): ClipScore
       cSrc += cs; cOut += co;
       if (cs > 14 && hs > 170 && hs < 300) { water++; const ho = ((Math.atan2(o[2], o[1]) * 180) / Math.PI + 360) % 360; if (co >= 8 && (ho < 150 || ho > 310)) warm++; }
     }
+    {
+      const cut = Float64Array.from(Ls).sort()[Math.floor(0.98 * (n - 1))];
+      for (let i = 0; i < n; i++) {
+        if (Ls[i] < cut) continue;
+        const o = srgb8ToLab(g[i * 4], g[i * 4 + 1], g[i * 4 + 2]), co = Math.hypot(o[1], o[2]), ho = ((Math.atan2(o[2], o[1]) * 180) / Math.PI + 360) % 360;
+        hiN++; hiC += co;
+        if (co >= 8 && (ho > 290 || ho < 20)) hiPink++;
+      }
+    }
     Ls.sort(); Lo.sort();
     de /= n; dESum += de; dEMax = Math.max(dEMax, de);
     samples.push({ seg: x.segment, dL: quantile(Lo, 0.5) - quantile(Ls, 0.5), da: da / n, db: db / n, wbR: x.params.wb[0], wbB: x.params.wb[2], exp: x.params.exposure });
@@ -215,7 +231,7 @@ function scoreClip(c: { id: string; category: string; file: string }): ClipScore
     wbSwing = Math.max(wbSwing, swing("wbR"), swing("wbB"));
     expSwing = Math.max(expSwing, swing("exp"));
   }
-  return { id: c.id, category: c.category, frames: samples.length, shots: segs.length, dE: dESum / Math.max(1, samples.length), dEMax, lightStd, lightJump, wbStd, wbSwing, expSwing, waterWarm: water ? (100 * warm) / water : 0, chroma: cSrc > 0 ? cOut / cSrc : 1 };
+  return { id: c.id, category: c.category, frames: samples.length, shots: segs.length, dE: dESum / Math.max(1, samples.length), dEMax, lightStd, lightJump, wbStd, wbSwing, expSwing, waterWarm: water ? (100 * warm) / water : 0, chroma: cSrc > 0 ? cOut / cSrc : 1, dL: samples.reduce((a, x) => a + x.dL, 0) / Math.max(1, samples.length), hiC: hiN ? hiC / hiN : 0, hiPink: hiN ? (100 * hiPink) / hiN : 0 };
 }
 
 // ---------- main ----------
@@ -288,8 +304,8 @@ if (flag("clip")) {
     for (const c of harm) lines.push(`${c.id.padEnd(30)} dE ${f(result.clips[c.id].dE)}  worst frame ${f(result.clips[c.id].dEMax)}${dl(result.clips[c.id].dE, base?.clips[c.id]?.dE)}`);
     lines.push(`${"MEAN".padEnd(30)} dE ${f(result.summary.harm.dE)}  worst frame ${f(result.summary.harm.dEMax)}${dl(result.summary.harm.dE, base?.summary.harm.dE)}`);
     lines.push("", "3. STABILITY PER SHOT (default style; std over time of the grade's own shift inside a shot; lower = steadier)");
-    lines.push(`${"clip".padEnd(30)} shots  light std  light jump  balance std  wb swing  exp swing | dE src  water→warm %  chroma x`);
-    for (const c of clips) { const k = result.clips[c.id]; lines.push(`${c.id.padEnd(30)} ${String(k.shots).padStart(5)}  ${f(k.lightStd, 9)}  ${f(k.lightJump, 10)}  ${f(k.wbStd, 11)}  ${(k.wbSwing ?? 0).toFixed(2).padStart(8)}  ${(k.expSwing ?? 0).toFixed(2).padStart(9)} | ${f(k.dE)}  ${f(k.waterWarm, 12)}  ${(k.chroma ?? 0).toFixed(2).padStart(8)}`); }
+    lines.push(`${"clip".padEnd(30)} shots  light std  light jump  balance std  wb swing  exp swing | dE src  water→warm %  chroma x  dL*  bright C  bright pink %`);
+    for (const c of clips) { const k = result.clips[c.id]; lines.push(`${c.id.padEnd(30)} ${String(k.shots).padStart(5)}  ${f(k.lightStd, 9)}  ${f(k.lightJump, 10)}  ${f(k.wbStd, 11)}  ${(k.wbSwing ?? 0).toFixed(2).padStart(8)}  ${(k.expSwing ?? 0).toFixed(2).padStart(9)} | ${f(k.dE)}  ${f(k.waterWarm, 12)}  ${(k.chroma ?? 0).toFixed(2).padStart(8)}  ${f(k.dL, 5)}  ${f(k.hiC, 7)}  ${f(k.hiPink, 12)}`); }
     const s = result.summary.stability, b = base?.summary.stability, d = result.summary.diagnostics;
     lines.push(`${"MEAN".padEnd(30)}        ${f(s.lightStd, 9)}  ${f(s.lightJump, 10)}  ${f(s.wbStd, 11)}  ${s.wbSwing.toFixed(2).padStart(8)}  ${s.expSwing.toFixed(2).padStart(9)} |         ${f(d.waterWarm, 12)}  ${d.chroma.toFixed(2).padStart(8)}`);
     if (b) lines.push(`vs baseline: light std${dl(s.lightStd, b.lightStd)}  light jump${dl(s.lightJump, b.lightJump)}  balance std${dl(s.wbStd, b.wbStd)}  wb swing${dl(s.wbSwing, b.wbSwing)}  exp swing${dl(s.expSwing, b.expSwing)}`);
