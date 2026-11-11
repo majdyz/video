@@ -373,9 +373,19 @@ export class SegLive {
 
 type UndoOp = { kind: "added"; id: number } | { kind: "removed"; id: number };
 
-/** The session's inputs, in order: replayed into a fresh worker after a hibernation (SubjectSeg.wake). */
+/**
+ * A segment's identity on the main thread: its start time in ms, or −1 for the clip's first seeds (asked for at the
+ * trim start, which the session snaps to a keyframe). Never the session's segment index: the session splices new
+ * starts into its grid as it tracks (session.ts reacquire), so an index names different segments over time.
+ */
+export function segKey(k: number, t: number): number {
+  return k === 0 ? -1 : Math.round(t * 1000);
+}
+
+/** The session's inputs, in order: replayed into a fresh worker after a hibernation (SubjectSeg.wake). Seeds are
+ * logged by their segment's start time (segKey; session.ts holds them until its tracking gets there). */
 type LogOp =
-  | { op: "seeds"; k: number; t: number; objects: (SegObject & { id: number })[] }
+  | { op: "seeds"; t: number; objects: (SegObject & { id: number })[] }
   | { op: "add"; object: SegObject & { id: number } }
   | { op: "remove"; id: number }
   | { op: "restore"; id: number };
@@ -603,7 +613,7 @@ export class SubjectSeg {
       if (this.file !== file) return false;
       this.hibernated = false;
       for (const l of this.log) {
-        if (l.op === "seeds") await model.sessionSeeds(l.k, l.t, l.objects);
+        if (l.op === "seeds") await model.sessionSeeds(l.t, l.objects);
         else if (l.op === "add") await model.sessionAdd(l.object);
         else if (l.op === "remove") await model.sessionRemove(l.id);
         else await model.sessionRestore(l.id);
@@ -662,16 +672,21 @@ export class SubjectSeg {
     return this.opening;
   }
 
-  /** Segment k's seeds: the engine's own subjects on its canonical frame t (none is an answer too). */
+  /**
+   * The seeds of the segment starting at t: the engine's own subjects on its canonical frame (none is an answer
+   * too). k = 0: the clip's first seeds (they fix the segment grid); otherwise the session's index for the segment
+   * when it asked, which is only a label: segments are told apart by their start time (segKey), because the session
+   * inserts new starts as it tracks and a later index then means another segment.
+   */
   async seedSegment(k: number, t: number, objs: SegObject[]): Promise<void> {
-    if (!this.live || this.seededSegs.has(k) || !(await this.wake()) || !this.model) return;
-    this.seededSegs.add(k);
+    if (!this.live || this.hasSegment(k, t) || !(await this.wake()) || !this.model || this.hasSegment(k, t)) return;
+    this.seededSegs.add(segKey(k, t));
     this.lastActivity = performance.now();
     if (k === 0) this.autos = objs;
     const objects = objs.map((o) => ({ ...o, id: this.nextId++ }));
-    this.log.push({ op: "seeds", k, t, objects });
+    this.log.push({ op: "seeds", t, objects });
     // A worker that failed meanwhile rejects the call (fail has told the user): nothing to seed.
-    if (!(await this.model.sessionSeeds(k, t, objects).then(() => true, () => false))) return;
+    if (!(await this.model.sessionSeeds(t, objects).then(() => true, () => false))) return;
     segLog(`seeded segment ${k} (${t.toFixed(2)} s): ${objs.length} automatic subject(s)`);
   }
   private seededSegs = new Set<number>();
@@ -719,9 +734,9 @@ export class SubjectSeg {
     return objs;
   }
 
-  /** Segment k has had its seeds. */
-  hasSegment(k: number): boolean {
-    return this.seededSegs.has(k);
+  /** The segment starting at t (k = 0: the clip's first) has had its seeds. */
+  hasSegment(k: number, t: number): boolean {
+    return this.seededSegs.has(segKey(k, t));
   }
 
   get canUndo(): boolean {

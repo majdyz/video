@@ -75,7 +75,8 @@ function fake(opts: Partial<Pick<Fake, "failAt" | "visible">> = {}): Fake {
     drop() {},
   } as unknown as EdgeTam;
   f.frames = {
-    width: 1920, height: 1080, rotation: 0,
+    // A wide strip (mask grid 320×40): the session's per-frame work is by the pixel, and the tests are about its logic.
+    width: 1920, height: 240, rotation: 0,
     async at(t: number) { f.reads.push(t); return { t } as unknown as CanvasImageSource; },
     dispose() { f.disposed = true; },
   };
@@ -86,6 +87,8 @@ type Run = {
   s: SegSession;
   frames: Map<number, SessionFrameOut>;
   asked: { k: number; t: number }[];
+  /** The seeds this run's "main thread" answered with, in order (what a replay hands over). */
+  log: { t: number; objs: (SegObject & { id: number })[] }[];
   errors: string[];
   idles: number;
   /** Resolves at the next idle or error. */
@@ -97,7 +100,7 @@ function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: numbe
   let wake: (() => void) | null = null;
   const done = () => { const w = wake; wake = null; w?.(); };
   const r: Run = {
-    s: null as unknown as SegSession, frames: new Map(), asked: [], errors: [], idles: 0,
+    s: null as unknown as SegSession, frames: new Map(), asked: [], log: [], errors: [], idles: 0,
     settled: () => new Promise<void>((res) => { wake = res; }),
   };
   const ev: SessionEvents = {
@@ -109,7 +112,7 @@ function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: numbe
     needSeeds: (k, t) => {
       r.asked.push({ k, t });
       const objs = seedsFor(t);
-      if (objs) setTimeout(() => r.s.seeds(k, t, objs), 0);
+      if (objs) setTimeout(() => { r.log.push({ t, objs }); r.s.seeds(t, objs); }, 0);
     },
     error: (msg) => { r.errors.push(msg); done(); },
   };
@@ -126,7 +129,7 @@ const subject = (t: number): SegObject & { id: number } => ({ id: ids++, kind: "
   const f = fake({ failAt: 3 });
   const r = open(f, { start: 0, end: 2 }, () => []);
   const end = r.settled();
-  r.s.seeds(0, 0, [subject(0)]);
+  r.s.seeds(0, [subject(0)]);
   await end;
   assert.equal(r.errors.length, 1, "one error event");
   assert.match(r.errors[0], /failed to allocate/);
@@ -150,7 +153,7 @@ const subject = (t: number): SegObject & { id: number } => ({ id: ids++, kind: "
   const f = fake();
   const r = open(f, { start: 0, end: 2 }, () => []);
   const end = r.settled();
-  r.s.seeds(0, 0, [subject(0)]);
+  r.s.seeds(0, [subject(0)]);
   await end;
   assert.equal(r.errors.length, 0);
   assert.equal(r.idles, 1);
@@ -168,4 +171,51 @@ const subject = (t: number): SegObject & { id: number } => ({ id: ids++, kind: "
   assert.equal(r.errors.length, 1);
   assert.equal(r.idles, 0);
   console.log("session: a failed queued request → error event: ok");
+}
+
+// ---------------------------------------------------------------- replay after a hibernation
+
+const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrameOut>, what: string) => {
+  assert.equal(b.size, a.size, `${what}: as many frames filled`);
+  const eq = (x: Uint8Array | null, y: Uint8Array | null) => (x === null || y === null ? x === y : x.length === y.length && x.every((v, i) => v === y[i]));
+  for (const [i, x] of a) {
+    const y = b.get(i);
+    assert.ok(y, `${what}: frame ${i} filled`);
+    assert.ok(eq(x.alpha, y.alpha) && eq(x.nearQ, y.nearQ) && eq(x.depQ, y.depQ) && eq(x.excQ, y.excQ), `${what}: frame ${i} identical`);
+  }
+};
+
+// A clip whose subject only shows up at 3 s: the first segments find nothing, so the session inserts extra segment
+// starts (2 s, 4 s) between the regular ones (0 s, 8 s) as it tracks. A replay hands every seed over up front, before
+// any tracking, when those extra starts do not exist yet: with seeds matched by index they landed on the wrong
+// frames or were dropped, and the session then waited for ever for a segment the main thread had already answered.
+{
+  const visible: [number, number] = [3, 9];
+  const seedsFor = (t: number) => (t >= visible[0] && t <= visible[1] ? [subject(t)] : []);
+  const f1 = fake({ visible });
+  const a = open(f1, { start: 0, end: 10 }, seedsFor);
+  let end = a.settled();
+  a.log.push({ t: 0, objs: seedsFor(0) });
+  a.s.seeds(0, a.log[0].objs);
+  await end;
+  assert.equal(a.errors.length, 0);
+  assert.deepEqual(a.log.map((l) => l.t), [0, 2, 4, 8], "segment starts as tracking met them (two inserted)");
+  assert.deepEqual(a.log.map((l) => l.objs.length), [0, 0, 1, 1]);
+  assert.ok(a.frames.size > 0);
+
+  // The replay: a fresh session, the same seeds all at once (the first seeds first: they fix the grid; the rest in
+  // any order, repeats ignored), and a main thread that answers nothing more.
+  const f2 = fake({ visible });
+  const b = open(f2, { start: 0, end: 10 }, () => null);
+  end = b.settled();
+  for (const l of a.log) b.s.seeds(l.t, l.objs);
+  for (const l of [...a.log].reverse()) b.s.seeds(l.t, []);
+  const timeout = new Promise<"hung">((res) => setTimeout(() => res("hung"), 60000).unref());
+  assert.equal(await Promise.race([end.then(() => "done"), timeout]), "done", "the replay finishes");
+  assert.equal(b.errors.length, 0);
+  assert.equal(b.idles, 1);
+  assert.deepEqual(b.asked, [], "the replay asks for nothing it was already given");
+  assert.equal(b.s.busy, false);
+  sameFrames(a.frames, b.frames, "replay");
+  console.log("session: replay with inserted segment starts → same masks, no hang: ok");
 }

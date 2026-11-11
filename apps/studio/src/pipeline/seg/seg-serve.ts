@@ -22,7 +22,7 @@ type Req =
   | { id: number; type: "session-close" }
   | { id: number; type: "session-busy" }
   | { id: number; type: "session-autoseeds"; t: number }
-  | { id: number; type: "session-seeds"; k: number; t: number; objects: (SegObject & { id: number })[] };
+  | { id: number; type: "session-seeds"; t: number; objects: (SegObject & { id: number })[] };
 
 let model: EdgeTam | null = null;
 let session: SegSession | null = null;
@@ -115,7 +115,7 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
     } else if (r.type === "session-autoseeds") {
       post({ ok: true, objects: await session.autoSeeds(r.t) });
     } else if (r.type === "session-seeds") {
-      session.seeds(r.k, r.t, r.objects);
+      session.seeds(r.t, r.objects);
       post({ ok: true });
     } else if (r.type === "session-add") {
       session.add(r.object);

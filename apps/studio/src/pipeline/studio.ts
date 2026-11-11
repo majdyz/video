@@ -748,7 +748,7 @@ export class Studio {
   private seedSegmentCanonical(k: number, t: number): Promise<void> {
     const run = this.seedChain.then(async () => {
       const e = this.engine, v = this.video, file = this.file;
-      if (!e || !v || !file || !this.seg.live || this.seg.hasSegment(k)) return;
+      if (!e || !v || !file || !this.seg.live || this.seg.hasSegment(k, t)) return;
       let objs: ReturnType<typeof seedObjects> = [];
       try {
         // Not while the user scrubs: two <video>s seeking at once (plus the analysis) is what phones fall over on.

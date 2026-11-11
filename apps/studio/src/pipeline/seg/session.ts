@@ -68,7 +68,8 @@ export type SessionEvents = {
   idle(profile: SessionProfile): void;
   /** A tapped include that came out as the background (the tap missed the animal): dropped. */
   rejected(id: number): void;
-  /** Segment k's seeds are needed (its canonical frame t): tracking waits for session.seeds(k, ...). */
+  /** The seeds of the segment starting at t are needed (k: its index right now, for the logs only): tracking waits
+   * for session.seeds(t, ...). */
   needSeeds(k: number, t: number): void;
   /** A step, a fill or a queued tap threw (out of memory in the runtime, an unreadable frame): the session has
    * stopped for good and is closed; no idle follows. The main thread tells the user and shuts the worker down. */
@@ -116,10 +117,18 @@ export class SegSession {
   private closed = false;
   /** Why the session stopped (run() threw); null while it is healthy. */
   failed: string | null = null;
-  /** Segment starts (keyframe times; segStarts[0] = the first seeds' frame), seeds received, the one asked for. */
+  /**
+   * Segment starts (keyframe times; segStarts[0] = the first seeds' frame). Everything about a segment is keyed by
+   * its start TIME, never its index: reacquire() splices new starts in as tracking goes, which shifts every later
+   * index, and a replay after a hibernation hands the seeds over before any tracking has happened.
+   */
   private segStarts: number[] = [];
+  /** Start times whose seeds tracking has taken. */
   private seeded = new Set<number>();
-  private asked = -1;
+  /** Seeds handed over (by start time), held until tracking reaches their segment. */
+  private given = new Map<number, (SegObject & { id: number })[]>();
+  /** The start time whose seeds were asked for (NaN: none). */
+  private asked = NaN;
   /** Steps done (for the progress). */
   private stepsDone = 0;
   private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0 };
@@ -166,20 +175,30 @@ export class SegSession {
   }
 
   /**
-   * Segment k's seeds (the engine's own subjects on its canonical frame t; may be none). Segment 0 also fixes the
-   * segment grid: its frame, then every SEG.segmentS to the end of the clip.
+   * The seeds of the segment starting at t (the engine's own subjects on its canonical frame; may be none). The
+   * first seeds also fix the segment grid: their frame, then every SEG.segmentS to the end of the clip. The seeds
+   * are held and taken when tracking reaches their segment (takeSeeds), so they may arrive in any order and ahead
+   * of time (a replay hands them all over at once) and the pass is the same.
    */
-  seeds(k: number, t: number, objs: (SegObject & { id: number })[]): void {
-    if (this.seeded.has(k)) return;
-    if (k === 0) {
-      const t0 = this.snap(t), end = this.keys[this.keys.length - 1] ?? t0;
-      this.segStarts = [];
+  seeds(t: number, objs: (SegObject & { id: number })[]): void {
+    if (this.closed) return;
+    const t0 = this.snap(t);
+    if (!this.segStarts.length) {
+      const end = this.keys[this.keys.length - 1] ?? t0;
       for (let s = t0; s <= end + 1e-6; s += SEG.segmentS) this.segStarts.push(this.snap(s));
       this.segStarts = this.segStarts.filter((s, i, a) => i === 0 || s > a[i - 1] + 1e-6);
     }
-    const t0 = this.segStarts[k];
-    if (t0 === undefined) return;
-    this.seeded.add(k);
+    if (this.seeded.has(t0) || this.given.has(t0)) return;
+    this.given.set(t0, objs);
+    void this.run();
+  }
+
+  /** Tracking has reached segment k: its seeds, if they were handed over, become objects. False: not here yet. */
+  private takeSeeds(k: number): boolean {
+    const t0 = this.segStarts[k], objs = this.given.get(t0);
+    if (!objs) return false;
+    this.given.delete(t0);
+    this.seeded.add(t0);
     if (this.waitSince) { this.prof.waitSeedsMs += performance.now() - this.waitSince; this.waitSince = 0; }
     const t1 = this.segStarts[k + 1] ?? this.keys[this.keys.length - 1];
     const span = this.keys.filter((x) => x >= t0 - 1e-6 && x <= t1 + 1e-6);
@@ -188,7 +207,7 @@ export class SegSession {
     }
     // Nothing seeded and nothing tracked into this segment: look again a little later (re-acquire).
     if (!objs.length && ![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) this.reacquire(k);
-    void this.run();
+    return true;
   }
 
   /**
@@ -282,9 +301,9 @@ export class SegSession {
     return this.running || this.waiting;
   }
 
-  /** Waiting for the main thread's seeds of segment `asked`. */
+  /** Waiting for the main thread's seeds of the segment starting at `asked`. */
   private get waiting(): boolean {
-    return this.asked >= 0 && !this.seeded.has(this.asked);
+    return !Number.isNaN(this.asked) && !this.seeded.has(this.asked) && !this.given.has(this.asked);
   }
 
   close(): void {
@@ -408,7 +427,7 @@ export class SegSession {
     let left = 0, autosNow = 0;
     for (const s of this.objs.values()) { left += s.fwd.length - s.fi + s.bwd.length - s.bi; if (s.auto) autosNow++; }
     const per = Math.max(1, autosNow) * Math.max(1, Math.round(SEG.segmentS * SEG.fps));
-    for (let k = 0; k < this.segStarts.length; k++) if (!this.seeded.has(k)) left += per;
+    for (const s of this.segStarts) if (!this.seeded.has(s)) left += per;
     if (!this.segStarts.length) left += per;
     return [this.stepsDone, this.stepsDone + left];
   }
@@ -443,8 +462,9 @@ export class SegSession {
         const t = autos.length ? Math.min(...autos.map((s) => this.nextOf(s)!)) : Infinity;
         const k = this.nextSegment(t);
         if (k !== null) {
-          if (!this.seeded.has(k)) {
-            if (this.asked !== k) { this.asked = k; this.waitSince = performance.now(); this.ev.needSeeds(k, this.segStarts[k]); }
+          if (!this.takeSeeds(k)) {
+            const ts = this.segStarts[k];
+            if (this.asked !== ts) { this.asked = ts; this.waitSince = performance.now(); this.ev.needSeeds(k, ts); }
             break;
           }
           await yieldNow();
@@ -495,7 +515,7 @@ export class SegSession {
   private nextSegment(t: number): number | null {
     if (!this.segStarts.length) return null;
     for (let k = 0; k < this.segStarts.length; k++) {
-      if (this.seeded.has(k)) continue;
+      if (this.seeded.has(this.segStarts[k])) continue;
       if (this.segStarts[k] <= t + 1e-6) return k;
       return t === Infinity ? k : null;
     }

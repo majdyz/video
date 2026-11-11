@@ -173,9 +173,9 @@ export class WorkerSegModel implements SegModel {
     return Number((await this.call({ type: "session-add", object })).t);
   }
 
-  /** Segment k's seeds (the engine's own subjects on its canonical frame t; may be none). */
-  async sessionSeeds(k: number, t: number, objects: (SegObject & { id: number })[]): Promise<void> {
-    await this.call({ type: "session-seeds", k, t, objects });
+  /** The seeds of the segment starting at t (the engine's own subjects on its canonical frame; may be none). */
+  async sessionSeeds(t: number, objects: (SegObject & { id: number })[]): Promise<void> {
+    await this.call({ type: "session-seeds", t, objects });
   }
 
   /** Subjects the model finds by itself on frame t (session.ts autoSeeds). */
