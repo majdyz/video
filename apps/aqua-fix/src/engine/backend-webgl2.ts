@@ -2,6 +2,7 @@ import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTexture
 import { GLSL_FRAGMENT, GLSL_DOWNSCALE_FRAGMENT, GLSL_COMPOSITE, GLSL_VERTEX as VS } from "./shaders.ts";
 import { GLSL_TP_FIELD, GLSL_TP_FLOW, GLSL_TP_LUM } from "./temporal.ts";
 import { TEMPORAL } from "./params.ts";
+import { waitForSync } from "./fence-poll.ts";
 
 
 /** Export readbacks kept in flight (the exporter overlaps up to three frames). */
@@ -634,6 +635,8 @@ export class WebGL2Backend implements GpuBackend {
   /** Human-readable result of the capture benchmark (diagnostics). */
   captureBench = "";
   private readbackRing: { pbo: WebGLBuffer; busy: boolean; size: number }[] = [];
+  /** readbackSlotFree callers waiting for a slot. */
+  private slotWaiters: (() => void)[] = [];
   /**
    * Host copy of a readback, reused frame after frame: the VideoFrame constructor copies the bytes, so one
    * buffer serves every slot (the copy-out and the wrap run back to back, synchronously). A fresh 33 MB array
@@ -760,7 +763,13 @@ export class WebGL2Backend implements GpuBackend {
    */
   async readbackSlotFree(): Promise<void> {
     if (this.capture !== "readback") return;
-    while (this.readbackRing.length >= READBACK_SLOTS && !this.readbackRing.some((r) => !r.busy)) await new Promise<void>((r) => setTimeout(r, 1));
+    // Woken when a readback finishes (captureReadback); the timer is only a net under a missed wake-up.
+    while (this.readbackRing.length >= READBACK_SLOTS && !this.readbackRing.some((r) => !r.busy)) {
+      await new Promise<void>((r) => {
+        this.slotWaiters.push(r);
+        setTimeout(r, 50);
+      });
+    }
   }
 
   /** Frees the export readback buffers (end of an export: at 4K they hold ~100 MB). */
@@ -889,17 +898,11 @@ export class WebGL2Backend implements GpuBackend {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)!;
       gl.flush();
-      await new Promise<void>((resolve, reject) => {
-        let tries = 0;
-        const poll = () => {
-          const status = gl.clientWaitSync(sync, 0, 0);
-          if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return resolve();
-          if (status === gl.WAIT_FAILED || ++tries > 15000) return reject(new Error("GPU readback timed out"));
-          setTimeout(poll, 1);
-        };
-        poll();
-      });
-      gl.deleteSync(sync);
+      try {
+        await waitForSync(gl, sync);
+      } finally {
+        gl.deleteSync(sync);
+      }
       if (!this.readbackHost || this.readbackHost.byteLength !== w * h * 4) this.readbackHost = new Uint8Array(w * h * 4);
       const px = this.readbackHost;
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
@@ -910,6 +913,7 @@ export class WebGL2Backend implements GpuBackend {
       return new VideoFrame(px, { format: "RGBA", codedWidth: w, codedHeight: h, timestamp: timestampUs, duration: durationUs });
     } finally {
       slot.busy = false;
+      for (const wake of this.slotWaiters.splice(0)) wake();
     }
   }
 
@@ -944,17 +948,11 @@ export class WebGL2Backend implements GpuBackend {
     gl.viewport(0, 0, w, h);
     const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)!;
     gl.flush();
-    await new Promise<void>((resolve, reject) => {
-      let tries = 0;
-      const poll = () => {
-        const status = gl.clientWaitSync(sync, 0, 0);
-        if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return resolve();
-        if (status === gl.WAIT_FAILED || ++tries > 15000) return reject(new Error("GPU readback timed out"));
-        setTimeout(poll, 1);
-      };
-      poll();
-    });
-    gl.deleteSync(sync);
+    try {
+      await waitForSync(gl, sync);
+    } finally {
+      gl.deleteSync(sync);
+    }
     if (!this.readbackHost || this.readbackHost.byteLength !== bytes) this.readbackHost = new Uint8Array(bytes);
     const px = this.readbackHost;
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
@@ -1013,17 +1011,11 @@ export class WebGL2Backend implements GpuBackend {
       gl.flush();
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      await new Promise<void>((resolve, reject) => {
-        let tries = 0;
-        const poll = () => {
-          const status = gl.clientWaitSync(sync, 0, 0);
-          if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return resolve();
-          if (status === gl.WAIT_FAILED || ++tries > 15000) return reject(new Error("GPU readback timed out"));
-          setTimeout(poll, 2);
-        };
-        poll();
-      });
-      gl.deleteSync(sync);
+      try {
+        await waitForSync(gl, sync, { slowDelayMs: 2 });
+      } finally {
+        gl.deleteSync(sync);
+      }
       const out = new Uint8ClampedArray(width * height * 4);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo);
       gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, out);
