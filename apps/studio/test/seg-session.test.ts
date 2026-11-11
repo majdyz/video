@@ -5,6 +5,10 @@ import assert from "node:assert/strict";
 import type { EdgeTam } from "../src/pipeline/seg/edgetam.ts";
 import { SegSession, type SessionEvents, type SessionFrameOut, type SessionFrames } from "../src/pipeline/seg/session.ts";
 import type { SegObject } from "../src/pipeline/seg/track.ts";
+import { rleDecode } from "../src/pipeline/seg/mask.ts";
+
+/** Frames whose alpha pops something (the fake clip's mask grid is 320×40). */
+const popped = (frames: Map<number, SessionFrameOut>) => [...frames.values()].filter((x) => rleDecode(x.alpha, 320 * 40).some((a) => a > 127)).length;
 
 // ---------------------------------------------------------------- fakes
 
@@ -218,4 +222,53 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   assert.equal(b.s.busy, false);
   sameFrames(a.frames, b.frames, "replay");
   console.log("session: replay with inserted segment starts → same masks, no hang: ok");
+}
+
+// An exclude tap replays as what it came to. Its outcome depends on the masks tracked when the tap came, so the
+// session used to stay awake for good after one (no hibernation, no release for the export). Logged as its outcome
+// (studio-seg.ts excludeOutcome), a fresh session given the log before any tracking ends with the same masks.
+{
+  const { excludeOutcome } = await import("../src/pipeline/seg/studio-seg.ts");
+  const s0 = subject(0);
+  const f1 = fake();
+  const a = open(f1, { start: 0, end: 2 }, () => []);
+  let end = a.settled();
+  a.s.seeds(0, [s0]);
+  await end;
+  const shown = popped(a.frames);
+  assert.ok(shown > 30, "the subject is popped before the tap");
+  // The tap on the subject, after the pass: most of it under the tap's own mask → the subject goes, whole.
+  end = a.settled();
+  const r = await a.s.excludeAt(900, 1, subjectX(1), 0.5);
+  assert.deepEqual(r, { action: "removed", removed: s0.id });
+  await end;
+  assert.equal(popped(a.frames), 0, "nothing is popped after it");
+  const entry = excludeOutcome(r, 900, 1, subjectX(1), 0.5);
+  assert.deepEqual(entry, { op: "remove", id: s0.id });
+
+  // Replay: seeds and the removal up front (the subject's object does not exist yet when it is removed).
+  const f2 = fake();
+  const b = open(f2, { start: 0, end: 2 }, () => []);
+  end = b.settled();
+  b.s.seeds(0, [s0]);
+  b.s.remove(s0.id);
+  await end;
+  sameFrames(a.frames, b.frames, "replayed removal");
+
+  // Undo (restore) brings the subject back, as a pass that never lost it.
+  end = b.settled();
+  b.s.restore(s0.id);
+  await end;
+  assert.equal(popped(b.frames), shown, "restored");
+
+  // A tap on nothing the ML pops is an exclude object; its log entry is the object the session added.
+  const f3 = fake();
+  const c = open(f3, { start: 0, end: 1 }, () => []);
+  end = c.settled();
+  c.s.seeds(0, []);
+  const r2 = await c.s.excludeAt(901, 0.5, 0.9, 0.5);
+  assert.deepEqual(r2, { action: "exclude" });
+  assert.deepEqual(excludeOutcome(r2, 901, 0.5, 0.9, 0.5), { op: "add", object: { id: 901, kind: "exclude", t: 0.5, prompt: { points: [[0.9, 0.5]], labels: [1] } } });
+  await end;
+  console.log("session: exclude taps replay as their outcome: ok");
 }

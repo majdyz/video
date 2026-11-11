@@ -84,6 +84,9 @@ type ObjState = {
   auto: boolean;
   /** The segment an auto is in now (carry-over moves it on). */
   seg: number;
+  /** An auto the user took out (remove): still tracked, so the pass stays the same whenever the tap came (it goes
+   * on deciding carry-overs as before), but in no mask. A removed tap just leaves (it affects no other object). */
+  hidden: boolean;
   /** Keyframe time → probability (0..255) on the mask grid, run-length coded. */
   keys: Map<number, Uint8Array>;
   /** Keyframes whose mask is not empty (the confidence curve only counts those). */
@@ -168,7 +171,7 @@ export class SegSession {
     const t = this.snap(o.t), reach = SEG.reachS;
     const near = this.keys.filter((k) => Math.abs(k - t) <= reach + 1e-6);
     this.objs.set(o.id, {
-      o: { ...o, t }, auto: false, seg: -1, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null,
+      o: { ...o, t }, auto: false, seg: -1, hidden: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null,
       fwd: near.filter((k) => k >= t - 1e-6), bwd: near.filter((k) => k <= t + 1e-6).reverse(),
     });
     void this.run();
@@ -203,7 +206,7 @@ export class SegSession {
     const t1 = this.segStarts[k + 1] ?? this.keys[this.keys.length - 1];
     const span = this.keys.filter((x) => x >= t0 - 1e-6 && x <= t1 + 1e-6);
     for (const o of objs) {
-      this.objs.set(o.id, { o: { ...o, t: t0 }, auto: true, seg: k, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd: span, bwd: [] });
+      this.objs.set(o.id, { o: { ...o, t: t0 }, auto: true, seg: k, hidden: this.gone.delete(o.id), keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd: span, bwd: [] });
     }
     // Nothing seeded and nothing tracked into this segment: look again a little later (re-acquire).
     if (!objs.length && ![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) this.reacquire(k);
@@ -220,17 +223,38 @@ export class SegSession {
     if (r > t + 1e-6 && r < next - SEG.reacquireS / 2) this.segStarts.splice(k + 1, 0, r);
   }
 
-  /** Takes an object out (its masks kept for restore); every interval it touched is filled again. */
+  /** Ids removed before their object exists (a replay removes an auto whose seeds are still held): hidden on arrival. */
+  private gone = new Set<number>();
+
+  /**
+   * Takes an object out of the masks (restorable); every interval it touched is filled again. A tap's object
+   * leaves the session; an auto stays and is tracked on, hidden (ObjState.hidden), so the result does not depend on
+   * when in the pass it was removed: a replay that removes it before anything is tracked gives the same masks.
+   */
   remove(id: number): void {
     const s = this.objs.get(id);
-    if (!s) return;
-    this.objs.delete(id);
-    this.trash.set(id, s);
+    if (!s) { if (!this.trash.has(id)) this.gone.add(id); return; }
+    if (s.auto) {
+      if (s.hidden) return;
+      s.hidden = true;
+    } else {
+      this.objs.delete(id);
+      this.trash.set(id, s);
+    }
     this.markObject(s);
     void this.run();
   }
 
   restore(id: number): void {
+    this.gone.delete(id);
+    const h = this.objs.get(id);
+    if (h) {
+      if (!h.hidden) return;
+      h.hidden = false;
+      this.markObject(h);
+      void this.run();
+      return;
+    }
     const s = this.trash.get(id);
     if (!s) return;
     this.trash.delete(id);
@@ -249,7 +273,7 @@ export class SegSession {
     const k = this.snap(t), x = Math.min(this.mw - 1, Math.floor(u * this.mw)), y = Math.min(this.mh - 1, Math.floor(v * this.mh));
     let best: ObjState | null = null, bp = 127;
     for (const s of this.objs.values()) {
-      if (s.o.kind !== "include") continue;
+      if (s.o.kind !== "include" || s.hidden) continue;
       const m = this.key(s, k);
       if (m && m[y * this.mw + x] > bp) { bp = m[y * this.mw + x]; best = s; }
     }
@@ -661,6 +685,7 @@ export class SegSession {
     const n = this.mw * this.mh, inc = new Float32Array(n);
     let exc: Float32Array | null = null, any = false;
     for (const s of this.objs.values()) {
+      if (s.hidden) continue;
       const m = this.key(s, t);
       if (!m) continue;
       any = true;
@@ -732,7 +757,7 @@ export class SegSession {
     for (const t of this.keys) {
       let num = 0, den = 0;
       for (const s of this.objs.values()) {
-        if (s.o.kind !== "include" || !s.shown.has(t)) continue;
+        if (s.o.kind !== "include" || s.hidden || !s.shown.has(t)) continue;
         const k = s.keys.get(t);
         const a = k ? Math.max(1, area(rleDecode(k, n), 127)) : 1;
         num += a * (s.conf.get(t) ?? 1); den += a;

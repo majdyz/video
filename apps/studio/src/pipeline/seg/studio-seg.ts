@@ -384,11 +384,19 @@ export function segKey(k: number, t: number): number {
 
 /** The session's inputs, in order: replayed into a fresh worker after a hibernation (SubjectSeg.wake). Seeds are
  * logged by their segment's start time (segKey; session.ts holds them until its tracking gets there). */
-type LogOp =
+export type LogOp =
   | { op: "seeds"; t: number; objects: (SegObject & { id: number })[] }
   | { op: "add"; object: SegObject & { id: number } }
   | { op: "remove"; id: number }
   | { op: "restore"; id: number };
+
+/**
+ * What an exclude tap (id, at clip time t, upright uv) came to in the session (session.ts excludeNow), as the log
+ * entry that reproduces it: the subject it removed, or the exclude object the session added for it.
+ */
+export function excludeOutcome(r: { action: "removed"; removed: number } | { action: "part" | "exclude" }, id: number, t: number, u: number, v: number): LogOp {
+  return r.action === "removed" ? { op: "remove", id: r.removed } : { op: "add", object: { id, kind: "exclude", t, prompt: { points: [[u, v]], labels: [1] } } };
+}
 
 /** A finished pass's worker (the model's ~800 MB of WASM heap) is shut down after this long idle (ms). */
 export const SEG_HIBERNATE_MS = 15000;
@@ -418,9 +426,10 @@ export class SubjectSeg {
   /** The engine's automatic subjects, seeded once per clip (autoObjects); null = not yet. */
   autos: SegObject[] | null = null;
   private onChange: () => void;
-  /** Everything the session was given (replayable: no exclude taps, whose outcome depends on the masks so far). */
+  /** Everything the session was given, as what replays to the same masks (an exclude tap as its outcome). */
   private log: LogOp[] = [];
-  private replayable = true;
+  /** Exclude taps the worker has not answered yet: their outcome is not in the log, so the worker stays up. */
+  private inflight = 0;
   private duration = 0;
   /** The pass finished and its worker was shut down; the masks stay in `live`. */
   private hibernated = false;
@@ -518,6 +527,8 @@ export class SubjectSeg {
       this.onNeedSeeds?.(e.k, e.t);
     } else if (e.ev === "rejected") {
       segLog(`tap ${e.id} came out as the background; dropped`);
+      // Out of the log too: a replay would track it to the same rejection and say so again.
+      this.log = this.log.filter((l) => !(l.op === "add" && l.object.id === e.id));
       this.onRejected?.();
     } else if (e.ev === "idle") {
       this.busy = false;
@@ -569,9 +580,9 @@ export class SubjectSeg {
    */
   private scheduleHibernate(): void {
     clearTimeout(this.hibTimer);
-    if (!this.replayable || !this.live) return;
+    if (!this.live) return;
     this.hibTimer = window.setTimeout(() => {
-      if (this.busy || !this.model || !this.live || !this.replayable || this.waking) return;
+      if (this.busy || !this.model || !this.live || this.waking || this.inflight) return;
       crumb("ai: hibernate");
       segLog(`pass done: shutting the model down (masks kept, ${(this.live.bytes / 1e6).toFixed(1)} MB)`);
       this.model.dispose();
@@ -589,7 +600,7 @@ export class SubjectSeg {
    */
   releaseForExport(): void {
     if (!isMobile(deviceFacts())) return;
-    if (this.busy || !this.model || !this.live || !this.replayable || this.waking) return;
+    if (this.busy || !this.model || !this.live || this.waking || this.inflight) return;
     clearTimeout(this.hibTimer);
     crumb("ai: hibernate (export)");
     segLog("export starting: shutting the model down (masks kept)");
@@ -709,13 +720,16 @@ export class SubjectSeg {
   async exclude(t: number, u: number, v: number): Promise<"removed" | "part" | "exclude" | null> {
     if (!this.live || !(await this.wake()) || !this.model) return null;
     const id = this.nextId++;
-    // Its outcome depends on the masks tracked so far: a replay could differ, so this session stays awake from now on.
-    this.replayable = false;
     clearTimeout(this.hibTimer);
     crumb(`ai: exclude ${t.toFixed(2)}s`);
-    const r = await this.model.sessionExclude(id, t, u, v).catch(() => null);
+    this.inflight++;
+    const r = await this.model.sessionExclude(id, t, u, v).catch(() => null).finally(() => { this.inflight--; });
     // Null: the worker failed in or before the tap's own step (fail has told the user).
     if (!r) return null;
+    // The tap's outcome depends on the masks tracked when it came, so the log keeps what it resolved to, not the tap:
+    // a subject taken out, or an exclude object added (excludeOutcome). Replayed, either gives the same masks, so the
+    // session can still hibernate and be released for an export (it used to stay awake for good after one exclude).
+    this.log.push(excludeOutcome(r, id, t, u, v));
     crumb(`ai: exclude -> ${r.action}`);
     this.undoOps.push(r.action === "removed" ? { kind: "removed", id: r.removed } : { kind: "added", id });
     segLog(`exclude tap at ${t.toFixed(2)} s: ${r.action}`);
@@ -764,7 +778,6 @@ export class SubjectSeg {
     this.undoOps = [];
     this.busy = false;
     this.log = [];
-    this.replayable = true;
     this.hibernated = false;
     clearTimeout(this.hibTimer);
     if (this.clipFailed) {
