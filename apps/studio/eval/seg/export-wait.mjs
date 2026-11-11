@@ -3,7 +3,7 @@
 //   MODE=playing    playback started, then Export right away (export must pause it and let the pass reach idle);
 //   MODE=after      the pass left to finish in the preview first, then Export.
 // Every mode must give the same frames (window.exportFrameHashes). Saves <out>/<MODE>.json: the hashes, the export
-// sheet's progress lines ("Finding subjects N%… then exporting") and the [export] log.
+// sheet's progress lines ("Finding subjects… then exporting"; the pass moves the bar) and the [export] log.
 // Usage: MODE=immediate node apps/studio/eval/seg/export-wait.mjs <base url> <outdir> <clip.mp4>   (env EXTRA)
 import fs from "node:fs";
 import path from "node:path";

@@ -993,6 +993,11 @@ export class SubjectSeg {
     return this.live && this.live.filled > 0 ? "ai" : "engine";
   }
 
+  /** The pass for this clip and trim has run to its end: an export has nothing to wait for (no share of its bar). */
+  ready(file: File, trim: TrimRange | null): boolean {
+    return this.file === file && !!this.live && !this.opening && this.passDone && scopeServes(this.scope, trim, true);
+  }
+
   /** Resolves when the session has nothing left to do (an export waits for it: the same masks as the preview). */
   get pending(): Promise<void> | null {
     if (!this.live || !this.busy) return null;
