@@ -26,15 +26,15 @@
    "dEMax": 14.47
   },
   "stability": {
-   "lightStd": 1.77,
-   "lightJump": 4.43,
-   "wbStd": 1.68,
-   "wbSwing": 0.06,
+   "lightStd": 1.81,
+   "lightJump": 4.67,
+   "wbStd": 1.64,
+   "wbSwing": 0.05,
    "expSwing": 0.01
   },
   "diagnostics": {
-   "waterWarm": 0.24,
-   "chroma": 0.92
+   "waterWarm": 0.22,
+   "chroma": 0.94
   }
  },
  "pairs": {
@@ -333,7 +333,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 0.86
+   "chroma": 0.86,
+   "dL": -24.56,
+   "hiC": 20.73,
+   "hiPink": 0
   },
   "cave_spring_surface_to_under": {
    "id": "cave_spring_surface_to_under",
@@ -341,14 +344,17 @@
    "frames": 16,
    "shots": 3,
    "dE": 29.13,
-   "dEMax": 35.57,
+   "dEMax": 35.58,
    "lightStd": 2.19,
-   "lightJump": 4.91,
-   "wbStd": 3.89,
+   "lightJump": 4.87,
+   "wbStd": 3.88,
    "wbSwing": 0.1,
    "expSwing": 0.09,
-   "waterWarm": 0.12,
-   "chroma": 0.73
+   "waterWarm": 0.13,
+   "chroma": 0.73,
+   "dL": -30.32,
+   "hiC": 30.21,
+   "hiPink": 5.55
   },
   "divers_shallow_reef": {
    "id": "divers_shallow_reef",
@@ -363,7 +369,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 1.14
+   "chroma": 1.14,
+   "dL": -13.42,
+   "hiC": 6.35,
+   "hiPink": 0.04
   },
   "divers_wreck_cabo": {
    "id": "divers_wreck_cabo",
@@ -378,7 +387,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 0.81
+   "chroma": 0.81,
+   "dL": -13.45,
+   "hiC": 44.3,
+   "hiPink": 0
   },
   "graded_blueholes_sunbeams": {
    "id": "graded_blueholes_sunbeams",
@@ -393,7 +405,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 0.96
+   "chroma": 0.96,
+   "dL": 0.9,
+   "hiC": 5.7,
+   "hiPink": 20.94
   },
   "graded_noaa_samoa": {
    "id": "graded_noaa_samoa",
@@ -408,7 +423,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 1.01
+   "chroma": 1.01,
+   "dL": 0.22,
+   "hiC": 10.68,
+   "hiPink": 0
   },
   "graded_noaa_wreck": {
    "id": "graded_noaa_wreck",
@@ -423,7 +441,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0.47,
-   "chroma": 1.29
+   "chroma": 1.29,
+   "dL": 4.84,
+   "hiC": 24.14,
+   "hiPink": 0
   },
   "graded_oceana_lionfish": {
    "id": "graded_oceana_lionfish",
@@ -438,7 +459,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 0.99
+   "chroma": 0.99,
+   "dL": 0.22,
+   "hiC": 8.02,
+   "hiPink": 1.64
   },
   "graded_usvi_promo": {
    "id": "graded_usvi_promo",
@@ -453,22 +477,28 @@
    "wbSwing": 0.01,
    "expSwing": 0.04,
    "waterWarm": 0.95,
-   "chroma": 0.98
+   "chroma": 0.98,
+   "dL": 7.24,
+   "hiC": 24.17,
+   "hiPink": 4.21
   },
   "green_reservoir_divers": {
    "id": "green_reservoir_divers",
    "category": "green_murky",
    "frames": 16,
    "shots": 2,
-   "dE": 22.53,
-   "dEMax": 40.03,
-   "lightStd": 1.61,
-   "lightJump": 4.15,
-   "wbStd": 2.34,
-   "wbSwing": 0.66,
-   "expSwing": 0.06,
-   "waterWarm": 0.62,
-   "chroma": 0.37
+   "dE": 16.08,
+   "dEMax": 29.14,
+   "lightStd": 2.19,
+   "lightJump": 8.62,
+   "wbStd": 1.69,
+   "wbSwing": 0.45,
+   "expSwing": 0.07,
+   "waterWarm": 0.13,
+   "chroma": 0.69,
+   "dL": -17.82,
+   "hiC": 22.35,
+   "hiPink": 0
   },
   "reef_anemonefish": {
    "id": "reef_anemonefish",
@@ -483,7 +513,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0.01,
-   "chroma": 1.08
+   "chroma": 1.08,
+   "dL": 1.61,
+   "hiC": 2.63,
+   "hiPink": 0
   },
   "sand_flounder": {
    "id": "sand_flounder",
@@ -498,7 +531,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 0.92
+   "chroma": 0.92,
+   "dL": -6.85,
+   "hiC": 2.82,
+   "hiPink": 0.06
   },
   "school_sardines": {
    "id": "school_sardines",
@@ -513,7 +549,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0.72,
-   "chroma": 1.26
+   "chroma": 1.26,
+   "dL": -13.51,
+   "hiC": 8.01,
+   "hiPink": 19.94
   },
   "tilt_reef_to_blue_barracuda": {
    "id": "tilt_reef_to_blue_barracuda",
@@ -528,7 +567,10 @@
    "wbSwing": 0.32,
    "expSwing": 0,
    "waterWarm": 0.12,
-   "chroma": 0.92
+   "chroma": 0.92,
+   "dL": -25.24,
+   "hiC": 20.99,
+   "hiPink": 0.97
   },
   "topside_blacktip_shallows": {
    "id": "topside_blacktip_shallows",
@@ -543,7 +585,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 1.04
+   "chroma": 1.04,
+   "dL": 0.29,
+   "hiC": 3.34,
+   "hiPink": 0
   },
   "topside_manta_surface": {
    "id": "topside_manta_surface",
@@ -558,7 +603,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 0.97
+   "chroma": 0.97,
+   "dL": -0.71,
+   "hiC": 15.13,
+   "hiPink": 0.01
   },
   "topside_whaleshark_boat": {
    "id": "topside_whaleshark_boat",
@@ -573,7 +621,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 0,
-   "chroma": 0.74
+   "chroma": 0.74,
+   "dL": -5.42,
+   "hiC": 2.36,
+   "hiPink": 0
   },
   "user_drift": {
    "id": "user_drift",
@@ -588,7 +639,10 @@
    "wbSwing": 0,
    "expSwing": 0,
    "waterWarm": 1.39,
-   "chroma": 0.57
+   "chroma": 0.57,
+   "dL": -6.22,
+   "hiC": 4.66,
+   "hiPink": 0.04
   }
  }
 }

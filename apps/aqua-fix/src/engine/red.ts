@@ -34,6 +34,19 @@
 //     the balance (the veil itself: a red channel of ~0 cannot be balanced
 //     back) has its chroma moved toward a muted blue-grey (greenNeutral, a
 //     per-pixel Oklab operation on its own colour: no gain, no structure).
+//  5. Lit green water is not murk. Under a bright green veil (a sunlit lake or
+//     reservoir near the surface: the veil is the lit water body itself, with
+//     a linear luminance several times any murky clip's) everything in 4 crushed
+//     the frame: the forced dehaze and the murk hold took the water to a dark
+//     grey, the blue-grey neutralisation removed what colour was left, and the
+//     opened red limit (×5) on top of a per-channel subtraction of the big
+//     green veil turned white fins pink (and painted brown patches where the
+//     object map lagged onto water). There the green weight stands down
+//     (greenLitOf): the frame is graded like any other bright hazy water (it
+//     ends a low-key teal through the water-hue map), with the ordinary
+//     balance limits, and the veil comes off hue-preserving on every pixel
+//     (analyze.ts raises subLo / subHi), so a white object keeps its green
+//     next to its blue instead of turning violet.
 
 import { linearToOklab, linearToSrgb } from "./color.ts";
 import type { DepthMap } from "./params.ts";
@@ -120,6 +133,11 @@ export const RED = {
   matOut: 65 * D2R,
   matC: 0.05,
   matKnee: 0.6,
+  /** Lit green water: veil colour luminance (linear) over which a green veil is the lit water body, not murk (the murky and coastal green clips sit at 0.03–0.3, a sunlit reservoir at 0.6): the green weight stands down over this ramp … */
+  litLo: 0.35,
+  litHi: 0.55,
+  /** … and the veil subtraction turns hue-preserving for every pixel (subLo / subHi move up by this much at full weight). */
+  litSub: 3,
   /** Murk is never lifted: in green water a water-path pixel ends at most at its source luminance. */
   murkHold: 1,
   /** … and dark murk (source linear luminance below murkLo, easing out by murkHi) ends darker still, at murkDark × its source: cleared, not greyed. */
@@ -136,8 +154,22 @@ function smoothstep(e0: number, e1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/** Green-water weight of a frame from its veiling light (0 blue/cyan … 1 green). */
+/** Green-water (murk) weight of a frame from its veiling light (0 blue/cyan, or lit green water … 1 green murk). */
 export function greenCastOf(binf: readonly number[], veil?: readonly number[]): number {
+  return greenVeilOf(binf, veil) * (1 - litOf(veil));
+}
+
+/** Lit-green-water weight of a frame (0..1): a green veil bright enough to be the lit water itself (RED.litLo/litHi). */
+export function greenLitOf(binf: readonly number[], veil?: readonly number[]): number {
+  return greenVeilOf(binf, veil) * litOf(veil);
+}
+
+function litOf(veil?: readonly number[]): number {
+  return veil ? smoothstep(RED.litLo, RED.litHi, 0.2126 * veil[0] + 0.7152 * veil[1] + 0.0722 * veil[2]) : 0;
+}
+
+/** How green the veil is (0 blue/cyan … 1 green), whatever its brightness. */
+function greenVeilOf(binf: readonly number[], veil?: readonly number[]): number {
   const fromBinf = smoothstep(RED.greenLo, RED.greenHi, binf[1] / Math.max(1e-4, binf[2]));
   // The veil colour (the brightest far water) is the steadier witness of a
   // cyan-green cast: tropical cyan reef water sits at G/B <= ~1.26, cyan-green
