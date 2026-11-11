@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { WEBGPU_LAYOUTS, type LayoutSpec } from "../src/engine/webgpu-layouts.ts";
 import { WGSL_COMPOSITE, WGSL_COMPOSITE_EXT, WGSL_DOWNSCALE, WGSL_DOWNSCALE_EXT, WGSL_GRADE, WGSL_GRADE_EXT } from "../src/engine/shaders.ts";
-import { WGSL_TP_FIELD, WGSL_TP_FLOW, WGSL_TP_LUM, tpExternal } from "../src/engine/temporal.ts";
+import { WGSL_NR, WGSL_NR_LEVEL, WGSL_NR_REFINE, WGSL_TP_FIELD, WGSL_TP_FLOW, WGSL_TP_LUM, tpExternal } from "../src/engine/temporal.ts";
 
 /** binding → kind declared by a WGSL program (group 0). */
 function declared(code: string): Map<number, string> {
@@ -29,6 +29,12 @@ const programs: [string, string, LayoutSpec][] = [
   ["lumExt", tpExternal(WGSL_TP_LUM), WEBGPU_LAYOUTS.downExt],
   ["flow", WGSL_TP_FLOW, WEBGPU_LAYOUTS.flow],
   ["field", WGSL_TP_FIELD, WEBGPU_LAYOUTS.field],
+  ["nrRefine", WGSL_NR_REFINE, WEBGPU_LAYOUTS.nrRefine],
+  ["nrRefineExt", tpExternal(WGSL_NR_REFINE), WEBGPU_LAYOUTS.nrRefineExt],
+  ["nrLevel", WGSL_NR_LEVEL, WEBGPU_LAYOUTS.nrLevel],
+  ["nrLevelExt", tpExternal(WGSL_NR_LEVEL), WEBGPU_LAYOUTS.nrLevelExt],
+  ["nr", WGSL_NR, WEBGPU_LAYOUTS.nr],
+  ["nrExt", tpExternal(WGSL_NR), WEBGPU_LAYOUTS.nrExt],
   ["composite", WGSL_COMPOSITE, WEBGPU_LAYOUTS.composite],
   ["compositeExt", WGSL_COMPOSITE_EXT, WEBGPU_LAYOUTS.compositeExt],
 ];
@@ -49,9 +55,13 @@ const layoutOf: Record<string, LayoutSpec> = {
   lumPipe: WEBGPU_LAYOUTS.down,
   tpFlowPipe: WEBGPU_LAYOUTS.flow,
   tpFieldPipe: WEBGPU_LAYOUTS.field,
+  refinePipe: WEBGPU_LAYOUTS.nrRefine, // or its Ext twin (same bindings), as for levelPipe and nrPipe
+  levelPipe: WEBGPU_LAYOUTS.nrLevel,
+  nrPipe: WEBGPU_LAYOUTS.nr,
   pipe: WEBGPU_LAYOUTS.composite, // composite(): compPipe or compPipeExt (same bindings)
 };
-const tpGrade = [6, 7, 8, 9];
+const tpGrade = [6, 7, 9];
+const nrCommon = [0, 1, 2];
 let groups = 0;
 for (let at = src.indexOf("createBindGroup("); at >= 0; at = src.indexOf("createBindGroup(", at + 1)) {
   // The call's argument, by bracket matching.
@@ -69,6 +79,7 @@ for (let at = src.indexOf("createBindGroup("); at >= 0; at = src.indexOf("create
   assert.ok(spec, `unknown pipeline in bind group: ${lay[1]}`);
   const got = [...call.matchAll(/binding:\s*(\d+)/g)].map((x) => Number(x[1]));
   if (call.includes("tpGradeEntries")) got.push(...tpGrade);
+  if (call.includes("...common()")) got.push(...nrCommon);
   if (/\bsrcEntry\b/.test(call)) got.push(2); // downGroup's source entry (binding 2), built just above the call
   assert.deepEqual(got.sort((a, b) => a - b), Object.keys(spec).map(Number).sort((a, b) => a - b), `bind group for ${pipe}`);
   groups++;

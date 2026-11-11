@@ -62,7 +62,15 @@ export type UserSettings = {
   subjectPopWarmth?: number;
   /** Seabed recovery, 0..1 (SEABED): sand and reef turned neutral where the water left no red at all; open water kept. */
   seabed?: number;
+  /** Temporal noise reduction before the grade (NR): "auto" (default) is gated on the frame's measured noise, "strong" blends harder and opens earlier. */
+  noiseReduction?: NoiseReduction;
 };
+
+export type NoiseReduction = "off" | "auto" | "strong";
+/** Uniform p26.x for a Noise reduction choice (0 off, 1 auto, 2 strong). */
+export function noiseLevelOf(s: Pick<UserSettings, "noiseReduction">): number {
+  return s.noiseReduction === "off" ? 0 : s.noiseReduction === "strong" ? 2 : 1;
+}
 
 /**
  * Scene preset: a prior on top of the estimated (clip-locked) correction.
@@ -86,7 +94,7 @@ export const PRESET_ADJUST: Record<ScenePreset, { red: number; blue: number; red
 };
 
 // clarity: 0.25 before the colour review's item 8 (local contrast as a modest control; the slider goes to 1).
-export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.15, veil: 0.7, look: 0, preset: "auto", subjectPop: false, subjectPopStrength: 0.5, subjectPopWarmth: 0.5, seabed: 0.6, vivid: 0, blue: 0 };
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.15, veil: 0.7, look: 0, preset: "auto", subjectPop: false, subjectPopStrength: 0.5, subjectPopWarmth: 0.5, seabed: 0.6, vivid: 0, blue: 0, noiseReduction: "auto" };
 export const INTENSITY_MAX = 2;
 
 /** Internal controls the shader reads, derived from the intensity. */
@@ -328,9 +336,8 @@ export function detailGuardOf(_p: GradeParams): number {
  *    kept near the current analysis map where the pixel departs from the
  *    water like a subject (BACKDROP.subjLo..subjHi, the same trim as the
  *    map's own reach) — the same object as one frame ago.
- *  - dark flat water gets a light motion-adaptive temporal denoise (denoise
- *    × flow confidence × flatness × darkness × not-subject × similarity to
- *    the warped previous output, tau in sRGB units).
+ * The same block flow feeds the full-frame noise reduction ahead of the grade (NR below), which replaced the
+ * light denoise of dark flat water this layer used to apply to the graded picture.
  * Block flow: 3×3 luma patches, ±flowR low-res texels (±24 px at 1/8),
  * lambda: per-texel bias toward zero motion; conf ramps out by sadLo..sadHi.
  */
@@ -351,13 +358,86 @@ export const TEMPORAL = {
   supportR: 2,
   supportLo: 0.2,
   supportHi: 0.6,
-  denoise: 0.5,
-  tau: 5 / 255,
-  flatLo: 3 / 255,
-  flatHi: 8 / 255,
-  darkLo: 0.3,
-  darkHi: 0.5,
 };
+
+/**
+ * Full-frame temporal noise reduction, before the grade (temporal.ts NR passes, apply.ts TemporalNR): the source
+ * is blended with the previous denoised frame, fetched at a whole-pixel displacement (no resampling, so the
+ * recursion cannot blur): the 1/8-resolution block flow, refined per block against the history itself to one pixel
+ * of the working frame (refineTaps² pixels per block; the 5×5 offsets of step refineStep, then the 3×3 of step 1
+ * around the best, biased toward the block flow by refineBias per pixel so flat noisy blocks stay put), read
+ * bilinearly and rounded. The block's remaining difference is its motion confidence: noise alone leaves about
+ * 0.6 × the noise level e0 (below; the previous frame's), and from blockLo to blockHi × e0 the block (a school of
+ * fish, a kicking fin, anything the flow cannot follow) fades out of the blend altogether.
+ *
+ * Noise level, once per frame: tilesX × tilesY tiles of tileTaps² pixels each measure the mean difference between
+ * the source and the warped history (largest channel), at the pixel (e0) and over its 3×3 tent average (el). A
+ * flat tile reads the noise alone; texture adds its own difference wherever the picture moves (a whole-pixel
+ * displacement leaves up to half a pixel of misalignment), so a tile counts by its flatness (texLo..texHi of the
+ * low-resolution luminance's step to its neighbours: water, sand, haze count, reef does not) and a level is the
+ * soft minimum over the tiles (power mean of exponent −4; eps keeps a small tile finite). A frame with fewer than
+ * tilesMin flat tiles has no level, and the noise reduction stands down on it. Tiles darker than lumLo or
+ * brighter than lumHi (clipped) and tiles that do not change at all (below `dead`: letterbox, crushed blacks,
+ * blocks the encoder skipped) carry no information and are left out. Noise depends on brightness, so the level is
+ * kept per luminance bin (`bins` of them, centres spread over 0..1, each tile weighted by its distance to the
+ * centre): a bin with fewer than binMin tiles leans on the whole frame's level, and no bin may exceed binMax ×
+ * that level (a bright fish that is the only bright thing in frame must not set its own, motion-inflated level)
+ * or eMax.
+ *
+ * Per pixel (level read at the luminance of its 3×3 average) the blend weight is w × gate(e0) × flow confidence ×
+ * two motion tests in units of that level: the pixel's own difference (c0Lo..c0Hi × e0: a speck of marine snow or
+ * a highlight is kept whole, and where it was the water returns at once, so nothing trails) and the 3×3 average
+ * difference (lLo..lHi × el: a moving fish, a misaligned edge). The gate (gateLo..gateHi of e0, encoded units)
+ * leaves clean footage alone.
+ */
+export const NR = {
+  // While the gate is shut for every luminance bin the reduction idles: frames pass through untouched and only
+  // every idleEvery-th one is measured (a copy of the frame before it stands in for the history). The first
+  // measurement that opens the gate starts the reduction on that frame; while open, every idleEvery-th
+  // measurement may shut it again.
+  idleEvery: 8,
+  refineTaps: 3,
+  refineStep: 2,
+  refineBias: 0.3 / 255,
+  blockLo: 0.75,
+  blockHi: 1.15,
+  tilesX: 16,
+  tilesY: 9,
+  tileTaps: 4,
+  texLo: 3 / 255,
+  texHi: 6 / 255,
+  tilesMin: 4,
+  eps: 0.25 / 255,
+  lumLo: 0.02,
+  lumHi: 0.98,
+  dead: 0.15 / 255,
+  bins: 6,
+  binMin: 4,
+  binMax: 1.5,
+  eMax: 6 / 255,
+  c0Lo: 2.5,
+  c0Hi: 4.0,
+  lLo: 1.6,
+  lHi: 2.8,
+  // Auto opens where the measured difference is clearly above what 8-bit rounding and a clean encode leave
+  // (about 1/255) and is fully on by 3.5/255 (white noise of about 2.4 steps a channel): a clip between the two,
+  // such as a shimmering school of fish, is mostly left alone. Strong opens at half that and blends harder.
+  auto: { w: 0.7, gateLo: 1.5 / 255, gateHi: 3.5 / 255 },
+  strong: { w: 0.8, gateLo: 0.75 / 255, gateHi: 2.0 / 255 },
+};
+
+/** Blend weight toward the history before the per-pixel tests: the level's strength × the noise gate at noise e0 (0 when off). */
+export function nrStrength(level: number, e0: number): number {
+  if (level < 0.5) return 0;
+  const c = level > 1.5 ? NR.strong : NR.auto;
+  const t = Math.min(1, Math.max(0, (e0 - c.gateLo) / (c.gateHi - c.gateLo)));
+  return c.w * t * t * (3 - 2 * t);
+}
+/** Whether the gate is open in any luminance bin of `levels` (nrLevel's layout, or the level target's texels: e0 first, `stride` floats per bin). */
+export function nrOpen(level: number, levels: ArrayLike<number>, stride = 2): boolean {
+  for (let b = 0; b < NR.bins; b++) if (nrStrength(level, levels[b * stride]) > 0) return true;
+  return false;
+}
 
 /**
  * Vivid objects keep their colour: a pixel that is strongly chromatic in the
@@ -1078,6 +1158,9 @@ export function packUniforms(
   u[99] = Math.max(1, params.toneGamma ?? 1); // p24.w: tone-target gamma on the graded lightness (analyze.ts TONE)
   u[96] = 1; // p24.x: Subject pop lift direction (set per frame by the engine, seg-overlay.ts popDirection)
   // p24.y: an AI subject overlay is on this frame (set by the engine): the AI alone weights the pop (grade-shader toneWeight)
+  // p26: Noise reduction level (0 off, 1 auto, 2 strong), its history valid (set by the backend per frame),
+  // hold (set by the engine: the same frame drawn again, the history must not advance), 0
+  u[104] = noiseLevelOf(settings);
   return u;
 }
 

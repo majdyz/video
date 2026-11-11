@@ -1,7 +1,7 @@
 import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput, FULL_RECT, type Rect } from "./backend.ts";
 import { WGSL_GRADE, WGSL_DOWNSCALE, WGSL_GRADE_EXT, WGSL_DOWNSCALE_EXT, WGSL_COMPOSITE, WGSL_COMPOSITE_EXT } from "./shaders.ts";
-import { WGSL_TP_FIELD, WGSL_TP_FLOW, WGSL_TP_LUM, tpExternal } from "./temporal.ts";
-import { TEMPORAL } from "./params.ts";
+import { WGSL_NR, WGSL_NR_LEVEL, WGSL_NR_REFINE, WGSL_TP_FIELD, WGSL_TP_FLOW, WGSL_TP_LUM, tpExternal } from "./temporal.ts";
+import { NR, TEMPORAL } from "./params.ts";
 import { WEBGPU_LAYOUTS, type BindingKind, type LayoutSpec } from "./webgpu-layouts.ts";
 
 /** Draws the frame small into a 2D canvas and looks for anything above black. */
@@ -61,8 +61,7 @@ export class WebGPUBackend implements GpuBackend {
   private exportTex: GPUTexture | null = null;
   private exportCanvas: OffscreenCanvas | null = null;
   private exportCtx: GPUCanvasContext | null = null;
-  // Temporal layer (temporal.ts): 1/8-resolution lum / flow / field passes
-  // and a full-resolution previous output, ping-ponged per frame.
+  // Temporal layer (temporal.ts): 1/8-resolution lum / flow / field passes, ping-ponged per frame.
   private readonly tpLumPipe: GPURenderPipeline;
   private readonly tpLumPipeExt: GPURenderPipeline;
   private readonly tpFlowPipe: GPURenderPipeline;
@@ -71,9 +70,21 @@ export class WebGPUBackend implements GpuBackend {
   private tpIdx = 0;
   private tpLowW = 0;
   private tpLowH = 0;
-  private tpOutW = 0;
-  private tpOutH = 0;
-  private tpTex: { lum: GPUTexture[]; f0: GPUTexture[]; f1: GPUTexture; flow: GPUTexture; out: GPUTexture[] } | null = null;
+  private tpTex: { lum: GPUTexture[]; f0: GPUTexture[]; f1: GPUTexture; flow: GPUTexture } | null = null;
+  // Noise reduction (temporal.ts passes 4-6; see backend-webgl2.ts): the refined flow, the noise levels and the
+  // denoised source at the target size (rgb10a2unorm), ping-ponged. Allocated only while it is on.
+  private readonly nrRefinePipe: GPURenderPipeline;
+  private readonly nrRefinePipeExt: GPURenderPipeline;
+  private readonly nrLevelPipe: GPURenderPipeline;
+  private readonly nrLevelPipeExt: GPURenderPipeline;
+  private readonly nrPipe: GPURenderPipeline;
+  private readonly nrPipeExt: GPURenderPipeline;
+  private nrTex: { flow: GPUTexture; level: GPUTexture; out: GPUTexture[] } | null = null;
+  private nrW = 0;
+  private nrH = 0;
+  private nrIdx = 0;
+  private nrWritten = false;
+  private nrHist = false;
   private readonly tpDummyHalf: GPUTexture;
   private readonly tpDummyOut: GPUTexture;
   // Compare wipe (WGSL_COMPOSITE): pipelines, its params, the "before"
@@ -128,6 +139,15 @@ export class WebGPUBackend implements GpuBackend {
     this.tpLumPipeExt = pipeline(tpExternal(WGSL_TP_LUM), "rgba16float", downLayoutExt);
     const flowLayout = layout(WEBGPU_LAYOUTS.flow);
     this.tpFlowPipe = pipeline(WGSL_TP_FLOW, "rgba16float", flowLayout);
+    const refineLayout = layout(WEBGPU_LAYOUTS.nrRefine), refineLayoutExt = layout(WEBGPU_LAYOUTS.nrRefineExt);
+    const levelLayout = layout(WEBGPU_LAYOUTS.nrLevel), levelLayoutExt = layout(WEBGPU_LAYOUTS.nrLevelExt);
+    const nrLayout = layout(WEBGPU_LAYOUTS.nr), nrLayoutExt = layout(WEBGPU_LAYOUTS.nrExt);
+    this.nrRefinePipe = pipeline(WGSL_NR_REFINE, "rgba16float", refineLayout);
+    this.nrRefinePipeExt = pipeline(tpExternal(WGSL_NR_REFINE), "rgba16float", refineLayoutExt);
+    this.nrLevelPipe = pipeline(WGSL_NR_LEVEL, "rgba16float", levelLayout);
+    this.nrLevelPipeExt = pipeline(tpExternal(WGSL_NR_LEVEL), "rgba16float", levelLayoutExt);
+    this.nrPipe = pipeline(WGSL_NR, "rgb10a2unorm", nrLayout);
+    this.nrPipeExt = pipeline(tpExternal(WGSL_NR), "rgb10a2unorm", nrLayoutExt);
     this.compPipe = pipeline(WGSL_COMPOSITE, this.format, layout(WEBGPU_LAYOUTS.composite));
     this.compPipeExt = pipeline(WGSL_COMPOSITE_EXT, this.format, layout(WEBGPU_LAYOUTS.compositeExt));
     this.compBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -342,29 +362,29 @@ export class WebGPUBackend implements GpuBackend {
   /** Forgets the temporal history (scene cut, seek, new clip). */
   resetTemporal(): void {
     this.tpValid = false;
+    this.nrWritten = false;
+    this.nrHist = false;
   }
 
+  /** The grade's temporal inputs: tracked mask, correction, and the denoised source (dummies while off). */
   private tpGradeEntries(): GPUBindGroupEntry[] {
-    const t = this.tpTex;
-    if (!t) return [6, 7, 8].map((b) => ({ binding: b, resource: this.tpDummyHalf.createView() })).concat([{ binding: 9, resource: this.tpDummyOut.createView() }]);
-    const cur = this.tpIdx;
+    const t = this.tpTex, n = this.nrTex;
     return [
-      { binding: 6, resource: t.f0[cur].createView() },
-      { binding: 7, resource: t.f1.createView() },
-      { binding: 8, resource: t.flow.createView() },
-      { binding: 9, resource: t.out[1 - cur].createView() },
+      { binding: 6, resource: (t ? t.f0[this.tpIdx] : this.tpDummyHalf).createView() },
+      { binding: 7, resource: (t ? t.f1 : this.tpDummyHalf).createView() },
+      { binding: 9, resource: (n ? n.out[this.nrIdx] : this.tpDummyOut).createView() },
     ];
   }
 
-  private tpEnsure(outW: number, outH: number): void {
+  private tpEnsure(): void {
     const lw = Math.max(1, Math.ceil(this.outputWidth / TEMPORAL.scale)), lh = Math.max(1, Math.ceil(this.outputHeight / TEMPORAL.scale));
-    if (this.tpTex && lw === this.tpLowW && lh === this.tpLowH && outW === this.tpOutW && outH === this.tpOutH) return;
+    if (this.tpTex && lw === this.tpLowW && lh === this.tpLowH) return;
     this.tpRelease();
+    this.nrRelease();
     const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
     const half = () => this.device.createTexture({ size: [lw, lh], format: "rgba16float", usage });
-    const out = () => this.device.createTexture({ size: [outW, outH], format: this.format, usage: usage | GPUTextureUsage.COPY_SRC });
-    this.tpTex = { lum: [half(), half()], f0: [half(), half()], f1: half(), flow: half(), out: [out(), out()] };
-    this.tpLowW = lw; this.tpLowH = lh; this.tpOutW = outW; this.tpOutH = outH;
+    this.tpTex = { lum: [half(), half()], f0: [half(), half()], f1: half(), flow: half() };
+    this.tpLowW = lw; this.tpLowH = lh;
     this.tpValid = false;
     this.bindGroupDirty = true;
   }
@@ -372,8 +392,31 @@ export class WebGPUBackend implements GpuBackend {
   private tpRelease(): void {
     this.lastGraded = null;
     const t = this.tpTex;
-    if (t) for (const x of [...t.lum, ...t.f0, t.f1, t.flow, ...t.out]) x.destroy();
+    if (t) for (const x of [...t.lum, ...t.f0, t.f1, t.flow]) x.destroy();
     this.tpTex = null;
+  }
+
+  /** (Re)creates the noise reduction targets for the target size (after tpEnsure, which drops them when the low size changes). */
+  private nrEnsure(outW: number, outH: number): void {
+    if (this.nrTex && outW === this.nrW && outH === this.nrH) return;
+    this.nrRelease();
+    const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
+    const half = (w: number, h: number) => this.device.createTexture({ size: [w, h], format: "rgba16float", usage });
+    const out = () => this.device.createTexture({ size: [outW, outH], format: "rgb10a2unorm", usage });
+    this.nrTex = { flow: half(this.tpLowW, this.tpLowH), level: half(NR.bins, 1), out: [out(), out()] };
+    this.nrW = outW; this.nrH = outH;
+    this.bindGroupDirty = true;
+  }
+
+  private nrRelease(): void {
+    const n = this.nrTex;
+    if (n) {
+      for (const x of [n.flow, n.level, ...n.out]) x.destroy();
+      this.bindGroupDirty = true;
+    }
+    this.nrTex = null;
+    this.nrWritten = false;
+    this.nrHist = false;
   }
 
   /** Grades the current source into `target` (through the temporal layer when it has a source size). */
@@ -385,10 +428,17 @@ export class WebGPUBackend implements GpuBackend {
       this.tpValid = false;
       if (this.uniforms[92] !== 0) { this.uniforms[92] = 0; this.device.queue.writeBuffer(this.uniformBuf, 92 * 4, this.uniforms, 92, 1); }
     }
+    // Noise reduction (p26.x) rides on the layer's flow: its targets exist only while it is on.
+    const nr = tp && this.uniforms[104] > 0.5;
+    if (!nr) {
+      this.nrRelease();
+      // The grade must read the source itself.
+      if (this.uniforms[104] !== 0) { this.uniforms[104] = 0; this.device.queue.writeBuffer(this.uniformBuf, 104 * 4, this.uniforms, 104, 1); }
+    }
     // One external import per draw, shared by the lum pass and the grade.
     const ext = this.extSource ? this.device.importExternalTexture({ source: this.extSource }) : null;
     if (tp) {
-      this.tpEnsure(target.width, target.height);
+      this.tpEnsure();
       const t = this.tpTex!, cur = this.tpIdx, prev = 1 - cur;
       this.uniforms[92] = this.tpValid ? 1 : 0;
       this.device.queue.writeBuffer(this.uniformBuf, 92 * 4, this.uniforms, 92, 1);
@@ -421,19 +471,48 @@ export class WebGPUBackend implements GpuBackend {
           { binding: 10, resource: this.data[3].createView() },
         ],
       }));
+      if (nr) {
+        // The history advances with the picture: a frame drawn again (p26.z, set by the engine) is denoised
+        // again from the same history, not from itself.
+        this.nrEnsure(target.width, target.height);
+        const n = this.nrTex!;
+        if (this.nrWritten && this.uniforms[106] < 0.5) {
+          this.nrIdx = 1 - this.nrIdx;
+          this.nrHist = true;
+          this.bindGroupDirty = true;
+        } else if (!this.nrWritten) this.nrHist = false;
+        this.uniforms[105] = this.nrHist ? 1 : 0;
+        this.device.queue.writeBuffer(this.uniformBuf, 105 * 4, this.uniforms, 105, 1);
+        const hist = n.out[1 - this.nrIdx];
+        const common = (): GPUBindGroupEntry[] => [{ binding: 0, resource: { buffer: this.uniformBuf } }, { binding: 1, resource: this.sampler }, { binding: 2, resource: ext ?? this.source!.createView() }];
+        const refinePipe = ext ? this.nrRefinePipeExt : this.nrRefinePipe;
+        lowPass([n.flow.createView()], refinePipe, this.device.createBindGroup({
+          layout: refinePipe.getBindGroupLayout(0),
+          entries: [...common(), { binding: 6, resource: t.flow.createView() }, { binding: 7, resource: hist.createView() }, { binding: 8, resource: n.level.createView() }], // 8: the previous frame's levels
+        }));
+        const levelPipe = ext ? this.nrLevelPipeExt : this.nrLevelPipe;
+        lowPass([n.level.createView()], levelPipe, this.device.createBindGroup({
+          layout: levelPipe.getBindGroupLayout(0),
+          entries: [...common(), { binding: 6, resource: n.flow.createView() }, { binding: 7, resource: hist.createView() }, { binding: 8, resource: t.lum[cur].createView() }],
+        }));
+        const nrPipe = ext ? this.nrPipeExt : this.nrPipe;
+        lowPass([n.out[this.nrIdx].createView()], nrPipe, this.device.createBindGroup({
+          layout: nrPipe.getBindGroupLayout(0),
+          entries: [...common(), { binding: 6, resource: n.flow.createView() }, { binding: 7, resource: hist.createView() }, { binding: 8, resource: n.level.createView() }],
+        }));
+        this.nrWritten = true;
+      }
     }
     // The grade never applies the compare wipe (p0.y): with the wipe on it
-    // renders into a texture (the temporal output, which is also the next
-    // frame's history) and the composite pass draws the target from it.
+    // renders into a texture and the composite pass draws the target from it.
     const split = this.uniforms[1];
-    const out = tp ? this.tpTex!.out[this.tpIdx] : split > 0 ? this.wipeTarget(target.width, target.height) : target;
+    const out = split > 0 ? this.wipeTarget(target.width, target.height) : target;
     const pass = encoder.beginRenderPass({ colorAttachments: [{ view: out.createView(), loadOp: "clear", storeOp: "store" }] });
     pass.setPipeline(this.extSource ? this.gradePipelineExt : this.gradePipeline);
     pass.setBindGroup(0, this.gradeGroup(ext));
     pass.draw(3);
     pass.end();
     if (split > 0) this.composite(encoder, out, target, split, ext);
-    else if (tp) encoder.copyTextureToTexture({ texture: out }, { texture: target }, [target.width, target.height]);
     if (tp) {
       this.tpIdx = 1 - this.tpIdx;
       this.tpValid = true;
@@ -443,7 +522,7 @@ export class WebGPUBackend implements GpuBackend {
     this.lastGraded = out !== target && !ext ? out : null;
   }
 
-  /** Graded target for the compare wipe when the temporal layer is off (target size). */
+  /** Graded target for the compare wipe (target size). */
   private wipeTarget(w: number, h: number): GPUTexture {
     if (this.wipeTex && this.wipeTex.width === w && this.wipeTex.height === h) return this.wipeTex;
     this.wipeTex?.destroy();
@@ -793,6 +872,7 @@ export class WebGPUBackend implements GpuBackend {
     this.exportTex?.destroy();
     for (const r of this.readbackRing) r.buffer.destroy();
     this.tpRelease();
+    this.nrRelease();
     this.device.destroy();
   }
 }

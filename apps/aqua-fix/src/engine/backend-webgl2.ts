@@ -1,7 +1,7 @@
 import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTextureSpec, type GpuBackend, type Rotation, type SourceInput, FULL_RECT, type Rect } from "./backend.ts";
 import { GLSL_FRAGMENT, GLSL_DOWNSCALE_FRAGMENT, GLSL_COMPOSITE, GLSL_VERTEX as VS } from "./shaders.ts";
-import { GLSL_TP_FIELD, GLSL_TP_FLOW, GLSL_TP_LUM } from "./temporal.ts";
-import { TEMPORAL } from "./params.ts";
+import { GLSL_NR, GLSL_NR_LEVEL, GLSL_NR_REFINE, GLSL_TP_FIELD, GLSL_TP_FLOW, GLSL_TP_LUM } from "./temporal.ts";
+import { NR, TEMPORAL, nrOpen } from "./params.ts";
 import { waitForSync } from "./fence-poll.ts";
 
 
@@ -80,8 +80,7 @@ export class WebGL2Backend implements GpuBackend {
   private pbo: WebGLBuffer | null = null;
   private readbackInFlight = false;
   private previewScale = 1;
-  // Temporal layer (temporal.ts): 1/8-resolution lum / flow / field passes
-  // and a full-resolution previous-output texture, ping-ponged per frame.
+  // Temporal layer (temporal.ts): 1/8-resolution lum / flow / field passes, ping-ponged per frame.
   private tpOn = false;
   private tpValid = false;
   private tpLum!: Program;
@@ -89,11 +88,32 @@ export class WebGL2Backend implements GpuBackend {
   private tpField!: Program;
   private tpLowW = 0;
   private tpLowH = 0;
-  private tpOutW = 0;
-  private tpOutH = 0;
   private tpIdx = 0;
-  private tpTex: { lum: WebGLTexture[]; f0: WebGLTexture[]; f1: WebGLTexture; flow: WebGLTexture; out: WebGLTexture[] } | null = null;
-  private tpFbo: { lum: WebGLFramebuffer[]; field: WebGLFramebuffer[]; flow: WebGLFramebuffer; out: WebGLFramebuffer[] } | null = null;
+  private tpTex: { lum: WebGLTexture[]; f0: WebGLTexture[]; f1: WebGLTexture; flow: WebGLTexture } | null = null;
+  private tpFbo: { lum: WebGLFramebuffer[]; field: WebGLFramebuffer[]; flow: WebGLFramebuffer } | null = null;
+  // Noise reduction (temporal.ts passes 4-6): the refined flow and the noise levels (half float, small) and the
+  // denoised source at the canvas size, ping-ponged: the one drawn this frame is the grade's source and the next
+  // frame's history. Allocated only while Noise reduction is on. nrWritten: nr[nrIdx] holds a frame; nrHist: the
+  // other one holds the frame before it (the history is valid).
+  private nrOn = false;
+  private nrRefine!: Program;
+  private nrLevel!: Program;
+  private nrProg!: Program;
+  private nrTex: { flow: WebGLTexture; level: WebGLTexture; out: WebGLTexture[] } | null = null;
+  private nrFbo: { flow: WebGLFramebuffer; level: WebGLFramebuffer; out: WebGLFramebuffer[] } | null = null;
+  private nrW = 0;
+  private nrH = 0;
+  private nrLowW = 0;
+  private nrLowH = 0;
+  private nrIdx = 0;
+  private nrWritten = false;
+  private nrHist = false;
+  /** Idle: the gate was shut at the last measurement (NR.idleEvery); nrCount counts frames toward the next one. */
+  private nrIdle = true;
+  private nrCount = NR.idleEvery - 2;
+  private readonly nrLevels = new Float32Array(NR.bins * 4);
+  /** RGB10_A2 history (false: the device cannot draw into it, RGBA8 instead). */
+  private nr10 = true;
   // Compare wipe (GLSL_COMPOSITE): the "before" picture when it is not the
   // source, the graded target used while the wipe is on without the temporal
   // layer, and the last graded frame recomposite() can reuse (null once the
@@ -122,7 +142,7 @@ export class WebGL2Backend implements GpuBackend {
     if (!gl) throw new Error("WebGL2 not supported");
     this.gl = gl;
     const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
-    this.grade = this.link(VS, GLSL_FRAGMENT, ["u_source", "u_data0", "u_data1", "u_data2", "u_data3", "u_tpF0", "u_tpF1", "u_tpFlow", "u_tpPrev"]);
+    this.grade = this.link(VS, GLSL_FRAGMENT, ["u_source", "u_data0", "u_data1", "u_data2", "u_data3", "u_tpF0", "u_tpF1", "u_tpNr"]);
     this.down = this.link(VS, GLSL_DOWNSCALE_FRAGMENT, ["u_source", "u_rotation", "u_srcSize", "u_outSize", "u_rect"]);
     this.comp = this.link(VS, GLSL_COMPOSITE, ["u_before", "u_graded", "u_split", "u_rot"]);
     this.vao = gl.createVertexArray()!;
@@ -151,18 +171,35 @@ export class WebGL2Backend implements GpuBackend {
       } catch (e) {
         console.warn("temporal layer unavailable:", (e as Error).message);
       }
+      // The noise reduction is separate: a device that cannot compile it keeps the temporal layer.
+      if (this.tpOn) {
+        try {
+          this.nrRefine = this.link(VS, GLSL_NR_REFINE, ["u_source", "u_tpFlow", "u_nrPrev", "u_nrLevel"]);
+          this.nrLevel = this.link(VS, GLSL_NR_LEVEL, ["u_source", "u_nrFlow", "u_nrPrev", "u_tpLum"]);
+          this.nrProg = this.link(VS, GLSL_NR, ["u_source", "u_nrFlow", "u_nrPrev", "u_nrLevel"]);
+          for (const p of [this.nrRefine, this.nrLevel, this.nrProg]) gl.uniformBlockBinding(p.prog, gl.getUniformBlockIndex(p.prog, "Params"), 0);
+          this.nrOn = true;
+        } catch (e) {
+          console.warn("noise reduction unavailable:", (e as Error).message);
+        }
+      }
     }
   }
 
   /** Forgets the temporal history (scene cut, seek, new clip). */
   resetTemporal(): void {
     this.tpValid = false;
+    this.nrWritten = false;
+    this.nrHist = false;
+    // Idle: measure again on the next two frames (a new shot may be noisy).
+    if (this.nrIdle) this.nrCount = NR.idleEvery - 2;
   }
 
-  private tpTarget(w: number, h: number, fmt: "half" | "rgba8"): WebGLTexture {
+  private tpTarget(w: number, h: number, fmt: "half" | "rgba8" | "rgb10"): WebGLTexture {
     const gl = this.gl;
     const t = this.makeTexture(gl.LINEAR);
     if (fmt === "half") gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    else if (fmt === "rgb10") gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB10_A2, w, h, 0, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, null);
     else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     return t;
   }
@@ -181,33 +218,179 @@ export class WebGL2Backend implements GpuBackend {
     this.lastGraded = null;
     if (this.tpTex) {
       const t = this.tpTex;
-      for (const x of [...t.lum, ...t.f0, t.f1, t.flow, ...t.out]) gl.deleteTexture(x);
+      for (const x of [...t.lum, ...t.f0, t.f1, t.flow]) gl.deleteTexture(x);
     }
     if (this.tpFbo) {
       const f = this.tpFbo;
-      for (const x of [...f.lum, ...f.field, f.flow, ...f.out]) gl.deleteFramebuffer(x);
+      for (const x of [...f.lum, ...f.field, f.flow]) gl.deleteFramebuffer(x);
     }
     this.tpTex = null;
     this.tpFbo = null;
+  }
+
+  private nrRelease(): void {
+    const gl = this.gl;
+    if (this.nrTex) for (const x of [this.nrTex.flow, this.nrTex.level, ...this.nrTex.out]) gl.deleteTexture(x);
+    if (this.nrFbo) for (const x of [this.nrFbo.flow, this.nrFbo.level, ...this.nrFbo.out]) gl.deleteFramebuffer(x);
+    this.nrTex = null;
+    this.nrFbo = null;
+    this.nrWritten = false;
+    this.nrHist = false;
+    if (this.nrIdle) this.nrCount = NR.idleEvery - 2;
+  }
+
+  /** (Re)creates the noise reduction targets for the current sizes (after tpEnsure). */
+  private nrEnsure(): boolean {
+    const gl = this.gl;
+    const ow = this.canvas.width, oh = this.canvas.height;
+    if (this.nrTex && ow === this.nrW && oh === this.nrH && this.nrLowW === this.tpLowW && this.nrLowH === this.tpLowH) return true;
+    this.nrRelease();
+    const out = (): WebGLTexture[] => [this.tpTarget(ow, oh, this.nr10 ? "rgb10" : "rgba8"), this.tpTarget(ow, oh, this.nr10 ? "rgb10" : "rgba8")];
+    let outs = out();
+    let fbos = outs.map((t) => this.tpFramebuffer(t));
+    if (this.nr10) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbos[0]);
+      const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      if (!ok) {
+        console.warn("noise reduction: RGB10_A2 is not renderable here, using RGBA8 history");
+        for (const t of outs) gl.deleteTexture(t);
+        for (const f of fbos) gl.deleteFramebuffer(f);
+        this.nr10 = false;
+        outs = out();
+        fbos = outs.map((t) => this.tpFramebuffer(t));
+      }
+    }
+    const flow = this.tpTarget(this.tpLowW, this.tpLowH, "half"), level = this.tpTarget(NR.bins, 1, "half");
+    this.nrTex = { flow, level, out: outs };
+    this.nrFbo = { flow: this.tpFramebuffer(flow), level: this.tpFramebuffer(level), out: fbos };
+    this.nrW = ow; this.nrH = oh; this.nrLowW = this.tpLowW; this.nrLowH = this.tpLowH;
+    return true;
+  }
+
+  private nrValid(v: boolean): void {
+    const gl = this.gl;
+    this.uniforms[105] = v ? 1 : 0;
+    gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, 105 * 4, this.uniforms.subarray(105, 106));
+    gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, this.uniformBuf);
+    gl.bindVertexArray(this.vao);
+  }
+
+  /** Passes 4 and 5: the refined flow, then the noise levels, against the history nr[1 − nrIdx]. */
+  private nrMeasure(): void {
+    const gl = this.gl;
+    const t = this.nrTex!, f = this.nrFbo!, hist = t.out[1 - this.nrIdx];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f.flow);
+    gl.viewport(0, 0, this.tpLowW, this.tpLowH);
+    gl.useProgram(this.nrRefine.prog);
+    this.bindTex(0, this.source, this.nrRefine, "u_source");
+    this.bindTex(4, this.tpTex!.flow, this.nrRefine, "u_tpFlow");
+    this.bindTex(5, hist, this.nrRefine, "u_nrPrev");
+    this.bindTex(6, t.level, this.nrRefine, "u_nrLevel"); // the previous measurement's levels
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f.level);
+    gl.viewport(0, 0, NR.bins, 1);
+    gl.useProgram(this.nrLevel.prog);
+    this.bindTex(0, this.source, this.nrLevel, "u_source");
+    this.bindTex(4, t.flow, this.nrLevel, "u_nrFlow");
+    this.bindTex(5, hist, this.nrLevel, "u_nrPrev");
+    this.bindTex(6, this.tpTex!.lum[this.tpIdx], this.nrLevel, "u_tpLum");
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  /** Whether the gate is open in any luminance bin: the level target read back (bins × 1 texels; a small synchronous read, at the idle cadence only). */
+  private nrGateOpen(): boolean {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.nrFbo!.level);
+    // The export readback may have left a pixel-pack buffer bound: this read goes to memory.
+    const pack = gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING) as WebGLBuffer | null;
+    if (pack) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    gl.readPixels(0, 0, NR.bins, 1, gl.RGBA, gl.FLOAT, this.nrLevels);
+    if (pack) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pack);
+    return nrOpen(this.uniforms[104], this.nrLevels, 4);
+  }
+
+  /** Pass 6 into nr[nrIdx]: the blend with the history, or (history not valid) a copy of the source. */
+  private nrDraw(): void {
+    const gl = this.gl;
+    const t = this.nrTex!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.nrFbo!.out[this.nrIdx]);
+    gl.viewport(0, 0, this.nrW, this.nrH);
+    gl.useProgram(this.nrProg.prog);
+    this.bindTex(0, this.source, this.nrProg, "u_source");
+    this.bindTex(4, t.flow, this.nrProg, "u_nrFlow");
+    this.bindTex(5, t.out[1 - this.nrIdx], this.nrProg, "u_nrPrev");
+    this.bindTex(6, t.level, this.nrProg, "u_nrLevel");
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    this.nrWritten = true;
+  }
+
+  /**
+   * Runs the noise reduction after the temporal passes; true when nr[nrIdx] then holds the frame the grade
+   * should read (false: the grade reads the source itself).
+   *
+   * Idle (the gate was shut at the last measurement; apply.ts TemporalNR mirrors this): nothing runs, except
+   * that of every NR.idleEvery frames one is copied as a history and the next is measured against it; a
+   * measurement that opens the gate starts the reduction on that frame. Open: refine, level and the blend
+   * every frame, and every idleEvery-th measurement may shut the gate again.
+   *
+   * The history advances with the picture: a frame drawn again (p26.z, set by the engine: the same media time,
+   * e.g. a setting changed while paused) is denoised again from the same history, not from itself.
+   */
+  private nrPasses(): boolean {
+    const hold = this.uniforms[106] > 0.5, M = NR.idleEvery;
+    if (this.nrIdle) {
+      if (hold) return false;
+      const phase = this.nrCount++ % M;
+      if (phase === M - 2) {
+        this.nrValid(false);
+        this.nrDraw();
+        return false;
+      }
+      if (phase !== M - 1 || !this.nrWritten) { this.nrWritten = false; return false; }
+      this.nrIdx = 1 - this.nrIdx;
+      this.nrValid(true);
+      this.nrMeasure();
+      if (!this.nrGateOpen()) { this.nrWritten = false; return false; }
+      this.nrIdle = false;
+      this.nrCount = 0;
+      this.nrHist = true;
+      this.nrDraw();
+      return true;
+    }
+    if (this.nrWritten && !hold) {
+      this.nrIdx = 1 - this.nrIdx;
+      this.nrHist = true;
+    } else if (!this.nrWritten) this.nrHist = false;
+    this.nrValid(this.nrHist);
+    this.nrMeasure();
+    this.nrDraw();
+    if (this.nrHist && !hold && ++this.nrCount % M === 0 && !this.nrGateOpen()) {
+      // Shut: this frame's blend already had no weight; the next ones pass through.
+      this.nrIdle = true;
+      this.nrCount = 0;
+      this.nrWritten = false;
+      this.nrHist = false;
+    }
+    return true;
   }
 
   /** (Re)creates the temporal targets for the current sizes; false when the layer is off. */
   private tpEnsure(): boolean {
     if (!this.tpOn || !this.outputWidth) return false;
     const lw = Math.max(1, Math.ceil(this.outputWidth / TEMPORAL.scale)), lh = Math.max(1, Math.ceil(this.outputHeight / TEMPORAL.scale));
-    const ow = this.canvas.width, oh = this.canvas.height;
-    if (this.tpTex && lw === this.tpLowW && lh === this.tpLowH && ow === this.tpOutW && oh === this.tpOutH) return true;
+    if (this.tpTex && lw === this.tpLowW && lh === this.tpLowH) return true;
     this.tpRelease();
     const half = (w: number, h: number) => this.tpTarget(w, h, "half");
-    const tex = { lum: [half(lw, lh), half(lw, lh)], f0: [half(lw, lh), half(lw, lh)], f1: half(lw, lh), flow: half(lw, lh), out: [this.tpTarget(ow, oh, "rgba8"), this.tpTarget(ow, oh, "rgba8")] };
+    const tex = { lum: [half(lw, lh), half(lw, lh)], f0: [half(lw, lh), half(lw, lh)], f1: half(lw, lh), flow: half(lw, lh) };
     this.tpTex = tex;
     this.tpFbo = {
       lum: tex.lum.map((t) => this.tpFramebuffer(t)),
       field: tex.f0.map((t) => this.tpFramebuffer(t, tex.f1)),
       flow: this.tpFramebuffer(tex.flow),
-      out: tex.out.map((t) => this.tpFramebuffer(t)),
     };
-    this.tpLowW = lw; this.tpLowH = lh; this.tpOutW = ow; this.tpOutH = oh;
+    this.tpLowW = lw; this.tpLowH = lh;
     this.tpValid = false;
     return true;
   }
@@ -376,7 +559,7 @@ export class WebGL2Backend implements GpuBackend {
     if (!this.gradePrograms.size) this.gradePrograms.set(GLSL_FRAGMENT, this.grade);
     let next = this.gradePrograms.get(src);
     if (!next) {
-      next = this.link(VS, src, ["u_source", "u_data0", "u_data1", "u_data2", "u_data3", "u_tpF0", "u_tpF1", "u_tpFlow", "u_tpPrev"]);
+      next = this.link(VS, src, ["u_source", "u_data0", "u_data1", "u_data2", "u_data3", "u_tpF0", "u_tpF1", "u_tpNr"]);
       gl.uniformBlockBinding(next.prog, gl.getUniformBlockIndex(next.prog, "Params"), 0);
       this.gradePrograms.set(src, next);
     }
@@ -507,29 +690,37 @@ export class WebGL2Backend implements GpuBackend {
     // The layer runs only while the engine asks for it (p23.y); off, the history lapses.
     const tp = this.uniforms[93] > 0.5 && this.tpEnsure();
     if (!tp) this.tpValid = false;
+    // Noise reduction (p26.x) rides on the layer's flow: its targets exist only while it is on.
+    const want = tp && this.nrOn && this.uniforms[104] > 0.5 && this.nrEnsure();
+    if (!want) {
+      if (this.nrTex) this.nrRelease();
+      this.nrWritten = false;
+    }
     let ts = this.syncProfile ? performance.now() : 0;
     if (tp) this.tpPasses();
+    else if (this.uniforms[92] !== 0) {
+      this.uniforms[92] = 0;
+      gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
+      gl.bufferSubData(gl.UNIFORM_BUFFER, 92 * 4, this.uniforms.subarray(92, 93));
+    }
+    // Idle (gate shut) or off: the grade reads the source itself.
+    const nr = want && this.nrPasses();
+    if (!nr && this.uniforms[104] !== 0) {
+      this.uniforms[104] = 0;
+      gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
+      gl.bufferSubData(gl.UNIFORM_BUFFER, 104 * 4, this.uniforms.subarray(104, 105));
+    }
     if (this.syncProfile) {
       this.gpuSync();
       const now = performance.now();
       this.stageMs.temporal += now - ts;
       ts = now;
     }
-    else if (this.uniforms[92] !== 0) {
-      this.uniforms[92] = 0;
-      gl.bindBuffer(gl.UNIFORM_BUFFER, this.uniformBuf);
-      gl.bufferSubData(gl.UNIFORM_BUFFER, 92 * 4, this.uniforms.subarray(92, 93));
-    }
-    const cur = this.tpIdx;
     // The grade never applies the compare wipe (p0.y): with the wipe on it
-    // renders into a texture (the temporal output, which is also the next
-    // frame's history) and the composite pass draws the screen from it.
+    // renders into a texture and the composite pass draws the screen from it.
     const split = this.uniforms[1];
     let graded: WebGLTexture | null = null;
-    if (tp) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.tpFbo!.out[cur]);
-      graded = this.tpTex!.out[cur];
-    } else if (split > 0) {
+    if (split > 0) {
       const w = this.wipeTarget();
       gl.bindFramebuffer(gl.FRAMEBUFFER, w.fbo);
       graded = w.tex;
@@ -537,28 +728,15 @@ export class WebGL2Backend implements GpuBackend {
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     this.bindCommon(this.grade);
     for (let i = 0; i < DATA_SLOTS; i++) this.bindTex(dataUnit(i), this.data[i], this.grade, `u_data${i}`);
-    if (tp) {
-      const t = this.tpTex!;
-      this.bindTex(4, t.f0[cur], this.grade, "u_tpF0");
-      this.bindTex(5, t.f1, this.grade, "u_tpF1");
-      this.bindTex(6, t.flow, this.grade, "u_tpFlow");
-      this.bindTex(7, t.out[1 - cur], this.grade, "u_tpPrev");
-    } else {
-      // Unused when the layer is off, but every sampler needs a texture.
-      for (const [u, n] of [[4, "u_tpF0"], [5, "u_tpF1"], [6, "u_tpFlow"], [7, "u_tpPrev"]] as const) this.bindTex(u, this.data[0], this.grade, n);
-    }
+    // Unused when the layer (or the noise reduction) is off, but every sampler needs a texture.
+    this.bindTex(4, tp ? this.tpTex!.f0[this.tpIdx] : this.data[0], this.grade, "u_tpF0");
+    this.bindTex(5, tp ? this.tpTex!.f1 : this.data[0], this.grade, "u_tpF1");
+    this.bindTex(7, nr ? this.nrTex!.out[this.nrIdx] : this.data[0], this.grade, "u_tpNr");
     gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, this.uniformBuf);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     if (split > 0) this.composite(graded!, split);
-    else if (tp) {
-      const w = this.canvas.width, h = this.canvas.height;
-      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.tpFbo!.out[cur]);
-      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-      gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    }
     if (tp) {
-      this.tpIdx = 1 - cur;
+      this.tpIdx = 1 - this.tpIdx;
       this.tpValid = true;
     }
     this.lastGraded = graded;
@@ -568,7 +746,7 @@ export class WebGL2Backend implements GpuBackend {
     }
   }
 
-  /** Graded target for the compare wipe when the temporal layer is off (canvas size, RGBA8). */
+  /** Graded target for the compare wipe (canvas size, RGBA8). */
   private wipeTarget(): { tex: WebGLTexture; fbo: WebGLFramebuffer } {
     const gl = this.gl;
     const w = this.canvas.width, h = this.canvas.height;
@@ -808,11 +986,17 @@ export class WebGL2Backend implements GpuBackend {
       this.drawTarget = null;
     }
     if (this.tpTex) {
-      // Six half-float targets at the low size, two RGBA8 outputs at the canvas size.
-      targets += 8;
-      bytes += 6 * this.tpLowW * this.tpLowH * 8 + 2 * this.tpOutW * this.tpOutH * 4;
+      // Six half-float targets at the low size.
+      targets += 6;
+      bytes += 6 * this.tpLowW * this.tpLowH * 8;
       this.tpRelease();
       this.tpValid = false;
+    }
+    if (this.nrTex) {
+      // The noise reduction's two histories at the canvas size (4 bytes a pixel), its flow and its levels.
+      targets += 4;
+      bytes += 2 * this.nrW * this.nrH * 4 + this.nrLowW * this.nrLowH * 8 + NR.bins * 8;
+      this.nrRelease();
     }
     return { targets, bytes };
   }
@@ -1089,6 +1273,7 @@ export class WebGL2Backend implements GpuBackend {
       gl.deleteFramebuffer(this.wipe.fbo);
     }
     this.tpRelease();
+    this.nrRelease();
     if (this.drawTarget) {
       gl.deleteTexture(this.drawTarget.tex);
       gl.deleteFramebuffer(this.drawTarget.fbo);

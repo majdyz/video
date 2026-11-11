@@ -5,7 +5,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, boostParams, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -695,9 +695,9 @@ export function detailRatio(sr: number, sg: number, sb: number, br: number, bg: 
  * while block steps and grain below the floor are averaged away. `guard` = 0
  * returns the pixel itself.
  */
-export function detailBase(rgba: Uint8ClampedArray, w: number, h: number, x: number, y: number, guard: number): [number, number, number] {
+export function detailBase(rgba: ArrayLike<number>, w: number, h: number, x: number, y: number, guard: number, scale = 255): [number, number, number] {
   const i0 = (y * w + x) * 4;
-  const sr = rgba[i0] / 255, sg = rgba[i0 + 1] / 255, sb = rgba[i0 + 2] / 255;
+  const sr = rgba[i0] / scale, sg = rgba[i0 + 1] / scale, sb = rgba[i0 + 2] / scale;
   if (guard <= 0) return [sr, sg, sb];
   const kk = DETAIL_GUARD.k / (guard * guard);
   let ar = sr, ag = sg, ab = sb, sw = 1;
@@ -707,7 +707,8 @@ export function detailBase(rgba: Uint8ClampedArray, w: number, h: number, x: num
     const fx = Math.floor(x + ox), fy = Math.floor(y + oy);
     const xa = cx(fx), xb = cx(fx + 1), ya = cy(fy), yb = cy(fy + 1);
     const a = (ya * w + xa) * 4, b = (ya * w + xb) * 4, c = (yb * w + xa) * 4, d = (yb * w + xb) * 4;
-    const tr = (rgba[a] + rgba[b] + rgba[c] + rgba[d]) / 1020, tg = (rgba[a + 1] + rgba[b + 1] + rgba[c + 1] + rgba[d + 1]) / 1020, tb = (rgba[a + 2] + rgba[b + 2] + rgba[c + 2] + rgba[d + 2]) / 1020;
+    const q = 4 * scale;
+    const tr = (rgba[a] + rgba[b] + rgba[c] + rgba[d]) / q, tg = (rgba[a + 1] + rgba[b + 1] + rgba[c + 1] + rgba[d + 1]) / q, tb = (rgba[a + 2] + rgba[b + 2] + rgba[c + 2] + rgba[d + 2]) / q;
     const dr = tr - sr, dg = tg - sg, db = tb - sb;
     const wt = ws * Math.exp(-(dr * dr + dg * dg + db * db) * kk);
     ar += wt * tr; ag += wt * tg; ab += wt * tb; sw += wt;
@@ -715,16 +716,20 @@ export function detailBase(rgba: Uint8ClampedArray, w: number, h: number, x: num
   return [ar / sw, ag / sw, ab / sw];
 }
 
-/** Grades a whole RGBA8 image (upright). */
-export function applyGrade(ctxIn: ApplyContext, rgba: Uint8ClampedArray, w: number, h: number): Uint8ClampedArray {
+/**
+ * Grades a whole RGBA image (upright): 8-bit, or floats in 0..1 (`scale` 1; the denoised source of TemporalNR).
+ * `rect` = the part of the frame the image is (a crop graded with the whole frame's maps); default the whole frame.
+ */
+export function applyGrade(ctxIn: ApplyContext, rgba: ArrayLike<number>, w: number, h: number, rect?: { x: number; y: number; w: number; h: number }, scale = 255): Uint8ClampedArray {
   const ctx = resolveContext(ctxIn);
   const guard = detailGuardOf(ctx.params);
   const out = new Uint8ClampedArray(rgba.length);
+  const rx = rect?.x ?? 0, ry = rect?.y ?? 0, rw = rect?.w ?? 1, rh = rect?.h ?? 1;
   for (let y = 0; y < h; y++) {
-    const v = (y + 0.5) / h;
+    const v = ry + ((y + 0.5) / h) * rh;
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
-      const [r, g, b] = gradePixel(ctx, rgba[i] / 255, rgba[i + 1] / 255, rgba[i + 2] / 255, (x + 0.5) / w, v, guard > 0 ? detailBase(rgba, w, h, x, y, guard) : undefined);
+      const [r, g, b] = gradePixel(ctx, rgba[i] / scale, rgba[i + 1] / scale, rgba[i + 2] / scale, rx + ((x + 0.5) / w) * rw, v, guard > 0 ? detailBase(rgba, w, h, x, y, guard, scale) : undefined);
       out[i] = r * 255 + 0.5;
       out[i + 1] = g * 255 + 0.5;
       out[i + 2] = b * 255 + 0.5;
@@ -754,4 +759,324 @@ function animalStrengthAt(d: DepthMap, u: number, v: number): [number, number] {
   const g = (xx: number, yy: number) => s[(yy * W + xx) * 4 + 1];
   const core = (g(x0, y0) * (1 - tx) + g(x1, y0) * tx) * (1 - ty) + (g(x0, y1) * (1 - tx) + g(x1, y1) * tx) * ty;
   return [s[(y * W + x) * 4], core];
+}
+
+// ------------------------------------------------------------------------------------------------------------
+// Temporal noise reduction: CPU reference of the temporal layer's lum and flow passes and of the NR level and
+// blend passes (temporal.ts GLSL_TP_LUM / GLSL_TP_FLOW / GLSL_NR_LEVEL / GLSL_NR and their WGSL twins), tap for
+// tap. Images are upright, top row first: `rgb` = 3 floats per pixel (sRGB-encoded, 0..1).
+
+/** Size of the temporal layer's low-resolution targets for a w × h frame. */
+export function tpLowSize(w: number, h: number): [number, number] {
+  return [Math.max(1, Math.ceil(w / TEMPORAL.scale)), Math.max(1, Math.ceil(h / TEMPORAL.scale))];
+}
+
+/** Pass 1 (lum): the encoded luminance of four bilinear taps 2 px around each low-resolution texel centre. */
+export function tpLum(rgb: Float32Array, w: number, h: number): Float32Array {
+  const [lw, lh] = tpLowSize(w, h);
+  const out = new Float32Array(lw * lh);
+  const cx = (q: number) => (q < 0 ? 0 : q >= w ? w - 1 : q), cy = (q: number) => (q < 0 ? 0 : q >= h ? h - 1 : q);
+  const Y = (x: number, y: number) => { const i = (cy(y) * w + cx(x)) * 3; return 0.2126 * rgb[i] + 0.7152 * rgb[i + 1] + 0.0722 * rgb[i + 2]; };
+  const tap = (fx: number, fy: number) => {
+    const x0 = Math.floor(fx), y0 = Math.floor(fy), tx = fx - x0, ty = fy - y0;
+    return (Y(x0, y0) * (1 - tx) + Y(x0 + 1, y0) * tx) * (1 - ty) + (Y(x0, y0 + 1) * (1 - tx) + Y(x0 + 1, y0 + 1) * tx) * ty;
+  };
+  for (let ly = 0; ly < lh; ly++) {
+    const py = ((ly + 0.5) / lh) * h - 0.5;
+    for (let lx = 0; lx < lw; lx++) {
+      const px = ((lx + 0.5) / lw) * w - 0.5;
+      out[ly * lw + lx] = 0.25 * (tap(px - 2, py - 2) + tap(px + 2, py - 2) + tap(px - 2, py + 2) + tap(px + 2, py + 2));
+    }
+  }
+  return out;
+}
+
+/**
+ * Pass 2 (flow): block matching of 3×3 luminance patches against the previous frame, ±flowR texels. Returns
+ * (dx, dy, confidence) per low-resolution texel: this frame's texel x matches the previous frame at x + (dx, dy).
+ */
+export function tpFlow(cur: Float32Array, prev: Float32Array, lw: number, lh: number): Float32Array {
+  const out = new Float32Array(lw * lh * 3);
+  const R = TEMPORAL.flowR;
+  const cx = (q: number) => (q < 0 ? 0 : q >= lw ? lw - 1 : q), cy = (q: number) => (q < 0 ? 0 : q >= lh ? lh - 1 : q);
+  const c = new Float32Array(9);
+  for (let y = 0; y < lh; y++) {
+    for (let x = 0; x < lw; x++) {
+      let k = 0;
+      for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) c[k++] = cur[cy(y + oy) * lw + cx(x + ox)];
+      const sad = (dx: number, dy: number) => {
+        let s = 0, j = 0;
+        for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) s += Math.abs(c[j++] - prev[cy(y + oy + dy) * lw + cx(x + ox + dx)]);
+        return s / 9;
+      };
+      let best = 1e9, bx = 0, by = 0;
+      for (let dy = -R; dy <= R; dy++) {
+        for (let dx = -R; dx <= R; dx++) {
+          const s = sad(dx, dy) + TEMPORAL.lambda * Math.hypot(dx, dy);
+          if (s < best) { best = s; bx = dx; by = dy; }
+        }
+      }
+      const o = (y * lw + x) * 3;
+      out[o] = bx;
+      out[o + 1] = by;
+      out[o + 2] = 1 - smoothstep(TEMPORAL.sadLo, TEMPORAL.sadHi, best);
+    }
+  }
+  return out;
+}
+
+/**
+ * NR pass 1 (refine): the block flow taken to whole pixels of the working frame. Per low-resolution texel, a
+ * refineTaps² grid of pixels across its block is compared (mean absolute difference over the channels) with the
+ * history at the block's displacement plus an offset: first the 5×5 offsets of step refineStep, then the 3×3 of
+ * step 1 around the best, each with a small bias (refineBias per pixel of offset) toward the block's own
+ * displacement so flat, noisy blocks stay put. Returns (dx, dy, confidence) in pixels of the working frame; the
+ * confidence is the block flow's × the block's own (NR.blockLo..blockHi: its remaining difference against the
+ * noise level `levels`, the previous frame's nrLevel, at the block's luminance).
+ */
+export function nrRefine(src: Float32Array, hist: Float32Array | null, flow: Float32Array, levels: Float32Array | null, w: number, h: number, refine = true): Float32Array {
+  const [lw, lh] = tpLowSize(w, h);
+  const out = new Float32Array(lw * lh * 3);
+  const T = NR.refineTaps, px = new Int32Array(T * T), py = new Int32Array(T * T);
+  for (let ly = 0; ly < lh; ly++) {
+    for (let lx = 0; lx < lw; lx++) {
+      const o = (ly * lw + lx) * 3;
+      const bx = Math.floor((flow[o] * w) / lw + 0.5), by = Math.floor((flow[o + 1] * h) / lh + 0.5);
+      out[o] = bx; out[o + 1] = by; out[o + 2] = flow[o + 2];
+      if (!hist) continue;
+      let lum = 0;
+      for (let j = 0; j < T; j++) for (let i = 0; i < T; i++) {
+        const x = (px[j * T + i] = clamp(Math.floor(((lx + (i + 0.5) / T) / lw) * w), 0, w - 1)), y = (py[j * T + i] = clamp(Math.floor(((ly + (j + 0.5) / T) / lh) * h), 0, h - 1));
+        lum += (0.2126 * src[(y * w + x) * 3] + 0.7152 * src[(y * w + x) * 3 + 1] + 0.0722 * src[(y * w + x) * 3 + 2]) / (T * T);
+      }
+      const cost = (dx: number, dy: number) => {
+        let sum = 0;
+        for (let k = 0; k < T * T; k++) {
+          const a = (py[k] * w + px[k]) * 3, b = (clamp(py[k] + by + dy, 0, h - 1) * w + clamp(px[k] + bx + dx, 0, w - 1)) * 3;
+          sum += Math.abs(src[a] - hist[b]) + Math.abs(src[a + 1] - hist[b + 1]) + Math.abs(src[a + 2] - hist[b + 2]);
+        }
+        return sum / (T * T * 3) + NR.refineBias * (Math.abs(dx) + Math.abs(dy));
+      };
+      let best = cost(0, 0), ox = 0, oy = 0;
+      for (const [reach, step] of refine ? [[2, NR.refineStep], [1, 1]] : []) {
+        const cx = ox, cy = oy;
+        for (let j = -reach; j <= reach; j++) for (let i = -reach; i <= reach; i++) {
+          if (!i && !j) continue;
+          const c = cost(cx + i * step, cy + j * step);
+          if (c < best) { best = c; ox = cx + i * step; oy = cy + j * step; }
+        }
+      }
+      out[o] = bx + ox; out[o + 1] = by + oy;
+      if (levels) {
+        const e0 = Math.max(nrLevelAt(levels, lum)[0], 1e-6);
+        out[o + 2] = flow[o + 2] * (1 - smoothstep(NR.blockLo * e0, NR.blockHi * e0, best - NR.refineBias * (Math.abs(ox) + Math.abs(oy))));
+      }
+    }
+  }
+  return out;
+}
+
+/** A low-resolution (dx, dy, confidence) field read bilinearly at upright (u, v), as the full-resolution passes sample it. */
+function flowAt(flow: Float32Array, lw: number, lh: number, u: number, v: number, out: Float32Array): void {
+  const fx = Math.min(Math.max(u * lw - 0.5, 0), lw - 1), fy = Math.min(Math.max(v * lh - 0.5, 0), lh - 1);
+  const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(x0 + 1, lw - 1), y1 = Math.min(y0 + 1, lh - 1);
+  const tx = fx - x0, ty = fy - y0;
+  const a = (y0 * lw + x0) * 3, b = (y0 * lw + x1) * 3, c = (y1 * lw + x0) * 3, d = (y1 * lw + x1) * 3;
+  for (let k = 0; k < 3; k++) out[k] = (flow[a + k] * (1 - tx) + flow[b + k] * tx) * (1 - ty) + (flow[c + k] * (1 - tx) + flow[d + k] * tx) * ty;
+}
+
+/** 3×3 tent average around (x, y): the mean of four bilinear taps half a pixel out on the diagonals (edges clamped). */
+function tent3(img: Float32Array, w: number, h: number, x: number, y: number, out: Float32Array): void {
+  const xa = x > 0 ? x - 1 : 0, xb = x < w - 1 ? x + 1 : w - 1, ya = y > 0 ? y - 1 : 0, yb = y < h - 1 ? y + 1 : h - 1;
+  const r0 = ya * w, r1 = y * w, r2 = yb * w;
+  for (let k = 0; k < 3; k++) {
+    out[k] = (img[(r0 + xa) * 3 + k] + img[(r0 + xb) * 3 + k] + img[(r2 + xa) * 3 + k] + img[(r2 + xb) * 3 + k]
+      + 2 * (img[(r0 + x) * 3 + k] + img[(r2 + x) * 3 + k] + img[(r1 + xa) * 3 + k] + img[(r1 + xb) * 3 + k]) + 4 * img[(r1 + x) * 3 + k]) / 16;
+  }
+}
+
+/** Scratch for one pixel's history lookup (nrProbe): [m0, ml, inside, qIndex, confidence]. */
+type NrProbe = { fl: Float32Array; a: Float32Array; b: Float32Array; m0: number; ml: number; inside: boolean; q: number; conf: number };
+const nrScratch = (): NrProbe => ({ fl: new Float32Array(3), a: new Float32Array(3), b: new Float32Array(3), m0: 0, ml: 0, inside: false, q: 0, conf: 0 });
+
+/**
+ * One pixel against the history: the refined flow (nrRefine) at the pixel, rounded to whole pixels, gives the history texel q; m0 is
+ * the largest channel difference between the source pixel and q, ml the same between their 3×3 tent averages.
+ */
+function nrProbe(src: Float32Array, hist: Float32Array, flow: Float32Array, w: number, h: number, lw: number, lh: number, x: number, y: number, s: NrProbe): void {
+  flowAt(flow, lw, lh, (x + 0.5) / w, (y + 0.5) / h, s.fl);
+  const qx = x + Math.floor(s.fl[0] + 0.5), qy = y + Math.floor(s.fl[1] + 0.5);
+  s.conf = s.fl[2];
+  s.inside = qx >= 0 && qy >= 0 && qx < w && qy < h;
+  const cx = qx < 0 ? 0 : qx >= w ? w - 1 : qx, cy = qy < 0 ? 0 : qy >= h ? h - 1 : qy;
+  const i = (y * w + x) * 3, q = (cy * w + cx) * 3;
+  s.q = q;
+  s.m0 = Math.max(Math.abs(src[i] - hist[q]), Math.abs(src[i + 1] - hist[q + 1]), Math.abs(src[i + 2] - hist[q + 2]));
+  tent3(src, w, h, x, y, s.a);
+  tent3(hist, w, h, cx, cy, s.b);
+  s.ml = Math.max(Math.abs(s.a[0] - s.b[0]), Math.abs(s.a[1] - s.b[1]), Math.abs(s.a[2] - s.b[2]));
+}
+
+/**
+ * The frame's noise levels (NR): per luminance bin, [e0, el] = the soft minimum over tiles of the mean pixel
+ * difference and the mean 3×3-average difference between the source and the warped history (2 floats per bin).
+ */
+export function nrLevel(src: Float32Array, hist: Float32Array, flow: Float32Array, lumLow: Float32Array, w: number, h: number): Float32Array {
+  const [lw, lh] = tpLowSize(w, h);
+  const T = NR.tileTaps, B = NR.bins, s = nrScratch();
+  const Y = (x: number, y: number) => lumLow[clamp(y, 0, lh - 1) * lw + clamp(x, 0, lw - 1)];
+  const S0 = new Float64Array(B + 1), Sl = new Float64Array(B + 1), N = new Float64Array(B + 1);
+  for (let ty = 0; ty < NR.tilesY; ty++) {
+    for (let tx = 0; tx < NR.tilesX; tx++) {
+      let a0 = 0, al = 0, lum = 0, tex = 0, n = 0;
+      for (let j = 0; j < T; j++) {
+        for (let i = 0; i < T; i++) {
+          const x = Math.min(w - 1, Math.floor(((tx + (i + 0.5) / T) / NR.tilesX) * w)), y = Math.min(h - 1, Math.floor(((ty + (j + 0.5) / T) / NR.tilesY) * h));
+          nrProbe(src, hist, flow, w, h, lw, lh, x, y, s);
+          if (!s.inside) continue;
+          // Texture: the low-resolution luminance's largest step to its four neighbours.
+          const lx = Math.floor(((x + 0.5) / w) * lw), ly = Math.floor(((y + 0.5) / h) * lh), yc = Y(lx, ly);
+          tex += Math.max(Math.abs(yc - Y(lx - 1, ly)), Math.abs(yc - Y(lx + 1, ly)), Math.abs(yc - Y(lx, ly - 1)), Math.abs(yc - Y(lx, ly + 1)));
+          a0 += s.m0; al += s.ml; lum += 0.2126 * s.a[0] + 0.7152 * s.a[1] + 0.0722 * s.a[2]; n++;
+        }
+      }
+      if (n * 2 < T * T || lum < NR.lumLo * n || lum > NR.lumHi * n || a0 < NR.dead * n) continue;
+      const flat = 1 - smoothstep(NR.texLo, NR.texHi, tex / n);
+      const r0 = (a0 / n + NR.eps) / NR.eps, rl = (al / n + NR.eps) / NR.eps;
+      const q0 = flat / (r0 * r0 * r0 * r0), ql = flat / (rl * rl * rl * rl), pos = (lum / n) * (B - 1);
+      S0[B] += q0; Sl[B] += ql; N[B] += flat;
+      for (let b = 0; b < B; b++) {
+        const wt = flat * Math.max(0, 1 - Math.abs(pos - b));
+        S0[b] += wt * q0; Sl[b] += wt * ql; N[b] += wt;
+      }
+    }
+  }
+  const out = new Float32Array(B * 2);
+  if (N[B] < NR.tilesMin) return out;
+  const soft = (S: number, n: number) => Math.max(0, NR.eps / Math.sqrt(Math.sqrt(S / n)) - NR.eps);
+  const g0 = soft(S0[B], N[B]), gl = soft(Sl[B], N[B]);
+  for (let b = 0; b < B; b++) {
+    const t = clamp(N[b] / NR.binMin, 0, 1);
+    const b0 = N[b] > 0 ? Math.min(soft(S0[b], N[b]), NR.binMax * g0) : g0, bl = N[b] > 0 ? Math.min(soft(Sl[b], N[b]), NR.binMax * gl) : gl;
+    out[b * 2] = Math.min(NR.eMax, g0 + (b0 - g0) * t);
+    out[b * 2 + 1] = Math.min(NR.eMax, gl + (bl - gl) * t);
+  }
+  return out;
+}
+
+/** The levels [e0, el] at encoded luminance Y: linear between the bin centres (the shaders' filtered read of the level texture). */
+export function nrLevelAt(levels: Float32Array, Y: number): [number, number] {
+  const B = NR.bins, f = clamp(Y, 0, 1) * (B - 1), i = Math.min(B - 2, Math.floor(f)), t = f - i;
+  return [levels[i * 2] + (levels[i * 2 + 2] - levels[i * 2]) * t, levels[i * 2 + 1] + (levels[i * 2 + 3] - levels[i * 2 + 1]) * t];
+}
+
+export { nrStrength, nrOpen };
+
+/** The two motion tests of a pixel (NR): 1 = within the noise, 0 = a real change. */
+export function nrKeep(m0: number, ml: number, e0: number, el: number): number {
+  const a = Math.max(e0, 1e-6), b = Math.max(el, 1e-6);
+  return (1 - smoothstep(NR.c0Lo * a, NR.c0Hi * a, m0)) * (1 - smoothstep(NR.lLo * b, NR.lHi * b, ml));
+}
+
+/**
+ * The NR pass: the denoised frame (also the next frame's history), stored at `bits` per channel as the GPU target
+ * stores it (RGB10_A2). `hist` null (no history yet, a cut, a seek) or level 0 returns the source.
+ */
+export function nrBlend(src: Float32Array, hist: Float32Array | null, flow: Float32Array, levels: Float32Array, level: number, w: number, h: number, bits = 10, stats?: { weight: number }): Float32Array {
+  const [lw, lh] = tpLowSize(w, h);
+  const out = new Float32Array(w * h * 3), Q = 2 ** bits - 1, s = nrScratch();
+  const on = hist !== null && level > 0.5;
+  let wsum = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 3;
+      let wt = 0;
+      if (on) {
+        nrProbe(src, hist!, flow, w, h, lw, lh, x, y, s);
+        if (s.inside) {
+          const [e0, el] = nrLevelAt(levels, 0.2126 * s.a[0] + 0.7152 * s.a[1] + 0.0722 * s.a[2]);
+          wt = nrStrength(level, e0) * s.conf * nrKeep(s.m0, s.ml, e0, el);
+        }
+      }
+      wsum += wt;
+      for (let c = 0; c < 3; c++) {
+        const v = wt > 0 ? src[i + c] + (hist![s.q + c] - src[i + c]) * wt : src[i + c];
+        out[i + c] = Math.floor(v * Q + 0.5) / Q;
+      }
+    }
+  }
+  if (stats) stats.weight = wsum / (w * h);
+  return out;
+}
+
+/** RGBA8 → rgb floats (0..1). */
+export function rgbOf(rgba: ArrayLike<number>, w: number, h: number): Float32Array {
+  const out = new Float32Array(w * h * 3);
+  for (let i = 0, n = w * h; i < n; i++) { out[i * 3] = rgba[i * 4] / 255; out[i * 3 + 1] = rgba[i * 4 + 1] / 255; out[i * 3 + 2] = rgba[i * 4 + 2] / 255; }
+  return out;
+}
+
+/**
+ * The temporal NR as the backends run it, frame after frame: lum → flow → level → blend, the result kept as the
+ * next frame's history (lum → flow → refine, against the previous frame's levels → level → blend), idling
+ * while the gate is shut exactly as backend-webgl2.ts does. `step` returns the denoised source (rgb floats) the grade then reads.
+ */
+export class TemporalNR {
+  private lumPrev: Float32Array | null = null;
+  private hist: Float32Array | null = null;
+  private w = 0;
+  private h = 0;
+  /** The last frame's noise levels (nrLevel) and flow (diagnostics, the eval). */
+  levels: Float32Array = new Float32Array(NR.bins * 2);
+  flow: Float32Array | null = null;
+  /** The last frame's mean blend weight toward the history (diagnostics). */
+  weight = 0;
+  /** Options: `refine` false = the block flow alone (no pixel refinement), `bits` = history precision. */
+  private readonly opts: { refine?: boolean; bits?: number };
+  constructor(opts: { refine?: boolean; bits?: number } = {}) { this.opts = opts; }
+
+  /** Idle (NR.idleEvery): the gate was shut at the last measurement, frames pass through untouched. */
+  idle = true;
+  private count = NR.idleEvery - 2;
+
+  /** Forgets the history (scene cut, seek); an idle reduction measures again on the next two frames. */
+  reset(): void {
+    this.lumPrev = null;
+    this.hist = null;
+    if (this.idle) this.count = NR.idleEvery - 2;
+  }
+
+  step(rgba: ArrayLike<number>, w: number, h: number, level: number): Float32Array {
+    if (w !== this.w || h !== this.h) { this.reset(); this.w = w; this.h = h; }
+    const src = rgbOf(rgba, w, h);
+    const [lw, lh] = tpLowSize(w, h);
+    const lum = tpLum(src, w, h);
+    const block = this.lumPrev ? tpFlow(lum, this.lumPrev, lw, lh) : new Float32Array(lw * lh * 3);
+    this.lumPrev = lum;
+    this.weight = 0;
+    if (level < 0.5) { this.hist = null; this.levels = new Float32Array(NR.bins * 2); this.flow = null; return src; }
+    const bits = this.opts.bits ?? 10, M = NR.idleEvery;
+    if (this.idle) {
+      // Shut gate: every idleEvery-th frame is measured against a copy of the frame before it; the rest cost nothing.
+      const phase = this.count++ % M;
+      if (phase === M - 2) { this.hist = nrBlend(src, null, block, this.levels, level, w, h, bits); return src; }
+      if (phase !== M - 1 || !this.hist) { this.hist = null; return src; }
+      const flow = nrRefine(src, this.hist, block, this.levels, w, h, this.opts.refine !== false);
+      this.flow = flow;
+      this.levels = nrLevel(src, this.hist, flow, lum, w, h);
+      if (!nrOpen(level, this.levels)) { this.hist = null; return src; }
+      this.idle = false;
+      this.count = 0;
+      return (this.hist = nrBlend(src, this.hist, flow, this.levels, level, w, h, bits, this));
+    }
+    const flow = nrRefine(src, this.hist, block, this.levels, w, h, this.opts.refine !== false);
+    this.flow = flow;
+    this.levels = this.hist ? nrLevel(src, this.hist, flow, lum, w, h) : new Float32Array(NR.bins * 2);
+    const measured = this.hist !== null;
+    const out = nrBlend(src, this.hist, flow, this.levels, level, w, h, bits, this);
+    this.hist = out;
+    // Open: every idleEvery-th measured frame checks whether the gate has shut.
+    if (measured && ++this.count % M === 0 && !nrOpen(level, this.levels)) { this.idle = true; this.count = 0; this.hist = null; }
+    return out;
+  }
 }

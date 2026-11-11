@@ -132,6 +132,10 @@ export class GradeEngine {
   personEnabled = true;
   /** Temporal layer on/off (debug `?temporal=0`). */
   temporalEnabled = true;
+  /** Noise reduction kill switch (`?tnr=0`): off whatever the setting says. */
+  noiseReductionEnabled = true;
+  /** Media time of the last frame drawn (NaN: none since a reset): the same time again is the same frame drawn again, and the noise reduction's history must not advance (uniform p26.z). */
+  private nrDrawnSec = Number.NaN;
   /** Each shot's material-anchored balance offset on top of the clip lock on/off (debug `?follow=0`; follow.ts, anchor.ts). */
   followEnabled = true;
   /** Profile thumbnails by clip time (analyzeRaw with a time): each shot's balance is measured on them. */
@@ -1013,6 +1017,9 @@ export class GradeEngine {
     const settings = this.hasAnalysis ? this.settings : { ...this.settings, intensity: 0 };
     const u = packUniforms(this.current, settings, depth, clahe, 0, this.split);
     u[93] = this.temporalEnabled ? 1 : 0;
+    if (!this.noiseReductionEnabled || !this.temporalEnabled) u[104] = 0;
+    u[106] = this.lastTickSec === this.nrDrawnSec ? 1 : 0;
+    this.nrDrawnSec = this.lastTickSec;
     u[96] = this.popDir;
     u[97] = this.seg && this.settings.subjectPop ? 1 : 0;
     this.checkJump();

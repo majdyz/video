@@ -38,6 +38,12 @@ const wgsl: Wgsl[] = [
   { name: "aqua tpExternal(WGSL_TP_LUM)", code: temporal.tpExternal(temporal.WGSL_TP_LUM), layout: "downExt", targets: ["rgba16float"] },
   { name: "aqua WGSL_TP_FLOW", code: temporal.WGSL_TP_FLOW, layout: "flow", targets: ["rgba16float"] },
   { name: "aqua WGSL_TP_FIELD", code: temporal.WGSL_TP_FIELD, layout: "field", targets: ["rgba16float", "rgba16float"] },
+  { name: "aqua WGSL_NR_REFINE", code: temporal.WGSL_NR_REFINE, layout: "nrRefine", targets: ["rgba16float"] },
+  { name: "aqua tpExternal(WGSL_NR_REFINE)", code: temporal.tpExternal(temporal.WGSL_NR_REFINE), layout: "nrRefineExt", targets: ["rgba16float"] },
+  { name: "aqua WGSL_NR_LEVEL", code: temporal.WGSL_NR_LEVEL, layout: "nrLevel", targets: ["rgba16float"] },
+  { name: "aqua tpExternal(WGSL_NR_LEVEL)", code: temporal.tpExternal(temporal.WGSL_NR_LEVEL), layout: "nrLevelExt", targets: ["rgba16float"] },
+  { name: "aqua WGSL_NR", code: temporal.WGSL_NR, layout: "nr", targets: ["rgb10a2unorm"] },
+  { name: "aqua tpExternal(WGSL_NR)", code: temporal.tpExternal(temporal.WGSL_NR), layout: "nrExt", targets: ["rgb10a2unorm"] },
   { name: "aqua WGSL_COMPOSITE", code: shaders.WGSL_COMPOSITE, layout: "composite" },
   { name: "aqua WGSL_COMPOSITE_EXT", code: shaders.WGSL_COMPOSITE_EXT, layout: "compositeExt" },
   { name: "dewarp WARP_WGSL", code: warp.WARP_WGSL, targets: ["rgba8unorm"] },
@@ -131,8 +137,8 @@ try {
       const src = tex("rgba8unorm", new Uint8Array([200, 120, 40, 255]), 4);
       const data = () => tex("rgba32float", new Float32Array([1, 1, 1, 1]));
       const half = () => tex("rgba16float", new Uint16Array(4), 8);
-      const ubuf = device.createBuffer({ size: 104 * 4, usage: B.UNIFORM | B.COPY_DST });
-      const u = new Float32Array(104);
+      const ubuf = device.createBuffer({ size: 108 * 4, usage: B.UNIFORM | B.COPY_DST });
+      const u = new Float32Array(108);
       u[2] = 0; // p[0].z strength
       device.queue.writeBuffer(ubuf, 0, u);
       const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });

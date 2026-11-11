@@ -1387,3 +1387,9 @@ fn detailBase(suv: vec2<f32>, src: vec3<f32>) -> vec3<f32> {
 ${tapsWgsl}
   return acc.xyz / acc.w;
 }`;
+
+// The same guard reading the denoised source (temporal.ts NR pass, u_tpNr) at its own uv: the taps are closed
+// under rotation and reflection (DETAIL_TAPS), so the target's orientation does not matter.
+const forNr = (code: string) => code.replaceAll("dgTap", "dgTapNr").replaceAll("detailBase", "detailBaseNr").replaceAll("u_source", "u_tpNr");
+export const DETAIL_NR_GLSL = forNr(DETAIL_GLSL);
+export const DETAIL_NR_WGSL = forNr(DETAIL_WGSL);
