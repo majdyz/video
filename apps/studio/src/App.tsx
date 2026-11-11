@@ -1,3 +1,4 @@
+import { Eta } from "./pipeline/eta.ts";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Studio } from "./pipeline/studio.ts";
 import { segStatusText } from "./pipeline/seg/studio-seg.ts";
@@ -340,10 +341,14 @@ export default function App() {
       .catch((e: unknown) => console.error("[native] pick failed", e));
   };
   const aspect = s.info ? s.info.displayW / s.info.displayH : null;
+  // The preview's AI pass: a rough time left once it has shown its pace (reset when it stops tracking).
+  const segEta = useRef(new Eta()).current;
+  if (s.seg.phase !== "tracking") segEta.reset();
+  const segEtaText = s.seg.phase === "tracking" ? segEta.text(s.seg.progress) : null;
   const pill = s.busy ?? (tools.stabilise.enabled && !photo && !exporting && (s.stab.state === "analysing" || s.stab.state === "solving")
     ? (s.stab.state === "solving" ? "Planning a smooth path…" : `Analysing motion ${Math.round(s.stab.progress * 100)}%`)
     // AI subject detection works in the background, also while the clip plays.
-    : s.seg.on && s.seg.phase === "tracking" && !exporting && tools.colour.enabled && tools.colour.subjectPop ? `AI subjects ${Math.round((s.seg.progress ?? 0) * 100)}%`
+    : s.seg.on && s.seg.phase === "tracking" && !exporting && tools.colour.enabled && tools.colour.subjectPop ? `AI subjects ${Math.round((s.seg.progress ?? 0) * 100)}%${segEtaText ? ` · ${segEtaText}` : ""}`
     : null);
 
   const closeSheet = useCallback(() => setSheetOpen(false), []);

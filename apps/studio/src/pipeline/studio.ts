@@ -14,6 +14,7 @@
 // (colour right after first paint, mediabunny when a clip opens, motion when
 // Stabilise is switched on, the lens maths when Dewarp is).
 
+import { Eta } from "./eta.ts";
 import { crumb, exportCrashed, lastCrash } from "./crumbs.ts";
 import { EXPORT_SHARE, ExportBar } from "./export-progress.ts";
 import { isRealtimeExportSupported, isWebCodecsSupported, isWebKit } from "./env.ts";
@@ -913,7 +914,13 @@ export class Studio {
     const v = this.video, file = this.file;
     if (!v || !file) return "engine";
     // The pass's progress moves the export's bar (its share of it: exportVideo), so the label carries no number.
-    const label = (p: number | null) => this.setExp(p === null ? { detail: "Finding subjects… then exporting" } : { detail: "Finding subjects… then exporting", progress: p });
+    // An estimate once the pass has shown its pace; before that, say it can take a while (phones: minutes).
+    const eta = new Eta();
+    const label = (p: number | null) => {
+      const t = eta.text(p);
+      const detail = `Finding subjects… ${t ?? "can take a few minutes"}, then exporting`;
+      this.setExp(p === null ? { detail } : { detail, progress: p });
+    };
     label(null);
     // The selection as it is exported (a drag still settling was applied by exportVideo).
     this.segTrim = this.trim;
