@@ -32,12 +32,8 @@ await p.setInputFiles("input[type=file]", clip);
 await p.waitForFunction(() => window.studio?.getSnapshot().phase === "ready" && window.studio.getSnapshot().colourProfiled && !window.studio.getSnapshot().busy, null, { timeout: 600000 });
 const duration = await p.evaluate(() => window.studio.video.duration);
 console.log(ts(), "ready", duration.toFixed(1), "s clip, isolated", await p.evaluate(() => crossOriginIsolated));
-await p.getByRole("button", { name: /Advanced/ }).first().click(); await p.waitForTimeout(800);
-const pop = p.getByRole("switch", { name: /Subject pop/ });
-if ((await pop.getAttribute("aria-checked")) !== "true") { await pop.click(); await p.waitForTimeout(500); }
-await p.evaluate(() => window.studio.pause());
-const ai = p.getByRole("switch", { name: /AI subject detection/ });
-if ((await ai.getAttribute("aria-checked")) !== "true") await ai.click();
+// Subject pop + AI through the studio API (the UI moved from Advanced to the tool dock).
+await p.evaluate(() => { const s = window.studio; s.pause(); s.setTools({ ...s.tools, colour: { ...s.tools.colour, subjectPop: true } }); s.setSegEnabled(true); });
 await p.waitForFunction(() => { const s = window.studio.getSnapshot().seg; return s.phase !== "download" && s.phase !== "starting"; }, null, { timeout: 600000 });
 const tPass = Date.now();
 const mem = [];

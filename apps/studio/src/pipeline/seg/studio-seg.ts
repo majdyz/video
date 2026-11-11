@@ -6,11 +6,12 @@
 import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts";
 import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
-import { aiCrashedLast, aiWorking, crumb } from "../crumbs.ts";
+import { aiCrashedLast, aiProfile, aiWorking, crumb } from "../crumbs.ts";
 import { deviceFacts, isMobile, isWeakDevice } from "../device.ts";
-import { segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
+import { segFps, segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
 import { confWeight, mapPrompt, maskSize, SEG, type SegObject } from "./track.ts";
+import { spanCovers, type TrimRange } from "../trim.ts";
 import type { SessionFrameOut } from "./session.ts";
 
 const PREF_KEY = "deepfix.subjectPop.ai";
@@ -416,6 +417,55 @@ export function excludeOutcome(r: { action: "removed"; removed: number } | { act
   return r.action === "removed" ? { op: "remove", id: r.removed } : { op: "add", object: { id, kind: "exclude", t, prompt: { points: [[u, v]], labels: [1] } } };
 }
 
+/**
+ * The clip range the session tracks for a trim: the selection plus SEG.scopeMarginS each side (the frames at the
+ * selection's edges round onto grid frames just outside it), inside the clip. Untrimmed: the whole clip.
+ */
+export function segSpan(trim: TrimRange | null, duration: number): TrimRange {
+  const d = Math.max(0, duration);
+  if (!trim) return { start: 0, end: d };
+  return { start: Math.max(0, trim.start - SEG.scopeMarginS), end: Math.min(d, trim.end + SEG.scopeMarginS) };
+}
+
+/**
+ * Whether a session opened for the trim `have` (null: the whole clip) serves the trim `want`: the same selection,
+ * or a finished pass whose selection contains it (its masks are there already; one still running is restarted on
+ * the smaller range instead, so the pass and an export waiting for it only do the selection).
+ */
+export function scopeServes(have: TrimRange | null, want: TrimRange | null, done: boolean): boolean {
+  const same = have === want || (!!have && !!want && Math.abs(have.start - want.start) < 1e-3 && Math.abs(have.end - want.end) < 1e-3);
+  return same || (done && spanCovers(have, want));
+}
+
+/**
+ * The inputs a re-scoped session starts with: the taps inside the new range (and what was done to them). The
+ * engine's own subjects are seeded again from the new start, so their seeds, and a removal of one of them, go.
+ */
+export function logForSpan(log: readonly LogOp[], span: TrimRange): LogOp[] {
+  const kept = new Set<number>();
+  for (const l of log) if (l.op === "add" && l.object.t >= span.start - 1e-6 && l.object.t <= span.end + 1e-6) kept.add(l.object.id);
+  return log.filter((l) => (l.op === "add" ? kept.has(l.object.id) : l.op !== "seeds" && kept.has(l.id)));
+}
+
+/**
+ * The pass profile (session.ts profile) as one line for the breadcrumbs and About: where a phone's time goes, per
+ * model stage (ms a call), in the decoder, the flow guard and the fill, and the pass's own time against the clip's.
+ */
+export function profileLine(p: Record<string, number>, ep = ""): string {
+  const n = (k: string) => (Number.isFinite(p[k]) ? p[k] : 0);
+  const per = (ms: string, count: string) => (n(count) > 0 ? Math.round(n(ms) / n(count)) : 0);
+  const s = (ms: string) => (n(ms) / 1000).toFixed(1);
+  return [
+    `ai: profile${ep ? ` ${ep}` : ""}`,
+    `encode ${per("encodeMs", "encodes")}ms×${n("encodes")}`,
+    `attn ${per("attendMs", "steps")} dec ${per("decoderMs", "steps")} mem ${per("memEncMs", "steps")}ms×${n("steps")} steps`,
+    `keys ${n("keyframes")} (${n("fps")}/s +${n("extraKeys")} extra) objs ${n("objects")}`,
+    `decode ${s("decodeMs")}s×${n("decodes")} (${n("restarts")} restarts)`,
+    `guard ${s("guardMs")}s fill ${s("fillMs")}s×${n("filledFrames")} maps ${s("productMs")}s seeds ${s("waitSeedsMs")}s`,
+    `total ${s("runMs")}s for ${n("clipS").toFixed(1)}s${n("heapMB") ? ` · heap ${n("heapMB")} MB` : ""}`,
+  ].join(" · ");
+}
+
 /** A finished pass's worker (the model's ~800 MB of WASM heap) is shut down after this long idle (ms). */
 export const SEG_HIBERNATE_MS = 15000;
 
@@ -448,7 +498,13 @@ export class SubjectSeg {
   private log: LogOp[] = [];
   /** Exclude taps the worker has not answered yet: their outcome is not in the log, so the worker stays up. */
   private inflight = 0;
-  private duration = 0;
+  /** The trim the session was opened for (null: the whole clip) and the range it tracks (segSpan). */
+  private scope: TrimRange | null = null;
+  private span: TrimRange = { start: 0, end: 0 };
+  /** The pass has run to its end (an idle since the last input): its masks are complete for its range. */
+  private passDone = false;
+  /** Counts the clip's sessions (a new clip, a new range): work begun for an earlier one is dropped (studio.ts). */
+  generation = 0;
   /** The pass finished and its worker was shut down; the masks stay in `live`. */
   private hibernated = false;
   private hibTimer = 0;
@@ -525,6 +581,8 @@ export class SubjectSeg {
   }
 
   private crumbTens = -1;
+  /** Model steps at the last profile written (onEvent idle). */
+  private profiledSteps = -1;
   /** Last sign of the pass working (any session event, seeding): the export's stall clock (settle). */
   private lastActivity = 0;
   private onEvent(e: SessionEvent): void {
@@ -550,8 +608,8 @@ export class SubjectSeg {
       if (tens !== this.crumbTens) { this.crumbTens = tens; crumb(`ai: pass ${tens * 10}% (${e.done}/${e.total}) · heap ${e.heapMB ?? "?"} MB`); }
       this.set({ phase: "tracking", progress: e.total ? e.done / e.total : null });
     } else if (e.ev === "seeds") {
-      segLog(`segment ${e.k} seeds asked for (${e.t.toFixed(2)} s)`);
-      this.onNeedSeeds?.(e.k, e.t);
+      segLog(`segment ${e.k} seeds asked for (${e.t.toFixed(2)} s${e.search === false ? ", engine only" : ""})`);
+      this.onNeedSeeds?.(e.k, e.t, e.search !== false);
     } else if (e.ev === "rejected") {
       segLog(`tap ${e.id} came out as the background; dropped`);
       // Out of the log too: a replay would track it to the same rejection and say so again.
@@ -559,9 +617,18 @@ export class SubjectSeg {
       this.onRejected?.();
     } else if (e.ev === "idle") {
       this.busy = false;
+      this.passDone = this.autos !== null;
       segLog(`session idle: ${live.filled}/${live.n} frames filled, ${(live.bytes / 1e6).toFixed(1)} MB`);
       this.lastProfile = e.profile;
       segLog(`pass profile ${JSON.stringify(Object.fromEntries(Object.entries(e.profile).map(([k, v]) => [k, Math.round(v)])))}`);
+      // Always (not only with ?debug=1): a phone has no console, and its numbers are the ones that matter. Once per
+      // stretch of model work (an idle after a tap that tracked nothing new says nothing new).
+      if (this.autos !== null && e.profile.steps !== this.profiledSteps) {
+        this.profiledSteps = e.profile.steps;
+        const line = profileLine(e.profile, this.model?.info ? `${this.model.info.ep}, ${this.model.info.threads} thr` : "");
+        aiProfile(line);
+        console.info(`[seg] ${line}`);
+      }
       this.set({ phase: "ready", progress: null });
       this.scheduleHibernate();
       const w = this.idleWaiters;
@@ -601,6 +668,8 @@ export class SubjectSeg {
     this.seededSegs = new Set();
     this.log = [];
     this.undoOps = [];
+    this.passDone = false;
+    this.generation++;
     this.clipFailed = true;
     this.set({ phase: "unavailable", progress: null, note: `AI detection stopped on this clip; using standard detection (${errText(msg)})` });
     const w = this.idleWaiters;
@@ -659,8 +728,9 @@ export class SubjectSeg {
       if (!model || !file || this.file !== file) return false;
       // The replay re-tracks the clip: at work until its idle.
       aiWorking(true);
-      await model.sessionOpen(file, 0, Math.max(0, this.duration));
-      if (this.file !== file) return false;
+      const span = this.span;
+      await model.sessionOpen(file, span.start, span.end, segFps());
+      if (this.file !== file || this.span !== span) return false;
       this.hibernated = false;
       for (const l of this.log) {
         if (l.op === "seeds") await model.sessionSeeds(l.t, l.objects);
@@ -675,8 +745,8 @@ export class SubjectSeg {
   }
 
   /** The session asks for segment k's seeds (the engine's own subjects on its canonical frame t): the studio answers
-   * with seedSegment. */
-  onNeedSeeds: ((k: number, t: number) => void) | null = null;
+   * with seedSegment. search: false = without the model's own search (autoSeeds) when the engine finds none. */
+  onNeedSeeds: ((k: number, t: number, search: boolean) => void) | null = null;
   /** The last pass's profile (where its time went; session.ts). */
   lastProfile: Record<string, number> | null = null;
 
@@ -687,42 +757,85 @@ export class SubjectSeg {
   onFrames: (() => void) | null = null;
 
   /**
-   * Opens the clip's background session (once per clip): the worker decodes the file itself, so the pass runs while
-   * the clip plays. Resolves to the live masks, or null (AI off, no model).
+   * Opens the clip's background session (once per clip and range): the worker decodes the file itself, so the pass
+   * runs while the clip plays. It tracks the trim only (segSpan); called again with another trim, a session that does
+   * not serve it (scopeServes) is replaced by one over the new range, with the taps inside it replayed (the masks
+   * made so far go: the engine's own subjects are seeded again from the new start). Resolves to the live masks, or
+   * null (AI off, no model, or replaced meanwhile).
    */
-  start(file: File, duration: number): Promise<SegLive | null> {
+  start(file: File, duration: number, trim: TrimRange | null = null): Promise<SegLive | null> {
     if (!this.on) return Promise.resolve(null);
-    if (this.file === file && (this.live || this.opening)) return this.opening ?? Promise.resolve(this.live);
+    const again = this.file === file && (!!this.live || !!this.opening);
+    if (again && scopeServes(this.scope, trim, this.passDone)) return this.opening ?? Promise.resolve(this.live);
+    const span = segSpan(trim, duration);
+    if (again) {
+      crumb(`ai: range ${span.start.toFixed(1)}-${span.end.toFixed(1)}s`);
+      segLog(`range changed: tracking ${span.start.toFixed(2)}–${span.end.toFixed(2)} s`);
+      clearTimeout(this.hibTimer);
+      this.generation++;
+      this.log = logForSpan(this.log, span);
+      const ids = new Set(this.log.map((l) => (l.op === "add" ? l.object.id : -1)));
+      this.undoOps = this.undoOps.filter((u) => ids.has(u.id));
+      this.live = null;
+      this.cache = null;
+      this.autos = null;
+      this.seededSegs = new Set();
+      this.busy = false;
+      this.passDone = false;
+      // A hibernated session's worker is gone: the new session starts a fresh one (ensureModel).
+      this.hibernated = false;
+      this.crumbTens = -1;
+      const w = this.idleWaiters;
+      this.idleWaiters = [];
+      for (const r of w) r();
+      this.set({ phase: this.model ? "ready" : "download", progress: null });
+    }
     this.file = file;
-    this.duration = duration;
-    this.opening = (async () => {
+    this.scope = trim ? { start: trim.start, end: trim.end } : null;
+    this.span = span;
+    const before = this.opening;
+    const replay = again ? this.log.slice() : [];
+    const me: { p: Promise<SegLive | null> | null } = { p: null };
+    me.p = (async () => {
+      // One open at a time in the worker (an earlier range's open finishes first; its result is dropped there).
+      await before?.catch(() => undefined);
       const model = await this.ensureModel();
-      if (!model || this.file !== file) return null;
+      if (!model || this.file !== file || this.span !== span) return null;
       try {
         crumb("ai: session open");
         aiWorking(true);
-        const info = await model.sessionOpen(file, 0, Math.max(0, duration));
+        const info = await model.sessionOpen(file, span.start, span.end, segFps());
         crumb(`ai: session ${info.width}x${info.height}, ${info.n} frames`);
-        if (this.file !== file) return null;
+        if (this.file !== file || this.span !== span) return null;
         this.live = new SegLive(info);
         // The lite encoder drops thin parts (a thresher's tail) while the body stays right: a sudden area drop is no
         // sign of a lost subject there, and dimming the pop for it made the subject blink.
         this.live.lenient = !!model.info?.ep.endsWith("lite");
-        segLog(`session open: ${info.width}×${info.height}, masks ${info.mw}×${info.mh}, ${info.n} frames`);
+        segLog(`session open: ${info.width}×${info.height}, masks ${info.mw}×${info.mh}, ${info.n} frames (${span.start.toFixed(2)}–${span.end.toFixed(2)} s)`);
+        // A worker that fails meanwhile says so itself (fail).
+        for (const l of replay) {
+          if (l.op === "add") await model.sessionAdd(l.object).catch(() => undefined);
+          else if (l.op === "remove") await model.sessionRemove(l.id).catch(() => undefined);
+          else if (l.op === "restore") await model.sessionRestore(l.id).catch(() => undefined);
+        }
         return this.live;
       } catch (e) {
+        if (this.file !== file || this.span !== span) return null;
         segLog("session failed to open; using the engine's masks", e);
         crumb(`ai: session failed: ${errText(e)}`);
         this.clipFailed = true;
         this.set({ phase: "unavailable", note: `This clip can't be decoded for AI detection; using standard detection (${errText(e)})` });
         return null;
       } finally {
-        this.opening = null;
-        // Open, nothing running yet (the seeds start the pass and mark it).
-        aiWorking(false);
+        if (this.opening === me.p) {
+          this.opening = null;
+          // Open, nothing running yet (the seeds start the pass and mark it).
+          if (!replay.length) aiWorking(false);
+        }
       }
     })();
-    return this.opening;
+    this.opening = me.p;
+    return me.p;
   }
 
   /**
@@ -734,6 +847,7 @@ export class SubjectSeg {
   async seedSegment(k: number, t: number, objs: SegObject[]): Promise<void> {
     if (!this.live || this.hasSegment(k, t) || !(await this.wake()) || !this.model || this.hasSegment(k, t)) return;
     this.seededSegs.add(segKey(k, t));
+    this.passDone = false;
     this.lastActivity = performance.now();
     if (k === 0) this.autos = objs;
     const objects = objs.map((o) => ({ ...o, id: this.nextId++ }));
@@ -751,6 +865,7 @@ export class SubjectSeg {
   async include(t: number, u: number, v: number, boxes: readonly PersonBox[], toSource: ((u: number, v: number) => [number, number]) | null = null): Promise<boolean> {
     if (!this.live || !(await this.wake()) || !this.model) return false;
     const id = this.nextId++;
+    this.passDone = false;
     crumb(`ai: include ${t.toFixed(2)}s`);
     const shown = promptFor({ u, v }, boxes);
     const object: SegObject & { id: number } = { id, kind: "include", t, prompt: toSource ? mapPrompt(shown, toSource) : shown };
@@ -768,6 +883,7 @@ export class SubjectSeg {
   async exclude(t: number, u: number, v: number): Promise<"removed" | "part" | "exclude" | null> {
     if (!this.live || !(await this.wake()) || !this.model) return null;
     const id = this.nextId++;
+    this.passDone = false;
     clearTimeout(this.hibTimer);
     crumb(`ai: exclude ${t.toFixed(2)}s`);
     this.inflight++;
@@ -811,6 +927,7 @@ export class SubjectSeg {
   async undo(): Promise<boolean> {
     const op = this.undoOps.pop();
     if (!op || !(await this.wake()) || !this.model) return false;
+    this.passDone = false;
     this.log.push(op.kind === "added" ? { op: "remove", id: op.id } : { op: "restore", id: op.id });
     aiWorking(true);
     const ok = await (op.kind === "added" ? this.model.sessionRemove(op.id) : this.model.sessionRestore(op.id)).then(() => true, () => false);
@@ -830,6 +947,9 @@ export class SubjectSeg {
     this.busy = false;
     this.log = [];
     this.hibernated = false;
+    this.passDone = false;
+    this.scope = null;
+    this.generation++;
     clearTimeout(this.hibTimer);
     // The session closes with the clip (a model still loading keeps its mark until it is loaded).
     if (!this.loading) aiWorking(false);
@@ -871,6 +991,11 @@ export class SubjectSeg {
       if (performance.now() - lastAt > o.stallMs) { segLog(`export: the AI pass made no progress for ${Math.round(o.stallMs / 1000)} s; exporting with the engine's masks`); return "engine"; }
     }
     return this.live && this.live.filled > 0 ? "ai" : "engine";
+  }
+
+  /** The pass for this clip and trim has run to its end: an export has nothing to wait for (no share of its bar). */
+  ready(file: File, trim: TrimRange | null): boolean {
+    return this.file === file && !!this.live && !this.opening && this.passDone && scopeServes(this.scope, trim, true);
   }
 
   /** Resolves when the session has nothing left to do (an export waits for it: the same masks as the preview). */

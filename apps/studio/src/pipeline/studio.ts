@@ -15,6 +15,7 @@
 // Stabilise is switched on, the lens maths when Dewarp is).
 
 import { crumb, exportCrashed, lastCrash } from "./crumbs.ts";
+import { EXPORT_SHARE, ExportBar } from "./export-progress.ts";
 import { isRealtimeExportSupported, isWebCodecsSupported, isWebKit } from "./env.ts";
 import { deviceFacts, isMobile } from "./device.ts";
 import { realtimeSteps } from "./realtime-steps.ts";
@@ -378,8 +379,21 @@ export class Studio {
     this.snap = { ...this.snap, ...patch };
     for (const l of this.listeners) l();
   }
+  /**
+   * A video export's one progress bar (export-progress.ts): every stage reports its own 0..1 through setExp, and the
+   * bar maps it into the stage's share, never backwards (a render that starts over in another mode carries on from
+   * where the bar is). Null outside a video export: progress is shown as given.
+   */
+  private bar: ExportBar | null = null;
   private setExp(patch: Partial<ExportStatus>): void {
+    if (this.bar && typeof patch.progress === "number" && patch.state !== "done" && patch.state !== "error") patch = { ...patch, progress: this.bar.at(patch.progress) };
     this.set({ exp: { ...this.snap.exp, ...patch } });
+  }
+  /** This export's offline run is handing over to the recorder (runRealtime's first label says so). */
+  private modeSwitch = false;
+  /** The export's current stage is over: the bar moves to the end of its share. */
+  private stageDone(): void {
+    if (this.bar) this.set({ exp: { ...this.snap.exp, progress: this.bar.done() } });
   }
   private setStab(patch: Partial<StabStatus>): void {
     this.set({ stab: { ...this.snap.stab, ...patch } });
@@ -715,12 +729,14 @@ export class Studio {
   private runSeg(): void {
     const v = this.video, file = this.file;
     if (!this.seg.on || !v || !file || this.snap.kind !== "video" || this.exporting) return;
-    void this.seg.start(file, v.duration || this.snap.duration).then((live) => {
+    void this.seg.start(file, v.duration || this.snap.duration, this.segTrim).then((live) => {
       if (!live || this.seg.autos || this.file !== file) return;
       void this.seedAutosCanonical();
     });
   }
 
+  /** The trim the AI session follows: the committed one (applyTrim, an export), not every step of a handle drag. */
+  private segTrim: TrimRange | null = null;
   /** Segment seeds run one after another (each its own canonical frame). */
   private seedChain: Promise<void> = Promise.resolve();
   /**
@@ -739,7 +755,7 @@ export class Studio {
 
   /** Segment 0's seeds: the engine's own subjects on the export range's start (trim start, else 0). */
   private seedAutosCanonical(): Promise<void> {
-    return this.seedSegmentCanonical(0, this.trim?.start ?? 0);
+    return this.seedSegmentCanonical(0, this.segTrim?.start ?? 0);
   }
 
   /**
@@ -750,15 +766,19 @@ export class Studio {
    * tracks start over (its next analysis picks up the frame on screen). A frame that can't be read seeds nothing (the
    * session goes on; the engine's masks cover that segment).
    */
-  private seedSegmentCanonical(k: number, t: number): Promise<void> {
+  private seedSegmentCanonical(k: number, t: number, search = true): Promise<void> {
+    // The session that asked: a newer one (the trim moved, seg.start) seeds itself from its own start.
+    const gen = this.seg.generation;
+    const stale = () => this.file !== file0 || this.seg.generation !== gen;
+    const file0 = this.file;
     const run = this.seedChain.then(async () => {
       const e = this.engine, v = this.video, file = this.file;
-      if (!e || !v || !file || !this.seg.live || this.seg.hasSegment(k, t)) return;
+      if (!e || !v || !file || stale() || !this.seg.live || this.seg.hasSegment(k, t)) return;
       let objs: ReturnType<typeof seedObjects> = [];
       try {
         // Not while the user scrubs: two <video>s seeking at once (plus the analysis) is what phones fall over on.
         await this.scrubIdle();
-        if (this.file !== file) return;
+        if (stale()) return;
         // No frame of the preview's may reach the engine between upload and analysis; one in flight lands first.
         objs = await this.workFrame(t + 1e-3, async (sv) => {
           e.resetTracking();
@@ -776,10 +796,11 @@ export class Studio {
       } catch (err) {
         console.warn(`[seg] segment ${k} seed frame failed`, err);
       }
-      if (this.file !== file) return;
+      if (stale()) return;
       // The engine found nothing (it only looks in open blue water: a manta over a reef): the model looks itself.
-      if (!objs.length) objs = await this.seg.autoSeeds(t);
-      if (this.file !== file) return;
+      // (Not at an extra start after several empty ones in a row: session.ts reacquire.)
+      if (!objs.length && search) objs = await this.seg.autoSeeds(t);
+      if (stale()) return;
       await this.seg.seedSegment(k, t, objs);
       console.info(`[seg] seeded segment ${k} on the canonical frame ${t.toFixed(2)} s: ${objs.length} subject(s)`);
       console.info(`[seg] seed prompts ${k}: ${JSON.stringify(objs.map((o) => ({ p: o.prompt.points.map(([x, y]) => [+x.toFixed(3), +y.toFixed(3)]), l: o.prompt.labels, b: o.prompt.box ? [o.prompt.box.x0, o.prompt.box.y0, o.prompt.box.x1, o.prompt.box.y1].map((v) => +v.toFixed(3)) : null })))}`);
@@ -889,9 +910,12 @@ export class Studio {
   private async segForExport(signal: AbortSignal): Promise<"ai" | "engine"> {
     const v = this.video, file = this.file;
     if (!v || !file) return "engine";
-    const label = (p: number | null) => this.setExp({ detail: p === null ? "Finding subjects… then exporting" : `Finding subjects ${Math.round(p * 100)}%… then exporting` });
+    // The pass's progress moves the export's bar (its share of it: exportVideo), so the label carries no number.
+    const label = (p: number | null) => this.setExp(p === null ? { detail: "Finding subjects… then exporting" } : { detail: "Finding subjects… then exporting", progress: p });
     label(null);
-    const live = await this.seg.start(file, v.duration || this.snap.duration);
+    // The selection as it is exported (a drag still settling was applied by exportVideo).
+    this.segTrim = this.trim;
+    const live = await this.seg.start(file, v.duration || this.snap.duration, this.segTrim);
     if (signal.aborted) throw new DOMException("Export cancelled", "AbortError");
     if (!live) return "engine";
     // The engine's own subjects on the canonical frame (as the preview seeds them).
@@ -994,7 +1018,7 @@ export class Studio {
     let last = 0;
     s.onRejected = () => this.set({ subjectNote: "Nothing there: tap the animal" });
     // The session asks for the next segment's seeds as its tracking reaches it (long clips).
-    s.onNeedSeeds = (k, t) => { if (k > 0) void this.seedSegmentCanonical(k, t); };
+    s.onNeedSeeds = (k, t, search) => { if (k > 0) void this.seedSegmentCanonical(k, t, search); };
     s.onFrames = () => { const now = performance.now(); if (now - last > 250 && this.paused()) { last = now; this.repaint(); } };
     // The pass is done and its worker shut down: the seed-frame <video> (a decoder of its own) goes too.
     s.onHibernate = () => this.dropSeedVideo();
@@ -1469,6 +1493,7 @@ export class Studio {
     clearTimeout(this.trimTimer);
     this.trimTimer = 0;
     this.trim = null;
+    this.segTrim = null;
     this.segs = NO_SEGMENTS;
     this.sampleCache = [];
     this.profileEpoch++;
@@ -1957,6 +1982,9 @@ export class Studio {
         void this.analyseMotion();
       }
     }
+    // The AI session tracks the selection only: one over another range is replaced (seg.start), then seeded again.
+    this.segTrim = this.trim;
+    if (this.seg.on) this.runSeg();
   }
 
   /** Decodes the filmstrip thumbnails once the clip is on screen (idle time; skipped where WebCodecs is missing). */
@@ -2215,7 +2243,7 @@ export class Studio {
       if (this.snap.stab.state === "error") throw new Error("Motion analysis failed: " + (this.snap.stab.message ?? ""));
       if (this.exportAbort?.signal.aborted) throw new DOMException("Aborted", "AbortError");
       const pct = Math.round(this.snap.stab.progress * 100);
-      this.setExp({ detail: `Analysing motion ${pct}%` });
+      this.setExp({ detail: `Analysing motion ${pct}%`, progress: this.snap.stab.progress });
       await new Promise((r) => setTimeout(r, 200));
     }
     // The export must use the refined plan: wait for the bobbing pass and the re-solve it triggers.
@@ -2289,6 +2317,7 @@ export class Studio {
       void releaseExportBlob(old.blob);
     }
     this.exporting = true;
+    this.bar = new ExportBar();
     this.previewOn = false;
     this.video?.pause();
     const ctrl = new AbortController();
@@ -2307,6 +2336,7 @@ export class Studio {
       else this.setExp({ state: "error", message: err instanceof Error ? err.message : String(err) });
     }
     this.exporting = false;
+    this.bar = null;
     this.exportAbort = null;
     this.wakeLock?.release().catch(() => undefined);
     this.wakeLock = null;
@@ -2356,15 +2386,21 @@ export class Studio {
       // The clip's scene lock must be in before the first frame: a profile still to run starts now, and the export waits.
       if (colourOn && !this.snap.colourProfiled && !this.profiling) void this.profileColour();
       if (this.profiling) {
+        this.bar?.stage(EXPORT_SHARE.water);
         this.setExp({ detail: "Reading the water…" });
         await this.profiling;
+        this.stageDone();
       }
       // Subject pop with AI: the pass finishes first, so the export has the same masks whenever it starts.
       this.segExportNote = null;
       this.segExportEngine = false;
       // (the AI toggle as the user set it: an AI that turned out unavailable still gets its note)
       if (colourOn && this.tools.colour.subjectPop && this.seg.status.on && this.snap.kind === "video") {
+        // A share of the bar only when there is a pass to wait for (one that has run to its end takes no time).
+        const wait = !this.seg.ready(file, trim);
+        if (wait) this.bar?.stage(EXPORT_SHARE.subjects);
         const r = await this.segForExport(ctrl.signal);
+        if (wait) this.stageDone();
         this.seg.releaseForExport();
         if (r === "engine") {
           this.segExportEngine = true;
@@ -2372,7 +2408,12 @@ export class Studio {
           this.setExp({ note: this.segExportNote });
         }
       }
+      const motion = this.tools.stabilise.enabled && (!this.path || !!this.stabAbort);
+      if (motion) this.bar?.stage(EXPORT_SHARE.motion);
       await this.waitForPath();
+      if (motion) this.stageDone();
+      // The render: what is left of the bar.
+      this.bar?.stage(1);
       if (this.stabActive() && this.path?.kind === "gyro") {
         const h = this.path.plan.hybrid;
         console.info(`[export] stabilise: gyro${h ? (h.applied ? " + bobbing removed" : ` (bobbing: ${h.reason})`) : " only"}`);
@@ -2406,7 +2447,11 @@ export class Studio {
           used = "realtime";
           this.engine?.clearPrecomputed(false);
           this.set({ exportMode: "realtime" });
-          this.setExp({ progress: 0, frames: 0, fps: 0, etaSec: null, note: null, profile: null });
+          // The render starts over in the recorder: the bar stays where it is and goes on from there (it went back
+          // to 0 here, and again at every slower speed the recorder tried: it looked like the export retrying).
+          this.bar?.stage(1);
+          this.modeSwitch = true;
+          this.setExp({ state: "preparing", detail: "Switching to a faster mode…", frames: 0, fps: 0, etaSec: null, note: null, profile: null });
           await this.restorePreview(v);
           res = await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl, trim, this.offlineSpeed);
         }
@@ -2418,7 +2463,8 @@ export class Studio {
           this.offlineSpeed = null;
           this.engine?.clearPrecomputed(false);
           this.set({ exportMode: "offline" });
-          this.setExp({ progress: 0, frames: 0, fps: 0, etaSec: null, note: null, profile: null });
+          this.bar?.stage(1);
+          this.setExp({ state: "preparing", detail: "Switching to a steadier mode…", frames: 0, fps: 0, etaSec: null, note: null, profile: null });
           await this.releaseForRender(v);
           res = await this.runOffline(media, file, bitrate, total, colourOn, ctrl, trim, req, false);
           if (!res) throw new Error("Export failed");
@@ -3091,7 +3137,12 @@ export class Studio {
       const tag = `${rate < 1 ? ` · ${rate === 0.5 ? "½" : "¼"} speed` : ""}${scale < 1 ? ` · ${Math.round(scale * 100)}% size` : ""}`;
       // Grade the first frame before recording starts so the file never opens uncorrected.
       await this.engineForExport();
-      this.setExp({ state: "preparing", detail: `Preparing${tag}` });
+      // A step after the first starts the recording over at a slower speed, and the first one after an offline run
+      // takes over from it: the bar goes on from where it is (exportVideo), and the label says what is happening.
+      if (si > 0) this.bar?.stage(1);
+      const takeover = si === 0 && this.modeSwitch;
+      this.modeSwitch = false;
+      this.setExp({ state: "preparing", detail: si > 0 ? `Switching to a steadier speed…${tag}` : takeover ? `Switching to a faster mode…${tag}` : `Preparing${tag}` });
       const from = trim?.start ?? 0;
       await seekVideo(v, from).catch(() => undefined);
       if (colourOn && e) {
@@ -3181,6 +3232,8 @@ export class Studio {
     if (!bmp || !info || this.exporting) return;
     const analysing = this.photoAnalysisDue();
     this.beginExport();
+    // One render, its own three steps: no stages to share a bar between.
+    this.bar = null;
     const started = performance.now();
     let failure: unknown = null;
     try {

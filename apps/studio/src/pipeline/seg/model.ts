@@ -12,7 +12,7 @@ export type SessionEvent =
   | { ev: "keys"; conf: { t: number; conf: number }[] }
   | { ev: "progress"; done: number; total: number; heapMB?: number }
   | { ev: "idle"; profile: Record<string, number> }
-  | { ev: "seeds"; k: number; t: number }
+  | { ev: "seeds"; k: number; t: number; search?: boolean }
   | { ev: "rejected"; id: number }
   /** The pass threw in the worker and stopped for good (session.ts fail). */
   | { ev: "error"; msg: string; heapMB?: number }
@@ -37,6 +37,15 @@ export function segDebug(): boolean {
     return new URLSearchParams(location.search).get("debug") === "1";
   } catch {
     return false;
+  }
+}
+/** `?segfps=N`: a fixed keyframe rate for the session (no adaptive extra keyframes), to compare speeds and masks. */
+export function segFps(): number | undefined {
+  try {
+    const n = Number(new URLSearchParams(location.search).get("segfps"));
+    return Number.isFinite(n) && n >= 1 && n <= 8 ? n : undefined;
+  } catch {
+    return undefined;
   }
 }
 export function segLog(...a: unknown[]): void {
@@ -167,8 +176,9 @@ export class WorkerSegModel implements SegModel {
 
   // ------------------------------------------------------------------ background session (session.ts)
 
-  async sessionOpen(file: File, start: number, end: number): Promise<SessionInfo> {
-    return (await this.call({ type: "session-open", file, start, end })) as unknown as SessionInfo;
+  /** fps: keyframes a second, fixed (`?segfps=N`); without it the session picks by the model (session.ts). */
+  async sessionOpen(file: File, start: number, end: number, fps?: number): Promise<SessionInfo> {
+    return (await this.call({ type: "session-open", file, start, end, fps })) as unknown as SessionInfo;
   }
 
   async sessionAdd(object: SegObject & { id: number }): Promise<number> {

@@ -27,14 +27,37 @@ import { area, bbox, DEPART_STEP, departMap, guidedFilter, iou, nearMap, promptF
 export const SEG = {
   /** Keyframes per clip second. */
   fps: 4,
+  /** The same on the lite (phone) model, where a keyframe takes seconds: half as many, with extra ones in between
+   * (back to `fps`) where the tracker and the flow-carried mask disagree (session.ts refine). */
+  liteFps: 2,
+  /** A step whose mask overlaps the flow-carried one by less than this (IoU; the level the confidence starts to
+   * fall at) is a hard one, as is a re-prompted or a runaway step... */
+  adaptAgree: 0.7,
+  /** ...and the object's next this many steps are on the fine grid (1 s at twice liteFps). */
+  adaptHold: 4,
   /** Mask grid: longest side (px). */
   maskLong: 320,
   /** Follow a tapped subject at most this far either side of its prompt (s). */
   reachS: 20,
   /** The engine's own subjects are seeded again every this long (s): a long clip is covered in segments. */
   segmentS: 8,
-  /** A segment start that finds no subject (and none carried in) looks again this much later (s). */
+  /** The session tracks the trim plus this much either side (s; studio-seg.ts segSpan). */
+  scopeMarginS: 0.5,
+  /** A segment start that finds no subject (and none carried in) looks again this much later (s); each further
+   * start in a row that finds none doubles the wait, up to reacquireMaxS (2, 4, 4 s: every look is a seek, an
+   * analysis and, when the engine sees nothing, the model's own search; 8 s lost a returning subject for ~3 s on
+   * blue-20s)... */
   reacquireS: 2,
+  reacquireMaxS: 4,
+  /** ...and from this many empty starts in a row, the extra starts leave the model's search out (the engine's look
+   * only; the regular starts, every segmentS, still search). */
+  reacquireSearches: 3,
+  /** At a segment start that leaves nothing to follow, a subject last seen within this long (s) is followed on to
+   * the next look (session.ts carryOver): the tracker knows it again when it comes back, a look may not. */
+  lostS: 3,
+  /** The lite (phone) model follows at most this many of the engine's own subjects at a time (every one is a
+   * tracker step per keyframe); taps are always followed. */
+  liteAutos: 2,
   /** At a segment start, an earlier subject carries on unless the new seeds cover this share of it. */
   carryCover: 0.5,
   /** Decoded frames the background session keeps (luma + colour cells, ~70 KB each). */

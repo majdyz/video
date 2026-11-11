@@ -29,3 +29,46 @@ console.log("realtime-steps: ok");
   assert.equal(exportCrashed(null), false);
   console.log("export crash crumbs: ok");
 }
+
+// The export's one progress bar (export-progress.ts): stages share it, and it never goes backwards.
+{
+  const { ExportBar, EXPORT_SHARE } = await import("../src/pipeline/export-progress.ts");
+  const near = (a: number, b: number, what: string) => assert.ok(Math.abs(a - b) < 1e-9, `${what}: ${a} vs ${b}`);
+  // AI subjects (30%), then the render in what is left; the render starts over twice (offline → recorder → slower).
+  const bar = new ExportBar();
+  const seen: number[] = [];
+  const at = (p: number) => { seen.push(bar.at(p)); return seen[seen.length - 1]; };
+  bar.stage(EXPORT_SHARE.subjects);
+  near(at(0), 0, "subjects 0%");
+  near(at(0.5), 0.15, "subjects 50%");
+  near(at(0.48), 0.15, "the pass's total grew: the bar holds");
+  seen.push(bar.done());
+  near(bar.value, 0.3, "subjects done");
+  bar.stage(1);
+  near(at(0), 0.3, "render 0%");
+  near(at(0.2), 0.3 + 0.2 * 0.7, "render 20%");
+  bar.stage(1);
+  near(at(0), 0.44, "the recorder takes over: the bar stays");
+  near(at(0.5), 0.44 + 0.5 * 0.56, "and goes on from there");
+  bar.stage(1);
+  near(at(0.01), 0.72, "restarting slower: still no step back");
+  near(at(1), 1, "the end is the end");
+  assert.ok(seen.every((v, i) => i === 0 || v >= seen[i - 1]), "never backwards");
+  // A stage joined part-way fills its share with what is left of it: a pass already at 80%, a resumed render at 40%.
+  const b2 = new ExportBar();
+  b2.stage(EXPORT_SHARE.subjects);
+  near(b2.at(0.8), 0, "the pass was at 80% when the export began");
+  near(b2.at(0.9), 0.15, "half of what was left");
+  b2.done();
+  b2.stage(1);
+  near(b2.at(0.4), 0.3, "resumed at 40%");
+  near(b2.at(0.7), 0.3 + 0.5 * 0.7, "half of the rest");
+  // No stages (nothing to wait for): the render's own progress, as is; junk never moves the bar.
+  const b3 = new ExportBar();
+  b3.stage(1);
+  near(b3.at(0), 0, "0");
+  near(b3.at(0.25), 0.25, "25%");
+  near(b3.at(Number.NaN), 0.25, "NaN");
+  near(b3.at(-3), 0.25, "negative");
+  console.log("export progress bar: ok");
+}

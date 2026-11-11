@@ -10,7 +10,11 @@
 //   cover carries on (its memory bank and all), so a subject the engine misses there is still followed.
 // - Taps (include, exclude) are tracked outward from their keyframe, both ways, within SEG.reachS, ahead of the
 //   autos, with their intervals filled right away (the outline updates within a few steps).
-// - Tracking uses the EdgeTAM memory tracker on the SEG.fps keyframe grid with the flow guard of the batch pass.
+// - Tracking uses the EdgeTAM memory tracker on a keyframe grid with the flow guard of the batch pass: SEG.fps (4) a
+//   second, or, on the lite (phone) model, SEG.liteFps (2) with extra keyframes in between wherever the tracker and
+//   the flow-carried mask disagree (adaptive: a calm clip costs half the model runs, a hard stretch what it did).
+//   An object without a keyframe at another object's extra one comes in there carried along the flow between its
+//   own two (union), so every object is in every keyframe's mask.
 // - Intervals between keyframes are filled (track.ts fillInterval: per-frame flow both ways, guided filter on each
 //   frame's luma) once both their keyframes are final, and every filled frame is posted as overlay-ready 8-bit maps
 //   (feathered alpha, "near", excludes, water departure), run-length coded (a few KB a frame: a long clip stays
@@ -18,7 +22,6 @@
 // - An exclude tap on an ML subject removes the subject when the tap's own mask is most of it (cleanly, restorable
 //   for undo), else it is followed as an exclude object (only the tapped part comes out).
 import type { EdgeTam } from "./edgetam.ts";
-import { frameIndex } from "./bank.ts";
 import { cellLab, nearMap, departFromCells, framePop, sdfFeather, area, bbox, guidedFilter, iou, promptFromMask, rleDecode, rleEncode } from "./mask.ts";
 import { denseFlow, warp, type Gray } from "./flow.ts";
 import { fillInterval, keyTimes, maskSize, remap, SEG, sigmoidResize, toU8, type Keyframe, type SegObject } from "./track.ts";
@@ -31,6 +34,8 @@ export type SessionFrames = {
   rotation: number;
   /** The frame covering clip time t (the caller closes nothing: the source owns the frame until the next call). */
   at(t: number): Promise<CanvasImageSource & { displayWidth?: number }>;
+  /** Times the decoder started over at a key frame (a read behind its position or far ahead), for the profile. */
+  restarts?(): number;
   dispose(): void;
 };
 
@@ -71,8 +76,9 @@ export type SessionEvents = {
   /** A tapped include that came out as the background (the tap missed the animal): dropped. */
   rejected(id: number): void;
   /** The seeds of the segment starting at t are needed (k: its index right now, for the logs only): tracking waits
-   * for session.seeds(t, ...). */
-  needSeeds(k: number, t: number): void;
+   * for session.seeds(t, ...). search: false when the model's own search (autoSeeds) is not worth it there (an
+   * extra start after SEG.reacquireSearches empty ones in a row): the engine's subjects only. */
+  needSeeds(k: number, t: number, search: boolean): void;
   /** A step, a fill or a queued tap threw (out of memory in the runtime, an unreadable frame): the session has
    * stopped for good and is closed; no idle follows. The main thread tells the user and shuts the worker down. */
   error?(msg: string): void;
@@ -100,7 +106,19 @@ type ObjState = {
   bi: number;
   prevF: { m: Float32Array; luma: Float32Array } | null;
   prevB: { m: Float32Array; luma: Float32Array } | null;
+  /** The last step disagreed with the flow-carried mask (SEG.adaptAgree), was re-prompted or ran away. */
+  hard: boolean;
+  /** Adaptive keyframes: steps this object still takes on the fine grid, forward / backward (taps; autos share one). */
+  fineF: number;
+  fineB: number;
 };
+
+/** fps: keyframes a second, fixed (no adaptive extra ones unless `adapt` says so). Default: by the model (see header). */
+export type SessionOptions = { fps?: number; adapt?: boolean };
+
+/** The memory bank's frame index of an object's n-th step in a direction (bank.ts: 5 apart, as the tracker was
+ * measured; the offset keeps a backward track's indices positive). */
+const bankFrame = (n: number, reverse: boolean) => 1e6 + (reverse ? -5 : 5) * n;
 
 const yieldNow = () => new Promise<void>((r) => setTimeout(r, 0));
 
@@ -111,14 +129,29 @@ export class SegSession {
   readonly mw: number;
   readonly mh: number;
   readonly grid: { i0: number; n: number };
+  /** Keyframes a second every object steps at. */
+  readonly fps: number;
+  /** Extra keyframes (twice as dense) where a step disagrees with the flow. */
+  readonly adapt: boolean;
+  /** The keyframes in use, in time order: the regular ones, plus prompts' and extra ones as they come (activate). */
   readonly keys: number[];
+  /** The regular keyframes (fps a second, and the range's last). */
+  private base: number[];
+  /** Every time a keyframe can be at (2 × fps when adaptive): prompts snap to these, extra keyframes are these. */
+  private fine: number[];
   private objs = new Map<number, ObjState>();
   private trash = new Map<number, ObjState>();
   private lumaCache = new Map<number, Uint8Array>();
   private cellCache = new Map<number, Float32Array>();
-  private dirty = new Set<number>(); // interval start indices (into keys) to fill again
+  /** Intervals to fill (again), by their first keyframe's time (an interval runs to the next keyframe in `keys`). */
+  private dirty = new Set<number>();
   /** Intervals a remove / restore (a tap or its undo) changed: filled before the next tracker step, nearest first. */
   private urgent: number[] = [];
+  /** Intervals filled at least once (activate: one split by a new keyframe is filled again as two). */
+  private filledIv = new Set<number>();
+  /** Adaptive keyframes: lockstep steps the autos still take on the fine grid. */
+  private autoFine = 0;
+  private carriedCache = new Map<string, { inc: Float32Array; exc: Float32Array | null }>();
   private small: OffscreenCanvas;
   private big: OffscreenCanvas;
   private running = false;
@@ -139,7 +172,7 @@ export class SegSession {
   private asked = NaN;
   /** Steps done (for the progress). */
   private stepsDone = 0;
-  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0 };
+  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0, extraKeys: 0, carried: 0, runMs: 0 };
   private waitSince = 0;
 
   private model: EdgeTam;
@@ -147,23 +180,65 @@ export class SegSession {
   private ev: SessionEvents;
   private traced = 0;
 
-  constructor(model: EdgeTam, frames: SessionFrames, span: { start: number; end: number }, ev: SessionEvents) {
+  constructor(model: EdgeTam, frames: SessionFrames, span: { start: number; end: number }, ev: SessionEvents, opts: SessionOptions = {}) {
     this.model = model;
     this.frames = frames;
     this.ev = ev;
     [this.mw, this.mh] = maskSize(frames.width, frames.height);
     const i0 = Math.ceil(span.start * SEG.sampleHz - 1e-6), i1 = Math.floor(span.end * SEG.sampleHz + 1e-6);
     this.grid = { i0, n: Math.max(0, i1 - i0 + 1) };
-    this.keys = keyTimes(span.start, span.end);
+    const fixed = !!opts.fps && opts.fps > 0;
+    this.fps = fixed ? opts.fps! : model.lite ? SEG.liteFps : SEG.fps;
+    this.adapt = opts.adapt ?? (!fixed && !!model.lite);
+    this.fine = keyTimes(span.start, span.end, [], this.adapt ? 2 * this.fps : this.fps);
+    const base = keyTimes(span.start, span.end, [], this.fps), last = this.fine[this.fine.length - 1];
+    this.base = last !== undefined && base[base.length - 1] !== last ? [...base, last] : base;
+    this.keys = this.base.slice();
     this.small = new OffscreenCanvas(this.mw, this.mh);
     this.big = new OffscreenCanvas(1024, 1024);
   }
 
-  /** The keyframe on the grid nearest to t (prompts snap to it: every object shares the keyframes). */
+  /** The keyframe time nearest to t (prompts snap to it). */
   snap(t: number): number {
-    let b = this.keys[0] ?? t;
-    for (const k of this.keys) if (Math.abs(k - t) < Math.abs(b - t)) b = k;
+    let b = this.fine[0] ?? t;
+    for (const k of this.fine) if (Math.abs(k - t) < Math.abs(b - t)) b = k;
     return b;
+  }
+
+  /** Puts keyframe time t (one of `fine`) in use. An interval it splits that was filled as one is filled again. */
+  private activate(t: number): void {
+    const K = this.keys;
+    let i = K.length;
+    while (i > 0 && K[i - 1] > t) i--;
+    if (i > 0 && K[i - 1] === t) return;
+    K.splice(i, 0, t);
+    const a = K[i - 1];
+    if (a !== undefined && (this.dirty.has(a) || this.filledIv.has(a))) { this.dirty.add(a); this.dirty.add(t); }
+  }
+
+  /** The keyframes an object steps at between lo and hi: the regular ones, and `extra` (its prompt, a segment's ends). */
+  private stepsBetween(lo: number, hi: number, extra: number[]): number[] {
+    return [...new Set([...this.base, ...extra])].filter((k) => k >= lo - 1e-6 && k <= hi + 1e-6).sort((a, b) => a - b);
+  }
+
+  /**
+   * An object stepped at keyframe t, coming from its keyframe `from` (the one it stepped at before in that direction;
+   * none: its first). The intervals either side of t changed, and so did those around every keyframe in use between
+   * the two (another object's: this object is now carried to them, union). Returns the intervals marked.
+   */
+  private touch(t: number, from: number = t): number[] {
+    const lo = Math.min(t, from), hi = Math.max(t, from), out: number[] = [];
+    this.keys.forEach((k, i) => {
+      if (k < lo - 1e-6 || k > hi + 1e-6 || (k === from && k !== t)) return;
+      if (i > 0) out.push(this.keys[i - 1]);
+      out.push(k);
+    });
+    for (const k of out) this.dirty.add(k);
+    return out;
+  }
+
+  private newObj(o: SegObject & { id: number }, auto: boolean, seg: number, hidden: boolean, fwd: number[], bwd: number[]): ObjState {
+    return { o, auto, seg, hidden, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0 };
   }
 
   /** Canonical frame of segment k (k = 0: the first seeds' frame; then every SEG.segmentS, snapped). */
@@ -174,11 +249,9 @@ export class SegSession {
   /** A tap's object (include / exclude): tracked both ways within SEG.reachS, ahead of the autos. */
   add(o: SegObject & { id: number }): void {
     const t = this.snap(o.t), reach = SEG.reachS;
-    const near = this.keys.filter((k) => Math.abs(k - t) <= reach + 1e-6);
-    this.objs.set(o.id, {
-      o: { ...o, t }, auto: false, seg: -1, hidden: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null,
-      fwd: near.filter((k) => k >= t - 1e-6), bwd: near.filter((k) => k <= t + 1e-6).reverse(),
-    });
+    this.activate(t);
+    const near = this.stepsBetween(t - reach, t + reach, [t]);
+    this.objs.set(o.id, this.newObj({ ...o, t }, false, -1, false, near.filter((k) => k >= t - 1e-6), near.filter((k) => k <= t + 1e-6).reverse()));
     void this.run();
   }
 
@@ -192,9 +265,10 @@ export class SegSession {
     if (this.closed) return;
     const t0 = this.snap(t);
     if (!this.segStarts.length) {
-      const end = this.keys[this.keys.length - 1] ?? t0;
+      const end = this.base[this.base.length - 1] ?? t0;
       for (let s = t0; s <= end + 1e-6; s += SEG.segmentS) this.segStarts.push(this.snap(s));
       this.segStarts = this.segStarts.filter((s, i, a) => i === 0 || s > a[i - 1] + 1e-6);
+      for (const s of this.segStarts) this.activate(s);
     }
     if (this.seeded.has(t0) || this.given.has(t0)) return;
     this.given.set(t0, objs);
@@ -208,24 +282,45 @@ export class SegSession {
     this.given.delete(t0);
     this.seeded.add(t0);
     if (this.waitSince) { this.prof.waitSeedsMs += performance.now() - this.waitSince; this.waitSince = 0; }
-    const t1 = this.segStarts[k + 1] ?? this.keys[this.keys.length - 1];
-    const span = this.keys.filter((x) => x >= t0 - 1e-6 && x <= t1 + 1e-6);
-    for (const o of objs) {
-      this.objs.set(o.id, { o: { ...o, t: t0 }, auto: true, seg: k, hidden: this.gone.delete(o.id), keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd: span, bwd: [] });
-    }
+    const t1 = this.segStarts[k + 1] ?? this.base[this.base.length - 1];
+    const span = this.stepsBetween(t0, t1, [t0, t1]);
+    // The seeds come most important first (the engine's largest animals, the model's best finds): the lite model
+    // takes the first SEG.liteAutos.
+    for (const o of objs.slice(0, this.autoCap)) this.objs.set(o.id, this.newObj({ ...o, t: t0 }, true, k, this.gone.delete(o.id), span.slice(), []));
     // Nothing seeded and nothing tracked into this segment: look again a little later (re-acquire).
-    if (!objs.length && ![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) this.reacquire(k);
+    if (objs.length) this.emptyRun = 0;
+    else if (![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) { this.emptyRun++; this.reacquire(k); }
     return true;
   }
 
+  /** How many of the engine's own subjects are followed at a time (SEG.liteAutos on the lite model). */
+  private get autoCap(): number {
+    return this.model.lite ? SEG.liteAutos : Infinity;
+  }
+
+  /** Segment starts in a row that found no subject (takeSeeds). */
+  private emptyRun = 0;
+  /** Extra starts (reacquire) that ask for the engine's subjects only (SEG.reacquireSearches). */
+  private noSearch = new Set<number>();
+
   /**
-   * Segment k has no subject: a new segment start SEG.reacquireS later (canonical: a function of the grid alone), so
-   * the main thread looks for the engine's subjects again before the next regular start.
+   * Segment k has no subject: a new segment start a little later (canonical: a function of the grid and of what the
+   * starts before found), so the main thread looks for subjects again before the next regular start. The wait
+   * doubles with every empty start in a row (SEG.reacquireS, up to SEG.segmentS): a clip with nothing to follow was
+   * looked through every 2 s, each look a seek, an analysis and the model's 12-point search.
    */
-  private reacquire(k: number): void {
-    const t = this.segStarts[k], next = this.segStarts[k + 1] ?? Infinity;
-    const r = this.snap(t + SEG.reacquireS);
-    if (r > t + 1e-6 && r < next - SEG.reacquireS / 2) this.segStarts.splice(k + 1, 0, r);
+  private reacquire(k: number): number | null {
+    // (Not within a second of the next start, or of the range's end: nothing is left to follow from there.)
+    const t = this.segStarts[k], next = this.segStarts[k + 1] ?? this.base[this.base.length - 1] ?? Infinity;
+    const wait = Math.min(SEG.reacquireMaxS, SEG.reacquireS * 2 ** Math.max(0, this.emptyRun - 1));
+    const r = this.snap(t + wait);
+    if (r > t + 1e-6 && r < next - SEG.reacquireS / 2) {
+      this.segStarts.splice(k + 1, 0, r);
+      this.activate(r);
+      if (this.emptyRun >= SEG.reacquireSearches) this.noSearch.add(r);
+      return r;
+    }
+    return null;
   }
 
   /** Ids removed before their object exists (a replay removes an auto whose seeds are still held): hidden on arrival. */
@@ -273,14 +368,18 @@ export class SegSession {
     return r ? rleDecode(r, this.mw * this.mh) : null;
   }
 
-  /** The include object whose mask covers (u, v) at the keyframe nearest t, if any. */
-  objectAt(t: number, u: number, v: number): ObjState | null {
-    const k = this.snap(t), x = Math.min(this.mw - 1, Math.floor(u * this.mw)), y = Math.min(this.mh - 1, Math.floor(v * this.mh));
-    let best: ObjState | null = null, bp = 127;
+  /** The include object whose mask covers (u, v) at its keyframe nearest t (within a keyframe step), if any, and
+   * that keyframe (objects do not all have the same ones: an extra keyframe is one object's). */
+  objectAt(t: number, u: number, v: number): { s: ObjState; k: number } | null {
+    const x = Math.min(this.mw - 1, Math.floor(u * this.mw)), y = Math.min(this.mh - 1, Math.floor(v * this.mh));
+    let best: { s: ObjState; k: number } | null = null, bp = 127;
     for (const s of this.objs.values()) {
       if (s.o.kind !== "include" || s.hidden) continue;
+      let k = NaN;
+      for (const kt of s.keys.keys()) if (!(Math.abs(kt - t) >= Math.abs(k - t))) k = kt;
+      if (!(Math.abs(k - t) <= 1 / this.fps + 1e-6)) continue;
       const m = this.key(s, k);
-      if (m && m[y * this.mw + x] > bp) { bp = m[y * this.mw + x]; best = s; }
+      if (m && m[y * this.mw + x] > bp) { bp = m[y * this.mw + x]; best = { s, k }; }
     }
     return best;
   }
@@ -307,14 +406,15 @@ export class SegSession {
   }
 
   private async excludeNow(id: number, t: number, u: number, v: number): Promise<{ action: "removed"; removed: number } | { action: "part" | "exclude" }> {
-    const o = this.objectAt(t, u, v);
-    if (!o) {
+    const hit = this.objectAt(t, u, v);
+    if (!hit) {
       this.add({ id, kind: "exclude", t, prompt: { points: [[u, v]], labels: [1] } });
       return { action: "exclude" };
     }
-    const k = this.snap(t);
-    const m = await this.oneShot(k, [[u, v]]);
-    const om = this.key(o, k)!;
+    // The tap's mask on the frame it was made on, against the subject's at its own keyframe nearest to it.
+    const o = hit.s;
+    const m = await this.oneShot(this.snap(t), [[u, v]]);
+    const om = this.key(o, hit.k)!;
     let inter = 0, oa = 0;
     for (let i = 0; i < om.length; i++) { const a = om[i] > 127; if (a) { oa++; if (m[i] > 0.5) inter++; } }
     if (oa && inter / oa >= 0.5) {
@@ -377,11 +477,24 @@ export class SegSession {
     return { luma: Float32Array.from(luma, (x) => x / 255), rgba1024: big };
   }
 
+  /**
+   * A forward step from keyframe `from` to t: the grid frames in between are read on the way (luma and colour cells
+   * into the cache, in time order). The decoder used to skip them, and the fill of that stretch, which runs right
+   * after the step, asked for them behind its position: a restart at the key frame before and the whole run decoded
+   * again, at every keyframe.
+   */
+  private async readAhead(from: number, t: number): Promise<void> {
+    const hz = SEG.sampleHz, i1 = this.grid.i0 + this.grid.n;
+    for (let i = Math.max(this.grid.i0, Math.ceil(from * hz - 1e-6)); i < i1 && i / hz < t - 1e-6; i++) {
+      if (!this.lumaCache.has(frameKey(i / hz))) await this.pixels(i / hz, false);
+    }
+  }
+
   /** A single prompted frame on a throwaway bank (the exclude tap's own mask). */
   private async oneShot(k: number, pts: [number, number][]): Promise<Float32Array> {
     const { rgba1024 } = await this.pixels(k, true);
     await this.model.encode(rgba1024!);
-    const r = await this.model.step("oneshot", frameIndex(k, SEG.fps), pts.map(([u, v]) => [u * 1024, v * 1024]), pts.map(() => 1), false);
+    const r = await this.model.step("oneshot", bankFrame(0, false), pts.map(([u, v]) => [u * 1024, v * 1024]), pts.map(() => 1), false);
     this.model.drop("oneshot");
     this.lastEncoded = NaN;
     return sigmoidResize(r.logits, r.lw, r.lh, this.mw, this.mh);
@@ -459,7 +572,7 @@ export class SegSession {
   private progress(): [number, number] {
     let left = 0, autosNow = 0;
     for (const s of this.objs.values()) { left += s.fwd.length - s.fi + s.bwd.length - s.bi; if (s.auto) autosNow++; }
-    const per = Math.max(1, autosNow) * Math.max(1, Math.round(SEG.segmentS * SEG.fps));
+    const per = Math.max(1, autosNow) * Math.max(1, Math.round(SEG.segmentS * this.fps));
     for (const s of this.segStarts) if (!this.seeded.has(s)) left += per;
     if (!this.segStarts.length) left += per;
     return [this.stepsDone, this.stepsDone + left];
@@ -470,9 +583,26 @@ export class SegSession {
     return s.bi < s.bwd.length ? s.bwd[s.bi] : null;
   }
 
-  private async run(): Promise<void> {
-    if (this.running) return;
+  private loop: Promise<void> = Promise.resolve();
+
+  /** Starts the loop unless it is running. */
+  private run(): Promise<void> {
+    if (!this.running) this.loop = this.work();
+    return this.loop;
+  }
+
+  /**
+   * Closes the session and resolves once its loop has left the model: a step under way (seconds on a phone) ends
+   * first, so the session opened next (another range, another clip) never runs the model at the same time.
+   */
+  async stop(): Promise<void> {
+    this.close();
+    await this.loop.catch(() => undefined);
+  }
+
+  private async work(): Promise<void> {
     this.running = true;
+    const began = performance.now();
     try {
       while (!this.closed) {
         const op = this.ops.shift();
@@ -483,8 +613,7 @@ export class SegSession {
         const tap = [...this.objs.values()].filter((s) => !s.auto && this.nextOf(s) !== null).sort((a, b) => b.o.id - a.o.id)[0];
         if (tap) {
           await this.stepObject(tap);
-          const ki = this.keys.indexOf(this.lastStepT);
-          await this.fillNow(ki);
+          await this.fillNow();
           this.postKeys();
           this.ev.progress(...this.progress());
           await yieldNow();
@@ -497,7 +626,7 @@ export class SegSession {
         if (k !== null) {
           if (!this.takeSeeds(k)) {
             const ts = this.segStarts[k];
-            if (this.asked !== ts) { this.asked = ts; this.waitSince = performance.now(); this.ev.needSeeds(k, ts); }
+            if (this.asked !== ts) { this.asked = ts; this.waitSince = performance.now(); this.ev.needSeeds(k, ts, !this.noSearch.has(ts)); }
             break;
           }
           await yieldNow();
@@ -508,16 +637,21 @@ export class SegSession {
           const batch = autos.filter((s) => Math.abs(this.nextOf(s)! - t) < 1e-6).sort((a, b) => b.o.id - a.o.id);
           for (const s of batch) await this.stepObject(s);
           this.carryOver(t, batch);
-          const ki = this.keys.indexOf(t);
-          if (ki > 0) this.dirty.add(ki - 1);
-          if (ki >= 0) this.dirty.add(ki);
+          this.refineAutos(t, batch.some((s) => s.hard));
           await this.fillReady();
           this.postKeys();
           this.ev.progress(...this.progress());
         } else if (this.dirty.size) {
-          const ki = [...this.dirty].sort((a, b) => a - b)[0];
-          this.dirty.delete(ki);
-          await this.fill(ki);
+          const ta = Math.min(...this.dirty);
+          this.dirty.delete(ta);
+          await this.fill(ta);
+        } else if (this.segStarts.length) {
+          // The pass is through. A stretch nothing was followed in (before the first subject, between a subject lost
+          // and the next one found, a clip without any) was never touched by a step, so never filled: its frames
+          // are posted too, empty (the engine's masks alone there), so every frame of the range has its answer.
+          const ta = this.keys.find((k) => !this.filledIv.has(k));
+          if (ta !== undefined) await this.fill(ta);
+          else if (this.fillRest()) break;
         } else break;
         await yieldNow();
       }
@@ -527,6 +661,8 @@ export class SegSession {
       if (!this.closed) this.fail(e);
     } finally {
       this.running = false;
+      // The loop's own time (it stops while it waits for seeds: waitSeedsMs, or for the user).
+      this.prof.runMs += performance.now() - began;
       if (!this.closed && !this.waiting) this.ev.idle(this.profile());
     }
   }
@@ -565,28 +701,52 @@ export class SegSession {
     const seeds = batch.filter((s) => s.seg === k && s.fi === 1);
     const n = this.mw * this.mh, cover = new Uint8Array(n);
     for (const s of seeds) { const m = this.key(s, t); if (m) for (let i = 0; i < n; i++) if (m[i] > 127) cover[i] = 1; }
-    const t1 = this.segStarts[k + 1] ?? this.keys[this.keys.length - 1];
+    const t1 = this.segStarts[k + 1] ?? this.base[this.base.length - 1];
+    const carry: { s: ObjState; a: number }[] = [], ended: ObjState[] = [];
     for (const s of batch) {
       if (s.seg >= k || s.fi < s.fwd.length) continue;
       const m = this.key(s, t);
       let a = 0, c = 0;
       if (m) for (let i = 0; i < n; i++) if (m[i] > 127) { a++; if (cover[i]) c++; }
-      if (a > SEG.guardMinArea * n && c < SEG.carryCover * a) {
-        s.fwd = [...s.fwd, ...this.keys.filter((x) => x > t + 1e-6 && x <= t1 + 1e-6)];
-        s.seg = k;
-      } else this.model.drop(`${s.o.id}f`);
+      if (a > SEG.guardMinArea * n && c < SEG.carryCover * a) carry.push({ s, a });
+      else ended.push(s);
     }
-    if (![...this.objs.values()].some((s) => s.auto && s.seg === k && this.nextOf(s) !== null)) this.reacquire(k);
+    // The lite model's limit holds across the start: the new seeds, then the largest subjects carried in.
+    carry.sort((x, y) => y.a - x.a || x.s.o.id - y.s.o.id);
+    const room = Math.max(0, this.autoCap - seeds.length);
+    carry.forEach(({ s }, i) => {
+      if (i >= room) { this.model.drop(`${s.o.id}f`); return; }
+      s.fwd = [...s.fwd, ...this.stepsBetween(t, t1, [t1]).filter((x) => x > t + 1e-6)];
+      s.seg = k;
+    });
+    if (![...this.objs.values()].some((s) => s.auto && s.seg === k && this.nextOf(s) !== null)) {
+      const r = this.reacquire(k);
+      // Nothing to follow from here, but a subject was in the picture a moment ago (out of frame, behind a rock): the
+      // one seen last is followed on to the next look (or the next start). Its tracker knows it again the keyframe it
+      // is back, where a look only comes every few seconds and may not see it (the engine looks in open water only).
+      // At 4 keyframes a second a subject back just before the start was still carried by its mask; at 2 it was
+      // dropped here, and the stretch to the next look that found it had no mask at all.
+      const seen = (s: ObjState) => Math.max(-Infinity, ...s.shown);
+      const keep = ended.filter((s) => t - seen(s) <= SEG.lostS + 1e-6).sort((x, y) => seen(y) - seen(x) || x.o.id - y.o.id)[0];
+      if (keep) {
+        const to = r ?? t1;
+        keep.fwd = [...keep.fwd, ...this.stepsBetween(t, to, [to]).filter((x) => x > t + 1e-6)];
+        keep.seg = k;
+        ended.splice(ended.indexOf(keep), 1);
+      }
+    }
+    for (const s of ended) this.model.drop(`${s.o.id}f`);
   }
 
-  private lastStepT = NaN;
+  /** The intervals the last step changed (touch). */
+  private lastTouched: number[] = [];
 
   private async stepObject(s: ObjState): Promise<void> {
     // Alternate forward and backward (the prompt keyframe is the forward list's first; backward starts after it).
     const goFwd = s.fi < s.fwd.length && (s.bi >= s.bwd.length || s.fi <= s.bi);
     const list = goFwd ? s.fwd : s.bwd, idx = goFwd ? s.fi : s.bi, t = list[idx];
-    this.lastStepT = t;
     const reverse = !goFwd, key = `${s.o.id}${goFwd ? "f" : "b"}`;
+    if (goFwd && idx > 0) await this.readAhead(list[idx - 1], t);
     const { luma, rgba1024 } = await this.pixels(t, t !== this.lastEncoded);
     if (t !== this.lastEncoded) {
       const tr = this.traced++ < 3;
@@ -604,7 +764,10 @@ export class SegSession {
       labels = p.labels.slice();
       if (p.box) { pts = [[p.box.x0 * 1024, p.box.y0 * 1024], [p.box.x1 * 1024, p.box.y1 * 1024], ...pts]; labels = [2, 3, ...labels]; }
     }
-    let r = await this.model.step(key, frameIndex(t, SEG.fps), pts, labels, reverse);
+    // The bank's clock is the object's own step count (bank.ts frameIndex: the keyframe's ordinal), so the keyframe
+    // before is its spatial memory whether it is a regular step back or an extra keyframe's half step.
+    const frame = bankFrame(idx, reverse);
+    let r = await this.model.step(key, frame, pts, labels, reverse);
     let m = sigmoidResize(r.logits, r.lw, r.lh, this.mw, this.mh);
     this.stepsDone++;
     if (first && !s.auto && s.o.kind === "include" && area(m) > SEG.maxTapArea * this.mw * this.mh) {
@@ -630,7 +793,7 @@ export class SegSession {
           const pr = promptFromMask(carried, this.mw, this.mh, this.mw / 640);
           if (pr) {
             const P: [number, number][] = [...pr.pos, ...pr.neg].map(([x, y]) => [((x + 0.5) / this.mw) * 1024, ((y + 0.5) / this.mh) * 1024]);
-            r = await this.model.step(key, frameIndex(t, SEG.fps), P, [...pr.pos.map(() => 1), ...pr.neg.map(() => 0)], reverse);
+            r = await this.model.step(key, frame, P, [...pr.pos.map(() => 1), ...pr.neg.map(() => 0)], reverse);
             m = sigmoidResize(r.logits, r.lw, r.lh, this.mw, this.mh);
             reprompts = 1;
           }
@@ -640,13 +803,16 @@ export class SegSession {
     }
     // A runaway mask (the tracker slid onto the reef or the water: a big warm patch over the background): over
     // SEG.runawayArea of the frame, or SEG.runawayGrow × what the flow carried, is no subject: the frame shows none.
+    let ranAway = false;
     {
       const N = this.mw * this.mh, a = area(m), ca = carriedArea;
       if (a > SEG.runawayArea * N || (ca > SEG.guardMinArea * N && a > SEG.runawayGrow * ca && a > 0.05 * N)) {
         m = new Float32Array(N);
         agree = 0;
+        ranAway = true;
       }
     }
+    s.hard = !first && (reprompts > 0 || ranAway || agree < SEG.adaptAgree);
     if (goFwd) { s.prevF = { m, luma }; s.fi++; } else { s.prevB = { m, luma }; s.bi++; }
     const conf = reprompts ? 0.5 : (r.score > 0 ? Math.min(1, Math.max(0, (r.score + 1) / 3)) : 0) * (agree < 1 ? Math.min(1, Math.max(0, (agree - 0.3) / 0.4)) : 1);
     const mu = toU8(m);
@@ -655,27 +821,73 @@ export class SegSession {
     s.conf.set(t, conf);
     if (!s.auto && (goFwd ? s.fi >= s.fwd.length : s.bi >= s.bwd.length)) this.model.drop(key);
     // Taps: the intervals on either side of t are filled right away (the caller); autos: once both ends are final.
-    const ki = this.keys.indexOf(t);
-    if (ki > 0) this.dirty.add(ki - 1);
-    if (ki >= 0) this.dirty.add(ki);
+    this.lastTouched = this.touch(t, idx > 0 ? list[idx - 1] : t);
+    if (!s.auto) this.refine(s, goFwd, t);
   }
 
-  /** Fills the intervals around keyframe ki right away (the rest wait in `dirty`). */
-  private async fillNow(ki: number): Promise<void> {
-    for (const k of [ki, ki - 1]) if (k >= 0 && this.dirty.has(k)) { this.dirty.delete(k); await this.fill(k); }
+  /** The keyframe time next to t on the fine grid (dir: +1 later, −1 earlier), when extra keyframes are on. */
+  private extraKey(t: number, dir: 1 | -1): number | null {
+    if (!this.adapt) return null;
+    const i = this.fine.indexOf(t);
+    return i >= 0 ? this.fine[i + dir] ?? null : null;
+  }
+
+  /**
+   * Adaptive keyframes, a tap's object: a hard step (ObjState.hard) puts the object on the fine grid for its next
+   * SEG.adaptHold steps in that direction: the fine keyframe next to t goes into its list ahead of its next regular
+   * one. The stretch where the tracker and the flow part ways is tracked twice as densely, the rest at `fps`.
+   */
+  private refine(s: ObjState, goFwd: boolean, t: number): void {
+    if (!this.adapt) return;
+    if (s.hard) { if (goFwd) s.fineF = SEG.adaptHold; else s.fineB = SEG.adaptHold; }
+    if ((goFwd ? s.fineF : s.fineB) <= 0) return;
+    if (goFwd) s.fineF--; else s.fineB--;
+    const list = goFwd ? s.fwd : s.bwd, i = goFwd ? s.fi : s.bi, next = list[i];
+    const f = this.extraKey(t, goFwd ? 1 : -1);
+    if (f === null || next === undefined || (goFwd ? next <= f + 1e-6 : next >= f - 1e-6)) return;
+    list.splice(i, 0, f);
+    this.activate(f);
+    this.prof.extraKeys++;
+  }
+
+  /** The same for the autos, which step in lockstep: one hard step among them puts them all on the fine grid. */
+  private refineAutos(t: number, hard: boolean): void {
+    if (!this.adapt) return;
+    if (hard) this.autoFine = SEG.adaptHold;
+    if (this.autoFine <= 0) return;
+    this.autoFine--;
+    const f = this.extraKey(t, 1);
+    if (f === null) return;
+    let any = false;
+    for (const s of this.objs.values()) {
+      const next = s.auto ? s.fwd[s.fi] : undefined;
+      if (next === undefined || next <= f + 1e-6) continue;
+      s.fwd.splice(s.fi, 0, f);
+      any = true;
+    }
+    if (any) { this.activate(f); this.prof.extraKeys++; }
+  }
+
+  /** Fills the intervals the last step changed right away, latest first (the rest wait in `dirty`). */
+  private async fillNow(): Promise<void> {
+    for (const k of [...new Set(this.lastTouched)].sort((a, b) => b - a)) if (this.dirty.has(k)) { this.dirty.delete(k); await this.fill(k); }
   }
 
   /** Fills every dirty interval no object will step at either end any more (each is filled once, with final keys). */
   private async fillReady(): Promise<void> {
-    const pending = new Set<number>();
+    // Not final: a keyframe an object has still to step at, and any keyframe between that and where it stands (another
+    // object's: this one is carried to it once it has stepped past).
+    const open: [number, number][] = [];
     for (const s of this.objs.values()) {
-      for (let i = s.fi; i < s.fwd.length; i++) pending.add(this.keys.indexOf(s.fwd[i]));
-      for (let i = s.bi; i < s.bwd.length; i++) pending.add(this.keys.indexOf(s.bwd[i]));
+      if (s.fi < s.fwd.length) open.push([s.fi > 0 ? s.fwd[s.fi - 1] + 1e-6 : s.fwd[0] - 1e-6, s.fwd[s.fwd.length - 1] + 1e-6]);
+      if (s.bi < s.bwd.length) open.push([s.bwd[s.bwd.length - 1] - 1e-6, s.bi > 0 ? s.bwd[s.bi - 1] - 1e-6 : s.bwd[0] + 1e-6]);
     }
-    for (const k of [...this.dirty].sort((a, b) => a - b)) {
-      if (pending.has(k) || pending.has(k + 1)) continue;
-      this.dirty.delete(k);
-      await this.fill(k);
+    const pending = { has: (k: number) => open.some(([lo, hi]) => k > lo && k < hi) };
+    for (const a of [...this.dirty].sort((x, y) => x - y)) {
+      const b = this.keys[this.keys.indexOf(a) + 1];
+      if (pending.has(a) || (b !== undefined && pending.has(b))) continue;
+      this.dirty.delete(a);
+      await this.fill(a);
     }
   }
 
@@ -684,38 +896,116 @@ export class SegSession {
     if (!ts.length) return;
     const lo = this.keys.indexOf(Math.min(...ts)), hi = this.keys.indexOf(Math.max(...ts));
     const ks: number[] = [];
-    for (let k = Math.max(0, lo - 1); k <= hi; k++) { this.dirty.delete(k); ks.push(k); }
-    const at = this.keys.indexOf(s.o.t);
+    for (let k = Math.max(0, lo - 1); k <= hi; k++) { this.dirty.delete(this.keys[k]); ks.push(this.keys[k]); }
+    const at = s.o.t;
     ks.sort((a, b) => Math.abs(a - at) - Math.abs(b - at));
     this.urgent = [...ks, ...this.urgent.filter((k) => !ks.includes(k))];
   }
 
-  private union(t: number): { inc: Float32Array; exc: Float32Array | null; any: boolean } {
+  /** The union of the given objects' own keyframe masks at t (probabilities; includes and excludes apart). */
+  private own(objs: Iterable<ObjState>, t: number, missing?: ObjState[]): { inc: Float32Array; exc: Float32Array | null } {
     const n = this.mw * this.mh, inc = new Float32Array(n);
-    let exc: Float32Array | null = null, any = false;
-    for (const s of this.objs.values()) {
+    let exc: Float32Array | null = null;
+    for (const s of objs) {
       if (s.hidden) continue;
       const m = this.key(s, t);
-      if (!m) continue;
-      any = true;
+      if (!m) { missing?.push(s); continue; }
       if (s.o.kind === "include") { for (let i = 0; i < n; i++) inc[i] = Math.max(inc[i], m[i] / 255); }
       else { exc ??= new Float32Array(n); for (let i = 0; i < n; i++) exc[i] = Math.max(exc[i], m[i] / 255); }
     }
-    return { inc, exc, any };
+    return { inc, exc };
   }
 
-  /** Fills interval ki (keys[ki] up to keys[ki + 1]) and posts its frames. */
-  private async fill(ki: number): Promise<void> {
-    const ta = this.keys[ki], tb = this.keys[ki + 1];
-    if (ta === undefined) return;
-    const A = this.union(ta), B = tb !== undefined ? this.union(tb) : null;
+  /**
+   * Every shown object's mask at keyframe t. An object with its own keyframe there gives that; one without (t is
+   * another object's prompt or extra keyframe) but with keyframes either side is carried to t along the flow between
+   * those two, as the fill would have drawn it there (carried). So a keyframe one object adds never drops the others
+   * from the mask, and the result does not depend on which object was tracked first.
+   */
+  private async union(t: number): Promise<{ inc: Float32Array; exc: Float32Array | null }> {
+    const missing: ObjState[] = [];
+    const u = this.own(this.objs.values(), t, missing);
+    const gaps = new Map<string, { a: number; b: number; objs: ObjState[] }>();
+    for (const s of missing) {
+      let a = -Infinity, b = Infinity;
+      for (const k of s.keys.keys()) { if (k < t && k > a) a = k; else if (k > t && k < b) b = k; }
+      if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+      const id = `${a}|${b}`, g = gaps.get(id) ?? { a, b, objs: [] };
+      g.objs.push(s);
+      gaps.set(id, g);
+    }
+    const n = this.mw * this.mh;
+    for (const g of gaps.values()) {
+      const c = await this.carried(g.objs, g.a, g.b, t);
+      for (let i = 0; i < n; i++) if (c.inc[i] > u.inc[i]) u.inc[i] = c.inc[i];
+      if (c.exc) { const e = (u.exc ??= new Float32Array(n)); for (let i = 0; i < n; i++) if (c.exc[i] > e[i]) e[i] = c.exc[i]; }
+    }
+    return u;
+  }
+
+  /** The masks of `objs` (which share the keyframes a < t < b and have none at t) at t: a's carried forward along the
+   * frames' flow, b's backward, cross-faded by time (track.ts fillInterval). */
+  private async carried(objs: ObjState[], a: number, b: number, t: number): Promise<{ inc: Float32Array; exc: Float32Array | null }> {
+    const id = `${objs.map((s) => s.o.id).sort((x, y) => x - y).join(",")}|${a}|${b}|${t}`;
+    const hit = this.carriedCache.get(id);
+    if (hit) return hit;
+    const A = this.own(objs, a), B = this.own(objs, b);
+    const hz = SEG.sampleHz, times: number[] = [];
+    for (let i = Math.floor(a * hz + 1e-6) + 1; i / hz < b - 1e-6; i++) if (Math.abs(i / hz - t) > 1e-6) times.push(i / hz);
+    times.push(t);
+    times.sort((x, y) => x - y);
+    const lumas: Float32Array[] = [];
+    for (const x of times) lumas.push((await this.pixels(x, false)).luma);
+    const ka: Keyframe = { t: a, inc: A.inc, exc: A.exc, luma: (await this.pixels(a, false)).luma, conf: 1, reprompts: 0, score: 0 };
+    const kb: Keyframe = { t: b, inc: B.inc, exc: B.exc, luma: (await this.pixels(b, false)).luma, conf: 1, reprompts: 0, score: 0 };
+    const t0 = performance.now();
+    const out = fillInterval(ka, kb, times, lumas, this.mw, this.mh, !!(A.exc || B.exc))[times.indexOf(t)];
+    this.prof.fillMs += performance.now() - t0;
+    this.prof.carried++;
+    // Each is asked for twice (the intervals either side of t); a handful are kept (230 KB each at 320 × 180).
+    if (this.carriedCache.size >= 8) this.carriedCache.delete(this.carriedCache.keys().next().value!);
+    this.carriedCache.set(id, out);
+    return out;
+  }
+
+  /** Grid frames posted at least once. */
+  private posted: Uint8Array | null = null;
+
+  /** Posts the grid frames no interval covers (those before the first keyframe), empty. True: nothing was left. */
+  private fillRest(): boolean {
+    const p = (this.posted ??= new Uint8Array(this.grid.n)), out: SessionFrameOut[] = [];
+    const z = new Float32Array(this.mw * this.mh);
+    for (let i = 0; i < this.grid.n; i++) if (!p[i]) { p[i] = 1; out.push(this.product(i, z, null, z)); }
+    if (!out.length) return true;
+    this.prof.filledFrames += out.length;
+    if (!this.closed) this.ev.frames(out);
+    return false;
+  }
+
+  /** Fills the interval from keyframe ta to the next one in use and posts its frames. */
+  private async fill(ta: number): Promise<void> {
+    const ki = this.keys.indexOf(ta);
+    if (ki < 0) return;
+    const tb = this.keys[ki + 1];
+    const A = await this.union(ta), B = tb !== undefined ? await this.union(tb) : null;
     const idx: number[] = [];
     for (let i = 0; i < this.grid.n; i++) {
       const t = (this.grid.i0 + i) / SEG.sampleHz;
       // The last keyframe holds (flow-carried) to the end of the clip.
       if (t >= ta - 1e-6 && (tb === undefined || t < tb - 1e-6)) idx.push(i);
     }
+    this.filledIv.add(ta);
     if (!idx.length) return;
+    const p = (this.posted ??= new Uint8Array(this.grid.n));
+    for (const i of idx) p[i] = 1;
+    // No mask at either end: empty frames, without decoding the stretch (what the fill of nothing comes to anyway).
+    const none = (u: { inc: Float32Array; exc: Float32Array | null } | null) => !u || (!u.exc && !u.inc.some((x) => x > 0));
+    if (none(A) && none(B)) {
+      const z = new Float32Array(this.mw * this.mh);
+      this.prof.filledFrames += idx.length;
+      if (!this.closed) this.ev.frames(idx.map((i) => this.product(i, z, null, z)));
+      return;
+    }
     const lumas: Float32Array[] = [];
     for (const i of idx) lumas.push((await this.pixels((this.grid.i0 + i) / SEG.sampleHz, false)).luma);
     const lumaA = (await this.pixels(ta, false)).luma;
@@ -734,7 +1024,7 @@ export class SegSession {
     this.prof.fillMs += t1 - t0;
     this.prof.productMs += performance.now() - t1;
     this.prof.filledFrames += idx.length;
-    this.ev.frames(out);
+    if (!this.closed) this.ev.frames(out);
   }
 
   /** The overlay-ready maps of one frame (feather, near, exclude, water departure; see track.ts SegTrack.at). */
@@ -782,7 +1072,9 @@ export class SegSession {
   /** Where the pass's time went (ms) and its counts. */
   profile(): SessionProfile {
     const m = this.model.timing;
-    return { ...this.prof, encodeMs: m.encode, encodes: m.encodes, attendMs: m.attend, decoderMs: m.decoder, memEncMs: m.memEnc, steps: m.steps, keyframes: this.keys.length };
+    let objects = 0;
+    for (const s of [...this.objs.values(), ...this.trash.values()]) if (s.keys.size) objects++;
+    return { ...this.prof, objects, clipS: this.grid.n / SEG.sampleHz, encodeMs: m.encode, encodes: m.encodes, attendMs: m.attend, decoderMs: m.decoder, memEncMs: m.memEnc, steps: m.steps, keyframes: this.keys.length, fps: this.fps, restarts: this.frames.restarts?.() ?? 0 };
   }
 }
 

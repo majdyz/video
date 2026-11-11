@@ -7,7 +7,7 @@ import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
 import { AdvancedControls, SubjectsPanel, TOOL_ICON, ToolPanel, toolStatus } from "./ui/panels";
 import { ToolDock } from "./ui/tool-dock";
-import { lastCrash, sessionCrumbs } from "./pipeline/crumbs.ts";
+import { lastAiProfile, lastCrash, sessionCrumbs } from "./pipeline/crumbs.ts";
 import { deviceFacts, isWeakDevice } from "./pipeline/device.ts";
 import type { FeedbackContext } from "./pipeline/feedback.ts";
 import { SubjectOutlines } from "./ui/subjects";
@@ -108,6 +108,8 @@ export default function App() {
   /** The last session crashed (crumbs.ts): its steps, offered once at start-up and kept in About. */
   const crash = useMemo(() => lastCrash(), []);
   const [crashToast, setCrashToast] = useState(!!crash);
+  /** The last AI pass's profile (crumbs.ts), read when About opens. */
+  const aiPass = useMemo(() => (aboutOpen ? lastAiProfile() : null), [aboutOpen]);
   const [hasLive, setHasLive] = useState(false);
   const [theme, setTheme] = useState<Theme>(() => (document.documentElement.dataset.theme === "light" ? "light" : "abyss"));
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -671,6 +673,16 @@ export default function App() {
             {s.exportMode === "realtime" ? "real-time export (plays the clip through once)" : s.exportMode === "native" ? "native hardware encoder" : "WebCodecs export"}
             {" · "}{BRAND.beta ? "beta " : ""}{"build "}{__BUILD_ID__}
           </p>
+          {aiPass && (
+            <div className="about__credit">
+              <h3>Last AI subject pass</h3>
+              <p>Where its time went on this device (send it to the developer):</p>
+              <pre className="crash-log" data-testid="ai-profile">{aiPass.split(" · ").join("\n")}</pre>
+              <div className="about__actions">
+                <button type="button" className="btn btn--quiet" onClick={() => void navigator.clipboard?.writeText(aiPass).catch(() => undefined)}>Copy</button>
+              </div>
+            </div>
+          )}
           {crash && (
             <div className="about__credit">
               <h3>Last session crashed</h3>

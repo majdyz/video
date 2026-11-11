@@ -3,7 +3,7 @@
 //   node --experimental-strip-types apps/studio/test/seg-session.test.ts
 import assert from "node:assert/strict";
 import type { EdgeTam } from "../src/pipeline/seg/edgetam.ts";
-import { frameKey, SegSession, type SessionEvents, type SessionFrameOut, type SessionFrames } from "../src/pipeline/seg/session.ts";
+import { frameKey, SegSession, type SessionEvents, type SessionFrameOut, type SessionFrames, type SessionOptions } from "../src/pipeline/seg/session.ts";
 import type { SegObject } from "../src/pipeline/seg/track.ts";
 import { rleDecode } from "../src/pipeline/seg/mask.ts";
 
@@ -14,7 +14,9 @@ const popped = (frames: Map<number, SessionFrameOut>) => [...frames.values()].fi
 
 /** A frame of the fake clip: a soft texture with a bright square (the subject) at x0 (share of the width). */
 type FakeFrame = { t: number };
-const subjectX = (t: number) => 0.3 + 0.02 * t;
+/** The subject jumps 0.3 of the width at this clip time (no flow can follow it: a hard step for the tracker). */
+let jumpAt = Infinity;
+const subjectX = (t: number) => 0.3 + 0.02 * t + (t >= jumpAt ? 0.3 : 0);
 const inSubject = (u: number, v: number, t: number) => Math.abs(u - subjectX(t)) < 0.1 && Math.abs(v - 0.5) < 0.2;
 
 /** OffscreenCanvas as the session uses it: drawImage of a FakeFrame, read back as RGBA. */
@@ -52,29 +54,33 @@ type Fake = {
   reads: number[];
   /** Encodes so far; the encode numbered failAt (1-based) throws. */
   encodes: number;
+  /** Tracker steps so far. */
+  steps: number;
   failAt: number;
   /** The subject is on screen between these clip times (the model finds nothing outside them). */
   visible: [number, number];
+  /** And not inside this stretch (the subject leaves and comes back). */
+  gone: [number, number] | null;
   disposed: boolean;
 };
 
-function fake(opts: Partial<Pick<Fake, "failAt" | "visible">> = {}): Fake {
-  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, reads: [], encodes: 0, failAt: opts.failAt ?? Infinity, visible: opts.visible ?? [-Infinity, Infinity], disposed: false };
+function fake(opts: Partial<Pick<Fake, "failAt" | "visible" | "gone">> & { lite?: boolean } = {}): Fake {
+  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, reads: [], encodes: 0, steps: 0, failAt: opts.failAt ?? Infinity, visible: opts.visible ?? [-Infinity, Infinity], gone: opts.gone ?? null, disposed: false };
   let encT = 0;
   const lw = 64, lh = 36;
   const mask = (t: number) => {
-    const logits = new Float32Array(lw * lh), on = t >= f.visible[0] - 1e-6 && t <= f.visible[1] + 1e-6;
+    const logits = new Float32Array(lw * lh), on = t >= f.visible[0] - 1e-6 && t <= f.visible[1] + 1e-6 && !(f.gone && t > f.gone[0] + 1e-6 && t < f.gone[1] - 1e-6);
     for (let y = 0; y < lh; y++) for (let x = 0; x < lw; x++) logits[y * lw + x] = on && inSubject((x + 0.5) / lw, (y + 0.5) / lh, t) ? 10 : -10;
     return { logits, lw, lh, score: on ? 5 : -5, iou: 0.95 };
   };
   f.model = {
-    lite: false,
+    lite: !!opts.lite,
     timing: { encode: 0, encodes: 0, attend: 0, decoder: 0, memEnc: 0, steps: 0 },
     async encode(rgba: Uint8ClampedArray) {
       if (++f.encodes === f.failAt) throw new Error("failed to allocate a buffer of size 67108864");
       encT = (rgba[0] + 256 * rgba[1]) / 10;
     },
-    async step() { return mask(encT); },
+    async step() { f.steps++; return mask(encT); },
     async probe() { return mask(encT); },
     drop() {},
   } as unknown as EdgeTam;
@@ -90,7 +96,7 @@ function fake(opts: Partial<Pick<Fake, "failAt" | "visible">> = {}): Fake {
 type Run = {
   s: SegSession;
   frames: Map<number, SessionFrameOut>;
-  asked: { k: number; t: number }[];
+  asked: { k: number; t: number; search: boolean }[];
   /** The seeds this run's "main thread" answered with, in order (what a replay hands over). */
   log: { t: number; objs: (SegObject & { id: number })[] }[];
   errors: string[];
@@ -100,7 +106,7 @@ type Run = {
 };
 
 /** A session whose "main thread" answers every request for seeds with `seedsFor(t)` (null: leaves it unanswered). */
-function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: number) => (SegObject & { id: number })[] | null): Run {
+function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: number) => (SegObject & { id: number })[] | null, opts: SessionOptions = {}): Run {
   let wake: (() => void) | null = null;
   const done = () => { const w = wake; wake = null; w?.(); };
   const r: Run = {
@@ -113,14 +119,14 @@ function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: numbe
     progress: () => undefined,
     idle: () => { r.idles++; done(); },
     rejected: () => undefined,
-    needSeeds: (k, t) => {
-      r.asked.push({ k, t });
+    needSeeds: (k, t, search) => {
+      r.asked.push({ k, t, search });
       const objs = seedsFor(t);
       if (objs) setTimeout(() => { r.log.push({ t, objs }); r.s.seeds(t, objs); }, 0);
     },
     error: (msg) => { r.errors.push(msg); done(); },
   };
-  r.s = new SegSession(f.model, f.frames, span, ev);
+  r.s = new SegSession(f.model, f.frames, span, ev, opts);
   return r;
 }
 
@@ -168,6 +174,10 @@ const subject = (t: number): SegObject & { id: number } => ({ id: ids++, kind: "
   assert.ok(read(0.25), "the keyframe at 0.25 s is decoded");
   assert.ok(read(8 / 30), "grid frame 8 is decoded itself");
   assert.ok(read(0.75) && read(23 / 30), "and the next pair");
+  // The frames between two keyframes are read on the way to the second, so the fill of that stretch (right after
+  // the step) has them: the decoder is never asked for a frame behind its position (each was a restart).
+  assert.equal(f.reads.filter((t, i) => i > 0 && t < f.reads[i - 1] - 1e-6).length, 0, "the pass reads the clip in time order");
+  assert.equal(new Set(f.reads.map(frameKey)).size, f.reads.length, "and each frame once");
   assert.equal(frameKey(0.5), frameKey(15 / 30), "a keyframe on the grid shares its grid frame's entry");
   assert.notEqual(frameKey(0.25), frameKey(8 / 30));
   for (let i = 1; i < 300; i++) assert.notEqual(frameKey(i / 30), frameKey((i - 1) / 30));
@@ -205,7 +215,7 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
 };
 
 // A clip whose subject only shows up at 3 s: the first segments find nothing, so the session inserts extra segment
-// starts (2 s, 4 s) between the regular ones (0 s, 8 s) as it tracks. A replay hands every seed over up front, before
+// starts (2 s, then 4 s later: 6 s) between the regular ones (0 s, 8 s) as it tracks. A replay hands every seed over up front, before
 // any tracking, when those extra starts do not exist yet: with seeds matched by index they landed on the wrong
 // frames or were dropped, and the session then waited for ever for a segment the main thread had already answered.
 {
@@ -218,7 +228,8 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   a.s.seeds(0, a.log[0].objs);
   await end;
   assert.equal(a.errors.length, 0);
-  assert.deepEqual(a.log.map((l) => l.t), [0, 2, 4, 8], "segment starts as tracking met them (two inserted)");
+  assert.deepEqual(a.log.map((l) => l.t), [0, 2, 6, 8], "segment starts as tracking met them (two inserted, the wait doubling)");
+  assert.deepEqual(a.asked.map((x) => x.search), [true, true, true], "extra starts keep the model's search until SEG.reacquireSearches (3) empty ones in a row");
   assert.deepEqual(a.log.map((l) => l.objs.length), [0, 0, 1, 1]);
   assert.ok(a.frames.size > 0);
 
@@ -286,4 +297,222 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   assert.deepEqual(excludeOutcome(r2, 901, 0.5, 0.9, 0.5), { op: "add", object: { id: 901, kind: "exclude", t: 0.5, prompt: { points: [[0.9, 0.5]], labels: [1] } } });
   await end;
   console.log("session: exclude taps replay as their outcome: ok");
+}
+
+// ---------------------------------------------------------------- the session tracks the trim only
+
+{
+  const { segSpan, scopeServes, logForSpan } = await import("../src/pipeline/seg/studio-seg.ts");
+  // The selection plus a margin each side, inside the clip; untrimmed: the whole clip.
+  assert.deepEqual(segSpan(null, 60), { start: 0, end: 60 });
+  assert.deepEqual(segSpan({ start: 20, end: 30 }, 60), { start: 19.5, end: 30.5 });
+  assert.deepEqual(segSpan({ start: 0.2, end: 59.9 }, 60), { start: 0, end: 60 });
+  // The same selection is served; another one only by a finished pass that contains it.
+  assert.equal(scopeServes(null, null, false), true);
+  assert.equal(scopeServes({ start: 20, end: 30 }, { start: 20, end: 30 }, false), true);
+  assert.equal(scopeServes(null, { start: 20, end: 30 }, false), false, "a whole-clip pass still running is restarted on the selection");
+  assert.equal(scopeServes(null, { start: 20, end: 30 }, true), true, "a finished whole-clip pass has the selection's masks");
+  assert.equal(scopeServes({ start: 20, end: 30 }, { start: 22, end: 28 }, true), true);
+  assert.equal(scopeServes({ start: 20, end: 30 }, { start: 18, end: 28 }, true), false, "the selection grew past the pass");
+  assert.equal(scopeServes({ start: 20, end: 30 }, null, true), false, "the trim was cleared");
+  // A re-scoped session keeps the taps inside its range (and what was done to them), not the engine's seeds.
+  const tap = (id: number, t: number) => ({ op: "add" as const, object: { ...subject(t), id } });
+  const log = [{ op: "seeds" as const, t: 0, objects: [{ ...subject(0), id: 1 }] }, tap(2, 5), tap(3, 25), { op: "remove" as const, id: 1 }, { op: "remove" as const, id: 3 }, { op: "restore" as const, id: 3 }, { op: "remove" as const, id: 2 }];
+  assert.deepEqual(logForSpan(log, { start: 19.5, end: 30.5 }).map((l) => `${l.op}:${l.op === "add" ? l.object.id : l.op === "seeds" ? "s" : l.id}`), ["add:3", "remove:3", "restore:3"]);
+
+  // A session over 20–22 s of a longer clip: its grid, its keyframes and every frame it decodes lie inside the range,
+  // and the pass ends there (the export waits for the selection, not the clip).
+  const f = fake();
+  const r = open(f, segSpan({ start: 20.5, end: 21.5 }, 60), () => []);
+  const end = r.settled();
+  r.s.seeds(20.5, [subject(20.5)]);
+  await end;
+  assert.equal(r.errors.length, 0);
+  assert.equal(r.s.grid.i0, 600);
+  assert.equal(r.s.grid.n, 61);
+  assert.ok(f.reads.every((t) => t >= 20 - 1e-6 && t <= 22 + 1e-6), "nothing outside the range is decoded");
+  assert.ok(Math.min(...r.frames.keys()) <= 15 && Math.max(...r.frames.keys()) === 60, "filled from the selection's start to the range's end");
+  // stop(): closes and waits for the loop (the next session never shares the model with a step under way).
+  const g = fake();
+  const q = open(g, { start: 0, end: 4 }, () => []);
+  q.s.seeds(0, [subject(0)]);
+  await new Promise((res) => setTimeout(res, 5));
+  await q.s.stop();
+  const n = g.encodes;
+  await new Promise((res) => setTimeout(res, 20));
+  assert.equal(g.encodes, n, "a stopped session has left the model");
+  assert.equal(q.idles, 0);
+  console.log("session: tracks the trim only; re-scope keeps the taps: ok");
+}
+
+// ---------------------------------------------------------------- adaptive keyframes (the lite model)
+
+{
+  const pass = async (f: Fake, end: number, opts: SessionOptions = {}) => {
+    const r = open(f, { start: 0, end }, () => [], opts);
+    const done = r.settled();
+    r.s.seeds(0, [subject(0)]);
+    await done;
+    assert.equal(r.errors.length, 0);
+    assert.equal(r.frames.size, r.s.grid.n, "every grid frame filled");
+    return r;
+  };
+  // A calm clip: the lite model steps twice a second (half the model runs of the full one's four), nothing extra.
+  const full = fake(), lite = fake({ lite: true });
+  await pass(full, 4);
+  const calm = await pass(lite, 4);
+  assert.equal(full.encodes, 17);
+  assert.equal(lite.encodes, 9);
+  assert.equal(calm.s.profile().extraKeys, 0);
+  assert.equal(lite.reads.filter((t, i) => i > 0 && t < lite.reads[i - 1] - 1e-6).length, 0, "read in time order");
+  assert.equal(popped(calm.frames), calm.s.grid.n, "the subject is popped on every frame");
+  // `?segfps=N` fixes the rate (no extra keyframes), on either model.
+  const fixed = fake({ lite: true });
+  await pass(fixed, 4, { fps: 4 });
+  assert.equal(fixed.encodes, 17);
+  const slow = fake();
+  await pass(slow, 4, { fps: 2 });
+  assert.equal(slow.encodes, 9);
+
+  // The subject jumps at 1.1 s: the step at 1.5 s disagrees with what the flow carried, and the next second is
+  // tracked on the fine grid (1.75 s and 2.25 s on top of the regular 2 s and 2.5 s), then twice a second again.
+  jumpAt = 1.1;
+  const hard = fake({ lite: true });
+  const a = await pass(hard, 4);
+  assert.equal(a.s.profile().extraKeys, 2);
+  assert.deepEqual(a.s.keys, [0, 0.5, 1, 1.5, 1.75, 2, 2.25, 2.5, 3, 3.5, 4]);
+  assert.equal(hard.encodes, 11);
+
+  // A tap whose keyframe (0.75 s) the autos do not have, and the autos' extra keyframes the tap may not have: every
+  // object is in every keyframe's mask (carried there along the flow), whichever was tracked first. Tap after the
+  // pass, and tap and seeds up front (a replay), end with the same frames, the subject popped on all of them.
+  const auto = subject(0), tap = { ...subject(0.8), id: 5000 };
+  const f1 = fake({ lite: true });
+  const one = open(f1, { start: 0, end: 4 }, () => []);
+  let end = one.settled();
+  one.s.seeds(0, [auto]);
+  await end;
+  end = one.settled();
+  one.s.add(tap);
+  await end;
+  assert.ok(one.s.keys.includes(0.75), "the tap's own keyframe");
+  assert.ok(one.s.profile().carried > 0, "objects without a keyframe there are carried to it");
+  assert.equal(popped(one.frames), one.s.grid.n, "no object drops out at another's keyframe");
+  const f2 = fake({ lite: true });
+  const two = open(f2, { start: 0, end: 4 }, () => []);
+  end = two.settled();
+  two.s.add(tap);
+  two.s.seeds(0, [auto]);
+  await end;
+  assert.deepEqual(two.s.keys, one.s.keys);
+  sameFrames(one.frames, two.frames, "tap before / after the pass");
+  jumpAt = Infinity;
+  console.log("session: lite model → 2 keyframes a second, extra ones where the flow disagrees; order-independent: ok");
+}
+
+// ---------------------------------------------------------------- a clip with nothing to follow
+
+{
+  // 30 s, no subject anywhere: looked through at 0, 2, 6 s, then every 4 s (SEG.reacquireMaxS) where it used to be
+  // every 2 s (15 looks, now 9); the model's search is left out of extra starts after three empty ones in a row.
+  const f = fake({ visible: [100, 200] });
+  const r = open(f, { start: 0, end: 30 }, () => []);
+  const end = r.settled();
+  r.s.seeds(0, []);
+  await end;
+  assert.equal(r.errors.length, 0);
+  assert.deepEqual(r.asked.map((x) => x.t), [2, 6, 8, 12, 16, 20, 24, 28]);
+  assert.deepEqual(r.asked.map((x) => x.search), [true, true, true, false, true, false, true, false]);
+  assert.equal(f.encodes, 0, "no model run without a subject");
+  console.log("session: empty clip → the looks back off (2, 4, 4 s): ok");
+}
+
+// ---------------------------------------------------------------- the lite model follows two automatic subjects
+
+{
+  const four = () => [subject(0), subject(0), subject(0), subject(0)];
+  const run = async (lite: boolean) => {
+    const f = fake({ lite });
+    const r = open(f, { start: 0, end: 2 }, () => [], { fps: 2 });
+    let end = r.settled();
+    r.s.seeds(0, four());
+    await end;
+    const autos = f.steps;
+    // A tap is followed whatever the autos are (forward and back from its keyframe: 5 keyframes + the prompt again).
+    end = r.settled();
+    r.s.add({ ...subject(1), id: 7000 });
+    await end;
+    assert.equal(r.errors.length, 0);
+    return { autos, tap: f.steps - autos };
+  };
+  assert.deepEqual(await run(false), { autos: 20, tap: 6 });
+  assert.deepEqual(await run(true), { autos: 10, tap: 6 }, "the first two seeds only; the tap as ever");
+  console.log("session: lite model → at most two automatic subjects, taps kept: ok");
+}
+
+// ---------------------------------------------------------------- the pass profile line (breadcrumbs, About)
+
+{
+  const { profileLine } = await import("../src/pipeline/seg/studio-seg.ts");
+  const f = fake({ lite: true });
+  const r = open(f, { start: 0, end: 2 }, () => []);
+  const end = r.settled();
+  r.s.seeds(0, [subject(0)]);
+  await end;
+  const p = r.s.profile();
+  assert.equal(p.objects, 1);
+  assert.equal(p.keyframes, 5);
+  assert.equal(p.restarts, 0);
+  assert.ok(p.runMs > 0 && p.clipS > 2);
+  const line = profileLine({ ...p, encodeMs: 9000, encodes: 5, attendMs: 500, decoderMs: 250, memEncMs: 1000, steps: 5, heapMB: 612 }, "wasm lite, 1 thr");
+  assert.match(line, /^ai: profile wasm lite, 1 thr · encode 1800ms×5 · attn 100 dec 50 mem 200ms×5 steps · keys 5 \(2\/s \+0 extra\) objs 1 · decode /);
+  assert.match(line, /\(0 restarts\) · guard .* fill .*×61 maps .* seeds .* · total [0-9.]+s for 2\.0s · heap 612 MB$/);
+  // Nothing measured (an old worker, a field missing): zeros, never NaN.
+  assert.doesNotMatch(profileLine({}), /NaN|undefined/);
+  console.log("pass profile line: ok");
+}
+
+// ---------------------------------------------------------------- a subject that leaves and comes back
+
+// Gone from 5.5 s; segments start every 8 s. Every frame of the range ends up filled (empty where there is nothing
+// to follow), and the subject is followed again as soon as it is back:
+//  - back at 8 s, the look at the 8 s start sees it: followed from 8 s;
+//  - back at 8.2 s and no look ever sees it (the engine is blind there): the object that lost it is followed on past
+//    the start (SEG.lostS) and knows it again at its next keyframe. At 2 keyframes a second it was dropped at 8 s;
+//  - back at 11.3 s (too long gone to follow on), seen by the look at 12 s: the stretch 8.5–11.5 s, which no step
+//    touched, was never filled at all (90 frames; the engine's masks, but "not done" to everything that counts).
+for (const [gone, sees, from, lite] of [
+  [[5.5, 8], true, 8.1, true], [[5.5, 8], true, 8.1, false],
+  [[5.5, 8.2], false, 8.6, true],
+  [[5.5, 11.3], true, 12.1, true],
+] as [[number, number], boolean, number, boolean][]) {
+  const there = (t: number) => !(t > gone[0] + 1e-6 && t < gone[1] - 1e-6);
+  const f = fake({ lite, gone });
+  const r = open(f, { start: 0, end: 14 }, (t) => (sees && there(t) ? [subject(t)] : []));
+  const end = r.settled();
+  r.s.seeds(0, [subject(0)]);
+  await end;
+  assert.equal(r.errors.length, 0);
+  const missing: number[] = [];
+  for (let i = 0; i < r.s.grid.n; i++) if (!r.frames.has(i)) missing.push(i);
+  assert.deepEqual(missing, [], `back at ${gone[1]} s: every frame of the range is filled`);
+  const on = (t: number) => rleDecode(r.frames.get(Math.round(t * 30))!.alpha, 320 * 40).some((a) => a > 127);
+  assert.ok(on(5) && !on(6.5) && !on(7.5), "popped while there, empty while gone");
+  assert.ok(on(from) && on(13.9), `back at ${gone[1]} s: followed again from ${from} s`);
+  assert.equal(r.asked[0].t, 8, "the regular start at 8 s");
+}
+console.log("session: a subject that leaves and comes back → every frame filled, followed again when back: ok");
+
+// Before any subject and in a clip without one, the frames are filled too (empty), without a model run or a decode.
+{
+  const f = fake({ lite: true, visible: [100, 200] });
+  const r = open(f, { start: 0.1, end: 6 }, () => []);
+  const end = r.settled();
+  r.s.seeds(0.1, []);
+  await end;
+  assert.equal(r.frames.size, r.s.grid.n, "every frame filled");
+  assert.equal(popped(r.frames), 0);
+  assert.equal(f.encodes, 0);
+  assert.equal(f.reads.length, 0, "nothing decoded for empty frames");
+  console.log("session: nothing to follow → empty frames for the whole range: ok");
 }
