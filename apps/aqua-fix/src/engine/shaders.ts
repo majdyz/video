@@ -36,7 +36,7 @@ export const GLSL_FRAGMENT = `#version 300 es
 precision highp float;
 precision highp int;
 precision highp sampler2D;
-layout(std140) uniform Params { vec4 p[27]; };
+layout(std140) uniform Params { vec4 p[36]; };
 uniform sampler2D u_source;
 uniform sampler2D u_data0;
 uniform sampler2D u_data1;
@@ -104,7 +104,7 @@ void main() {
 }`;
 
 export const WGSL_GRADE = `
-struct Params { p: array<vec4<f32>, 27> };
+struct Params { p: array<vec4<f32>, 36> };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var u_source: texture_2d<f32>;

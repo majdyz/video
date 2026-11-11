@@ -79,7 +79,7 @@ const HEAD_GLSL = `#version 300 es
 precision highp float;
 precision highp int;
 precision highp sampler2D;
-layout(std140) uniform Params { vec4 p[27]; };`;
+layout(std140) uniform Params { vec4 p[36]; };`;
 
 // ---------------------------------------------------------------- pass 1: lum
 export const GLSL_TP_LUM = `${HEAD_GLSL}
@@ -100,7 +100,7 @@ void main() {
   o_color = vec4(c, dot(c, vec3(0.2126, 0.7152, 0.0722)));
 }`;
 export const WGSL_TP_LUM = `
-struct Params { p: array<vec4<f32>, 27> };
+struct Params { p: array<vec4<f32>, 36> };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var u_source: texture_2d<f32>;
@@ -215,7 +215,7 @@ void main() {
   o_f1 = vec4(stab / cur, g_subjOut);
 }`;
 export const WGSL_TP_FIELD = `
-struct Params { p: array<vec4<f32>, 27> };
+struct Params { p: array<vec4<f32>, 36> };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(3) var u_data0: texture_2d<f32>;
 @group(0) @binding(4) var u_data1: texture_2d<f32>;
@@ -410,7 +410,7 @@ void main() {
   o_color = vec4(vec2(b + off), conf, 1.0);
 }`;
 export const WGSL_NR_REFINE = `
-struct Params { p: array<vec4<f32>, 27> };
+struct Params { p: array<vec4<f32>, 36> };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var u_source: texture_2d<f32>;
@@ -515,7 +515,7 @@ void main() {
   o_color = vec4(e, 0.0, 1.0);
 }`;
 export const WGSL_NR_LEVEL = `
-struct Params { p: array<vec4<f32>, 27> };
+struct Params { p: array<vec4<f32>, 36> };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var u_source: texture_2d<f32>;
@@ -595,7 +595,7 @@ void main() {
   o_color = vec4(mix(r.c, r.h, w), 1.0);
 }`;
 export const WGSL_NR = `
-struct Params { p: array<vec4<f32>, 27> };
+struct Params { p: array<vec4<f32>, 36> };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var u_source: texture_2d<f32>;

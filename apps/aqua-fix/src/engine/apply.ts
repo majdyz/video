@@ -37,21 +37,23 @@ export function seabedAmountOf(params: GradeParams, settings: UserSettings): num
   return clamp(settings.seabed ?? 0, 0, 1) * clamp(params.seabedNeed ?? 0, 0, 1) * (1 - clamp(params.backdrop ?? 0, 0, 1));
 }
 
-/** Seabed ramp (grade-shader seabedT): 0 at the frame's water lightness, 1 toward its bright lightness (Oklab L). */
-function seabedT(p: GradeParams, L: number): number {
-  const lw = p.seabedLw ?? 0, lb = Math.max(p.seabedLb ?? 1, lw + 0.05);
-  return smoothstep(lw + SEABED.lo * (lb - lw), lw + (SEABED.lo + SEABED.span) * (lb - lw), L);
-}
-/** Seabed weight (grade-shader seabedW): the pixel's own ramp or its region's (a ring of 8 guide texels), spared toward the top of the frame. */
-function seabedW(p: GradeParams, d: DepthMap, u: number, v: number, L: number): number {
+/**
+ * Seabed weight (grade-shader seabedW): how much of the ground around the pixel is lit seabed, read from the
+ * analysis' coarse grid (GradeParams.seabedGrid, SEABED.grid² cell means) with a quadratic B-spline (smooth, no
+ * detail finer than a cell) and a soft ramp. The pixel's own brightness has no say: a dark stone and the sand it
+ * lies on share one weight, and the weight fades with the ground's brightness (distance), so the seabed goes over
+ * into the blue gradually instead of splitting where the sand stops being bright. Spared toward the top of the frame.
+ */
+export function seabedW(p: GradeParams, u: number, v: number): number {
+  const G = SEABED.grid, g = p.seabedGrid;
+  if (!g || g.length !== G * G) return 0;
+  const gx = u * G - 0.5, gy = v * G - 0.5;
+  const cx = Math.floor(gx + 0.5), cy = Math.floor(gy + 0.5), fx = gx - cx, fy = gy - cy;
+  const wx = [0.5 * (0.5 - fx) * (0.5 - fx), 0.75 - fx * fx, 0.5 * (0.5 + fx) * (0.5 + fx)];
+  const wy = [0.5 * (0.5 - fy) * (0.5 - fy), 0.75 - fy * fy, 0.5 * (0.5 + fy) * (0.5 + fy)];
   let acc = 0;
-  for (let k = 0; k < 8; k++) {
-    const a = k * 0.7853982;
-    const qx = clamp(u + SEABED.ring * Math.cos(a), 0, 1), qy = clamp(v + SEABED.ring * Math.sin(a), 0, 1);
-    const i = Math.min(d.height - 1, Math.floor(qy * d.height)) * d.width + Math.min(d.width - 1, Math.floor(qx * d.width));
-    acc += seabedT(p, linearToOklab(Math.max(0, d.guide[i * 3]), Math.max(0, d.guide[i * 3 + 1]), Math.max(0, d.guide[i * 3 + 2]))[0]);
-  }
-  return Math.max(seabedT(p, L), Math.min(1, (SEABED.regionK * acc) / 8)) * smoothstep(SEABED.y0, SEABED.y1, v);
+  for (let j = 0; j < 3; j++) for (let i = 0; i < 3; i++) acc += wx[i] * wy[j] * g[clamp(cy + j - 1, 0, G - 1) * G + clamp(cx + i - 1, 0, G - 1)];
+  return smoothstep(SEABED.wLo, SEABED.wHi, acc) * smoothstep(SEABED.y0, SEABED.y1, v);
 }
 
 /**
@@ -345,7 +347,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   [bl[1], bl[2]] = richLook(bl[0], bl[1], bl[2], s.vivid ?? 0);
   // Seabed recovery (grade-shader, after the Blue water style): sand and reef to a warm neutral (and a little lighter) where the water left no red.
   if ((ctx.seabed ?? 0) > 0) {
-    const sbw = seabedW(p, ctx.depth, u, v, lab0[0]) * ctx.seabed!;
+    // A pixel whose own colour escaped the cast (yellow coral, an orange fish: vividW) is not the red-less ground.
+    const sbw = seabedW(p, u, v) * (1 - vividW) * ctx.seabed!;
     bl[0] += SEABED.lift * sbw;
     bl[1] += (Math.cos(SEABED.hue) * SEABED.chroma + SEABED.keep * bl[1] - bl[1]) * sbw;
     bl[2] += (Math.sin(SEABED.hue) * SEABED.chroma + SEABED.keep * bl[2] - bl[2]) * sbw;
