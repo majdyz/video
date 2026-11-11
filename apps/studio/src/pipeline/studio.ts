@@ -38,6 +38,7 @@ const PHONE_UW_DEFAULTS = profileDefaults("phone-ultra-wide");
 import { activeCuts, lockWithCuts, lookIndexAt, topUpTimes, visibleSegments, type Segments } from "./segments.ts";
 import { bobbingNote, stabInfo, stabSummary, type StabInfo } from "./stab-info.ts";
 import { seekVideo, waitForEvent, waitForFirstFrame, type VideoWithRVFC } from "./video.ts";
+import { PreviewRelease, releaseSummary } from "./export-release.ts";
 import { decodePhoto, encodeJpeg, isPhotoFile, photoLimits } from "./photo.ts";
 import { readExif, withExif } from "./photo-exif.ts";
 import { photoCamera, photoTags } from "./phone-lens.ts";
@@ -819,7 +820,8 @@ export class Studio {
           const timer = setTimeout(() => rej(new Error("work video did not load")), WORK_VIDEO_LOAD_MS);
           wv.onloadeddata = () => { clearTimeout(timer); res(); };
           wv.onerror = () => { clearTimeout(timer); rej(new Error("frame unreadable")); };
-          wv.src = v.currentSrc || v.src;
+          // The clip's own URL: the preview element is unloaded while an export renders (releaseForRender).
+          wv.src = this.sourceUrl ?? (v.currentSrc || v.src);
           wv.load();
         });
       } catch (err) {
@@ -2210,6 +2212,46 @@ export class Studio {
     return `${base}-${exportSuffix({ ...this.tools, dewarp: { ...this.tools.dewarp, enabled: dewarped }, stabilise: { ...this.tools.stabilise, enabled: this.tools.stabilise.enabled && this.snap.kind === "video" } })}${trimmed}.${ext}`;
   }
 
+  /** The preview <video>, unloaded while an offline / native export renders (export-release.ts). */
+  private previewRelease = new PreviewRelease<HTMLVideoElement>();
+
+  /**
+   * Start of an offline / native render, which decodes the file itself: the two <video> decoders (the preview's
+   * and the background passes') and the GPU targets only the preview draws with are freed for its length.
+   * restorePreview undoes the first; the work video and the targets come back on their next use.
+   */
+  private async releaseForRender(v: HTMLVideoElement): Promise<void> {
+    if (new URLSearchParams(location.search).get("release") === "0") return;
+    const decoders: string[] = [];
+    // After the frame job in flight (it has the work video); one that does not end soon keeps it.
+    const idle = await Promise.race([this.workChain.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 2000))]);
+    if (idle && this.workVid) {
+      this.dropSeedVideo();
+      decoders.push("work");
+    }
+    if (this.previewRelease.release(v, this.sourceUrl)) decoders.push("preview");
+    const freed = (this.engine?.backend as unknown as { releasePreviewTargets?: () => { targets: number; bytes: number } } | undefined)?.releasePreviewTargets?.() ?? { targets: 0, bytes: 0 };
+    // The geometry passes' source textures hold the last preview frame at source size; a render that draws
+    // through them uploads its first frame anyway.
+    this.geoShared?.geo.releaseSource();
+    this.geo?.releaseSource();
+    const line = releaseSummary({ decoders, ...freed });
+    console.info(`[export] released for the render: ${line}`);
+    crumb(`export released ${decoders.length} decoders, ${freed.targets} targets`);
+  }
+
+  /** The preview <video> back as the export found it (loaded, paused on a frame); a no-op when it was not unloaded. */
+  private async restorePreview(v: HTMLVideoElement): Promise<void> {
+    if (!this.previewRelease.released) return;
+    const t0 = performance.now();
+    const r = await this.previewRelease.restore(v, () => this.sourceUrl, {
+      metadata: (el) => waitForEvent(el, ["loadedmetadata"], ["error"], 10_000, "Could not reload the clip"),
+      firstFrame: (el) => waitForFirstFrame(el, 5_000),
+    });
+    console.info(`[export] preview video ${r} (${Math.round(performance.now() - t0)} ms)`);
+    if (r === "failed") console.warn("[export] the preview video did not come back; reopen the clip if the picture stays frozen");
+  }
+
   private beginExport(): AbortController {
     const old = this.snap.exp.result;
     if (old?.blob) {
@@ -2316,6 +2358,8 @@ export class Studio {
       if (trim) console.info(`[export] trim ${trim.start.toFixed(2)}–${trim.end.toFixed(2)} s (${total.toFixed(2)} of ${clipLen.toFixed(2)} s)`);
       this.dropStill();
       const mode = this.snap.exportMode;
+      // The recorder plays the preview <video>; the other two decode the file themselves.
+      if (mode !== "realtime") await this.releaseForRender(v);
       if (mode === "native") {
         const res = await this.runNative(media, file, info, bitrate, total, colourOn, ctrl, trim);
         console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (native), audio ${res.audioIncluded ? "kept" : "dropped"}`);
@@ -2333,6 +2377,7 @@ export class Studio {
           this.engine?.clearPrecomputed(false);
           this.set({ exportMode: "realtime" });
           this.setExp({ progress: 0, frames: 0, fps: 0, etaSec: null, note: null, profile: null });
+          await this.restorePreview(v);
           res = await this.runRealtime(media, file, v, info, bitrate, total, colourOn, ctrl, trim, this.offlineSpeed);
         }
         if (!res) {
@@ -2344,6 +2389,7 @@ export class Studio {
           this.engine?.clearPrecomputed(false);
           this.set({ exportMode: "offline" });
           this.setExp({ progress: 0, frames: 0, fps: 0, etaSec: null, note: null, profile: null });
+          await this.releaseForRender(v);
           res = await this.runOffline(media, file, bitrate, total, colourOn, ctrl, trim, req, false);
           if (!res) throw new Error("Export failed");
         }
@@ -2361,6 +2407,8 @@ export class Studio {
       const help = err instanceof Error && /not decodable/i.test(err.message) ? codecHelp(info.codecString) : null;
       failure = help ? new Error(help) : err;
     } finally {
+      // Before the export is over for the UI (no play / seek on an empty element); a closed clip is left alone.
+      await this.restorePreview(v).catch(() => undefined);
       this.finishExport(failure);
       if (e && this.colour) {
         // The export's last analysis may still be reading back.

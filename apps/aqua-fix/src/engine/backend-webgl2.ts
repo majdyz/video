@@ -99,6 +99,7 @@ export class WebGL2Backend implements GpuBackend {
   // layer, and the last graded frame recomposite() can reuse (null once the
   // source, uniforms, data or canvas size change).
   private beforeTex: WebGLTexture | null = null;
+  private beforePx = 0;
   private wipe: { tex: WebGLTexture; fbo: WebGLFramebuffer; w: number; h: number } | null = null;
   private lastGraded: WebGLTexture | null = null;
   // A source drawn in this context by another stage (beginSourceDraw / endSourceDraw): its
@@ -112,8 +113,9 @@ export class WebGL2Backend implements GpuBackend {
       alpha: false,
       antialias: false,
       premultipliedAlpha: false,
-      // The export path wraps the canvas in a VideoFrame right after draw;
-      // keeping the buffer also makes toBlob/screenshots reliable.
+      // Kept on purpose: the photo export draws this canvas into a 2D canvas after awaits (studio
+      // renderPhotoJpeg → emitFrame → encodeJpeg), and the eval pages read it outside the frame that drew
+      // it; without it both would read a cleared buffer. The video export captures in the task that draws.
       preserveDrawingBuffer: true,
       powerPreference: "high-performance",
     });
@@ -607,9 +609,11 @@ export class WebGL2Backend implements GpuBackend {
     if (!src) {
       if (this.beforeTex) gl.deleteTexture(this.beforeTex);
       this.beforeTex = null;
+      this.beforePx = 0;
       return;
     }
     if (!this.beforeTex) this.beforeTex = this.makeTexture(gl.LINEAR);
+    this.beforePx = width * height;
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.beforeTex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
@@ -770,6 +774,47 @@ export class WebGL2Backend implements GpuBackend {
         setTimeout(r, 50);
       });
     }
+  }
+
+  /**
+   * Frees the targets only the preview needs (start of an export, which renders without the compare wipe and
+   * at its own size): the wipe's graded target, the "before" picture, the drawn-source target and the temporal
+   * targets. Each comes back on its next use (the temporal history starts over, as after a seek). Returns how
+   * many textures went and their size, for the export log.
+   */
+  releasePreviewTargets(): { targets: number; bytes: number } {
+    const gl = this.gl;
+    let targets = 0, bytes = 0;
+    this.lastGraded = null;
+    if (this.wipe) {
+      gl.deleteTexture(this.wipe.tex);
+      gl.deleteFramebuffer(this.wipe.fbo);
+      targets++;
+      bytes += this.wipe.w * this.wipe.h * 4;
+      this.wipe = null;
+    }
+    if (this.beforeTex) {
+      gl.deleteTexture(this.beforeTex);
+      targets++;
+      bytes += this.beforePx * 4;
+      this.beforeTex = null;
+      this.beforePx = 0;
+    }
+    if (this.drawTarget) {
+      gl.deleteTexture(this.drawTarget.tex);
+      gl.deleteFramebuffer(this.drawTarget.fbo);
+      targets++;
+      bytes += this.drawTarget.w * this.drawTarget.h * 4;
+      this.drawTarget = null;
+    }
+    if (this.tpTex) {
+      // Six half-float targets at the low size, two RGBA8 outputs at the canvas size.
+      targets += 8;
+      bytes += 6 * this.tpLowW * this.tpLowH * 8 + 2 * this.tpOutW * this.tpOutH * 4;
+      this.tpRelease();
+      this.tpValid = false;
+    }
+    return { targets, bytes };
   }
 
   /** Frees the export readback buffers (end of an export: at 4K they hold ~100 MB). */
