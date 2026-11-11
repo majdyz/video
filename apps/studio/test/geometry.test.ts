@@ -93,4 +93,31 @@ for (const p of [both, rotParams, { ...rotParams, stab: (x: number, y: number) =
 // Off the picture (rendered black): clamped to the frame, never outside it.
 assert.deepEqual(outputToUpright(0.999, 0.5, shift), [1, 0.5]);
 
+// Preview fit (no geometry tool on): the pass draws the source at the preview size only when that at least
+// halves the pixels, and with an identity transform (no stabiliser path, no lens) every output pixel samples
+// its own place in the source, whatever the clip's rotation.
+{
+  const { previewFitWanted } = await import("../src/pipeline/geometry-math.ts");
+  assert.equal(previewFitWanted(1170, 658, 3840, 2160), true, "4K on a phone");
+  assert.equal(previewFitWanted(1600, 900, 3840, 2160), true, "4K on a 1600 px preview");
+  assert.equal(previewFitWanted(1170, 658, 1920, 1080), true, "1080p on a phone: 37% of the pixels");
+  assert.equal(previewFitWanted(1600, 900, 1920, 1080), false, "1080p on a 1600 px preview: 69% of the pixels");
+  assert.equal(previewFitWanted(3840, 2160, 3840, 2160), false, "full size (zoomed in, or the stage not measured yet)");
+  assert.equal(previewFitWanted(4096, 2304, 3840, 2160), false, "never enlarges");
+  assert.equal(previewFitWanted(2, 2, 0, 0), false, "no source size");
+  assert.equal(previewFitWanted(0, 0, 3840, 2160), false);
+  for (const rot of [0, 1, 2, 3] as QuarterTurns[]) {
+    const id: GeometryParams = { rot, displayW: rot % 2 ? 2160 : 3840, displayH: rot % 2 ? 3840 : 2160, stab: null, dewarp: null };
+    for (const [x, y] of [[0, 0], [0.25, 0.8], [0.5, 0.5], [1, 1]]) {
+      assert.deepEqual(stabilisedPoint(x, y, id), [x, y]);
+      // The shader samples an upright texture at codedToDisplay(sourcePoint): the pixel's own place.
+      const c = sourcePoint(x, y, id)!;
+      const [dx, dy] = codedToDisplay(c[0], c[1], rot);
+      near(dx, x, 1e-12, `identity rot ${rot} x`);
+      near(dy, y, 1e-12, `identity rot ${rot} y`);
+      assert.deepEqual(outputToUpright(x, y, id), [x, y]);
+    }
+  }
+}
+
 console.log("geometry: ok");

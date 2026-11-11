@@ -2,6 +2,7 @@ import { DATA_SLOTS, UNIFORM_FLOATS, isVideoFrame, uprightSize, type DataTexture
 import { GLSL_FRAGMENT, GLSL_DOWNSCALE_FRAGMENT, GLSL_COMPOSITE, GLSL_VERTEX as VS } from "./shaders.ts";
 import { GLSL_TP_FIELD, GLSL_TP_FLOW, GLSL_TP_LUM } from "./temporal.ts";
 import { TEMPORAL } from "./params.ts";
+import { waitForSync } from "./fence-poll.ts";
 
 
 /** Export readbacks kept in flight (the exporter overlaps up to three frames). */
@@ -98,6 +99,7 @@ export class WebGL2Backend implements GpuBackend {
   // layer, and the last graded frame recomposite() can reuse (null once the
   // source, uniforms, data or canvas size change).
   private beforeTex: WebGLTexture | null = null;
+  private beforePx = 0;
   private wipe: { tex: WebGLTexture; fbo: WebGLFramebuffer; w: number; h: number } | null = null;
   private lastGraded: WebGLTexture | null = null;
   // A source drawn in this context by another stage (beginSourceDraw / endSourceDraw): its
@@ -111,8 +113,9 @@ export class WebGL2Backend implements GpuBackend {
       alpha: false,
       antialias: false,
       premultipliedAlpha: false,
-      // The export path wraps the canvas in a VideoFrame right after draw;
-      // keeping the buffer also makes toBlob/screenshots reliable.
+      // Kept on purpose: the photo export draws this canvas into a 2D canvas after awaits (studio
+      // renderPhotoJpeg → emitFrame → encodeJpeg), and the eval pages read it outside the frame that drew
+      // it; without it both would read a cleared buffer. The video export captures in the task that draws.
       preserveDrawingBuffer: true,
       powerPreference: "high-performance",
     });
@@ -606,9 +609,11 @@ export class WebGL2Backend implements GpuBackend {
     if (!src) {
       if (this.beforeTex) gl.deleteTexture(this.beforeTex);
       this.beforeTex = null;
+      this.beforePx = 0;
       return;
     }
     if (!this.beforeTex) this.beforeTex = this.makeTexture(gl.LINEAR);
+    this.beforePx = width * height;
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.beforeTex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
@@ -634,6 +639,8 @@ export class WebGL2Backend implements GpuBackend {
   /** Human-readable result of the capture benchmark (diagnostics). */
   captureBench = "";
   private readbackRing: { pbo: WebGLBuffer; busy: boolean; size: number }[] = [];
+  /** readbackSlotFree callers waiting for a slot. */
+  private slotWaiters: (() => void)[] = [];
   /**
    * Host copy of a readback, reused frame after frame: the VideoFrame constructor copies the bytes, so one
    * buffer serves every slot (the copy-out and the wrap run back to back, synchronously). A fresh 33 MB array
@@ -760,7 +767,54 @@ export class WebGL2Backend implements GpuBackend {
    */
   async readbackSlotFree(): Promise<void> {
     if (this.capture !== "readback") return;
-    while (this.readbackRing.length >= READBACK_SLOTS && !this.readbackRing.some((r) => !r.busy)) await new Promise<void>((r) => setTimeout(r, 1));
+    // Woken when a readback finishes (captureReadback); the timer is only a net under a missed wake-up.
+    while (this.readbackRing.length >= READBACK_SLOTS && !this.readbackRing.some((r) => !r.busy)) {
+      await new Promise<void>((r) => {
+        this.slotWaiters.push(r);
+        setTimeout(r, 50);
+      });
+    }
+  }
+
+  /**
+   * Frees the targets only the preview needs (start of an export, which renders without the compare wipe and
+   * at its own size): the wipe's graded target, the "before" picture, the drawn-source target and the temporal
+   * targets. Each comes back on its next use (the temporal history starts over, as after a seek). Returns how
+   * many textures went and their size, for the export log.
+   */
+  releasePreviewTargets(): { targets: number; bytes: number } {
+    const gl = this.gl;
+    let targets = 0, bytes = 0;
+    this.lastGraded = null;
+    if (this.wipe) {
+      gl.deleteTexture(this.wipe.tex);
+      gl.deleteFramebuffer(this.wipe.fbo);
+      targets++;
+      bytes += this.wipe.w * this.wipe.h * 4;
+      this.wipe = null;
+    }
+    if (this.beforeTex) {
+      gl.deleteTexture(this.beforeTex);
+      targets++;
+      bytes += this.beforePx * 4;
+      this.beforeTex = null;
+      this.beforePx = 0;
+    }
+    if (this.drawTarget) {
+      gl.deleteTexture(this.drawTarget.tex);
+      gl.deleteFramebuffer(this.drawTarget.fbo);
+      targets++;
+      bytes += this.drawTarget.w * this.drawTarget.h * 4;
+      this.drawTarget = null;
+    }
+    if (this.tpTex) {
+      // Six half-float targets at the low size, two RGBA8 outputs at the canvas size.
+      targets += 8;
+      bytes += 6 * this.tpLowW * this.tpLowH * 8 + 2 * this.tpOutW * this.tpOutH * 4;
+      this.tpRelease();
+      this.tpValid = false;
+    }
+    return { targets, bytes };
   }
 
   /** Frees the export readback buffers (end of an export: at 4K they hold ~100 MB). */
@@ -889,17 +943,11 @@ export class WebGL2Backend implements GpuBackend {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)!;
       gl.flush();
-      await new Promise<void>((resolve, reject) => {
-        let tries = 0;
-        const poll = () => {
-          const status = gl.clientWaitSync(sync, 0, 0);
-          if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return resolve();
-          if (status === gl.WAIT_FAILED || ++tries > 15000) return reject(new Error("GPU readback timed out"));
-          setTimeout(poll, 1);
-        };
-        poll();
-      });
-      gl.deleteSync(sync);
+      try {
+        await waitForSync(gl, sync);
+      } finally {
+        gl.deleteSync(sync);
+      }
       if (!this.readbackHost || this.readbackHost.byteLength !== w * h * 4) this.readbackHost = new Uint8Array(w * h * 4);
       const px = this.readbackHost;
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
@@ -910,6 +958,7 @@ export class WebGL2Backend implements GpuBackend {
       return new VideoFrame(px, { format: "RGBA", codedWidth: w, codedHeight: h, timestamp: timestampUs, duration: durationUs });
     } finally {
       slot.busy = false;
+      for (const wake of this.slotWaiters.splice(0)) wake();
     }
   }
 
@@ -944,17 +993,11 @@ export class WebGL2Backend implements GpuBackend {
     gl.viewport(0, 0, w, h);
     const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)!;
     gl.flush();
-    await new Promise<void>((resolve, reject) => {
-      let tries = 0;
-      const poll = () => {
-        const status = gl.clientWaitSync(sync, 0, 0);
-        if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return resolve();
-        if (status === gl.WAIT_FAILED || ++tries > 15000) return reject(new Error("GPU readback timed out"));
-        setTimeout(poll, 1);
-      };
-      poll();
-    });
-    gl.deleteSync(sync);
+    try {
+      await waitForSync(gl, sync);
+    } finally {
+      gl.deleteSync(sync);
+    }
     if (!this.readbackHost || this.readbackHost.byteLength !== bytes) this.readbackHost = new Uint8Array(bytes);
     const px = this.readbackHost;
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.pbo);
@@ -1013,17 +1056,11 @@ export class WebGL2Backend implements GpuBackend {
       gl.flush();
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      await new Promise<void>((resolve, reject) => {
-        let tries = 0;
-        const poll = () => {
-          const status = gl.clientWaitSync(sync, 0, 0);
-          if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return resolve();
-          if (status === gl.WAIT_FAILED || ++tries > 15000) return reject(new Error("GPU readback timed out"));
-          setTimeout(poll, 2);
-        };
-        poll();
-      });
-      gl.deleteSync(sync);
+      try {
+        await waitForSync(gl, sync, { slowDelayMs: 2 });
+      } finally {
+        gl.deleteSync(sync);
+      }
       const out = new Uint8ClampedArray(width * height * 4);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo);
       gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, out);

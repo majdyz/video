@@ -64,6 +64,16 @@ export type GeometryParams = {
   dewarp: WarpUniforms | null;
 };
 
+/**
+ * With no geometry tool on, the preview draws a source through the pass (identity) at the preview size when that
+ * is worth the extra draw: the w×h preview has at most half the pixels of the sw×sh source (a 4K clip on a phone
+ * or a 1600 px desktop preview: yes; 1080p on a 1600 px preview: no). Never when it would enlarge the picture.
+ */
+export function previewFitWanted(w: number, h: number, sw: number, sh: number): boolean {
+  if (!(w >= 2 && h >= 2 && sw > 0 && sh > 0)) return false;
+  return w < sw && h < sh && w * h * 2 <= sw * sh;
+}
+
 /** The intermediate (dewarped, display) point a mesh vertex samples; the vertex shader's input. */
 export function stabilisedPoint(nx: number, ny: number, p: GeometryParams): [number, number] {
   if (!p.stab) return [nx, ny];

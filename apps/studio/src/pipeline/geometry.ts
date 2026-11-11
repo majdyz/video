@@ -320,6 +320,17 @@ export class GeometryRenderer {
     });
   }
 
+  /**
+   * Shrinks the source texture to one texel (start of an export that does not draw through this renderer: it
+   * holds the last frame at source size, 33 MB at 4K, 66 MB half-float). The next render uploads as usual.
+   */
+  releaseSource(): void {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  }
+
   dispose(): void {
     const gl = this.gl;
     gl.deleteTexture(this.tex);
