@@ -4,7 +4,7 @@
 //        [--before OBJ.field=v,…]   overrides for the "before" row (default WATER_HUE.amount=0: Vivid without the water-hue map)
 //        [--resim]                  the "before" row replays the clip with its overrides in force (for a change in the analysis, e.g. RED.litLo=10)
 //        [--clips all]              every clip of the valset (after any --first id,id,… clips)   [--cols 8] wraps the strip into rows of clips
-//        [--valset <dir>] [--w 320]
+//        [--valset <dir>] [--w 320] [--crop 0.5]   --crop: only the centre share of the frame, enlarged to the cell (detail: grain, blotches)
 //
 // Each clip is replayed at preview cadence (clip-sim.ts) up to --at seconds and that frame is graded twice.
 import { spawnSync } from "node:child_process";
@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import * as paramsModule from "../src/engine/params.ts";
 import * as analyzeModule from "../src/engine/analyze.ts";
 import * as redModule from "../src/engine/red.ts";
+import * as lockModule from "../src/engine/lock.ts";
 import { ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.ts";
 import { applyGrade } from "../src/engine/apply.ts";
 import { DEFAULT_SETTINGS, type UserSettings } from "../src/engine/params.ts";
@@ -25,10 +26,12 @@ const args = process.argv.slice(2);
 const opt = (n: string, d: string) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : d; };
 const VALSET = opt("valset", process.env.SCORE_VALSET ?? "/home/majdyz/video-data/valset");
 const OUT = opt("out", "strip.jpg"), AT = parseFloat(opt("at", "4")), W = parseInt(opt("w", "320"));
-const tunable = (o: string) => (paramsModule as unknown as Record<string, Record<string, number>>)[o] ?? (analyzeModule as unknown as Record<string, Record<string, number>>)[o] ?? (redModule as unknown as Record<string, Record<string, number>>)[o];
+const tunable = (o: string) => (paramsModule as unknown as Record<string, Record<string, number>>)[o] ?? (analyzeModule as unknown as Record<string, Record<string, number>>)[o] ?? (redModule as unknown as Record<string, Record<string, number>>)[o] ?? (lockModule as unknown as Record<string, Record<string, number>>)[o];
 const BEFORE = opt("before", "WATER_HUE.amount=0").split(",").filter(Boolean).map((kv) => { const [k, v] = kv.split("="), [o, f] = k.split("."); if (!tunable(o) || !(f in tunable(o))) throw new Error(`--before: no ${k}`); return { o: tunable(o), f, v: parseFloat(v) }; });
 const RESIM = args.includes("--resim"), COLS = parseInt(opt("cols", "0"));
-const STYLE: UserSettings = { ...DEFAULT_SETTINGS, vivid: 1, blue: 0, seabed: 0.6 };
+// Built per grade: a --before override of DEFAULT_SETTINGS (e.g. DEFAULT_SETTINGS.clarity=0.25) must reach it.
+const style = (): UserSettings => ({ ...DEFAULT_SETTINGS, vivid: 1, blue: 0, seabed: 0.6 });
+const CROP = Math.min(1, Math.max(0.05, parseFloat(opt("crop", "1"))));
 const require = createRequire(path.resolve(HERE, "../package.json"));
 const sharp = require("sharp") as typeof import("sharp");
 
@@ -67,7 +70,7 @@ for (let c = 0; c < CLIPS.length; c++) {
     return sim.state();
   };
   const x = replay();
-  const grade = (y: typeof x) => applyGrade({ params: y.params, settings: STYLE, depth: y.depth, clahe: y.clahe }, img, W, GH);
+  const grade = (y: typeof x) => applyGrade({ params: y.params, settings: style(), depth: y.depth, clahe: y.clahe }, img, W, GH);
   const after = grade(x);
   const saved = BEFORE.map((b) => b.o[b.f]);
   BEFORE.forEach((b) => (b.o[b.f] = b.v));
@@ -75,7 +78,8 @@ for (let c = 0; c < CLIPS.length; c++) {
   BEFORE.forEach((b, i) => (b.o[b.f] = saved[i]));
   const cells = [img, before, after];
   const cx = (c % NCOL) * (W + PAD), cy = Math.floor(c / NCOL) * ROWH;
-  for (let r = 0; r < 3; r++) comp.push({ input: await sharp(Buffer.from(cells[r].buffer, cells[r].byteOffset, cells[r].byteLength), { raw: { width: W, height: GH, channels: 4 } }).resize(W, H, { fit: "cover" }).jpeg({ quality: 92 }).toBuffer(), left: cx, top: cy + LABEL + r * (H + LABEL) + LABEL });
+  const cw = Math.round(W * CROP), ch = Math.round(GH * CROP);
+  for (let r = 0; r < 3; r++) comp.push({ input: await sharp(Buffer.from(cells[r].buffer, cells[r].byteOffset, cells[r].byteLength), { raw: { width: W, height: GH, channels: 4 } }).extract({ left: (W - cw) >> 1, top: (GH - ch) >> 1, width: cw, height: ch }).resize(W, H, { fit: "cover", kernel: CROP < 1 ? "nearest" : "lanczos3" }).jpeg({ quality: 92 }).toBuffer(), left: cx, top: cy + LABEL + r * (H + LABEL) + LABEL });
   svg += `<text x="${cx + 4}" y="${cy + 14}" font-size="13" fill="#ddd" font-family="sans-serif">${clip.id}</text>`;
   process.stderr.write(`${clip.id} done\n`);
 }
