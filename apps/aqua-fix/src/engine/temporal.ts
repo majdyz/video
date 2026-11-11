@@ -203,8 +203,6 @@ void main() {
     sup = max(sup, mapConf(v_uv + vec2(cos(a), sin(a)) * sr));
   }
   g_subjPrior = hist.a * conf * TP_DECAY * smoothstepf(TP_SUP_LO, TP_SUP_HI, sup);
-  // Without an AI overlay's pop (grade-shader g_segTone): the correction stabilised here is the grade's own.
-  g_segTone = 0.0;
   vec3 g = gradeD(lm.rgb, lm.rgb, v_uv);
   vec3 cur = (srgbToLinear(g) + 0.003) / (srgbToLinear(lm.rgb) + 0.003);
   vec3 lc = log(cur);
@@ -244,7 +242,6 @@ ${GRADE_WGSL}
     sup = max(sup, mapConf(in.uv + vec2<f32>(cos(a), sin(a)) * sr));
   }
   g_subjPrior = hist.a * conf * TP_DECAY * smoothstepf(TP_SUP_LO, TP_SUP_HI, sup);
-  g_segTone = 0.0;
   let g = gradeD(lm.rgb, lm.rgb, in.uv);
   let cur = (srgbToLinear(g) + 0.003) / (srgbToLinear(lm.rgb) + 0.003);
   let lc = log(cur);
