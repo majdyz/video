@@ -9,8 +9,9 @@
 //  1. Reference distance. <pairs>/src/<name>.jpg is graded as each studio style and compared with the user's own
 //     grade <pairs>/ref/<name>.jpg: a sliced Wasserstein distance between the two CIELAB distributions (the crops
 //     differ, so nothing is aligned per pixel; it scores tone and palette, not local artefacts), plus region
-//     statistics against the reference: water hue, median L*, black point (L* p5) and the chroma of the bright
-//     non-water pixels (sand, skin). Lower is closer. The headline is the default style (Vivid + Seabed).
+//     statistics against the reference: water hue, median L*, black point (L* p5), the chroma of the bright
+//     non-water pixels (sand, skin), and saturation: the median chroma of the frame and of its water, and the chroma
+//     of the warm subjects (95th percentile of the warm-hued chroma). Lower is closer. The headline is the default style (Vivid + Seabed).
 //  2. Do no harm. Already-graded and topside clips of the valset, replayed at preview cadence (clip-sim.ts) in the
 //     default style: mean CIEDE2000 between output and source. Lower is better.
 //  3. Stability per shot. The harm clips plus a fixed set of difficult clips: within each locked shot, the standard
@@ -78,7 +79,7 @@ const r2 = (x: number) => (Number.isFinite(x) ? Math.round(x * 100) / 100 : null
 
 // ---------- 1. reference pairs ----------
 
-type PairScore = { source: number; swd: Record<string, number>; out: Region; ref: Region; err: { waterHue: number | null; L50: number; L5: number; warmC: number | null } };
+type PairScore = { source: number; swd: Record<string, number>; out: Region; ref: Region; err: { waterHue: number | null; L50: number; L5: number; warmC: number | null; C50: number; waterC: number | null; subjC: number } };
 
 async function scorePairs(): Promise<Record<string, PairScore>> {
   const sharp = require("sharp") as typeof import("sharp");
@@ -115,7 +116,7 @@ async function scorePairs(): Promise<Record<string, PairScore>> {
     }
     const so = regionStats(def), sr = regionStats(ref);
     const d = (x: number | null, y: number | null) => (x === null || y === null ? null : Math.abs(x - y));
-    res[name] = { source: swd(src, ref), swd: out, out: so, ref: sr, err: { waterHue: so.waterHue === null || sr.waterHue === null ? null : hueDiff(so.waterHue, sr.waterHue), L50: Math.abs(so.L50 - sr.L50), L5: Math.abs(so.L5 - sr.L5), warmC: d(so.warmC, sr.warmC) } };
+    res[name] = { source: swd(src, ref), swd: out, out: so, ref: sr, err: { waterHue: so.waterHue === null || sr.waterHue === null ? null : hueDiff(so.waterHue, sr.waterHue), L50: Math.abs(so.L50 - sr.L50), L5: Math.abs(so.L5 - sr.L5), warmC: d(so.warmC, sr.warmC), C50: Math.abs(so.C50 - sr.C50), waterC: d(so.waterC, sr.waterC), subjC: Math.abs(so.subjC - sr.subjC) } };
     if (OUT) {
       const before = BEFORE && fs.existsSync(path.join(BEFORE, `${name}-${DEFAULT_STYLE}.png`)) ? fs.readFileSync(path.join(BEFORE, `${name}-${DEFAULT_STYLE}.png`)) : null;
       cells.push({ name, rows: [meta.data, ...(BEFORE ? [before] : []), defPng, fs.readFileSync(refFile)] });
@@ -254,7 +255,7 @@ if (flag("clip")) {
     reference: {
       source: mean(P.map((p) => p.source)),
       ...Object.fromEntries(Object.keys(STYLES).map((s) => [s, mean(P.map((p) => p.swd[s]))])),
-      waterHueErr: mean(P.map((p) => p.err.waterHue)), L50Err: mean(P.map((p) => p.err.L50)), L5Err: mean(P.map((p) => p.err.L5)), warmCErr: mean(P.map((p) => p.err.warmC)),
+      waterHueErr: mean(P.map((p) => p.err.waterHue)), L50Err: mean(P.map((p) => p.err.L50)), L5Err: mean(P.map((p) => p.err.L5)), warmCErr: mean(P.map((p) => p.err.warmC)), C50Err: mean(P.map((p) => p.err.C50)), waterCErr: mean(P.map((p) => p.err.waterC)), subjCErr: mean(P.map((p) => p.err.subjC)),
     } as Record<string, number>,
     harm: { dE: mean(harm.map((c) => c.dE)), dEMax: Math.max(0, ...harm.map((c) => c.dEMax)) },
     stability: { lightStd: mean(clips.map((c) => c.lightStd)), lightJump: mean(clips.map((c) => c.lightJump)), wbStd: mean(clips.map((c) => c.wbStd)), wbSwing: mean(clips.map((c) => c.wbSwing)), expSwing: mean(clips.map((c) => c.expSwing)) },
@@ -273,14 +274,14 @@ if (flag("clip")) {
   const lines: string[] = [];
   if (P.length) {
     lines.push("1. REFERENCE DISTANCE (CIELAB sliced Wasserstein to the user's grade; lower = closer)");
-    lines.push(`${"pair".padEnd(20)}${["source", ...Object.keys(STYLES)].map((s) => (s === DEFAULT_STYLE ? `${s}*` : s).padStart(9)).join("")}   | default* vs ref: water hue     L50          L5        sand/skin C`);
+    lines.push(`${"pair".padEnd(20)}${["source", ...Object.keys(STYLES)].map((s) => (s === DEFAULT_STYLE ? `${s}*` : s).padStart(9)).join("")}   | default* vs ref: water hue     L50          L5        sand/skin C | chroma: median    water      warm subj`);
     for (const [name, p] of Object.entries(result.pairs)) {
       const pr = (a: number | null, b: number | null) => `${f(a, 5)}/${f(b, 5)}`;
-      lines.push(`${name.padEnd(20)}${f(p.source, 9)}${Object.keys(STYLES).map((s) => f(p.swd[s], 9)).join("")}   |             ${pr(p.out.waterHue, p.ref.waterHue)}  ${pr(p.out.L50, p.ref.L50)}  ${pr(p.out.L5, p.ref.L5)}  ${pr(p.out.warmC, p.ref.warmC)}`);
+      lines.push(`${name.padEnd(20)}${f(p.source, 9)}${Object.keys(STYLES).map((s) => f(p.swd[s], 9)).join("")}   |             ${pr(p.out.waterHue, p.ref.waterHue)}  ${pr(p.out.L50, p.ref.L50)}  ${pr(p.out.L5, p.ref.L5)}  ${pr(p.out.warmC, p.ref.warmC)} |        ${pr(p.out.C50, p.ref.C50)} ${pr(p.out.waterC, p.ref.waterC)} ${pr(p.out.subjC, p.ref.subjC)}`);
     }
     const s = result.summary.reference, b = base?.summary.reference;
-    lines.push(`${"MEAN".padEnd(20)}${f(s.source, 9)}${Object.keys(STYLES).map((k) => f(s[k], 9)).join("")}   | mean |error|:  hue ${f(s.waterHueErr, 5)}°  L50 ${f(s.L50Err, 5)}  L5 ${f(s.L5Err, 5)}  C ${f(s.warmCErr, 5)}`);
-    if (b) lines.push(`${"vs baseline".padEnd(20)}${" ".repeat(9)}${Object.keys(STYLES).map((k) => dl(s[k], b[k]).padStart(9)).join("")}   |                hue${dl(s.waterHueErr, b.waterHueErr)}  L50${dl(s.L50Err, b.L50Err)}  L5${dl(s.L5Err, b.L5Err)}  C${dl(s.warmCErr, b.warmCErr)}`);
+    lines.push(`${"MEAN".padEnd(20)}${f(s.source, 9)}${Object.keys(STYLES).map((k) => f(s[k], 9)).join("")}   | mean |error|:  hue ${f(s.waterHueErr, 5)}°  L50 ${f(s.L50Err, 5)}  L5 ${f(s.L5Err, 5)}  C ${f(s.warmCErr, 5)} | chroma: median ${f(s.C50Err, 5)}  water ${f(s.waterCErr, 5)}  warm subj ${f(s.subjCErr, 5)}`);
+    if (b) lines.push(`${"vs baseline".padEnd(20)}${" ".repeat(9)}${Object.keys(STYLES).map((k) => dl(s[k], b[k]).padStart(9)).join("")}   |                hue${dl(s.waterHueErr, b.waterHueErr)}  L50${dl(s.L50Err, b.L50Err)}  L5${dl(s.L5Err, b.L5Err)}  C${dl(s.warmCErr, b.warmCErr)} | median${dl(s.C50Err, b.C50Err)}  water${dl(s.waterCErr, b.waterCErr)}  warm subj${dl(s.subjCErr, b.subjCErr)}`);
   }
   if (clips.length) {
     lines.push("", "2. DO NO HARM (graded + topside clips, default style; mean CIEDE2000 output vs source; lower = better)");
@@ -294,7 +295,7 @@ if (flag("clip")) {
     if (b) lines.push(`vs baseline: light std${dl(s.lightStd, b.lightStd)}  light jump${dl(s.lightJump, b.lightJump)}  balance std${dl(s.wbStd, b.wbStd)}  wb swing${dl(s.wbSwing, b.wbSwing)}  exp swing${dl(s.expSwing, b.expSwing)}`);
   }
   const s = result.summary;
-  lines.push("", `SUMMARY  reference ${f(s.reference[DEFAULT_STYLE], 0)} (source ${f(s.reference.source, 0)})${dl(s.reference[DEFAULT_STYLE], base?.summary.reference[DEFAULT_STYLE])} · harm dE ${f(s.harm.dE, 0)}${dl(s.harm.dE, base?.summary.harm.dE)} · stability light ${f(s.stability.lightStd, 0)}${dl(s.stability.lightStd, base?.summary.stability.lightStd)} / balance ${f(s.stability.wbStd, 0)}${dl(s.stability.wbStd, base?.summary.stability.wbStd)}${base ? "   (deltas vs " + path.basename(BASELINE) + ")" : ""}`);
+  lines.push("", `SUMMARY  reference ${f(s.reference[DEFAULT_STYLE], 0)} (source ${f(s.reference.source, 0)})${dl(s.reference[DEFAULT_STYLE], base?.summary.reference[DEFAULT_STYLE])} · harm dE ${f(s.harm.dE, 0)}${dl(s.harm.dE, base?.summary.harm.dE)} · stability light ${f(s.stability.lightStd, 0)}${dl(s.stability.lightStd, base?.summary.stability.lightStd)} / balance ${f(s.stability.wbStd, 0)}${dl(s.stability.wbStd, base?.summary.stability.wbStd)}${P.length ? ` · chroma error median ${f(s.reference.C50Err, 0)}${dl(s.reference.C50Err, base?.summary.reference.C50Err)} / water ${f(s.reference.waterCErr, 0)}${dl(s.reference.waterCErr, base?.summary.reference.waterCErr)} / warm ${f(s.reference.subjCErr, 0)}${dl(s.reference.subjCErr, base?.summary.reference.subjCErr)} · water hue error ${f(s.reference.waterHueErr, 0)}°${dl(s.reference.waterHueErr, base?.summary.reference.waterHueErr)}` : ""}${base ? "   (deltas vs " + path.basename(BASELINE) + ")" : ""}`);
   if (TUNE) lines.push(`TUNED: ${TUNE}`);
   lines.push(`Scores come from the CPU reference incl. Seabed recovery; person segmentation / AI subjects / temporal layer are not simulated. ${((performance.now() - t0) / 1000).toFixed(0)} s`);
   console.log(lines.join("\n"));

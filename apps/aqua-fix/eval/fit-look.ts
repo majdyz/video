@@ -4,12 +4,14 @@
 //        [--set OBJ.field=v,…]                 start from these overrides (and just print the score when no --fit)
 //        [--fit OBJ.field=v1/v2/v3,…]          coordinate descent over these candidate values (the current value is always a candidate)
 //        [--loo]                               also refit with each pair held out and score the held-out pair
-//        [--rounds 2] [--reg 0.1] [--hold 1]
+//        [--rounds 2] [--reg 0.1] [--hold 1] [--creg 0]
+//        [--hold-base OBJ.field=v,…]           the look each pair must not fall behind (default WATER_HUE.amount=0)
 //
 // The objective is score.ts's reference distance (sliced Wasserstein in CIELAB to the user's grade) of one style,
 // averaged over the pairs, plus `reg` × the mean water hue error in degrees / 10 (a region statistic the palette
 // distance alone under-weights), plus `hold` × how far each pair ends up behind the same style with the water-hue
-// map off (WATER_HUE.amount = 0, the look before this fit): a mean bought by breaking one picture costs. Stills are graded at --px directly (score.ts grades at 2× and halves), so the
+// map off (WATER_HUE.amount = 0, the look before that fit; --hold-base names another): a mean bought by breaking one
+// picture costs. `creg` × the mean chroma error (median, water and warm-subject chroma vs the reference, C*ab / 10) can be added. Stills are graded at --px directly (score.ts grades at 2× and halves), so the
 // numbers differ a little from score.ts; the ranking does not.
 //
 // Leave-one-out: for each pair the same descent runs on the other pairs from the same start; the held-out pair is
@@ -24,13 +26,13 @@ import * as paramsModule from "../src/engine/params.ts";
 import { analyzeThumbnail, ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.ts";
 import { applyGrade } from "../src/engine/apply.ts";
 import { DEFAULT_SETTINGS, type UserSettings } from "../src/engine/params.ts";
-import { hueDiff, labOf, regionStats, swd, type Lab } from "./colour-metrics.ts";
+import { hueDiff, labOf, regionStats, swd, type Lab, type Region } from "./colour-metrics.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const opt = (n: string, d: string) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : d; };
 const PAIRS = opt("pairs", process.env.SCORE_PAIRS ?? "/home/majdyz/video-data/review-fable/colour/pairs");
-const PX = parseInt(opt("px", "160")), ROUNDS = parseInt(opt("rounds", "2")), REG = parseFloat(opt("reg", "0.1")), HOLD = parseFloat(opt("hold", "1"));
+const PX = parseInt(opt("px", "160")), ROUNDS = parseInt(opt("rounds", "2")), REG = parseFloat(opt("reg", "0.1")), HOLD = parseFloat(opt("hold", "1")), CREG = parseFloat(opt("creg", "0"));
 const STYLES: Record<string, UserSettings> = {
   natural: { ...DEFAULT_SETTINGS, vivid: 0, blue: 0, seabed: 0 },
   vivid: { ...DEFAULT_SETTINGS, vivid: 1, blue: 0, seabed: 0.6 },
@@ -39,7 +41,7 @@ const STYLES: Record<string, UserSettings> = {
 const STYLE = STYLES[opt("style", "vivid")];
 const require = createRequire(path.resolve(HERE, "../package.json"));
 
-const DEG = /^(target|warmDir|warmHue|(veg|warm)(In|Out)\d|vio\d)$/; // angles: given in degrees on the command line
+const DEG = /^(target|warmDir|warmHue|(veg|warm|mag|cool)(In|Out)\d|vio\d)$/; // angles: given in degrees on the command line
 function slot(key: string): { o: Record<string, number>; f: string; k: number } {
   const [obj, f] = key.split(".");
   const o = ((paramsModule as unknown as Record<string, Record<string, number>>)[obj] ?? (analyzeModule as unknown as Record<string, Record<string, number>>)[obj]);
@@ -49,7 +51,7 @@ function slot(key: string): { o: Record<string, number>; f: string; k: number } 
 const get = (key: string) => { const s = slot(key); return s.o[s.f] / s.k; };
 const set = (key: string, v: number) => { const s = slot(key); s.o[s.f] = v * s.k; };
 
-type Pair = { name: string; /** Reference distance with the water-hue map off. */ d0: number; img: Uint8ClampedArray; w: number; h: number; a: ReturnType<typeof analyzeThumbnail>; ref: Lab; refHue: number | null };
+type Pair = { name: string; /** Reference distance with the water-hue map off. */ d0: number; img: Uint8ClampedArray; w: number; h: number; a: ReturnType<typeof analyzeThumbnail>; ref: Lab; refHue: number | null; refStats: Region };
 async function load(): Promise<Pair[]> {
   const sharp = require("sharp") as typeof import("sharp");
   const out: Pair[] = [];
@@ -61,17 +63,19 @@ async function load(): Promise<Pair[]> {
     const a = analyzeThumbnail(new Uint8ClampedArray(tb.buffer, tb.byteOffset, tb.byteLength), ANALYSIS_W, ANALYSIS_H);
     const rb = await sharp(path.join(PAIRS, "ref", f)).rotate().resize(PX, PX, { fit: "inside" }).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
     const ref = labOf(rb.data, rb.info.width * rb.info.height);
-    out.push({ name: f.replace(/\.[^.]+$/, ""), d0: 0, img, w, h, a, ref, refHue: regionStats(ref).waterHue });
+    out.push({ name: f.replace(/\.[^.]+$/, ""), d0: 0, img, w, h, a, ref, refHue: regionStats(ref).waterHue, refStats: regionStats(ref) });
   }
   return out;
 }
-type Score = { d: number; hue: number | null };
+type Score = { d: number; hue: number | null; /** Chroma errors vs the reference: median, water, warm subjects (mean of those defined). */ c: number; cs: [number, number | null, number] };
 function scoreOf(p: Pair): Score {
   const g = applyGrade({ params: p.a.params, settings: STYLE, depth: p.a.depth, clahe: p.a.clahe }, p.img, p.w, p.h);
-  const lab = labOf(g, p.w * p.h), wh = regionStats(lab).waterHue;
-  return { d: swd(lab, p.ref), hue: wh === null || p.refHue === null ? null : hueDiff(wh, p.refHue) };
+  const lab = labOf(g, p.w * p.h), st = regionStats(lab), wh = st.waterHue, r = p.refStats;
+  const cs: [number, number | null, number] = [Math.abs(st.C50 - r.C50), st.waterC === null || r.waterC === null ? null : Math.abs(st.waterC - r.waterC), Math.abs(st.subjC - r.subjC)];
+  const def = cs.filter((x): x is number => x !== null);
+  return { d: swd(lab, p.ref), hue: wh === null || p.refHue === null ? null : hueDiff(wh, p.refHue), c: def.reduce((a, b) => a + b, 0) / def.length, cs };
 }
-const cost = (s: Score[], ps: Pair[]) => s.reduce((a, x, i) => a + x.d + REG * (x.hue ?? 0) / 10 + HOLD * Math.max(0, x.d - ps[i].d0), 0) / s.length;
+const cost = (s: Score[], ps: Pair[]) => s.reduce((a, x, i) => a + x.d + REG * (x.hue ?? 0) / 10 + CREG * x.c / 10 + HOLD * Math.max(0, x.d - ps[i].d0), 0) / s.length;
 const mean = (v: number[]) => v.reduce((a, b) => a + b, 0) / Math.max(1, v.length);
 
 function descend(pairs: Pair[], grid: [string, number[]][], log: boolean): number {
@@ -97,13 +101,18 @@ function descend(pairs: Pair[], grid: [string, number[]][], log: boolean): numbe
 }
 
 const pairs = await load();
-{ const amt = get("WATER_HUE.amount"); set("WATER_HUE.amount", 0); for (const p of pairs) p.d0 = scoreOf(p).d; set("WATER_HUE.amount", amt); }
+{
+  const base = opt("hold-base", "WATER_HUE.amount=0").split(",").filter(Boolean).map((kv) => { const [k, v] = kv.split("="); return [k, parseFloat(v), get(k)] as const; });
+  for (const [k, v] of base) set(k, v);
+  for (const p of pairs) p.d0 = scoreOf(p).d;
+  for (const [k, , was] of base) set(k, was);
+}
 for (const kv of opt("set", "").split(",").filter(Boolean)) { const [k, v] = kv.split("="); set(k, parseFloat(v)); }
 const grid: [string, number[]][] = opt("fit", "").split(",").filter(Boolean).map((kv) => { const [k, v] = kv.split("="); return [k, v.split("/").map(Number)]; });
 const start = grid.map(([k]) => get(k));
 const report = (label: string) => {
   const s = pairs.map(scoreOf);
-  console.log(`${label}: mean ${mean(s.map((x) => x.d)).toFixed(2)}  hue err ${mean(s.filter((x) => x.hue !== null).map((x) => x.hue!)).toFixed(1)}°  | ${pairs.map((p, i) => `${p.name.slice(0, 8)} ${s[i].d.toFixed(1)}`).join("  ")}`);
+  console.log(`${label}: mean ${mean(s.map((x) => x.d)).toFixed(2)}  hue err ${mean(s.filter((x) => x.hue !== null).map((x) => x.hue!)).toFixed(1)}°  chroma err median ${mean(s.map((x) => x.cs[0])).toFixed(1)} water ${mean(s.filter((x) => x.cs[1] !== null).map((x) => x.cs[1]!)).toFixed(1)} warm ${mean(s.map((x) => x.cs[2])).toFixed(1)}  | ${pairs.map((p, i) => `${p.name.slice(0, 8)} ${s[i].d.toFixed(1)}`).join("  ")}`);
   return s;
 };
 report("start");

@@ -626,11 +626,50 @@ export function blueGateOf(veilL: number, veilC: number, lift: number): number {
  * Fitted with BLUE_WATER on the reference pairs (eval/fit-look.ts, leave-one-out reported there).
  */
 export const WATER_HUE = {
-  amount: 0.5, // the dial between reference distance and do-no-harm: 0.85 fits the pairs best (8.8, harm +0.6), 0.5 keeps harm within +0.3
+  amount: 0.7, // the dial between reference distance and do-no-harm: 0.85 fits the pairs best but costs twice the harm of 0.5; 0.7 with RICH_LOOK: reference 10.1 → 9.0, harm +0.22
   // Do no harm: the map is a larger move than the rest of Vivid, so it stands down sooner on footage that looks
   // graded or topside (calm.ts scores; Vivid's own ramp is VIVID_GATE.calmLo..calmHi).
   calmLo: 0.05,
   calmHi: 0.3,
+};
+
+/**
+ * Saturation by hue in the default look (Vivid): the user's references and their own edits of the engine's output
+ * hold about 1.5× its chroma, more on warm subjects (skin, orange fish and jellyfish, coral); the deeper blue of
+ * their open water is the water-hue map's (WATER_HUE.amount, fitted together with this). Hue is never touched here. Runs after the water-hue map, last before Seabed; every weight is a smooth function of the graded
+ * colour, the amount is Vivid's (so it stands down with it on graded, topside, night and lamp-lit footage), and the
+ * Saturation slider and Subjects → Warmth ride on top as before. Fitted on the reference pairs (eval/fit-look.ts).
+ *
+ * Chroma: C ×(1 + g·exp(−C / top)), a vibrance curve — monotone in C for any g, the gain fading as the colour is
+ * already rich (no neon). g = `gain`, cut by `coolCut` over the water hues (from `coolIn0..coolIn1` up to the
+ * magentas: the water's chroma is set by the water-hue map, and a full gain there turns the blue cast the balance
+ * leaves on sand and its shadows into blue speckle), plus `warmGain` over the warm hues (`warmIn0..warmOut1`), with
+ * its own roll-off `warmTop`. Magentas (`magIn0..magOut1`) take none: the look never adds pink. Near-neutrals take
+ * none either (`cLo..cHi`: whites, sand and silver stay as they are, and chroma noise is not amplified), nor do the
+ * deep shadows (`lLo..lHi`) and the highlights (`hiLo..hiHi`).
+ */
+export const RICH_LOOK = {
+  gain: 0.5,
+  top: 0.15,
+  warmGain: 0.5,
+  warmTop: 0.12,
+  warmIn0: (10 * Math.PI) / 180,
+  warmIn1: (45 * Math.PI) / 180,
+  warmOut0: (80 * Math.PI) / 180,
+  warmOut1: (115 * Math.PI) / 180,
+  magIn0: (285 * Math.PI) / 180,
+  magIn1: (320 * Math.PI) / 180,
+  magOut0: (330 * Math.PI) / 180,
+  magOut1: (360 * Math.PI) / 180,
+  cLo: 0.01,
+  cHi: 0.07,
+  lLo: 0.1,
+  lHi: 0.3,
+  hiLo: 0.85,
+  hiHi: 0.97,
+  coolCut: 0.6,
+  coolIn0: (165 * Math.PI) / 180,
+  coolIn1: (215 * Math.PI) / 180,
 };
 
 /** The Blue water amount the shader reads (0..1): Vivid's share (WATER_HUE) or the Blue water style, through the gate (graded, topside, night, ROV). */
