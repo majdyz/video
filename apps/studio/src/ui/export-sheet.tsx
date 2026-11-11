@@ -239,6 +239,11 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
               </button>
             </div>
             {saveNote && <p className="export__note" role="status">{saveNote}</p>}
+            {BRAND.donate && (
+              <p className="export__support">
+                Free to use. Enjoying it? <a href={BRAND.donate} target="_blank" rel="noopener noreferrer">Support DiveGrade ☕</a>
+              </p>
+            )}
             {DEBUG && exp.profile && <p className="export__note mono" data-testid="export-profile">{exp.profile}</p>}
             <button type="button" className="btn btn--quiet btn--block" onClick={() => { studio.dismissExport(); onClose(); }}>Done</button>
           </>

@@ -645,6 +645,12 @@ export default function App() {
             <button type="button" className="btn btn--ghost" onClick={openFeedback}>Send feedback</button>
             <button type="button" className="btn btn--ghost" onClick={() => { setAboutOpen(false); setIntroOpen(true); }}>How it works</button>
           </div>
+          {BRAND.donate && (
+            <p className="about__support">
+              DiveGrade is free. If it saved a dive, you can{" "}
+              <a href={BRAND.donate} target="_blank" rel="noopener noreferrer">buy the developer a coffee ☕</a>.
+            </p>
+          )}
           <div className="adv__field">
             <span className="adv__label" id="appearance-label">Appearance</span>
             <Segmented label="Appearance" items={THEMES} value={theme} onChange={setTheme} />

@@ -3059,3 +3059,17 @@ a {
 .export__actions--stack {
   grid-auto-flow: row;
 }
+
+/* Tip jar (BRAND.donate): one quiet line, never a popup. */
+.about__support,
+.export__support {
+  margin: 0.75rem 0;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  text-align: center;
+}
+.about__support a,
+.export__support a {
+  color: var(--accent);
+  font-weight: 600;
+}

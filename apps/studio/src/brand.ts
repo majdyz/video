@@ -6,6 +6,8 @@ export const BRAND = {
   beta: true,
   /** Where "Open a GitHub issue" in Send feedback goes (owner/repo). */
   issues: "majdyz/video",
+  /** Tip jar (Ko-fi / Buy Me a Coffee / GitHub Sponsors URL). Empty: no support link anywhere. */
+  donate: "",
 };
 
 /**
