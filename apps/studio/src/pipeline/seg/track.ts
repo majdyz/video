@@ -52,6 +52,9 @@ export const SEG = {
   /** ...and from this many empty starts in a row, the extra starts leave the model's search out (the engine's look
    * only; the regular starts, every segmentS, still search). */
   reacquireSearches: 3,
+  /** At a segment start that leaves nothing to follow, a subject last seen within this long (s) is followed on to
+   * the next look (session.ts carryOver): the tracker knows it again when it comes back, a look may not. */
+  lostS: 3,
   /** The lite (phone) model follows at most this many of the engine's own subjects at a time (every one is a
    * tracker step per keyframe); taps are always followed. */
   liteAutos: 2,

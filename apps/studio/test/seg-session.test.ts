@@ -59,15 +59,17 @@ type Fake = {
   failAt: number;
   /** The subject is on screen between these clip times (the model finds nothing outside them). */
   visible: [number, number];
+  /** And not inside this stretch (the subject leaves and comes back). */
+  gone: [number, number] | null;
   disposed: boolean;
 };
 
-function fake(opts: Partial<Pick<Fake, "failAt" | "visible">> & { lite?: boolean } = {}): Fake {
-  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, reads: [], encodes: 0, steps: 0, failAt: opts.failAt ?? Infinity, visible: opts.visible ?? [-Infinity, Infinity], disposed: false };
+function fake(opts: Partial<Pick<Fake, "failAt" | "visible" | "gone">> & { lite?: boolean } = {}): Fake {
+  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, reads: [], encodes: 0, steps: 0, failAt: opts.failAt ?? Infinity, visible: opts.visible ?? [-Infinity, Infinity], gone: opts.gone ?? null, disposed: false };
   let encT = 0;
   const lw = 64, lh = 36;
   const mask = (t: number) => {
-    const logits = new Float32Array(lw * lh), on = t >= f.visible[0] - 1e-6 && t <= f.visible[1] + 1e-6;
+    const logits = new Float32Array(lw * lh), on = t >= f.visible[0] - 1e-6 && t <= f.visible[1] + 1e-6 && !(f.gone && t > f.gone[0] + 1e-6 && t < f.gone[1] - 1e-6);
     for (let y = 0; y < lh; y++) for (let x = 0; x < lw; x++) logits[y * lw + x] = on && inSubject((x + 0.5) / lw, (y + 0.5) / lh, t) ? 10 : -10;
     return { logits, lw, lh, score: on ? 5 : -5, iou: 0.95 };
   };
@@ -468,4 +470,49 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   // Nothing measured (an old worker, a field missing): zeros, never NaN.
   assert.doesNotMatch(profileLine({}), /NaN|undefined/);
   console.log("pass profile line: ok");
+}
+
+// ---------------------------------------------------------------- a subject that leaves and comes back
+
+// Gone from 5.5 s; segments start every 8 s. Every frame of the range ends up filled (empty where there is nothing
+// to follow), and the subject is followed again as soon as it is back:
+//  - back at 8 s, the look at the 8 s start sees it: followed from 8 s;
+//  - back at 8.2 s and no look ever sees it (the engine is blind there): the object that lost it is followed on past
+//    the start (SEG.lostS) and knows it again at its next keyframe. At 2 keyframes a second it was dropped at 8 s;
+//  - back at 11.3 s (too long gone to follow on), seen by the look at 12 s: the stretch 8.5–11.5 s, which no step
+//    touched, was never filled at all (90 frames; the engine's masks, but "not done" to everything that counts).
+for (const [gone, sees, from, lite] of [
+  [[5.5, 8], true, 8.1, true], [[5.5, 8], true, 8.1, false],
+  [[5.5, 8.2], false, 8.6, true],
+  [[5.5, 11.3], true, 12.1, true],
+] as [[number, number], boolean, number, boolean][]) {
+  const there = (t: number) => !(t > gone[0] + 1e-6 && t < gone[1] - 1e-6);
+  const f = fake({ lite, gone });
+  const r = open(f, { start: 0, end: 14 }, (t) => (sees && there(t) ? [subject(t)] : []));
+  const end = r.settled();
+  r.s.seeds(0, [subject(0)]);
+  await end;
+  assert.equal(r.errors.length, 0);
+  const missing: number[] = [];
+  for (let i = 0; i < r.s.grid.n; i++) if (!r.frames.has(i)) missing.push(i);
+  assert.deepEqual(missing, [], `back at ${gone[1]} s: every frame of the range is filled`);
+  const on = (t: number) => rleDecode(r.frames.get(Math.round(t * 30))!.alpha, 320 * 40).some((a) => a > 127);
+  assert.ok(on(5) && !on(6.5) && !on(7.5), "popped while there, empty while gone");
+  assert.ok(on(from) && on(13.9), `back at ${gone[1]} s: followed again from ${from} s`);
+  assert.equal(r.asked[0].t, 8, "the regular start at 8 s");
+}
+console.log("session: a subject that leaves and comes back → every frame filled, followed again when back: ok");
+
+// Before any subject and in a clip without one, the frames are filled too (empty), without a model run or a decode.
+{
+  const f = fake({ lite: true, visible: [100, 200] });
+  const r = open(f, { start: 0.1, end: 6 }, () => []);
+  const end = r.settled();
+  r.s.seeds(0.1, []);
+  await end;
+  assert.equal(r.frames.size, r.s.grid.n, "every frame filled");
+  assert.equal(popped(r.frames), 0);
+  assert.equal(f.encodes, 0);
+  assert.equal(f.reads.length, 0, "nothing decoded for empty frames");
+  console.log("session: nothing to follow → empty frames for the whole range: ok");
 }

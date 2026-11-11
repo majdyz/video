@@ -309,7 +309,7 @@ export class SegSession {
    * doubles with every empty start in a row (SEG.reacquireS, up to SEG.segmentS): a clip with nothing to follow was
    * looked through every 2 s, each look a seek, an analysis and the model's 12-point search.
    */
-  private reacquire(k: number): void {
+  private reacquire(k: number): number | null {
     // (Not within a second of the next start, or of the range's end: nothing is left to follow from there.)
     const t = this.segStarts[k], next = this.segStarts[k + 1] ?? this.base[this.base.length - 1] ?? Infinity;
     const wait = Math.min(SEG.reacquireMaxS, SEG.reacquireS * 2 ** Math.max(0, this.emptyRun - 1));
@@ -318,7 +318,9 @@ export class SegSession {
       this.segStarts.splice(k + 1, 0, r);
       this.activate(r);
       if (this.emptyRun >= SEG.reacquireSearches) this.noSearch.add(r);
+      return r;
     }
+    return null;
   }
 
   /** Ids removed before their object exists (a replay removes an auto whose seeds are still held): hidden on arrival. */
@@ -643,6 +645,13 @@ export class SegSession {
           const ta = Math.min(...this.dirty);
           this.dirty.delete(ta);
           await this.fill(ta);
+        } else if (this.segStarts.length) {
+          // The pass is through. A stretch nothing was followed in (before the first subject, between a subject lost
+          // and the next one found, a clip without any) was never touched by a step, so never filled: its frames
+          // are posted too, empty (the engine's masks alone there), so every frame of the range has its answer.
+          const ta = this.keys.find((k) => !this.filledIv.has(k));
+          if (ta !== undefined) await this.fill(ta);
+          else if (this.fillRest()) break;
         } else break;
         await yieldNow();
       }
@@ -693,14 +702,14 @@ export class SegSession {
     const n = this.mw * this.mh, cover = new Uint8Array(n);
     for (const s of seeds) { const m = this.key(s, t); if (m) for (let i = 0; i < n; i++) if (m[i] > 127) cover[i] = 1; }
     const t1 = this.segStarts[k + 1] ?? this.base[this.base.length - 1];
-    const carry: { s: ObjState; a: number }[] = [];
+    const carry: { s: ObjState; a: number }[] = [], ended: ObjState[] = [];
     for (const s of batch) {
       if (s.seg >= k || s.fi < s.fwd.length) continue;
       const m = this.key(s, t);
       let a = 0, c = 0;
       if (m) for (let i = 0; i < n; i++) if (m[i] > 127) { a++; if (cover[i]) c++; }
       if (a > SEG.guardMinArea * n && c < SEG.carryCover * a) carry.push({ s, a });
-      else this.model.drop(`${s.o.id}f`);
+      else ended.push(s);
     }
     // The lite model's limit holds across the start: the new seeds, then the largest subjects carried in.
     carry.sort((x, y) => y.a - x.a || x.s.o.id - y.s.o.id);
@@ -710,7 +719,23 @@ export class SegSession {
       s.fwd = [...s.fwd, ...this.stepsBetween(t, t1, [t1]).filter((x) => x > t + 1e-6)];
       s.seg = k;
     });
-    if (![...this.objs.values()].some((s) => s.auto && s.seg === k && this.nextOf(s) !== null)) this.reacquire(k);
+    if (![...this.objs.values()].some((s) => s.auto && s.seg === k && this.nextOf(s) !== null)) {
+      const r = this.reacquire(k);
+      // Nothing to follow from here, but a subject was in the picture a moment ago (out of frame, behind a rock): the
+      // one seen last is followed on to the next look (or the next start). Its tracker knows it again the keyframe it
+      // is back, where a look only comes every few seconds and may not see it (the engine looks in open water only).
+      // At 4 keyframes a second a subject back just before the start was still carried by its mask; at 2 it was
+      // dropped here, and the stretch to the next look that found it had no mask at all.
+      const seen = (s: ObjState) => Math.max(-Infinity, ...s.shown);
+      const keep = ended.filter((s) => t - seen(s) <= SEG.lostS + 1e-6).sort((x, y) => seen(y) - seen(x) || x.o.id - y.o.id)[0];
+      if (keep) {
+        const to = r ?? t1;
+        keep.fwd = [...keep.fwd, ...this.stepsBetween(t, to, [to]).filter((x) => x > t + 1e-6)];
+        keep.seg = k;
+        ended.splice(ended.indexOf(keep), 1);
+      }
+    }
+    for (const s of ended) this.model.drop(`${s.o.id}f`);
   }
 
   /** The intervals the last step changed (touch). */
@@ -943,6 +968,20 @@ export class SegSession {
     return out;
   }
 
+  /** Grid frames posted at least once. */
+  private posted: Uint8Array | null = null;
+
+  /** Posts the grid frames no interval covers (those before the first keyframe), empty. True: nothing was left. */
+  private fillRest(): boolean {
+    const p = (this.posted ??= new Uint8Array(this.grid.n)), out: SessionFrameOut[] = [];
+    const z = new Float32Array(this.mw * this.mh);
+    for (let i = 0; i < this.grid.n; i++) if (!p[i]) { p[i] = 1; out.push(this.product(i, z, null, z)); }
+    if (!out.length) return true;
+    this.prof.filledFrames += out.length;
+    if (!this.closed) this.ev.frames(out);
+    return false;
+  }
+
   /** Fills the interval from keyframe ta to the next one in use and posts its frames. */
   private async fill(ta: number): Promise<void> {
     const ki = this.keys.indexOf(ta);
@@ -957,6 +996,16 @@ export class SegSession {
     }
     this.filledIv.add(ta);
     if (!idx.length) return;
+    const p = (this.posted ??= new Uint8Array(this.grid.n));
+    for (const i of idx) p[i] = 1;
+    // No mask at either end: empty frames, without decoding the stretch (what the fill of nothing comes to anyway).
+    const none = (u: { inc: Float32Array; exc: Float32Array | null } | null) => !u || (!u.exc && !u.inc.some((x) => x > 0));
+    if (none(A) && none(B)) {
+      const z = new Float32Array(this.mw * this.mh);
+      this.prof.filledFrames += idx.length;
+      if (!this.closed) this.ev.frames(idx.map((i) => this.product(i, z, null, z)));
+      return;
+    }
     const lumas: Float32Array[] = [];
     for (const i of idx) lumas.push((await this.pixels((this.grid.i0 + i) / SEG.sampleHz, false)).luma);
     const lumaA = (await this.pixels(ta, false)).luma;
