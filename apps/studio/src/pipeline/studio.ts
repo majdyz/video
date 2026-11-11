@@ -33,7 +33,8 @@ import { GpuGeometryRenderer } from "./geometry-gpu.ts";
 import { outputToUpright, previewFitWanted, type GeometryParams, type QuarterTurns } from "./geometry-math.ts";
 import { mapPrompt } from "./seg/track.ts";
 import type { ClipInfo } from "./probe.ts";
-import { colourSettings, DEFAULT_TOOLS, exportSuffix, profileDefaults, solveParams, type ColourLook, type DewarpState, type ToolsState } from "./tools.ts";
+import { clipKeyOf, colourSettings, DEFAULT_TOOLS, exportSuffix, neutralNote, profileDefaults, solveParams, type ColourLook, type ColourState, type DewarpState, type NeutralPick, type ToolsState } from "./tools.ts";
+import type { TapSolve } from "../../../aqua-fix/src/engine/tap.ts";
 
 const PHONE_UW_DEFAULTS = profileDefaults("phone-ultra-wide");
 import { activeCuts, lockWithCuts, lookIndexAt, topUpTimes, visibleSegments, type Segments } from "./segments.ts";
@@ -206,6 +207,8 @@ export type Snapshot = {
   subjectTracking: number | null;
   /** A short note about the latest tap (e.g. nothing to follow there); null when none. */
   subjectNote: string | null;
+  /** Tap-to-neutral: what the latest tap came to ("Balanced to that point", "Too dark to read there…"); null when none. */
+  neutralNote: string | null;
   /** AI subject detection (beta, Subject pop): toggle, model download and ML track pass (seg/studio-seg.ts). */
   seg: SegStatus;
   /** Subject taps that can be undone (newest last). */
@@ -284,6 +287,7 @@ export class Studio {
     subjectOverrides: [],
     subjectTracking: null,
     subjectNote: null,
+    neutralNote: null,
     seg: { on: false, phase: "off", progress: null, note: null },
     subjectUndo: 0,
   };
@@ -1078,9 +1082,80 @@ export class Studio {
 
   /** Engine settings for the colour tool (debug `?pop=1` forces Subject pop on for headless checks). */
   private colourFor(c: Parameters<typeof colourSettings>[0]) {
-    const s = colourSettings(c);
+    // A tap-to-neutral pick counts on the clip it was solved on only (tools.ts NeutralPick).
+    const s = colourSettings(c, this.clipKey);
     if (new URLSearchParams(location.search).get("pop") === "1") s.subjectPop = true;
     return s;
+  }
+
+  // ------------------------------------------------------------ manual colour overrides
+
+  /** The open file's key: what a tap-to-neutral pick is tied to (tools.ts clipKeyOf). */
+  get clipKey(): string {
+    return clipKeyOf(this.file);
+  }
+
+  /**
+   * Where a change to the Colour look made here (a tap on the picture, the debug API) goes: the app's own tools
+   * state (App sets this; the look of the selected segment once the clip is split). Null = headless: applied here.
+   */
+  onColourPatch: ((patch: Partial<ColourState>) => void) | null = null;
+
+  private patchColour(patch: Partial<ColourState>): void {
+    if (this.onColourPatch) return this.onColourPatch(patch);
+    const s = this.segs;
+    if (this.snap.kind === "video" && s.cuts.length) {
+      const i = lookIndexAt(s.cuts, this.playhead(), this.trim, this.snap.duration, this.snap.info?.fps || 30);
+      const looks = s.looks.slice();
+      const { enabled: _enabled, ...look } = { ...this.tools.colour, ...looks[i], ...patch };
+      looks[i] = look;
+      this.setSegments({ cuts: s.cuts, looks }, false);
+    } else this.setTools({ ...this.tools, colour: { ...this.tools.colour, ...patch } });
+  }
+
+  /**
+   * Tap-to-neutral: the user taps a point of the picture (upright 0..1) that should be white or grey. Playback
+   * pauses, the engine reads the source there and solves the balance offset that grades it to neutral on top of the
+   * clip's automatic balance (aqua-fix tap.ts), and the pick is stored with the clip's colour settings (the selected
+   * segment's once split): preview and export read the same two gains, and a second tap replaces the first.
+   * Resolves to the pick, or null when the point could not be used (the note says why).
+   */
+  async tapNeutral(u: number, v: number): Promise<NeutralPick | null> {
+    const e = this.engine;
+    if (!e || this.exporting || this.snap.phase !== "ready" || !this.tools.colour.enabled) return null;
+    crumb(`neutral ${u.toFixed(2)},${v.toFixed(2)}`);
+    if (!this.paused()) this.pause();
+    const t = this.playhead();
+    let r: TapSolve | null = null;
+    try {
+      // Not before the clip's scene lock (the photo's balance) is in: the offset is solved on top of it.
+      if (this.snap.colourProfiled) r = await e.solveNeutral(u, v, this.settingsAt(t));
+    } catch (err) {
+      console.warn("[neutral] tap failed", err);
+    }
+    this.set({ neutralNote: neutralNote(r) });
+    // Nothing usable there (too dark, clipped, no red left): an earlier pick stays as it is.
+    if (!r || !r.ok || (r.gains[0] === 1 && r.gains[1] === 1)) return null;
+    const pick: NeutralPick = { r: r.gains[0], b: r.gains[1], u, v, t, limited: r.limited, clip: this.clipKey };
+    console.info(`[neutral] ${u.toFixed(3)},${v.toFixed(3)} @${t.toFixed(2)}s: R ×${pick.r.toFixed(2)} B ×${pick.b.toFixed(2)}, chroma ${r.before.toFixed(3)} → ${r.after.toFixed(3)}${r.limited ? " (limited)" : ""}`);
+    this.patchColour({ neutral: pick });
+    return pick;
+  }
+
+  /** Back to the automatic balance. */
+  clearNeutral(): void {
+    this.set({ neutralNote: null });
+    this.patchColour({ neutral: null });
+  }
+
+  /** Forgets the latest tap's note (the picker closed). */
+  clearNeutralNote(): void {
+    if (this.snap.neutralNote !== null) this.set({ neutralNote: null });
+  }
+
+  /** "Water colour", −100 (teal) … 0 (auto) … 100 (deeper blue). */
+  setWaterHue(v: number): void {
+    this.patchColour({ waterHue: Math.min(100, Math.max(-100, v)) });
   }
 
   setTools(next: ToolsState): void {
@@ -1220,7 +1295,7 @@ export class Studio {
     const gen = ++this.gen;
     crumb(`open ${file.type || "?"} ${(file.size / 1e6).toFixed(1)} MB`);
     this.file = file;
-    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [] });
+    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [], neutralNote: null });
     try {
       await touchFile(file);
       const media = await loadMedia();
@@ -1404,7 +1479,7 @@ export class Studio {
     crumb(`open ${file.type || "?"} ${(file.size / 1e6).toFixed(1)} MB`);
     this.file = file;
     this.signal = null;
-    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [] });
+    this.set({ phase: "loading", kind: "photo", busy: "Reading photo…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, playing: false, currentTime: 0, duration: 0, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [], neutralNote: null });
     try {
       await touchFile(file);
       const { bitmap, original } = await decodePhoto(file, photoLimits(isWebKit(), e.backend.kind));
@@ -1473,7 +1548,7 @@ export class Studio {
   /** Back to the empty state. */
   close(): void {
     this.teardown();
-    this.set({ phase: "empty", kind: null, fileName: null, info: null, duration: 0, currentTime: 0, playing: false, busy: null, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [] });
+    this.set({ phase: "empty", kind: null, fileName: null, info: null, duration: 0, currentTime: 0, playing: false, busy: null, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [], neutralNote: null });
   }
 
   private teardown(): void {

@@ -14,6 +14,7 @@ import {
   COLOUR_STYLES,
   NOISE_CHOICES,
   NOISE_HINT,
+  waterHueLabel,
   type ToolId,
   type ToolsState,
 } from "../pipeline/tools.ts";
@@ -21,7 +22,7 @@ import type { FootageChoice } from "../pipeline/footage.ts";
 import { FOOTAGE_SHORT } from "./footage";
 import type { FootageStatus, StabStatus } from "../pipeline/studio.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
-import type { SubjectControls } from "./panels";
+import type { NeutralControls, SubjectControls } from "./panels";
 import { Chips, Slider } from "./controls";
 import { IconCheck, IconPause, IconPlay, IconReset } from "./icons";
 
@@ -40,6 +41,8 @@ type Param = {
   choices?: { items: { id: string; label: string; hint?: string }[]; value: string; onChange: (id: string) => void; note?: string };
   toggle?: { on: boolean; onChange: (v: boolean) => void };
   action?: () => void;
+  /** An action that is a mode (tap-to-neutral waiting for a tap): shown lit while on. */
+  lit?: boolean;
   disabled?: boolean;
 };
 
@@ -47,7 +50,7 @@ type Setter = (fn: (t: ToolsState) => ToolsState) => void;
 
 const pct = (v: number) => String(Math.round(v));
 
-function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | null, onFootage: ((c: FootageChoice) => void) | null): Param[] {
+function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | null, onFootage: ((c: FootageChoice) => void) | null, neutral: NeutralControls | null): Param[] {
   const c = tools.colour;
   const up = (patch: Partial<typeof c>) => set((t) => ({ ...t, colour: { ...t.colour, ...patch, enabled: true } }));
   const scene = COLOUR_PRESETS.find((p) => p.id === c.preset);
@@ -56,6 +59,9 @@ function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | n
     { id: "strength", label: "Strength", value: pct(c.strength), slider: { value: c.strength, min: 0, max: 100, def: DEFAULT_COLOUR.strength, onChange: (v) => up({ strength: v }) } },
     { id: "scene", label: "Scene", value: scene?.label ?? "Auto", choices: { items: COLOUR_PRESETS, value: c.preset, onChange: (id) => up({ preset: id as typeof c.preset }) } },
     { id: "vivid", label: "Style", value: COLOUR_STYLES.find((s) => s.id === styleOf(c))?.label ?? "Vivid", choices: { items: COLOUR_STYLES, value: styleOf(c), onChange: (id) => { const s = id as ReturnType<typeof styleOf>; saveStyle(s); up(styleFlags(s)); } } },
+    // The manual overrides, after the one-tap controls: a white point (tap the picture) and the water's hue.
+    ...(neutral ? [{ id: "white", label: "White point", more: true, value: neutral.active ? "Tap…" : neutral.pick ? "Set" : "Auto", action: neutral.onToggle, lit: neutral.active } as Param] : []),
+    { id: "water", label: "Water", more: true, value: waterHueLabel(c.waterHue ?? 0), slider: { value: c.waterHue ?? 0, min: -100, max: 100, def: 0, format: waterHueLabel, onChange: (v) => up({ waterHue: Math.abs(v) < 4 ? 0 : v }) } },
     { id: "look", label: "Deep blue", more: true, value: pct(c.look * 100), slider: { value: c.look * 100, min: 0, max: 100, def: 0, onChange: (v) => up({ look: v / 100 }) } },
     { id: "sat", label: "Saturation", more: true, value: `${Math.round(c.saturation * 100)}%`, slider: { value: c.saturation * 100, min: 0, max: 200, def: 100, format: (v) => `${Math.round(v)}%`, onChange: (v) => up({ saturation: v / 100 }) } },
     { id: "clarity", label: "Clarity", more: true, value: pct(c.clarity * 100), slider: { value: c.clarity * 100, min: 0, max: 100, def: DEFAULT_COLOUR.clarity * 100, onChange: (v) => up({ clarity: v / 100 }) } },
@@ -127,7 +133,9 @@ function subjectParams(tools: ToolsState, set: Setter, subjects: SubjectControls
  * The phone's tool controls, floating over the picture: the selected option's one bar (a slider or a row of
  * choices) and the tool's options as one scrolling row of bubbles (on/off first, the rarer ones last). Nothing here takes picture space: it sits on a soft scrim at the bottom of the full-screen preview.
  */
-export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, onFootage, onMotionLog, subjects, disabled, status, onClose, playback }: {
+export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, onFootage, onMotionLog, subjects, neutral, disabled, status, onClose, playback }: {
+  /** Colour: tap-to-neutral (the "White point" bubble). */
+  neutral?: NeutralControls | null;
   onClose: () => void;
   /** Video: play / pause from the bubbles (the timeline steps aside while a tool is open; a tap on the picture may pick subjects). */
   playback?: { playing: boolean; toggle: () => void } | null;
@@ -145,7 +153,7 @@ export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, 
   /** The tool's live state ("Scene-locked", "Analysing motion 40%"), over the bubbles. */
   status: ReactNode;
 }) {
-  const params = pane === "colour" ? colourParams(tools, setTools, footage, onFootage)
+  const params = pane === "colour" ? colourParams(tools, setTools, footage, onFootage, neutral ?? null)
     : pane === "stabilise" ? stabParams(tools, setTools, stab, onMotionLog)
     : pane === "dewarp" ? dewarpParams(tools, setTools, camera)
     : subjectParams(tools, setTools, subjects, photo);
@@ -166,8 +174,8 @@ export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, 
       else setSel(p.id);
     };
     return (
-      <button key={p.id} type="button" className={`bubble${on ? " is-on" : ""}${p.toggle?.on ? " is-lit" : ""}${p.more ? " bubble--more" : ""}`} onClick={click} disabled={disabled || p.disabled || (!enabled && !p.toggle && !p.action)}
-        aria-pressed={p.toggle ? p.toggle.on : p.slider || p.choices ? on : undefined}>
+      <button key={p.id} type="button" className={`bubble${on ? " is-on" : ""}${p.toggle?.on || p.lit ? " is-lit" : ""}${p.more ? " bubble--more" : ""}`} onClick={click} disabled={disabled || p.disabled || (!enabled && !p.toggle && !p.action)}
+        aria-pressed={p.toggle ? p.toggle.on : p.lit !== undefined ? p.lit : p.slider || p.choices ? on : undefined}>
         <span className="bubble__label">{p.id === "reset" ? <><IconReset size={13} /> {p.label}</> : p.label}</span>
         {p.value !== undefined && <span className="bubble__value">{p.value}</span>}
       </button>

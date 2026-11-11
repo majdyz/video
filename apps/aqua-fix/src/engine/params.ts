@@ -64,6 +64,14 @@ export type UserSettings = {
   seabed?: number;
   /** Temporal noise reduction before the grade (NR): "auto" (default) is gated on the frame's measured noise, "strong" blends harder and opens earlier. */
   noiseReduction?: NoiseReduction;
+  /**
+   * Tap-to-neutral (tap.ts): gains on red and blue (green = 1) on top of the estimated balance, solved once from a
+   * point the user says is white or grey. A constant of the clip: it rides on whatever balance is in force (the
+   * clip lock, each shot's offset, a scene preset), so no later analysis undoes it. Absent = none.
+   */
+  wbTap?: [number, number];
+  /** "Water colour", −1..1 (0 = as graded): the water's hue turned toward teal (−) or a deeper blue (+); see WATER_TINT. */
+  waterHue?: number;
 };
 
 export type NoiseReduction = "off" | "auto" | "strong";
@@ -753,6 +761,55 @@ export const RICH_LOOK = {
   coolIn1: (215 * Math.PI) / 180,
 };
 
+/**
+ * Tap-to-neutral limits. `max`: the largest gain (or cut) the tap may ask of red or blue; `wbMin..wbMax`: the range
+ * of the balance with the tap on it (boostParams' own range); `waterPow`: the share (as an exponent) of the tap the
+ * water path takes — the toned-down balance of veil-dominated pixels follows the full balance the same way
+ * (analyze.ts WATER_WB_POWER), so open water does not go purple when a grey rock asks for more red; `waterMax`: its
+ * range. The red gain itself still follows the region's red SNR in the shader (red.ts redGainStrength): a tap
+ * cannot amplify a red channel that holds nothing.
+ */
+export const TAP = { max: 4, wbMin: 0.25, wbMax: 5, waterPow: 0.6, waterMax: 3 };
+
+/** The tap's gains as stored: finite, green-normalised, inside ±TAP.max. Null when there is none (or it is the identity). */
+export function tapGains(s: Pick<UserSettings, "wbTap">): [number, number] | null {
+  const t = s.wbTap;
+  if (!t || !(t[0] > 0) || !(t[1] > 0) || !Number.isFinite(t[0]) || !Number.isFinite(t[1])) return null;
+  const c = (g: number) => Math.min(TAP.max, Math.max(1 / TAP.max, g));
+  const r = c(t[0]), b = c(t[1]);
+  return r === 1 && b === 1 ? null : [r, b];
+}
+
+/**
+ * Tap-to-neutral on the parameters: the last step of the chain (after do-no-harm, the push and the scene preset), so
+ * none of them takes it back. The object path gets the gains in full, the water path their toned-down share.
+ */
+export function tapParams(p: GradeParams, s: Pick<UserSettings, "wbTap">): GradeParams {
+  const t = tapGains(s);
+  if (!t) return p;
+  const g: Vec3 = [t[0], 1, t[1]];
+  const wb = p.wb.map((x, c) => (c === 1 ? x : Math.min(TAP.wbMax, Math.max(TAP.wbMin, x * g[c])))) as Vec3;
+  const waterWb = p.waterWb.map((x, c) => (c === 1 ? x : Math.min(TAP.waterMax, Math.max(1 / TAP.waterMax, x * Math.pow(g[c], TAP.waterPow))))) as Vec3;
+  return { ...p, wb, waterWb };
+}
+
+/**
+ * "Water colour": one control that turns the hue of the water, −1 (teal, `teal` radians toward green) … 0 (as
+ * graded) … +1 (a deeper blue, `blue` radians toward indigo; much smaller: the default look already sits on cobalt, and 20° read violet on pale sand and open water). A
+ * rotation of the graded Oklab chroma, weighted by the water-hue map's own idea of water (BLUE_WATER: the cool side
+ * of its warm projection, vegetation and vivid violets kept), so skin, sand in sunlight, orange fish and coral do not
+ * move, a near-grey moves by next to nothing (a rotation scales with the chroma) and no chroma is added: noise is
+ * not amplified and no edge appears that the picture does not have. Runs right after the water-hue map in every
+ * style (Natural has no map, the control still works) and whatever the do-no-harm gates say: it is the user's call.
+ */
+export const WATER_TINT = { teal: (35 * Math.PI) / 180, blue: (14 * Math.PI) / 180 };
+
+/** The water-hue rotation at full water weight, radians (positive = toward blue / indigo); uniform p26.w. */
+export function waterTintOf(s: Pick<UserSettings, "waterHue">): number {
+  const x = Math.min(1, Math.max(-1, s.waterHue ?? 0));
+  return Number.isFinite(x) ? x * (x < 0 ? WATER_TINT.teal : WATER_TINT.blue) : 0;
+}
+
 /** The Blue water amount the shader reads (0..1): Vivid's share (WATER_HUE) or the Blue water style, through the gate (graded, topside, night, ROV). */
 export function blueAmountOf(p: GradeParams, s: UserSettings): number {
   const c01 = (x: number) => Math.min(1, Math.max(0, x));
@@ -1102,6 +1159,7 @@ export const CLAHE_BINS = 32;
  *  p18–p22: backdrop surface (18 coefficients, L / a / b; backdrop.ts), p22.z subject tone, p22.w green-water weight (red.ts)
  *  p23: temporal history valid (backend), temporal layer on (engine), Vivid amount (vividAmountOf), Subject pop Strength
  *  p25: Seabed amount, water L, bright L, Blue water amount (blueAmountOf)
+ *  p26: Noise reduction level, its history valid, hold, "Water colour" hue rotation (waterTintOf)
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -1115,7 +1173,7 @@ export function packUniforms(
 ): Float32Array {
   const u = new Float32Array(UNIFORM_FLOATS);
   const hz = settings.hazeAuto !== false;
-  params = lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(params), pushOf(settings)), settings)), settings);
+  params = tapParams(lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(params), pushOf(settings)), settings)), settings), settings);
   const base = greenSettings(presetSettings(calmSettings(resolveSettings(settings), params), settings), params);
   const s = lookSettings(hz ? hazeSettings(base, params) : base, params);
   u.set([rotation, split, s.strength, 0], 0);
@@ -1159,8 +1217,9 @@ export function packUniforms(
   u[96] = 1; // p24.x: Subject pop lift direction (set per frame by the engine, seg-overlay.ts popDirection)
   // p24.y: an AI subject overlay is on this frame (set by the engine): the AI alone weights the pop (grade-shader toneWeight)
   // p26: Noise reduction level (0 off, 1 auto, 2 strong), its history valid (set by the backend per frame),
-  // hold (set by the engine: the same frame drawn again, the history must not advance), 0
+  // hold (set by the engine: the same frame drawn again, the history must not advance), Water colour (below)
   u[104] = noiseLevelOf(settings);
+  u[107] = waterTintOf(settings); // p26.w: "Water colour" hue rotation (WATER_TINT)
   return u;
 }
 

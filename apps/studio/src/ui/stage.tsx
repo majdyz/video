@@ -57,6 +57,7 @@ export function Stage({
   onHold,
   onTap,
   onTapAt,
+  tapHint,
   overlay,
   onZoom,
   interactive,
@@ -80,6 +81,8 @@ export function Stage({
   onTap?: () => void;
   /** A tap at upright picture position (u, v), 0..1 (takes over from onTap; e.g. selecting subjects). */
   onTapAt?: (u: number, v: number) => void;
+  /** What a tap at a point does, for the accessible description (default: selecting subjects). */
+  tapHint?: string;
   /** Drawn over the picture inside the zoomed content (follows pinch and pan). */
   overlay?: ReactNode;
   onZoom: (z: number) => void;
@@ -309,7 +312,7 @@ export function Stage({
   const lineX = split !== null ? view.tx + split * box.w * view.z : 0;
   const lineVisible = split !== null && lineX >= 0 && lineX <= box.w;
   const label = !aspect ? undefined
-    : `Preview${zoomed ? `, zoomed ${view.z.toFixed(1)} times` : ""}. ${split !== null ? "Drag to move the before and after line. " : onHold ? "Press and hold to see the original. " : ""}Double-tap or pinch to zoom${onTapAt ? ", tap an animal to include or exclude it" : onTap ? ", tap to play or pause" : ""}.`;
+    : `Preview${zoomed ? `, zoomed ${view.z.toFixed(1)} times` : ""}. ${split !== null ? "Drag to move the before and after line. " : onHold ? "Press and hold to see the original. " : ""}Double-tap or pinch to zoom${onTapAt ? `, ${tapHint ?? "tap an animal to include or exclude it"}` : onTap ? ", tap to play or pause" : ""}.`;
 
   return (
     <div className="stage" ref={areaRef}>

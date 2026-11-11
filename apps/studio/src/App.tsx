@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Studio } from "./pipeline/studio.ts";
 import { segStatusText } from "./pipeline/seg/studio-seg.ts";
-import { DEFAULT_TOOLS, TOOL_LABEL, TOOL_ORDER, detectedProfile, enabledTools, initialStyle, lookOf, profileDefaults, savedVivid, styleFlags, styleOf, subjectPopVisible, type ToolId, type ToolsState } from "./pipeline/tools.ts";
+import { DEFAULT_TOOLS, NEUTRAL_HINT, TOOL_LABEL, TOOL_ORDER, detectedProfile, enabledTools, initialStyle, lookOf, neutralFor, profileDefaults, savedVivid, styleFlags, styleOf, subjectPopVisible, type ColourState, type ToolId, type ToolsState } from "./pipeline/tools.ts";
 import { BRAND, SAMPLE, donateUrl } from "./brand.ts";
 import { Stage } from "./ui/stage";
 import { Timeline } from "./ui/timeline";
@@ -11,6 +11,7 @@ import { lastAiProfile, lastCrash, sessionCrumbs } from "./pipeline/crumbs.ts";
 import { deviceFacts, isWeakDevice } from "./pipeline/device.ts";
 import type { FeedbackContext } from "./pipeline/feedback.ts";
 import { SubjectOutlines } from "./ui/subjects";
+import { NeutralMark } from "./ui/neutral";
 import { ExportSheet } from "./ui/export-sheet";
 import { BatchSheet, BatchStrip, makeThumb, type BatchItem } from "./ui/batch";
 import { kindOf, splitBatch } from "./pipeline/batch.ts";
@@ -92,6 +93,8 @@ export default function App() {
   /** Full screen: the picture alone (the Fullscreen API where there is one, else the page's own chrome hidden). */
   const [immersive, setImmersive] = useState(false);
   const [tapPulse, setTapPulse] = useState<{ u: number; v: number; t: number } | null>(null);
+  /** Tap-to-neutral: the picture is waiting for a tap on something white or grey (Colour → White point). */
+  const [picking, setPicking] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   /** Several photos opened at once (ui/batch.tsx): the strip under the picture, Export all. Null for one clip / photo. */
   const [batch, setBatch] = useState<BatchItem[] | null>(null);
@@ -359,7 +362,29 @@ export default function App() {
     // The outlines must match the paused frame, not the last analysis taken while playing.
     if (selectActive) void studio.refreshSubjects();
   }, [studio, selectActive]);
-  useEffect(() => studio.setSplit(holding ? 1 : selectActive ? null : split), [studio, split, holding, selectActive]);
+  /**
+   * Tap-to-neutral: while on (from Colour → White point), a tap on the picture picks the point that should be white
+   * or grey; the before / after line steps aside so the whole picture shows the result. Leaving Colour, closing the
+   * sheet or starting an export ends it.
+   */
+  const pickActive = picking && pane === "colour" && paneOpen && ready && !exporting && tools.colour.enabled;
+  useEffect(() => {
+    if (picking && !pickActive) setPicking(false);
+    if (!pickActive) studio.clearNeutralNote();
+  }, [studio, picking, pickActive]);
+  // A change to the colour look made in the studio (a tap, the debug API) goes through the panels' state.
+  const patchColourRef = useRef<(patch: Partial<ColourState>) => void>(() => undefined);
+  patchColourRef.current = (patch) => setPanelTools((t) => ({ ...t, colour: { ...t.colour, ...patch } }));
+  useEffect(() => {
+    studio.onColourPatch = (patch) => patchColourRef.current(patch);
+    return () => { studio.onColourPatch = null; };
+  }, [studio]);
+  /** The pick in force on this clip (a pick made on another file is ignored, see tools.ts NeutralPick). */
+  const neutralPick = neutralFor(panelTools.colour, studio.clipKey);
+  const neutralControls = { active: pickActive, pick: neutralPick, onToggle: () => setPicking((v) => !v), onReset: () => studio.clearNeutral() };
+  // The mark sits where the tap was: on a clip, only around the frame it was made on (the scene moves on).
+  const neutralMark = neutralPick && (photo || Math.abs(s.currentTime - neutralPick.t) < 0.25) ? neutralPick : null;
+  useEffect(() => studio.setSplit(holding ? 1 : selectActive || pickActive ? null : split), [studio, split, holding, selectActive, pickActive]);
   const getSelection = useCallback(() => studio.outlineSelection(), [studio]);
   const openPane = (id: Pane) => {
     setPane(id);
@@ -445,7 +470,7 @@ export default function App() {
       {!immersive && !wide && <span className="rail-sep" aria-hidden="true" />}
       {!immersive && (
         <>
-          <button type="button" className={`rail-btn${split !== null ? " is-on" : ""}`} aria-pressed={split !== null} onClick={() => setSplit((v) => (v === null ? 0.5 : null))} disabled={!ready || exporting || selectActive}>
+          <button type="button" className={`rail-btn${split !== null ? " is-on" : ""}`} aria-pressed={split !== null} onClick={() => setSplit((v) => (v === null ? 0.5 : null))} disabled={!ready || exporting || selectActive || pickActive}>
             <IconCompare size={20} /><span>Compare</span>
           </button>
           {subjectPopVisible() && wide && (
@@ -468,7 +493,7 @@ export default function App() {
       advanced={
         <section className="finetune" aria-label={`${TOOL_LABEL[tab]} fine-tuning${tab === "colour" && segNum ? `, segment ${segNum.index} of ${segNum.count}` : ""}`}>
           <h4 className="finetune__title">Fine-tune</h4>
-          <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined} />
+          <AdvancedControls tool={tab} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} onMotionLog={s.kind === "video" ? (f) => studio.setMotionLog(f) : undefined} neutral={neutralControls} />
           {tab === "colour" && s.kind === "video" && <FootageField footage={s.footage} onChange={(c) => studio.setFootage(c)} disabled={exporting} />}
         </section>
       } />
@@ -481,7 +506,7 @@ export default function App() {
   );
 
   return (
-    <div className={`app phase-${s.phase}${wide ? " is-wide" : " is-narrow"}${!wide && sheetOpen ? " sheet-open" : ""}${immersive ? " is-immersive" : ""}`} style={aspect ? ({ ["--clip-ar" as string]: aspect.toFixed(4) }) : undefined} data-stab={s.stab.state} data-export={s.exp.state} data-kind={s.kind ?? "none"}>
+    <div className={`app phase-${s.phase}${wide ? " is-wide" : " is-narrow"}${!wide && sheetOpen ? " sheet-open" : ""}${immersive ? " is-immersive" : ""}${pickActive ? " is-picking" : ""}`} style={aspect ? ({ ["--clip-ar" as string]: aspect.toFixed(4) }) : undefined} data-stab={s.stab.state} data-export={s.exp.state} data-kind={s.kind ?? "none"}>
       <header className="topbar">
         <div className="brand">
           <h1 className="wordmark">{BRAND.name}</h1>
@@ -510,25 +535,33 @@ export default function App() {
             liveRef={liveRef}
             liveOn={liveOn}
             visible={s.visible}
-            split={ready && !exporting && !selectActive ? split : null}
+            split={ready && !exporting && !selectActive && !pickActive ? split : null}
             holding={holding}
             onSplit={setSplit}
             onHold={ready && !exporting ? setHolding : undefined}
-            onTap={selectActive || photo ? undefined : () => studio.togglePlay()}
-            onTapAt={selectActive ? (u, v) => { void studio.toggleSubjectAt(u, v); setTapPulse({ u, v, t: performance.now() }); } : undefined}
-            overlay={selectActive ? <SubjectOutlines getSelection={getSelection} pulse={tapPulse} /> : undefined}
+            onTap={selectActive || pickActive || photo ? undefined : () => studio.togglePlay()}
+            onTapAt={pickActive ? (u, v) => void studio.tapNeutral(u, v) : selectActive ? (u, v) => { void studio.toggleSubjectAt(u, v); setTapPulse({ u, v, t: performance.now() }); } : undefined}
+            tapHint={pickActive ? "tap something that should be white or grey to balance the colour to it" : undefined}
+            overlay={pickActive ? <NeutralMark pick={neutralMark} /> : selectActive ? <SubjectOutlines getSelection={getSelection} pulse={tapPulse} /> : undefined}
             onZoom={onZoom}
             interactive={ready && !exporting}
             onFrameSize={onFrameSize}
             paused={!s.playing}
-            showPlayHint={ready && !photo && !s.busy && !exporting && !selectActive}
+            showPlayHint={ready && !photo && !s.busy && !exporting && !selectActive && !pickActive}
             resetKey={`${s.fileName}:${s.info?.displayW}x${s.info?.displayH}`}
           >
             {s.phase === "empty" && <EmptyState accept={ACCEPT} onFiles={openFiles} onPick={native ? pick : undefined} onSample={openSample} busy={s.busy} />}
-            {s.phase !== "empty" && pill && !selectActive && (
+            {s.phase !== "empty" && pill && !selectActive && !pickActive && (
               <div className="pill" role="status"><span className="pill__dot" aria-hidden="true" />{pill}</div>
             )}
             {rail}
+            {pickActive && (
+              <div className="select-bar" role="status" onClick={(e) => e.stopPropagation()}>
+                <span>{s.neutralNote ?? NEUTRAL_HINT}</span>
+                {neutralPick && <button type="button" className="link-btn" onClick={() => studio.clearNeutral()}>Reset</button>}
+                <button type="button" className="link-btn" onClick={() => setPicking(false)}>Done</button>
+              </div>
+            )}
             {selectActive && (
               // Its buttons are never a click "outside" (Undo can re-render away under the click before it bubbles).
               <div className="select-bar" role="status" onClick={(e) => e.stopPropagation()}>
@@ -550,7 +583,7 @@ export default function App() {
               <ToolDock pane={pane} tools={tab === "colour" ? panelTools : tools} setTools={tab === "colour" ? setPanelTools : setTools} stab={s.stab} camera={s.camera} photo={photo} disabled={exporting || !ready}
                 footage={s.kind === "video" ? s.footage : null} onFootage={s.kind === "video" ? (c) => studio.setFootage(c) : null}
                 onMotionLog={s.kind === "video" ? () => motionLogRef.current?.click() : null}
-                subjects={subjectControls} onClose={closeSheet}
+                subjects={subjectControls} neutral={neutralControls} onClose={closeSheet}
                 status={pane === "subjects" ? (s.kind === "video" && (s.seg.on || s.seg.phase === "unavailable" || s.seg.weak || s.seg.crashed) ? segStatusText(s.seg) : null) : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
             ) : null}
             {/* The timeline (play / pause, scrub) stays while a tool is open: a change is checked across the clip. */}

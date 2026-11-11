@@ -391,6 +391,19 @@ vec4 blueLook(vec3 lab, float v, float g) {
   float L2 = lab.x * (1.0 - BW_SHADOW_K * v * (1.0 - smoothstepf(0.0, BW_SHADOW_HI, lab.x)));
   return vec4(L2, ab, max(ct * w, Cw * warm));
 }
+// "Water colour" (see WATER_TINT in params.ts; mirrors apply.ts waterTint): the water's hue turned by t radians. Returns (a, b).
+vec2 waterTint(vec2 ab, float t, float g) {
+  if (t == 0.0) return ab;
+  float C = length(ab);
+  float h = atan(ab.y, ab.x);
+  float hh = h < 0.0 ? h + 6.2831853 : h;
+  float cool = 1.0 - smoothstepf(BW_S_LO, BW_S_HI, dot(ab, vec2(cos(BW_WARM_DIR), sin(BW_WARM_DIR))));
+  float vio = smoothstepf(BW_VC_LO, BW_VC_HI, C) * smoothstepf(BW_VIO0, BW_VIO1, hh) * (1.0 - smoothstepf(BW_VIO2, 6.2831853, hh));
+  float veg = smoothstepf(BW_VEG_C_LO, BW_VEG_C_HI, C) * smoothstepf(BW_VEG_IN0, BW_VEG_IN1, hh) * (1.0 - smoothstepf(BW_VEG_OUT0, BW_VEG_OUT1, hh)) * (1.0 - BW_VEG_GREEN * g);
+  float ang = t * cool * (1.0 - vio) * (1.0 - veg);
+  float cs = cos(ang), sn = sin(ang);
+  return vec2(ab.x * cs - ab.y * sn, ab.x * sn + ab.y * cs);
+}
 // Saturation by hue (see RICH_LOOK in params.ts; mirrors apply.ts richLook). v = Vivid amount. Returns (a, b).
 vec2 richLook(vec3 lab, float v) {
   float C = length(lab.yz);
@@ -792,6 +805,8 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // Blue water style (opt-in, p25.w): cobalt water, orange warm subjects, neutral silver, deeper shadows.
   vec4 bl = blueLook(lk, p[25].w, p[22].w);
   lk = bl.xyz;
+  // "Water colour" (p26.w): the water's hue turned toward teal or a deeper blue; subjects keep theirs.
+  lk.yz = waterTint(lk.yz, p[26].w, p[22].w);
   // Saturation by hue (RICH_LOOK; rides on the Vivid amount, p23.z): richer colour, warm subjects more.
   lk.yz = richLook(lk, p[23].z);
   // Seabed recovery: sand and reef to a warm neutral (and a little lighter) where the water left no red.
@@ -1006,6 +1021,20 @@ fn blueLook(lab: vec3<f32>, v: f32, g: f32) -> vec4<f32> {
   ab *= 1.0 - BW_NEUTRAL_K * neutral * cool * v;
   let L2 = lab.x * (1.0 - BW_SHADOW_K * v * (1.0 - smoothstepf(0.0, BW_SHADOW_HI, lab.x)));
   return vec4<f32>(L2, ab, max(ct * w, Cw * warm));
+}
+// "Water colour" (mirrors the GLSL / apply.ts waterTint): the water's hue turned by t radians. Returns (a, b).
+fn waterTint(ab: vec2<f32>, t: f32, g: f32) -> vec2<f32> {
+  if (t == 0.0) { return ab; }
+  let C = length(ab);
+  let h = atan2(ab.y, ab.x);
+  let hh = select(h, h + 6.2831853, h < 0.0);
+  let cool = 1.0 - smoothstepf(BW_S_LO, BW_S_HI, dot(ab, vec2<f32>(cos(BW_WARM_DIR), sin(BW_WARM_DIR))));
+  let vio = smoothstepf(BW_VC_LO, BW_VC_HI, C) * smoothstepf(BW_VIO0, BW_VIO1, hh) * (1.0 - smoothstepf(BW_VIO2, 6.2831853, hh));
+  let veg = smoothstepf(BW_VEG_C_LO, BW_VEG_C_HI, C) * smoothstepf(BW_VEG_IN0, BW_VEG_IN1, hh) * (1.0 - smoothstepf(BW_VEG_OUT0, BW_VEG_OUT1, hh)) * (1.0 - BW_VEG_GREEN * g);
+  let ang = t * cool * (1.0 - vio) * (1.0 - veg);
+  let cs = cos(ang);
+  let sn = sin(ang);
+  return vec2<f32>(ab.x * cs - ab.y * sn, ab.x * sn + ab.y * cs);
 }
 // Saturation by hue (mirrors the GLSL / apply.ts richLook). v = Vivid amount. Returns (a, b).
 fn richLook(lab: vec3<f32>, v: f32) -> vec2<f32> {
@@ -1335,6 +1364,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   lk = vec3(lk.x, warmPop(lk.x, lk.yz, wk));
   let bl = blueLook(lk, params.p[25].w, p[22].w);
   lk = bl.xyz;
+  lk = vec3(lk.x, waterTint(lk.yz, params.p[26].w, p[22].w));
   lk = vec3(lk.x, richLook(lk, p[23].z));
   if (params.p[25].x > 0.0) {
     let sb = seabedW(uv, lab0.x) * params.p[25].x;
