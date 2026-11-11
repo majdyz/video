@@ -447,3 +447,25 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   assert.deepEqual(await run(true), { autos: 10, tap: 6 }, "the first two seeds only; the tap as ever");
   console.log("session: lite model → at most two automatic subjects, taps kept: ok");
 }
+
+// ---------------------------------------------------------------- the pass profile line (breadcrumbs, About)
+
+{
+  const { profileLine } = await import("../src/pipeline/seg/studio-seg.ts");
+  const f = fake({ lite: true });
+  const r = open(f, { start: 0, end: 2 }, () => []);
+  const end = r.settled();
+  r.s.seeds(0, [subject(0)]);
+  await end;
+  const p = r.s.profile();
+  assert.equal(p.objects, 1);
+  assert.equal(p.keyframes, 5);
+  assert.equal(p.restarts, 0);
+  assert.ok(p.runMs > 0 && p.clipS > 2);
+  const line = profileLine({ ...p, encodeMs: 9000, encodes: 5, attendMs: 500, decoderMs: 250, memEncMs: 1000, steps: 5, heapMB: 612 }, "wasm lite, 1 thr");
+  assert.match(line, /^ai: profile wasm lite, 1 thr · encode 1800ms×5 · attn 100 dec 50 mem 200ms×5 steps · keys 5 \(2\/s \+0 extra\) objs 1 · decode /);
+  assert.match(line, /\(0 restarts\) · guard .* fill .*×61 maps .* seeds .* · total [0-9.]+s for 2\.0s · heap 612 MB$/);
+  // Nothing measured (an old worker, a field missing): zeros, never NaN.
+  assert.doesNotMatch(profileLine({}), /NaN|undefined/);
+  console.log("pass profile line: ok");
+}

@@ -74,6 +74,27 @@ export function crumb(msg: string): void {
   } catch { /* full or blocked */ }
 }
 
+// The last AI pass's profile (studio-seg.ts profileLine): kept apart from the steps (40 of them: an export's own steps
+// push it out) and across reloads, so a phone's numbers can be read back in About after the fact.
+const PROFILE_KEY = "studio.aiProfile";
+
+/** Keeps the AI pass's profile line (and writes it as a step). */
+export function aiProfile(line: string): void {
+  crumb(line);
+  try {
+    localStorage.setItem(PROFILE_KEY, `${new Date().toISOString().slice(0, 16).replace("T", " ")} ${line}`);
+  } catch { /* full or blocked */ }
+}
+
+/** The last AI pass's profile on this device, or null. */
+export function lastAiProfile(): string | null {
+  try {
+    return localStorage.getItem(PROFILE_KEY);
+  } catch {
+    return null;
+  }
+}
+
 /** The steps of a last session that crashed, or null. */
 export function lastCrash(): string[] | null {
   return previous;

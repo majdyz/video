@@ -6,7 +6,7 @@
 import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts";
 import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
-import { aiCrashedLast, aiWorking, crumb } from "../crumbs.ts";
+import { aiCrashedLast, aiProfile, aiWorking, crumb } from "../crumbs.ts";
 import { deviceFacts, isMobile, isWeakDevice } from "../device.ts";
 import { segFps, segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
@@ -447,6 +447,25 @@ export function logForSpan(log: readonly LogOp[], span: TrimRange): LogOp[] {
   return log.filter((l) => (l.op === "add" ? kept.has(l.object.id) : l.op !== "seeds" && kept.has(l.id)));
 }
 
+/**
+ * The pass profile (session.ts profile) as one line for the breadcrumbs and About: where a phone's time goes, per
+ * model stage (ms a call), in the decoder, the flow guard and the fill, and the pass's own time against the clip's.
+ */
+export function profileLine(p: Record<string, number>, ep = ""): string {
+  const n = (k: string) => (Number.isFinite(p[k]) ? p[k] : 0);
+  const per = (ms: string, count: string) => (n(count) > 0 ? Math.round(n(ms) / n(count)) : 0);
+  const s = (ms: string) => (n(ms) / 1000).toFixed(1);
+  return [
+    `ai: profile${ep ? ` ${ep}` : ""}`,
+    `encode ${per("encodeMs", "encodes")}ms×${n("encodes")}`,
+    `attn ${per("attendMs", "steps")} dec ${per("decoderMs", "steps")} mem ${per("memEncMs", "steps")}ms×${n("steps")} steps`,
+    `keys ${n("keyframes")} (${n("fps")}/s +${n("extraKeys")} extra) objs ${n("objects")}`,
+    `decode ${s("decodeMs")}s×${n("decodes")} (${n("restarts")} restarts)`,
+    `guard ${s("guardMs")}s fill ${s("fillMs")}s×${n("filledFrames")} maps ${s("productMs")}s seeds ${s("waitSeedsMs")}s`,
+    `total ${s("runMs")}s for ${n("clipS").toFixed(1)}s${n("heapMB") ? ` · heap ${n("heapMB")} MB` : ""}`,
+  ].join(" · ");
+}
+
 /** A finished pass's worker (the model's ~800 MB of WASM heap) is shut down after this long idle (ms). */
 export const SEG_HIBERNATE_MS = 15000;
 
@@ -562,6 +581,8 @@ export class SubjectSeg {
   }
 
   private crumbTens = -1;
+  /** Model steps at the last profile written (onEvent idle). */
+  private profiledSteps = -1;
   /** Last sign of the pass working (any session event, seeding): the export's stall clock (settle). */
   private lastActivity = 0;
   private onEvent(e: SessionEvent): void {
@@ -600,6 +621,14 @@ export class SubjectSeg {
       segLog(`session idle: ${live.filled}/${live.n} frames filled, ${(live.bytes / 1e6).toFixed(1)} MB`);
       this.lastProfile = e.profile;
       segLog(`pass profile ${JSON.stringify(Object.fromEntries(Object.entries(e.profile).map(([k, v]) => [k, Math.round(v)])))}`);
+      // Always (not only with ?debug=1): a phone has no console, and its numbers are the ones that matter. Once per
+      // stretch of model work (an idle after a tap that tracked nothing new says nothing new).
+      if (this.autos !== null && e.profile.steps !== this.profiledSteps) {
+        this.profiledSteps = e.profile.steps;
+        const line = profileLine(e.profile, this.model?.info ? `${this.model.info.ep}, ${this.model.info.threads} thr` : "");
+        aiProfile(line);
+        console.info(`[seg] ${line}`);
+      }
       this.set({ phase: "ready", progress: null });
       this.scheduleHibernate();
       const w = this.idleWaiters;

@@ -172,7 +172,7 @@ export class SegSession {
   private asked = NaN;
   /** Steps done (for the progress). */
   private stepsDone = 0;
-  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0, extraKeys: 0, carried: 0 };
+  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0, extraKeys: 0, carried: 0, runMs: 0 };
   private waitSince = 0;
 
   private model: EdgeTam;
@@ -600,6 +600,7 @@ export class SegSession {
 
   private async work(): Promise<void> {
     this.running = true;
+    const began = performance.now();
     try {
       while (!this.closed) {
         const op = this.ops.shift();
@@ -651,6 +652,8 @@ export class SegSession {
       if (!this.closed) this.fail(e);
     } finally {
       this.running = false;
+      // The loop's own time (it stops while it waits for seeds: waitSeedsMs, or for the user).
+      this.prof.runMs += performance.now() - began;
       if (!this.closed && !this.waiting) this.ev.idle(this.profile());
     }
   }
@@ -1020,7 +1023,9 @@ export class SegSession {
   /** Where the pass's time went (ms) and its counts. */
   profile(): SessionProfile {
     const m = this.model.timing;
-    return { ...this.prof, encodeMs: m.encode, encodes: m.encodes, attendMs: m.attend, decoderMs: m.decoder, memEncMs: m.memEnc, steps: m.steps, keyframes: this.keys.length, fps: this.fps, restarts: this.frames.restarts?.() ?? 0 };
+    let objects = 0;
+    for (const s of [...this.objs.values(), ...this.trash.values()]) if (s.keys.size) objects++;
+    return { ...this.prof, objects, clipS: this.grid.n / SEG.sampleHz, encodeMs: m.encode, encodes: m.encodes, attendMs: m.attend, decoderMs: m.decoder, memEncMs: m.memEnc, steps: m.steps, keyframes: this.keys.length, fps: this.fps, restarts: this.frames.restarts?.() ?? 0 };
   }
 }
 
