@@ -422,8 +422,9 @@ export default function App() {
   const exportBtn = (
     <button type="button" className="btn btn--primary export-btn" onClick={() => { studio.pause(); if (inBatch) setBatchOpen(true); else setExportOpen(true); }} disabled={!ready || !s.canExport || colourPending}
       title={colourPending ? `Export unlocks once the colour analysis of this ${photo ? "photo" : "clip"} is done` : undefined}>
-      {colourPending ? <span className="pill__dot" aria-hidden="true" /> : <IconExport size={18} />}
-      <span>{colourPending ? (wide ? "Reading the water…" : "Analysing") : inBatch ? (wide ? `Export all ${batch!.length}` : `Export ${batch!.length}`) : "Export"}</span>
+      {/* While the colour is read, the stage pill ("Profiling colour…") is the one spinner; the button just waits greyed out. */}
+      <IconExport size={18} />
+      <span>{inBatch ? (wide ? `Export all ${batch!.length}` : `Export ${batch!.length}`) : "Export"}</span>
     </button>
   );
   const subjectsOn = !!panelTools.colour.subjectPop && tools.colour.enabled;
