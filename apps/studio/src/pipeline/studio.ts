@@ -29,7 +29,7 @@ import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import { GeometryRenderer, type GeometryRenderOptions, type GeometrySource } from "./geometry.ts";
 import { GpuGeometryRenderer } from "./geometry-gpu.ts";
-import { outputToUpright, type GeometryParams, type QuarterTurns } from "./geometry-math.ts";
+import { outputToUpright, previewFitWanted, type GeometryParams, type QuarterTurns } from "./geometry-math.ts";
 import { mapPrompt } from "./seg/track.ts";
 import type { ClipInfo } from "./probe.ts";
 import { colourSettings, DEFAULT_TOOLS, exportSuffix, profileDefaults, solveParams, type ColourLook, type DewarpState, type ToolsState } from "./tools.ts";
@@ -1562,12 +1562,40 @@ export class Studio {
       this.beforeSet = split !== null;
       e.setPreviewScale(1);
     } else {
+      const fit = size ? null : this.previewFit(e, sw, sh);
+      if (fit) {
+        // No geometry tool on, a source much larger than the preview (4K on a phone): the geometry pass with
+        // an identity transform draws it at the preview size, so the engine's source, its temporal targets and
+        // everything that samples them are preview-sized instead of source-sized. The source is still the
+        // untouched picture, so it is the compare wipe's "before" as on the direct path.
+        this.geometryToEngine(e, src, this.geoParams(t, info.rot), this.uprightOpts(null), fit.w, fit.h, undefined, fit.shared);
+        e.setBefore(null, 0, 0);
+        e.setPreviewScale(1);
+        return;
+      }
       const w = sw, h = sh;
       e.setBefore(null, 0, 0);
       e.upload(src, w, h, 0);
       if (size) e.setPreviewScale(Math.min(1, size[0] / w));
       else e.setPreviewScale(Math.min(1, this.previewSize()[0] / w));
     }
+  }
+
+  /** `?previewfit=0`: the preview uploads the source at its own size, as before (A/B). */
+  private readonly previewFitOn = typeof location === "undefined" || new URLSearchParams(location.search).get("previewfit") !== "0";
+
+  /**
+   * The preview-sized source for a sw×sh picture with no geometry tool on (uploadToEngine), or null to upload it
+   * as it is: only through the pass in the engine's own GL context (no copy between canvases), and only when the
+   * preview has at most half the source's pixels (below that the extra pass is not worth a smaller source).
+   * Exports pass their size and never come here.
+   */
+  private previewFit(e: Engine, sw: number, sh: number): { w: number; h: number; shared: SharedGeometry } | null {
+    if (!this.previewFitOn) return null;
+    const [w, h] = this.previewSize();
+    if (!previewFitWanted(w, h, sw, sh)) return null;
+    const shared = this.sharedGeometry(e);
+    return shared?.kind === "gl" ? { w, h, shared } : null;
   }
 
   /**
