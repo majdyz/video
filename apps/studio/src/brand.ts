@@ -6,9 +6,11 @@ export const BRAND = {
   beta: true,
   /** Where "Open a GitHub issue" in Send feedback goes (owner/repo). */
   issues: "majdyz/video",
-  /** Tip jar for everyone (Ko-fi / Buy Me a Coffee URL). Empty: no support link anywhere (unless donateId applies). */
+  /** Tip jar for everyone (Ko-fi / Buy Me a Coffee URL). Empty: no support link anywhere (unless donateId applies).
+   *  Ready: https://ko-fi.com/divegrade (set it here once its payouts are connected). */
   donate: "",
   /** Indonesian tip jar (Trakteer / Saweria: QRIS, e-wallets) for phones set to Indonesian; falls back to `donate`. */
+  /** Ready: https://trakteer.id/divegrade (set it here once its payouts are connected). */
   donateId: "",
 };
 
