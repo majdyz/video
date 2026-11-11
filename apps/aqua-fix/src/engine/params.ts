@@ -85,7 +85,8 @@ export const PRESET_ADJUST: Record<ScenePreset, { red: number; blue: number; red
   reef: { red: 1, blue: 1, redMax: 1.6, dehaze: 0, clarity: -0.1, exposure: 0.97, hazeLift: 0 },
 };
 
-export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.25, veil: 0.7, look: 0, preset: "auto", subjectPop: false, subjectPopStrength: 0.5, subjectPopWarmth: 0.5, seabed: 0.6, vivid: 0, blue: 0 };
+// clarity: 0.25 before the colour review's item 8 (local contrast as a modest control; the slider goes to 1).
+export const DEFAULT_SETTINGS: UserSettings = { intensity: 1, saturation: 1, clarity: 0.15, veil: 0.7, look: 0, preset: "auto", subjectPop: false, subjectPopStrength: 0.5, subjectPopWarmth: 0.5, seabed: 0.6, vivid: 0, blue: 0 };
 export const INTENSITY_MAX = 2;
 
 /** Internal controls the shader reads, derived from the intensity. */
@@ -760,8 +761,11 @@ export function lookParams(p: GradeParams, s: UserSettings): GradeParams {
  * levels stretch on their own (no balance push), so a murky clip clears up
  * at the default Intensity while clear scenes are untouched.
  */
-// clarity 0.3 cost ~35 % temporal grain on hazy clips (review A/B, 4 Oct); 0.15 keeps most of the clearing.
-export const HAZE_AUTO = { dehaze: 0.5, clarity: 0.15, levels: 0.15, lift: 0.9 };
+// clarity 0.3 cost ~35 % temporal grain on hazy clips (review A/B, 4 Oct); 0.15 kept most of the clearing. Since the
+// colour review (P5, item 8) haze adds no local contrast at all: a hazy frame is the low-signal case, where local
+// contrast stretches grain ("crunchy"), and the reference pairs score no worse without it. The lift is a little
+// under full (0.9 before) and capped by the frame's signal (analyze.ts HAZE_CAP, VEIL_CAP).
+export const HAZE_AUTO = { dehaze: 0.5, clarity: 0, levels: 0.15, lift: 0.8 };
 export function hazeSettings(g: GradeSettings, p: GradeParams): GradeSettings {
   const hw = hazeWeight(p);
   if (hw <= 0) return g;
@@ -894,6 +898,8 @@ export type GradeParams = {
   seabedNeed?: number;
   /** Tone target (analyze.ts TONE): gamma on the graded Oklab lightness, ≥ 1 (1 = off). */
   toneGamma?: number;
+  /** This frame's own (capped) lifted black, kept through a clip lock: the lock's haze lift never exceeds what the frame holds (lock.ts LOCK_LIFT). Absent = hazeBlack. */
+  frameBlack?: number;
   seabedLw?: number;
   seabedLb?: number;
 };
@@ -987,7 +993,7 @@ export type FrameAnalysis = {
   /** Mean sRGB of the thumbnail, for scene-cut detection. */
   mean: Vec3;
   /** Diagnostics (harness only; the worker does not post it). */
-  diag?: { sandWeight: number; sandFrac: number; sandMask: Uint8Array; calm: CalmEvidence; backdrop?: number };
+  diag?: { sandWeight: number; sandFrac: number; sandMask: Uint8Array; calm: CalmEvidence; backdrop?: number; /** Tone caps (analyze.ts HAZE_CAP, VEIL_CAP): measured black, 10th percentile and median of the exposed luminance, and the veil cap's weight. */ tone?: { black: number; yLow: number; yMid: number; veilCap: number } };
 };
 
 export const CLAHE_TILES_X = 8;
@@ -1165,6 +1171,7 @@ export function lerpParams(a: GradeParams, b: GradeParams, t: number): GradePara
     blueGate: m(a.blueGate ?? a.vividGate ?? 1, b.blueGate ?? b.vividGate ?? 1),
     seabedNeed: m(a.seabedNeed ?? 0, b.seabedNeed ?? 0),
     toneGamma: m(a.toneGamma ?? 1, b.toneGamma ?? 1),
+    frameBlack: m(a.frameBlack ?? a.hazeBlack, b.frameBlack ?? b.hazeBlack),
     seabedLw: m(a.seabedLw ?? 0, b.seabedLw ?? 0),
     seabedLb: m(a.seabedLb ?? 1, b.seabedLb ?? 1),
     backdropFit: a.backdropFit && b.backdropFit && a.backdropFit.length === b.backdropFit.length ? a.backdropFit.map((x, i) => m(x, b.backdropFit![i])) : b.backdropFit,

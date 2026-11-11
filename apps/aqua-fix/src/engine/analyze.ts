@@ -132,7 +132,19 @@ const LEVELS_MIX = 0.5;
  */
 export const TONE = { target: 0.4, strength: 0.7, max: 1.35 };
 const LEVELS_WHITE_MIN = 0.65;
-const CLAHE_CLIP = 2.0;
+/**
+ * Local contrast (CLAHE tile LUTs), capped by signal and neutral in tone.
+ *  clip: histogram clip limit (× the mean bin), as before.
+ *  sigLo..sigHi: the tile's standard deviation of encoded luminance over which the equalisation comes in. A flat
+ *   tile (haze, open water, plain sand: spread near the grain and block noise of compressed video) has a narrow
+ *   histogram, which is exactly where equalisation is steepest (up to 3×): it stretched noise, not picture
+ *   ("crunchy", colour review P5). Below sigLo a tile's LUT is the identity.
+ *  anchor: share of the equalisation's shift of the tile's median that is taken back out. Plain equalisation pulls
+ *   every tile's median toward mid-grey, so the frame's brightness followed whatever each tile held from one
+ *   analysis to the next (lightness pumping) and dark water was lifted to grey ("chalky"). Anchored, the stage only
+ *   spreads tones about the tile's own median.
+ */
+export const CLAHE = { clip: 2.0, sigLo: 0.03, sigHi: 0.1, anchor: 1 };
 // Highlight shoulder: linear luminance above KNEE rolls off toward 1.
 const KNEE = 0.75;
 // Veil subtraction: per channel (colour restoration) when the pixel keeps
@@ -145,12 +157,35 @@ const SUB_HI = 0.55;
 const CHROMA_K = 2.6;
 const CHROMA_C0 = 0.025;
 const FLOOR_FRAC = 0.05;
+/**
+ * Veil cap by signal. The backscatter fit takes the frame's far, water-coloured pixels for the veil. A frame with no
+ * water column in view (top-down sand, macro) still gets a fit: its "veil" is the scene itself. Subtracting it
+ * multiplies what little contrast is left by 1 / signal (2–4×, grain and compression blocks included), and because
+ * every pixel then sits in the middle of the signal test, the water / object split cuts the sand into light and dark
+ * patches (the harsh, mottled sand of the colour review, P5). Such a frame is recognised by two things together:
+ * nearly all of it is on the object path (`covLo..covHi`, mean object confidence), and nothing in it stands clear of
+ * the fitted veil (`clearLo..clearHi`, the 95th percentile of the signal fraction; a reef or a diver in real haze has
+ * pixels well above it). There the fitted veil is scaled down (all channels alike) until the frame's median signal
+ * fraction is `sig`: the subtraction never multiplies the picture's contrast by more than about 1 / sig. The lifted
+ * black of such a frame is the scene's own darkest tone, not haze in front of it: the haze lift gives up `lift` of it.
+ */
+export const VEIL_CAP = { covLo: 0.3, covHi: 0.7, clearLo: 0.7, clearHi: 0.85, sig: 0.8, lift: 0.7 };
 // Dark subjects are mostly veil; subtracting it makes them darker still.
 // Hold corrected luminance at ≥ this fraction of the source luminance.
 const SHADOW_FLOOR = 0.55;
 const DEPTH_GUIDE = 0.5;
 // Lifted-black level (p0.4 of exposed luminance) that counts as fully hazy.
 const HAZE_BLACK_REF = 0.12;
+/**
+ * Haze lift cap by signal. The lift subtracts a share t of the lifted black (p0.4 of the exposed luminance) and
+ * multiplies contrast at luminance Y by Y / (Y − t). On a flat, hazy frame the low tones and the median sit just above
+ * that black, so the subtraction took most of them to the toe and stretched what was left: harsh shadows, amplified
+ * specks, and a tone curve steep enough to double any brightness change of the source (colour review P5). The black
+ * handed to the lift (GradeParams.hazeBlack) is at most `low` × the frame's 10th percentile and `mid` × its median,
+ * so with the default lift the low tones keep about a third of their luminance and the median's contrast gain stays
+ * under about 1.7. `haze` (how hazy the frame is, which drives the look) is not capped.
+ */
+export const HAZE_CAP = { low: 0.75, mid: 0.5 };
 
 // Per-frame temporaries, reused between calls (one analysis at a time per
 // worker): ~15 thumbnail-sized allocations a frame were a tenth of the cost in GC.
@@ -260,6 +295,8 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     }
   }
 
+  // The fit as measured (the Vivid / Blue gates read the veil's own lightness and chroma; VEIL_CAP may scale binf).
+  const binfFit: Vec3 = [binf[0], binf[1], binf[2]];
   let zSum = 0;
   for (let i = 0; i < n; i++) zSum += z[i];
   const zMean = zSum / n;
@@ -311,7 +348,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
   // Only pixels the surface predicts as water lose the hue verdict (a dark reef
   // in green murk departs from the surface and keeps it).
   for (let i = 0; i < n; i++) objHue[i] = Math.max(hueObj[i] * (1 - backdropValidity * (1 - bdDev[i])), backdrop[i]);
-  const veilScale = veilScaleMap(lin, objHue, bfArr, w, h, temp("veilScale", n));
+  let veilScale = veilScaleMap(lin, objHue, bfArr, w, h, temp("veilScale", n));
   // Green water (red.ts): every object shares the green veil's hue, so the hue
   // test calls the whole scene water; there the signal test decides alone.
   const greenObj = greenCastOf(binf, veilColor) * RED.greenObj;
@@ -322,10 +359,12 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
   const J = temp("J", n * 3);
   const conf = temp("conf", n);
   const wbWeight = temp("wbWeight", n);
+  const sigArr = temp("sigArr", n);
   // Mirrors the shader: the scaled veil says whether a pixel *is* water
   // (sunlit water sits above the global fit); what gets subtracted from an
   // object is at most the global fit; and a pixel that keeps little signal
   // gets a proportional (hue-preserving) subtraction instead of per channel.
+  const descatter = (): void => {
   for (let i = 0; i < n; i++) {
     const lumI = Math.max(1e-5, lum[i]);
     const subScale = Math.min(1, veilScale[i]);
@@ -339,6 +378,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
       lumBs += Bsub[c] * wl;
     }
     const sig = Math.max(0, (lumI - lumBc) / lumI);
+    sigArr[i] = sig;
     const wSub = smoothstep(subLo, subHi, sig) * (1 - hueFarArr[i]);
     const prop = Math.max(FLOOR_FRAC, 1 - lumBs / lumI);
     for (let c = 0; c < 3; c++) {
@@ -358,6 +398,25 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     // every object shares the water's hue and the hue test would starve the
     // vote, leaving deep reef uncorrected. Open water drops out by itself.
     wbWeight[i] = Math.sqrt(confSignal);
+  }
+  };
+  descatter();
+  let veilCap = 0;
+  // Veil cap (VEIL_CAP): a frame that is nearly all object path and yet has nothing standing clear of the fitted
+  // veil has no water column to remove; the fit is scaled down until the frame's median signal reaches the target.
+  {
+    let cs = 0;
+    for (let i = 0; i < n; i++) cs += conf[i];
+    const [mid, clear] = percentiles(sigArr, [0.5, 0.95]);
+    const cap = smoothstep(VEIL_CAP.covLo, VEIL_CAP.covHi, cs / n) * (1 - smoothstep(VEIL_CAP.clearLo, VEIL_CAP.clearHi, clear));
+    veilCap = cap;
+    const k = 1 + (Math.min(1, (1 - VEIL_CAP.sig) / Math.max(1e-3, 1 - mid)) - 1) * cap;
+    if (k < 0.98) {
+      for (let c = 0; c < 3; c++) binf[c] *= k;
+      for (let i = 0; i < n * 3; i++) bfArr[i] *= k;
+      veilScale = veilScaleMap(lin, objHue, bfArr, w, h, veilScale);
+      descatter();
+    }
   }
 
   // 4. Shades-of-Gray white balance (p = 6) on the de-scattered image,
@@ -542,7 +601,9 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     const ew = Math.pow(exposure, WATER_EXPOSURE);
     for (let i = 0; i < n; i++) Y[i] = mixYAt(i, exposure, ew);
   }
-  const [black] = percentiles(Y, [0.004]);
+  const [black, yLow, yMid] = percentiles(Y, [0.004, 0.1, 0.5]);
+  // Haze lift cap (HAZE_CAP): the black the lift may subtract, held to a share of the frame's low tones.
+  const liftBlack = Math.min(black, HAZE_CAP.low * yLow, HAZE_CAP.mid * yMid) * (1 - VEIL_CAP.lift * veilCap);
   // Per-channel lifted black (the colour of the haze floor), same blend as Y.
   const hazeFloor: Vec3 = [0, 0, 0];
   {
@@ -556,10 +617,11 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
       hazeFloor[c] = percentiles(ch, [0.004])[0];
     }
   }
+  if (liftBlack < black) for (let c = 0; c < 3; c++) hazeFloor[c] *= liftBlack / black;
   // The default haze-lift removal (see HAZE_LIFT) runs before levels in the
   // shader: levels and CLAHE are measured on the lifted-black-removed image.
   {
-    const tLift = HAZE_AUTO.lift * hazeWeightOf(clamp01(black / HAZE_BLACK_REF)) * black;
+    const tLift = HAZE_AUTO.lift * hazeWeightOf(clamp01(black / HAZE_BLACK_REF)) * liftBlack;
     if (tLift > 0) for (let i = 0; i < n; i++) Y[i] *= hazeLiftRatio(Y[i], tLift);
   }
   const [blackL, white] = percentiles(Y, [0.004, 0.996]);
@@ -622,7 +684,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
       if (band === 1) { topL += L; topN++; } else { botL += L; botN++; }
     }
   }
-  const veilLab = linearToOklab(binf[0], binf[1], binf[2]);
+  const veilLab = linearToOklab(binfFit[0], binfFit[1], binfFit[2]);
   const gateLift = topN > 0 && botN > 0 ? botL / botN - topL / topN : 0;
   const vividGate = vividGateOf(veilLab[0], Math.hypot(veilLab[1], veilLab[2]), gateLift);
   const blueGate = blueGateOf(veilLab[0], Math.hypot(veilLab[1], veilLab[2]), gateLift);
@@ -665,7 +727,8 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     // references stretch hazy frames down to a real black point and leave
     // clear, contrasty frames alone).
     haze,
-    hazeBlack: black,
+    hazeBlack: liftBlack,
+    frameBlack: liftBlack,
     hazeFloor,
     achroma: ACHROMA,
     waterExposure: WATER_EXPOSURE,
@@ -691,7 +754,7 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     vividGate,
     blueGate,
   };
-  return { params, depth, clahe, mean, diag: { sandWeight: sand.weight, sandFrac: sand.frac, sandMask, calm: evidence, backdrop: backdropValidity } };
+  return { params, depth, clahe, mean, diag: { sandWeight: sand.weight, sandFrac: sand.frac, sandMask, calm: evidence, backdrop: backdropValidity, tone: { black, yLow, yMid, veilCap } } };
 }
 
 // Neutral reference (sand / white rubble) for the balance, see sandReference.
@@ -1049,7 +1112,7 @@ function buildMaps(z: Float32Array, conf: Float32Array, ds: Float32Array, veilSc
 }
 
 /** Contrast-limited tile histograms → per-tile equalisation LUTs. */
-function buildClahe(enc: Float32Array, w: number, h: number): ClaheLuts {
+export function buildClahe(enc: Float32Array, w: number, h: number): ClaheLuts {
   const tilesX = CLAHE_TILES_X, tilesY = CLAHE_TILES_Y, bins = CLAHE_BINS;
   const data = new Float32Array(tilesX * tilesY * bins);
   const hist = new Float32Array(bins);
@@ -1060,15 +1123,23 @@ function buildClahe(enc: Float32Array, w: number, h: number): ClaheLuts {
       const x0 = Math.floor((tx * w) / tilesX);
       const x1 = Math.floor(((tx + 1) * w) / tilesX);
       hist.fill(0);
-      let count = 0;
+      let count = 0, sum = 0, sum2 = 0;
       for (let y = y0; y < y1; y++) {
         for (let x = x0; x < x1; x++) {
-          hist[Math.min(bins - 1, (enc[y * w + x] * bins) | 0)]++;
+          const e = enc[y * w + x];
+          hist[Math.min(bins - 1, (e * bins) | 0)]++;
+          sum += e; sum2 += e * e;
           count++;
         }
       }
+      // Median of the tile (linear inside its bin).
+      let med = 0.5;
+      for (let b = 0, c = 0; b < bins; b++) {
+        if (c + hist[b] >= count / 2 && hist[b] > 0) { med = (b + (count / 2 - c) / hist[b]) / bins; break; }
+        c += hist[b];
+      }
       // Clip and redistribute the excess evenly.
-      const limit = (CLAHE_CLIP * count) / bins;
+      const limit = (CLAHE.clip * count) / bins;
       let excess = 0;
       for (let b = 0; b < bins; b++) {
         if (hist[b] > limit) {
@@ -1077,12 +1148,25 @@ function buildClahe(enc: Float32Array, w: number, h: number): ClaheLuts {
         }
       }
       const add = excess / bins;
-      let acc = 0;
       const base = (ty * tilesX + tx) * bins;
+      if (count === 0) { for (let b = 0; b < bins; b++) data[base + b] = (b + 1) / bins; continue; }
+      // Signal weight: the tile's own spread of encoded luminance against the noise floor (see CLAHE).
+      const mean = sum / count;
+      const k = smoothstep(CLAHE.sigLo, CLAHE.sigHi, Math.sqrt(Math.max(0, sum2 / count - mean * mean)));
+      // The equalised value of the tile's median (CDF, linear inside its bin), for the anchor.
+      let acc = 0, eqMed = med;
+      {
+        const mb = Math.min(bins - 1, (med * bins) | 0);
+        let below = 0;
+        for (let b = 0; b < mb; b++) below += hist[b] + add;
+        eqMed = (below + (hist[mb] + add) * (med * bins - mb)) / count;
+      }
+      const shift = CLAHE.anchor * (eqMed - med);
       for (let b = 0; b < bins; b++) {
         acc += hist[b] + add;
-        // LUT value = CDF at the upper edge of the bin.
-        data[base + b] = count > 0 ? acc / count : (b + 1) / bins;
+        // LUT value = CDF at the upper edge of the bin, mixed with the identity by the tile's signal, the median held.
+        const id = (b + 1) / bins;
+        data[base + b] = clamp01(id + k * (acc / count - id - shift));
       }
     }
   }

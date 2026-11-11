@@ -36,6 +36,7 @@ import { analyzeThumbnail, ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.
 import { applyGrade } from "../src/engine/apply.ts";
 import * as paramsModule from "../src/engine/params.ts";
 import * as redModule from "../src/engine/red.ts";
+import * as lockModule from "../src/engine/lock.ts";
 import { DEFAULT_SETTINGS, type UserSettings } from "../src/engine/params.ts";
 import { ClipSim } from "./clip-sim.ts";
 import { deltaE00, halve, hueDiff, labOf, quantile, regionStats, srgb8ToLab, swd, type Lab } from "./colour-metrics.ts";
@@ -55,7 +56,7 @@ const SECS = parseFloat(opt("secs", "8"));
 const TUNE = opt("tune", "");
 for (const kv of TUNE.split(",").filter(Boolean)) {
   const [key, val] = kv.split("="), [obj, field] = key.split(".");
-  const o = (analyzeModule as unknown as Record<string, Record<string, unknown>>)[obj] ?? (paramsModule as unknown as Record<string, Record<string, unknown>>)[obj] ?? (redModule as unknown as Record<string, Record<string, unknown>>)[obj];
+  const o = (analyzeModule as unknown as Record<string, Record<string, unknown>>)[obj] ?? (paramsModule as unknown as Record<string, Record<string, unknown>>)[obj] ?? (redModule as unknown as Record<string, Record<string, unknown>>)[obj] ?? (lockModule as unknown as Record<string, Record<string, unknown>>)[obj];
   if (!o || !(field in o)) throw new Error(`--tune: no ${key}`);
   o[field] = val === "null" ? null : parseFloat(val);
 }
