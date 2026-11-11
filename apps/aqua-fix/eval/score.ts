@@ -2,6 +2,7 @@
 //
 //   node --experimental-strip-types apps/aqua-fix/eval/score.ts [--pairs <dir>] [--valset <dir>] [--out <dir>]
 //        [--before <dir>] [--write-baseline] [--baseline <file>] [--jobs 2] [--secs 8] [--only-pairs] [--only-clips]
+//        [--tune OBJ.field=value,…]
 //
 // Three scores, printed and compared with eval/baseline-score.json (--write-baseline replaces that file):
 //
@@ -28,6 +29,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import * as analyzeModule from "../src/engine/analyze.ts";
 import { analyzeThumbnail, ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.ts";
 import { applyGrade } from "../src/engine/apply.ts";
 import { DEFAULT_SETTINGS, type UserSettings } from "../src/engine/params.ts";
@@ -45,6 +47,14 @@ const BEFORE = opt("before", "");
 const BASELINE = opt("baseline", path.join(HERE, "baseline-score.json"));
 const JOBS = parseInt(opt("jobs", "2"));
 const SECS = parseFloat(opt("secs", "8"));
+// Tuning experiments: --tune TONE.target=0.07,TONE.strength=0.5 overrides fields of the engine's exported tuning objects (analyze.ts).
+const TUNE = opt("tune", "");
+for (const kv of TUNE.split(",").filter(Boolean)) {
+  const [key, val] = kv.split("="), [obj, field] = key.split(".");
+  const o = (analyzeModule as unknown as Record<string, Record<string, unknown>>)[obj];
+  if (!o || !(field in o)) throw new Error(`--tune: no ${key}`);
+  o[field] = val === "null" ? null : parseFloat(val);
+}
 /** Longest side of the images the reference distance is measured on; stills are graded at twice this. */
 const SCORE_PX = 200;
 /** Clip render width and sampling step (s). */
@@ -283,7 +293,7 @@ if (flag("clip")) {
     for (let c = queue.shift(); c; c = queue.shift()) {
       const id = c.id;
       const out = await new Promise<string>((resolve, reject) => {
-        const ch = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", fileURLToPath(import.meta.url), "--clip", id, "--valset", VALSET, "--secs", String(SECS)], { stdio: ["ignore", "pipe", "inherit"] });
+        const ch = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", fileURLToPath(import.meta.url), "--clip", id, "--valset", VALSET, "--secs", String(SECS), ...(TUNE ? ["--tune", TUNE] : [])], { stdio: ["ignore", "pipe", "inherit"] });
         let s = "";
         ch.stdout.on("data", (d) => (s += d));
         ch.on("close", (code) => (code === 0 ? resolve(s) : reject(new Error(`clip ${id} failed (${code})`))));
@@ -344,6 +354,7 @@ if (flag("clip")) {
   }
   const s = result.summary;
   lines.push("", `SUMMARY  reference ${f(s.reference[DEFAULT_STYLE], 0)} (source ${f(s.reference.source, 0)})${dl(s.reference[DEFAULT_STYLE], base?.summary.reference[DEFAULT_STYLE])} · harm dE ${f(s.harm.dE, 0)}${dl(s.harm.dE, base?.summary.harm.dE)} · stability light ${f(s.stability.lightStd, 0)}${dl(s.stability.lightStd, base?.summary.stability.lightStd)} / balance ${f(s.stability.wbStd, 0)}${dl(s.stability.wbStd, base?.summary.stability.wbStd)}${base ? "   (deltas vs " + path.basename(BASELINE) + ")" : ""}`);
+  if (TUNE) lines.push(`TUNED: ${TUNE}`);
   lines.push(`Scores come from the CPU reference incl. Seabed recovery; person segmentation / AI subjects / temporal layer are not simulated. ${((performance.now() - t0) / 1000).toFixed(0)} s`);
   console.log(lines.join("\n"));
   if (OUT) fs.writeFileSync(path.join(OUT, "score.json"), JSON.stringify(result, null, 1) + "\n");

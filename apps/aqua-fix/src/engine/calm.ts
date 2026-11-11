@@ -81,6 +81,8 @@ export const CALM = {
   // How far each score moves its stages toward the identity at 1.
   colourMax: 0.9,
   toneMax: 0.9,
+  // Share of full calm (colour or tone) at which the tone-target gamma (analyze.ts TONE) is fully off.
+  toneLookOff: 0.4,
   // Highlight shoulder knee at full tone calm (1 would divide by zero in the shader).
   knee: 0.97,
 };
@@ -204,6 +206,9 @@ export function calmParams(p: GradeParams): GradeParams {
     binf: p.binf.map((b) => b * (1 - k)) as Vec3,
     exposure: Math.pow(Math.max(1e-4, p.exposure), keep),
     levelsMix: p.levelsMix * keep,
+    // The tone target is a look for uncorrected underwater footage: any real calm evidence (topside, graded,
+    // already-red) turns it off well before the calm scores saturate.
+    toneGamma: 1 + ((p.toneGamma ?? 1) - 1) * (1 - Math.min(1, Math.max(k / CALM.colourMax, t / CALM.toneMax) / CALM.toneLookOff)),
     haze: p.haze * keep,
     hazeBlack: p.hazeBlack * keep,
     hazeFloor: p.hazeFloor.map((f) => f * keep) as Vec3,

@@ -344,6 +344,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
     bl[1] += (Math.cos(SEABED.hue) * SEABED.chroma + SEABED.keep * bl[1] - bl[1]) * sbw;
     bl[2] += (Math.sin(SEABED.hue) * SEABED.chroma + SEABED.keep * bl[2] - bl[2]) * sbw;
   }
+  // Tone target (analyze.ts TONE): one gamma on the graded lightness, the same for every pixel of the frame.
+  if ((p.toneGamma ?? 1) > 1) bl[0] = Math.pow(Math.max(0, bl[0]), p.toneGamma!);
   const capped = capChroma(bl[0], bl[1], bl[2], Math.max(cSrc, wk * WARM_POP.cMin * 1.5, bl[3]));
   const [r1, g1, b1] = oklabToLinear(bl[0], capped[0], capped[1]);
   void C;
