@@ -4,6 +4,7 @@
 import type { GraphName } from "./edgetam.ts";
 import type { SegModel, SegObject, StepResult } from "./track.ts";
 import type { SessionFrameOut } from "./session.ts";
+import { deviceFacts, segThreads } from "../device.ts";
 
 /** Background-session events from the worker (session.ts). */
 export type SessionEvent =
@@ -141,7 +142,8 @@ export class WorkerSegModel implements SegModel {
     }
     void pruneCache(keys);
     const bank = await (await fetch(`${base}bank.json?v=${man.files["bank.json"]?.sha256.slice(0, 16) ?? "0"}`)).json();
-    const threads = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
+    // One thread on iOS, up to four elsewhere when isolated (device.ts segThreads; `?segthreads=N` to measure).
+    const threads = segThreads(deviceFacts(), Number(new URLSearchParams(location.search).get("segthreads")) || null);
     const r = await this.call({ type: "init", models, bank, threads, prefer: opts.prefer ?? "auto", lite, debug: segDebug() }, Object.values(models));
     this.info = { ep: String(r.ep) + (lite ? " lite" : ""), f16: !!r.f16, threads: Number(r.threads), loadMs: performance.now() - t0, bytes: total, heapMB: Number(r.heapMB ?? 0) };
     segLog(`model ready on ${this.info.ep} (tried ${(r.tried as string[]).join(", ")}; WebGPU adapter ${r.webgpu ? "yes" : "no"}, shader-f16 ${r.f16 ? "yes" : "no"}; WASM threads ${this.info.threads}, cross-origin isolated ${r.coi ? "yes" : "no"})`, this.info);

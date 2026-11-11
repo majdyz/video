@@ -2,7 +2,7 @@
 //   node --experimental-strip-types apps/studio/test/feedback.test.ts
 import assert from "node:assert/strict";
 import { feedbackReport, feedbackTitle, issueUrl, ISSUE_URL_MAX, TRUNCATED } from "../src/pipeline/feedback.ts";
-import { isIOS, weakDevice } from "../src/pipeline/device.ts";
+import { isIOS, segThreads, weakDevice } from "../src/pipeline/device.ts";
 import { aiCrashed } from "../src/pipeline/crumbs.ts";
 import { CRASHED_NOTE, segStatusText, WEAK_DEVICE_NOTE } from "../src/pipeline/seg/studio-seg.ts";
 
@@ -60,6 +60,20 @@ const ctx = { build: "abc1234", device: ["Device: iPhone", "Screen: 390×844 @3x
   assert.equal(weakDevice({ ua: android, cores: 4 }), true);
   assert.equal(weakDevice({ ua: desktop, memory: 2, cores: 2 }), false, "desktops keep their default");
   assert.equal(weakDevice({ ua: ipad, touch: 0, cores: 4, coi: false }), false, "Mac Safari");
+  // The AI model's WASM threads: one on iOS (isolated or not), up to four elsewhere when isolated.
+  assert.equal(segThreads({ ua: iphone, cores: 6, coi: true }), 1, "iPhone, isolated");
+  assert.equal(segThreads({ ua: iphone, cores: 6, coi: false }), 1);
+  assert.equal(segThreads({ ua: ipad, touch: 5, cores: 8, coi: true }), 1, "iPad");
+  assert.equal(segThreads({ ua: desktop, cores: 16, coi: true }), 4);
+  assert.equal(segThreads({ ua: android, cores: 8, coi: true }), 4);
+  assert.equal(segThreads({ ua: desktop, cores: 2, coi: true }), 2);
+  assert.equal(segThreads({ ua: desktop, cores: 16, coi: false }), 1, "no shared memory without isolation");
+  assert.equal(segThreads({ ua: desktop, coi: true }), 1, "cores unknown");
+  // ?segthreads=N (a device measurement): honoured when isolated, clamped to 1..4.
+  assert.equal(segThreads({ ua: iphone, cores: 6, coi: true }, 4), 4);
+  assert.equal(segThreads({ ua: iphone, cores: 6, coi: true }, 9), 4);
+  assert.equal(segThreads({ ua: iphone, cores: 6, coi: false }, 4), 1);
+  assert.equal(segThreads({ ua: desktop, cores: 16, coi: true }, 1), 1);
 }
 
 // AI crash: a crashed session whose last step was the model at work turns AI off for the next one (studio-seg).
