@@ -146,6 +146,20 @@ const STYLES: Record<string, UserSettings> = { natural: { ...DEFAULT_SETTINGS },
     assert.ok(s.ok && s.limited, JSON.stringify(s));
     if (s.ok) assert.ok(s.gains[0] < TAP.max - 1e-6 && s.gains[1] > 1 / TAP.max + 1e-6, `not at the limit: ${s.gains}`);
   }
+  // Open water tapped as if it were grey (a bubble stream that is mostly water): the correction alone would shed
+  // much of its cast, at gains near the limit, and the default look paints water blue again. Refused in every
+  // style: gains [1, 1], flagged, the picture untouched. A limited tap that is kept always pays on screen.
+  for (const lin of [[0.03, 0.2, 0.42], [0.05, 0.3, 0.6], [0.015, 0.12, 0.3], [0.02, 0.22, 0.5]]) for (const wbr of [2, 3.5]) {
+    const water = srgb(lin);
+    const P: GradeParams = { ...PARAMS, wb: [wbr, 1, 1], waterWb: [Math.pow(wbr, 0.6), 1, 1], veilColor: lin as [number, number, number] };
+    for (const [name, style] of Object.entries(STYLES)) {
+      const ctx: ApplyContext = { params: P, settings: style, ...maps(lin, 0) };
+      const s = solveTap(ctx, water, 0.5, 0.5);
+      assert.ok(s.ok && s.limited, JSON.stringify(s));
+      if (s.ok) assert.deepEqual(s.gains, [1, 1], `${name} water ${lin} wb ${wbr}: gains ${s.gains}`);
+    }
+  }
+  assert.ok(TAP_SOLVE.limitedMax < TAP.max && TAP_SOLVE.limitedMax >= 2);
   // A partly recoverable point: improved, flagged, and no further than it pays.
   const weak = srgb([0.3 * 0.12, 0.3, 0.3 * 1.1]);
   const ctx: ApplyContext = { params: PARAMS, settings: STYLES.natural, ...maps(weak.map(srgbToLinear), 1) };

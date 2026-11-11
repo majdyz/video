@@ -17,8 +17,10 @@ import { TAP, type UserSettings } from "./params.ts";
  * achievable improvement, so a point that cannot be neutralised does not drag the rest of the picture to the limit;
  * `useless`: and when even the best leaves more than this share of the point's chroma (gravel whose red is gone:
  * no balance brings it back), the tap changes nothing at all rather than recolour the frame for a point it cannot fix.
+ * The same share is asked of the picture as shown (with its style), and a tap still short of neutral at gains
+ * beyond `limitedMax` is refused outright (see the end of solveTap).
  */
-export const TAP_SOLVE = { patch: 9, darkY: 0.004, bright: 0.985, done: 0.003, limited: 0.012, iters: 16, step: 0.7, probe: 0.04, keep: 0.15, useless: 0.7 };
+export const TAP_SOLVE = { patch: 9, darkY: 0.004, bright: 0.985, done: 0.003, limited: 0.012, iters: 16, step: 0.7, probe: 0.04, keep: 0.15, useless: 0.7, limitedMax: 2.5 };
 
 export type TapSolve =
   | {
@@ -128,6 +130,22 @@ export function solveTap(ctx: ApplyContext, rgb: readonly [number, number, numbe
       if (ft.c <= goal) { x *= t; y *= t; f = ft; break; }
     }
     limited = f.c > S.limited;
+    // A tap the guards cut short must still pay on screen. The gains are solved on the correction, but what the
+    // user sees is the picture with its style: a patch of open water (a bubble stream that is mostly water) loses
+    // a third of its cast in the correction and Vivid paints it blue again, so the frame would be re-balanced
+    // for nothing visible. Judged as shown (style, Seabed, Strength), by the same `useless` share: refuse it.
+    if (limited) {
+      const shown = (tap: [number, number] | undefined) => {
+        const o = gradePixel(resolveContext({ ...ctx, settings: { ...ctx.settings, wbTap: tap }, debug: false, trace: undefined }), rgb[0], rgb[1], rgb[2], u, v);
+        const [, a, b] = linearToOklab(srgbToLinear(o[0]), srgbToLinear(o[1]), srgbToLinear(o[2]));
+        return Math.hypot(a, b);
+      };
+      // … and a tap that is still short of neutral at more than `limitedMax` on a channel is not a grey under a
+      // cast: it is water (or another coloured thing) asked to be grey. Re-balancing the frame that hard for it is
+      // never what the tap meant, however much of the patch's own chroma it sheds.
+      const big = Math.exp(Math.max(Math.abs(x), Math.abs(y))) > S.limitedMax;
+      if (big || shown([Math.exp(x), Math.exp(y)]) > S.useless * shown(undefined)) return { ok: true, gains: [1, 1], before, after: before, limited: true };
+    }
   }
   return { ok: true, gains: [Math.exp(x), Math.exp(y)], before, after: f.c, limited };
 }
