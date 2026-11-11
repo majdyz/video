@@ -34,6 +34,8 @@ export type SessionFrames = {
   rotation: number;
   /** The frame covering clip time t (the caller closes nothing: the source owns the frame until the next call). */
   at(t: number): Promise<CanvasImageSource & { displayWidth?: number }>;
+  /** Times the decoder started over at a key frame (a read behind its position or far ahead), for the profile. */
+  restarts?(): number;
   dispose(): void;
 };
 
@@ -451,6 +453,19 @@ export class SegSession {
     return { luma: Float32Array.from(luma, (x) => x / 255), rgba1024: big };
   }
 
+  /**
+   * A forward step from keyframe `from` to t: the grid frames in between are read on the way (luma and colour cells
+   * into the cache, in time order). The decoder used to skip them, and the fill of that stretch, which runs right
+   * after the step, asked for them behind its position: a restart at the key frame before and the whole run decoded
+   * again, at every keyframe.
+   */
+  private async readAhead(from: number, t: number): Promise<void> {
+    const hz = SEG.sampleHz, i1 = this.grid.i0 + this.grid.n;
+    for (let i = Math.max(this.grid.i0, Math.ceil(from * hz - 1e-6)); i < i1 && i / hz < t - 1e-6; i++) {
+      if (!this.lumaCache.has(frameKey(i / hz))) await this.pixels(i / hz, false);
+    }
+  }
+
   /** A single prompted frame on a throwaway bank (the exclude tap's own mask). */
   private async oneShot(k: number, pts: [number, number][]): Promise<Float32Array> {
     const { rgba1024 } = await this.pixels(k, true);
@@ -674,6 +689,7 @@ export class SegSession {
     const goFwd = s.fi < s.fwd.length && (s.bi >= s.bwd.length || s.fi <= s.bi);
     const list = goFwd ? s.fwd : s.bwd, idx = goFwd ? s.fi : s.bi, t = list[idx];
     const reverse = !goFwd, key = `${s.o.id}${goFwd ? "f" : "b"}`;
+    if (goFwd && idx > 0) await this.readAhead(list[idx - 1], t);
     const { luma, rgba1024 } = await this.pixels(t, t !== this.lastEncoded);
     if (t !== this.lastEncoded) {
       const tr = this.traced++ < 3;
@@ -975,7 +991,7 @@ export class SegSession {
   /** Where the pass's time went (ms) and its counts. */
   profile(): SessionProfile {
     const m = this.model.timing;
-    return { ...this.prof, encodeMs: m.encode, encodes: m.encodes, attendMs: m.attend, decoderMs: m.decoder, memEncMs: m.memEnc, steps: m.steps, keyframes: this.keys.length, fps: this.fps };
+    return { ...this.prof, encodeMs: m.encode, encodes: m.encodes, attendMs: m.attend, decoderMs: m.decoder, memEncMs: m.memEnc, steps: m.steps, keyframes: this.keys.length, fps: this.fps, restarts: this.frames.restarts?.() ?? 0 };
   }
 }
 

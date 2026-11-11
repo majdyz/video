@@ -14,7 +14,9 @@ export async function openSessionFrames(file: File): Promise<SessionFrames> {
   let it: AsyncGenerator<Item, void, unknown> | null = null;
   let cur: Item | null = null, next: Item | null = null, frame: VideoFrame | null = null;
   const drop = (x: Item | null) => { try { x?.sample.close(); } catch { /* closed */ } };
+  let restarts = 0;
   const reset = async (t: number) => {
+    restarts++;
     drop(cur); drop(next); cur = next = null;
     frame?.close(); frame = null;
     await it?.return(undefined).catch(() => undefined);
@@ -41,6 +43,8 @@ export async function openSessionFrames(file: File): Promise<SessionFrames> {
       frame ??= cur.sample.toVideoFrame();
       return frame;
     },
+    // The first read opens the decoder: not a restart.
+    restarts: () => Math.max(0, restarts - 1),
     dispose() {
       frame?.close(); drop(cur); drop(next);
       void it?.return(undefined).catch(() => undefined);

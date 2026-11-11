@@ -170,6 +170,10 @@ const subject = (t: number): SegObject & { id: number } => ({ id: ids++, kind: "
   assert.ok(read(0.25), "the keyframe at 0.25 s is decoded");
   assert.ok(read(8 / 30), "grid frame 8 is decoded itself");
   assert.ok(read(0.75) && read(23 / 30), "and the next pair");
+  // The frames between two keyframes are read on the way to the second, so the fill of that stretch (right after
+  // the step) has them: the decoder is never asked for a frame behind its position (each was a restart).
+  assert.equal(f.reads.filter((t, i) => i > 0 && t < f.reads[i - 1] - 1e-6).length, 0, "the pass reads the clip in time order");
+  assert.equal(new Set(f.reads.map(frameKey)).size, f.reads.length, "and each frame once");
   assert.equal(frameKey(0.5), frameKey(15 / 30), "a keyframe on the grid shares its grid frame's entry");
   assert.notEqual(frameKey(0.25), frameKey(8 / 30));
   for (let i = 1; i < 300; i++) assert.notEqual(frameKey(i / 30), frameKey((i - 1) / 30));
@@ -355,6 +359,7 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   assert.equal(full.encodes, 17);
   assert.equal(lite.encodes, 9);
   assert.equal(calm.s.profile().extraKeys, 0);
+  assert.equal(lite.reads.filter((t, i) => i > 0 && t < lite.reads[i - 1] - 1e-6).length, 0, "read in time order");
   assert.equal(popped(calm.frames), calm.s.grid.n, "the subject is popped on every frame");
   // `?segfps=N` fixes the rate (no extra keyframes), on either model.
   const fixed = fake({ lite: true });
