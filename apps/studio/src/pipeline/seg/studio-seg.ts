@@ -554,11 +554,14 @@ export class SubjectSeg {
     this.loading = (async () => {
       // Where the model can only run on WASM, the worker with the plain WASM runtime: the WebGPU build's (twice the
       // WebAssembly) start-up was the pass's memory peak (+130 MB in Chromium).
-      const m = new WorkerSegModel(isWebKit() || !("gpu" in navigator));
+      // `?seggpu=1`: try WebGPU on WebKit anyway (iOS 26 Safari ships WebGPU; the crash above was iOS 18.7).
+      const q = new URLSearchParams(location.search);
+      const forceWasm = isWebKit() && q.get("seggpu") !== "1";
+      const m = new WorkerSegModel(forceWasm || !("gpu" in navigator));
       try {
         // WebGPU in iPhone Safari crashed the page on the first frames (crash log, 31 Oct, iOS 18.7): WebKit runs
         // the model on WASM.
-        await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: isWebKit() ? "wasm" : "auto", lite: isWebKit() || new URLSearchParams(location.search).get("seglite") === "1" });
+        await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: forceWasm ? "wasm" : "auto", lite: forceWasm || q.get("seglite") === "1" });
         m.onEvent = (e) => this.onEvent(e);
         this.model = m;
         crumb(`ai: model ready (${m.info?.ep ?? "?"}, ${m.info?.threads ?? "?"} threads, heap ${m.info?.heapMB ?? "?"} MB)`);
