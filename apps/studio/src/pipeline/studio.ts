@@ -571,10 +571,17 @@ export class Studio {
       // An include leaves the engine's own corrections alone (its toggle there would have taken the animal out).
       if (action === "exclude") this.setSubjectOverrides(list);
       if (action === "include") {
-        await this.seg.include(t, u, v, this.engine?.personBoxesNow() ?? []);
-        this.set({ subjectNote: "Added" });
+        // False: the tap never reached the session (the AI pass failed; its note is up): nothing to undo.
+        if (await this.seg.include(t, u, v, this.engine?.personBoxesNow() ?? [])) this.set({ subjectNote: "Added" });
+        else { this.subjectUndo.pop(); this.set({ subjectUndo: this.subjectUndo.length }); }
       } else {
         const r = await this.seg.exclude(t, u, v);
+        if (r === null) {
+          this.subjectUndo.pop();
+          this.setSubjectOverrides(before);
+          this.set({ subjectUndo: this.subjectUndo.length });
+          return id;
+        }
         this.set({ subjectNote: r === "removed" ? "Taken out" : "Part taken out" });
         // A whole subject out: the engine's own selection drops the animal along its path too (else it would tone
         // it where the ML no longer covers it). A part out leaves the engine's animal in.
@@ -969,6 +976,13 @@ export class Studio {
     s.onFrames = () => { const now = performance.now(); if (now - last > 250 && this.paused()) { last = now; this.repaint(); } };
     // The pass is done and its worker shut down: the seed-frame <video> (a decoder of its own) goes too.
     s.onHibernate = () => this.dropSeedVideo();
+    // The pass failed in the worker (it used to look finished): say so, and the picture goes back to the engine's masks.
+    s.onFailed = () => {
+      // After the frame job in flight (a seed frame may be in the engine right now).
+      this.workChain = this.workChain.then(() => this.dropSeedVideo());
+      this.set({ subjectNote: "AI detection stopped; using standard detection" });
+      this.repaint();
+    };
     return s;
   })();
   /**

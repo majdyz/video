@@ -13,6 +13,8 @@ export type SessionEvent =
   | { ev: "idle"; profile: Record<string, number> }
   | { ev: "seeds"; k: number; t: number }
   | { ev: "rejected"; id: number }
+  /** The pass threw in the worker and stopped for good (session.ts fail). */
+  | { ev: "error"; msg: string; heapMB?: number }
   | { ev: "trace"; msg: string };
 export type SessionInfo = { width: number; height: number; mw: number; mh: number; i0: number; n: number };
 
@@ -104,6 +106,8 @@ export class WorkerSegModel implements SegModel {
     this.w.onerror = (e) => {
       for (const p of this.waiting.values()) p.rej(new Error(e.message || "segmentation worker failed"));
       this.waiting.clear();
+      // The worker itself fell over (a script error, the runtime aborting): the session is gone with it.
+      this.onEvent?.({ ev: "error", msg: e.message || "segmentation worker failed" });
     };
   }
 

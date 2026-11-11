@@ -49,6 +49,11 @@ async function webgpuInfo(): Promise<{ ok: boolean; f16: boolean }> {
 export function serve(ort: typeof OrtNS, webgpu: boolean): void {
   if ((self as unknown as { name?: string }).name === "em-pthread") return;
   self.onmessage = (ev: MessageEvent<Req>) => handle(ort, webgpu, ev.data);
+  // A rejection nobody handles would vanish (worker.onerror does not fire for it): it goes to the breadcrumbs.
+  self.addEventListener("unhandledrejection", (ev) => {
+    const why = (ev as PromiseRejectionEvent).reason;
+    emit({ ev: "trace", msg: `unhandled: ${String(why instanceof Error ? why.message : why).slice(0, 120)} · heap ${wasmHeapMB()} MB` });
+  });
 }
 
 async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void> {
@@ -92,6 +97,8 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
         idle: (profile) => emit({ ev: "idle", profile: { ...profile, heapMB: wasmHeapMB() } }),
         needSeeds: (k, t) => emit({ ev: "seeds", k, t }),
         rejected: (id) => emit({ ev: "rejected", id }),
+        // The pass threw (session.ts run): the main thread shows it and shuts this worker down.
+        error: (msg) => { if (session === s) session = null; emit({ ev: "error", msg, heapMB: wasmHeapMB() }); },
         // Each breadcrumb carries the WASM heap (it only grows: the step that took it past the phone's limit shows).
         trace: (msg) => emit({ ev: "trace", msg: `${msg} · heap ${wasmHeapMB()} MB` }),
       });

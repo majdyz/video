@@ -488,6 +488,7 @@ export class SubjectSeg {
   private onEvent(e: SessionEvent): void {
     this.lastActivity = performance.now();
     if (e.ev === "trace") { crumb(`ai· ${e.msg}`); return; }
+    if (e.ev === "error") { this.fail(e.msg, e.heapMB); return; }
     const live = this.live;
     if (!live) return;
     if (e.ev === "frames") {
@@ -519,6 +520,37 @@ export class SubjectSeg {
       this.idleWaiters = [];
       for (const r of w) r();
     }
+  }
+
+  /** Called when the pass failed in the worker (fail): the studio tells the user and drops its seed-frame video. */
+  onFailed: ((msg: string) => void) | null = null;
+  /** "unavailable" because of this clip (its pass failed, or it can't be decoded): the next clip tries again. */
+  private clipFailed = false;
+
+  /**
+   * The pass threw in the worker (session.ts fail: the runtime out of memory, a frame that can't be decoded) or the
+   * worker itself died. It used to look like a finished pass. Now: a breadcrumb, a note under the toggle, the worker
+   * shut down (after an abort it is dead anyway, and its memory is what a phone needs back), and the masks made so
+   * far dropped, so the whole clip is graded with the engine's masks in the preview and the export alike (half a
+   * clip of AI masks next to half of the engine's reads as a fault).
+   */
+  private fail(msg: string, heapMB?: number): void {
+    if (!this.model) return;
+    crumb(`ai: pass failed: ${errText(msg)}${heapMB !== undefined ? ` · heap ${heapMB} MB` : ""}`);
+    segLog("pass failed; using the engine's masks", msg);
+    clearTimeout(this.hibTimer);
+    this.model.dispose();
+    this.model = null;
+    this.live = null;
+    this.cache = null;
+    this.busy = false;
+    this.hibernated = false;
+    this.clipFailed = true;
+    this.set({ phase: "unavailable", progress: null, note: `AI detection stopped on this clip; using standard detection (${errText(msg)})` });
+    const w = this.idleWaiters;
+    this.idleWaiters = [];
+    for (const r of w) r();
+    this.onFailed?.(msg);
   }
 
   /**
@@ -619,6 +651,8 @@ export class SubjectSeg {
         return this.live;
       } catch (e) {
         segLog("session failed to open; using the engine's masks", e);
+        crumb(`ai: session failed: ${errText(e)}`);
+        this.clipFailed = true;
         this.set({ phase: "unavailable", note: `This clip can't be decoded for AI detection; using standard detection (${errText(e)})` });
         return null;
       } finally {
@@ -636,21 +670,24 @@ export class SubjectSeg {
     if (k === 0) this.autos = objs;
     const objects = objs.map((o) => ({ ...o, id: this.nextId++ }));
     this.log.push({ op: "seeds", k, t, objects });
-    await this.model.sessionSeeds(k, t, objects);
+    // A worker that failed meanwhile rejects the call (fail has told the user): nothing to seed.
+    if (!(await this.model.sessionSeeds(k, t, objects).then(() => true, () => false))) return;
     segLog(`seeded segment ${k} (${t.toFixed(2)} s): ${objs.length} automatic subject(s)`);
   }
   private seededSegs = new Set<number>();
 
   /** A tap that adds what is missing: a new include object at (t, u, v), followed both ways from the tap. */
-  async include(t: number, u: number, v: number, boxes: readonly PersonBox[]): Promise<void> {
-    if (!this.live || !(await this.wake()) || !this.model) return;
+  async include(t: number, u: number, v: number, boxes: readonly PersonBox[]): Promise<boolean> {
+    if (!this.live || !(await this.wake()) || !this.model) return false;
     const id = this.nextId++;
     crumb(`ai: include ${t.toFixed(2)}s`);
     const object: SegObject & { id: number } = { id, kind: "include", t, prompt: promptFor({ u, v }, boxes) };
     this.log.push({ op: "add", object });
-    await this.model.sessionAdd(object);
+    // False: the worker failed meanwhile (fail has told the user).
+    if (!(await this.model.sessionAdd(object).then(() => true, () => false))) return false;
     this.undoOps.push({ kind: "added", id });
     this.onChange();
+    return true;
   }
 
   /** A tap on what the ML pops: removes that subject (most of it under the tap) or just the tapped part. */
@@ -661,7 +698,9 @@ export class SubjectSeg {
     this.replayable = false;
     clearTimeout(this.hibTimer);
     crumb(`ai: exclude ${t.toFixed(2)}s`);
-    const r = await this.model.sessionExclude(id, t, u, v);
+    const r = await this.model.sessionExclude(id, t, u, v).catch(() => null);
+    // Null: the worker failed in or before the tap's own step (fail has told the user).
+    if (!r) return null;
     crumb(`ai: exclude -> ${r.action}`);
     this.undoOps.push(r.action === "removed" ? { kind: "removed", id: r.removed } : { kind: "added", id });
     segLog(`exclude tap at ${t.toFixed(2)} s: ${r.action}`);
@@ -694,10 +733,9 @@ export class SubjectSeg {
     const op = this.undoOps.pop();
     if (!op || !(await this.wake()) || !this.model) return false;
     this.log.push(op.kind === "added" ? { op: "remove", id: op.id } : { op: "restore", id: op.id });
-    if (op.kind === "added") await this.model.sessionRemove(op.id);
-    else await this.model.sessionRestore(op.id);
+    const ok = await (op.kind === "added" ? this.model.sessionRemove(op.id) : this.model.sessionRestore(op.id)).then(() => true, () => false);
     this.onChange();
-    return true;
+    return ok;
   }
 
   /** A new clip (or no clip): the session closes. */
@@ -714,6 +752,11 @@ export class SubjectSeg {
     this.replayable = true;
     this.hibernated = false;
     clearTimeout(this.hibTimer);
+    if (this.clipFailed) {
+      // The last clip's pass failed (or it could not be decoded): this one gets its own try.
+      this.clipFailed = false;
+      if (this.status.phase === "unavailable") this.set({ phase: this.status.on ? (this.model ? "ready" : "download") : "off", progress: null, note: null });
+    }
     void this.model?.sessionClose().catch(() => undefined);
     for (const r of this.idleWaiters) r();
     this.idleWaiters = [];
@@ -732,7 +775,11 @@ export class SubjectSeg {
     let last = -1, lastAt = performance.now();
     for (;;) {
       if (o.signal.aborted) throw new DOMException("Export cancelled", "AbortError");
-      if (!(await this.model.sessionBusy())) { this.busy = false; break; }
+      // The pass failed while the export waited (fail): the engine's masks, as the preview now shows.
+      if (!this.live || !this.model) return "engine";
+      const busy = await this.model.sessionBusy().catch(() => null);
+      if (busy === null) return "engine";
+      if (!busy) { this.busy = false; break; }
       const wait = new Promise<void>((r) => this.idleWaiters.push(r));
       await Promise.race([wait, new Promise((r) => setTimeout(r, 500))]);
       const p = this.status.progress;
@@ -742,7 +789,7 @@ export class SubjectSeg {
       lastAt = Math.max(lastAt, this.lastActivity);
       if (performance.now() - lastAt > o.stallMs) { segLog(`export: the AI pass made no progress for ${Math.round(o.stallMs / 1000)} s; exporting with the engine's masks`); return "engine"; }
     }
-    return this.live.filled > 0 ? "ai" : "engine";
+    return this.live && this.live.filled > 0 ? "ai" : "engine";
   }
 
   /** Resolves when the session has nothing left to do (an export waits for it: the same masks as the preview). */

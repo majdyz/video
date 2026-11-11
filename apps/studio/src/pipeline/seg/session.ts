@@ -70,6 +70,9 @@ export type SessionEvents = {
   rejected(id: number): void;
   /** Segment k's seeds are needed (its canonical frame t): tracking waits for session.seeds(k, ...). */
   needSeeds(k: number, t: number): void;
+  /** A step, a fill or a queued tap threw (out of memory in the runtime, an unreadable frame): the session has
+   * stopped for good and is closed; no idle follows. The main thread tells the user and shuts the worker down. */
+  error?(msg: string): void;
   /** Breadcrumbs of the heavy steps (the main thread keeps them: a phone that kills the page leaves no log). */
   trace?(msg: string): void;
 };
@@ -111,6 +114,8 @@ export class SegSession {
   private big: OffscreenCanvas;
   private running = false;
   private closed = false;
+  /** Why the session stopped (run() threw); null while it is healthy. */
+  failed: string | null = null;
   /** Segment starts (keyframe times; segStarts[0] = the first seeds' frame), seeds received, the one asked for. */
   private segStarts: number[] = [];
   private seeded = new Set<number>();
@@ -239,13 +244,19 @@ export class SegSession {
    */
   excludeAt(id: number, t: number, u: number, v: number): Promise<{ action: "removed"; removed: number } | { action: "part" | "exclude" }> {
     // Runs between two tracker steps (the model is not re-entrant).
-    return new Promise((resolve, reject) => {
-      this.ops.push(() => this.excludeNow(id, t, u, v).then(resolve, reject));
+    return this.queue(() => this.excludeNow(id, t, u, v));
+  }
+
+  private ops: { run: () => Promise<void>; fail: (e: Error) => void }[] = [];
+
+  /** Runs fn between two tracker steps (the model is not re-entrant). Its failure fails the session (run's catch). */
+  private queue<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.closed) return Promise.reject(new Error(this.failed ?? "session closed"));
+    return new Promise<T>((resolve, reject) => {
+      this.ops.push({ run: async () => { try { resolve(await fn()); } catch (e) { reject(e); throw e; } }, fail: reject });
       void this.run();
     });
   }
-
-  private ops: (() => Promise<void>)[] = [];
 
   private async excludeNow(id: number, t: number, u: number, v: number): Promise<{ action: "removed"; removed: number } | { action: "part" | "exclude" }> {
     const o = this.objectAt(t, u, v);
@@ -277,7 +288,9 @@ export class SegSession {
   }
 
   close(): void {
+    if (this.closed) return;
     this.closed = true;
+    for (const op of this.ops.splice(0)) op.fail(new Error("session closed"));
     this.frames.dispose();
   }
 
@@ -331,10 +344,7 @@ export class SegSession {
    * Deterministic for the frame (same seeds whenever and wherever the clip is seeded).
    */
   autoSeeds(t: number): Promise<SegObject[]> {
-    return new Promise((resolve, reject) => {
-      this.ops.push(() => this.autoSeedsNow(t).then(resolve, reject));
-      void this.run();
-    });
+    return this.queue(() => this.autoSeedsNow(t));
   }
 
   private async autoSeedsNow(t0: number): Promise<SegObject[]> {
@@ -414,7 +424,7 @@ export class SegSession {
     try {
       while (!this.closed) {
         const op = this.ops.shift();
-        if (op) { await op(); await yieldNow(); continue; }
+        if (op) { await op.run(); await yieldNow(); continue; }
         const uk = this.urgent.shift();
         if (uk !== undefined) { await this.fill(uk); await yieldNow(); continue; }
         // Taps first, newest first.
@@ -458,10 +468,24 @@ export class SegSession {
         } else break;
         await yieldNow();
       }
+    } catch (e) {
+      // Nothing is left to trust after a throw in here (an allocation that failed leaves the runtime dead): the
+      // session stops and says so, instead of looking like a finished pass.
+      if (!this.closed) this.fail(e);
     } finally {
       this.running = false;
       if (!this.closed && !this.waiting) this.ev.idle(this.profile());
     }
+  }
+
+  private fail(e: unknown): void {
+    const msg = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 160) || "unknown error";
+    this.failed = msg;
+    this.closed = true;
+    const err = new Error(msg);
+    for (const op of this.ops.splice(0)) op.fail(err);
+    try { this.frames.dispose(); } catch { /* already gone */ }
+    this.ev.error?.(msg);
   }
 
   /**
