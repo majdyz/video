@@ -16,7 +16,10 @@
    "waterHueErr": 17.92,
    "L50Err": 4.83,
    "L5Err": 3.34,
-   "warmCErr": 4.94
+   "warmCErr": 4.94,
+   "C50Err": 5.17,
+   "waterCErr": 7.11,
+   "subjCErr": 6.74
   },
   "harm": {
    "dE": 3.26,
@@ -46,19 +49,28 @@
     "waterHue": 235.19,
     "L50": 36.2,
     "L5": 1.2,
-    "warmC": 15.12
+    "warmC": 15.12,
+    "C50": 13.4,
+    "waterC": 15.6,
+    "subjC": 0
    },
    "ref": {
     "waterHue": 240.64,
     "L50": 34.63,
     "L5": 3.61,
-    "warmC": 22.03
+    "warmC": 22.03,
+    "C50": 14.52,
+    "waterC": 32.53,
+    "subjC": 27.38
    },
    "err": {
     "waterHue": 5.44,
     "L50": 1.58,
     "L5": 2.42,
-    "warmC": 6.91
+    "warmC": 6.91,
+    "C50": 1.12,
+    "waterC": 16.94,
+    "subjC": 27.38
    }
   },
   "h0": {
@@ -72,19 +84,28 @@
     "waterHue": 261.09,
     "L50": 30.24,
     "L5": 13.52,
-    "warmC": 5.95
+    "warmC": 5.95,
+    "C50": 18.62,
+    "waterC": 20.34,
+    "subjC": 0
    },
    "ref": {
     "waterHue": 273.65,
     "L50": 40.54,
     "L5": 19.42,
-    "warmC": 6.21
+    "warmC": 6.21,
+    "C50": 16.19,
+    "waterC": 21.01,
+    "subjC": 0
    },
    "err": {
     "waterHue": 12.56,
     "L50": 10.3,
     "L5": 5.89,
-    "warmC": 0.25
+    "warmC": 0.25,
+    "C50": 2.42,
+    "waterC": 0.66,
+    "subjC": 0
    }
   },
   "h1": {
@@ -98,19 +119,28 @@
     "waterHue": 234.15,
     "L50": 30.18,
     "L5": 1.53,
-    "warmC": 8.85
+    "warmC": 8.85,
+    "C50": 12.1,
+    "waterC": 16.97,
+    "subjC": 0
    },
    "ref": {
     "waterHue": 269.82,
     "L50": 21.16,
     "L5": 0.79,
-    "warmC": 8.39
+    "warmC": 8.39,
+    "C50": 19.87,
+    "waterC": 24.54,
+    "subjC": 0
    },
    "err": {
     "waterHue": 35.67,
     "L50": 9.02,
     "L5": 0.74,
-    "warmC": 0.46
+    "warmC": 0.46,
+    "C50": 7.77,
+    "waterC": 7.57,
+    "subjC": 0
    }
   },
   "h2": {
@@ -124,19 +154,28 @@
     "waterHue": 234.11,
     "L50": 35.88,
     "L5": 11.47,
-    "warmC": 9.36
+    "warmC": 9.36,
+    "C50": 10.26,
+    "waterC": 12.3,
+    "subjC": 20.57
    },
    "ref": {
     "waterHue": 274.09,
     "L50": 35.4,
     "L5": 6.23,
-    "warmC": 22.71
+    "warmC": 22.71,
+    "C50": 23.61,
+    "waterC": 26.9,
+    "subjC": 34.3
    },
    "err": {
     "waterHue": 39.98,
     "L50": 0.48,
     "L5": 5.24,
-    "warmC": 13.35
+    "warmC": 13.35,
+    "C50": 13.35,
+    "waterC": 14.6,
+    "subjC": 13.72
    }
   },
   "u1_freediver_cyan": {
@@ -150,19 +189,28 @@
     "waterHue": 257,
     "L50": 37.48,
     "L5": 15.05,
-    "warmC": 6.56
+    "warmC": 6.56,
+    "C50": 8.99,
+    "waterC": 16.82,
+    "subjC": 0
    },
    "ref": {
     "waterHue": 253.83,
     "L50": 26.52,
     "L5": 11.42,
-    "warmC": null
+    "warmC": null,
+    "C50": 14.34,
+    "waterC": 14.69,
+    "subjC": 0
    },
    "err": {
     "waterHue": 3.17,
     "L50": 10.96,
     "L5": 3.64,
-    "warmC": null
+    "warmC": null,
+    "C50": 5.35,
+    "waterC": 2.13,
+    "subjC": 0
    }
   },
   "u3_freediver_green": {
@@ -176,19 +224,28 @@
     "waterHue": 254.48,
     "L50": 33.06,
     "L5": 8.4,
-    "warmC": 6.47
+    "warmC": 6.47,
+    "C50": 18.28,
+    "waterC": 20,
+    "subjC": 0
    },
    "ref": {
     "waterHue": 269.12,
     "L50": 33.84,
     "L5": 10.67,
-    "warmC": null
+    "warmC": null,
+    "C50": 25.42,
+    "waterC": 25.66,
+    "subjC": 0
    },
    "err": {
     "waterHue": 14.64,
     "L50": 0.78,
     "L5": 2.27,
-    "warmC": null
+    "warmC": null,
+    "C50": 7.14,
+    "waterC": 5.67,
+    "subjC": 0
    }
   },
   "u5_nurseshark": {
@@ -202,19 +259,28 @@
     "waterHue": 272.99,
     "L50": 36.03,
     "L5": 3.53,
-    "warmC": 4.83
+    "warmC": 4.83,
+    "C50": 6.31,
+    "waterC": 28.59,
+    "subjC": 7.74
    },
    "ref": {
     "waterHue": 281.13,
     "L50": 34.67,
     "L5": 5.68,
-    "warmC": 1.82
+    "warmC": 1.82,
+    "C50": 3.29,
+    "waterC": 32.06,
+    "subjC": 5.72
    },
    "err": {
     "waterHue": 8.14,
     "L50": 1.36,
     "L5": 2.16,
-    "warmC": 3.01
+    "warmC": 3.01,
+    "C50": 3.02,
+    "waterC": 3.47,
+    "subjC": 2.03
    }
   },
   "u7_seafan_top": {
@@ -228,19 +294,28 @@
     "waterHue": 265.86,
     "L50": 29.09,
     "L5": 8.7,
-    "warmC": 28.92
+    "warmC": 28.92,
+    "C50": 20.81,
+    "waterC": 36.39,
+    "subjC": 41.87
    },
    "ref": {
     "waterHue": 289.59,
     "L50": 24.89,
     "L5": 4.35,
-    "warmC": 34.59
+    "warmC": 34.59,
+    "C50": 22.02,
+    "waterC": 42.24,
+    "subjC": 52.69
    },
    "err": {
     "waterHue": 23.72,
     "L50": 4.2,
     "L5": 4.35,
-    "warmC": 5.67
+    "warmC": 5.67,
+    "C50": 1.21,
+    "waterC": 5.85,
+    "subjC": 10.81
    }
   }
  },

@@ -73,18 +73,20 @@ export function swd(x: Lab, y: Lab): number {
   }
   return (sum / DIRS.length) * Math.sqrt(3);
 }
-export type Region = { waterHue: number | null; L50: number; L5: number; warmC: number | null };
-/** Region statistics of one image: water = chroma > 10 and CIELAB hue 170–310°; sand/skin = the other pixels above L* 45. */
+export type Region = { waterHue: number | null; L50: number; L5: number; warmC: number | null; /** Median chroma (C*ab) of the frame, of its water, and the 95th percentile of the warm-hued chroma (0 where the hue is not warm). */ C50: number; waterC: number | null; subjC: number };
+/** Region statistics of one image: water = chroma > 10 and CIELAB hue 170–310°; sand/skin = the other pixels above L* 45;
+ *  warm subjects (skin, orange fish, coral) = CIELAB hue 0–100° (and 340–360°): their chroma at the frame's 95th percentile. */
 export function regionStats(p: Lab): Region {
-  const n = p.length / 3, L = new Float64Array(n);
+  const n = p.length / 3, L = new Float64Array(n), Call = new Float64Array(n), Cwarm = new Float64Array(n), Cwater: number[] = [];
   let sx = 0, sy = 0, cool = 0, wc = 0, wn = 0;
   for (let i = 0; i < n; i++) {
     const l = p[i * 3], a = p[i * 3 + 1], b = p[i * 3 + 2], c = Math.hypot(a, b), h = ((Math.atan2(b, a) * 180) / Math.PI + 360) % 360;
-    L[i] = l;
-    if (c > 10 && h > 170 && h < 310) { cool++; sx += a / c; sy += b / c; } else if (l > 45) { wc += c; wn++; }
+    L[i] = l; Call[i] = c; Cwarm[i] = h < 100 || h > 340 ? c : 0;
+    if (c > 10 && h > 170 && h < 310) { cool++; sx += a / c; sy += b / c; Cwater.push(c); } else if (l > 45) { wc += c; wn++; }
   }
-  L.sort();
-  return { waterHue: cool > 0.02 * n ? ((Math.atan2(sy, sx) * 180) / Math.PI + 360) % 360 : null, L50: quantile(L, 0.5), L5: quantile(L, 0.05), warmC: wn > 0.02 * n ? wc / wn : null };
+  L.sort(); Call.sort(); Cwarm.sort();
+  const hasWater = cool > 0.02 * n;
+  return { waterHue: hasWater ? ((Math.atan2(sy, sx) * 180) / Math.PI + 360) % 360 : null, L50: quantile(L, 0.5), L5: quantile(L, 0.05), warmC: wn > 0.02 * n ? wc / wn : null, C50: quantile(Call, 0.5), waterC: hasWater ? quantile(Float64Array.from(Cwater).sort(), 0.5) : null, subjC: quantile(Cwarm, 0.95) };
 }
 export const hueDiff = (a: number, b: number) => Math.abs(((a - b + 540) % 360) - 180);
 /** 2×2 box downsample of RGBA8 (encoded values, as an area resize does). */
