@@ -33,7 +33,7 @@ import { GpuGeometryRenderer } from "./geometry-gpu.ts";
 import { outputToUpright, previewFitWanted, type GeometryParams, type QuarterTurns } from "./geometry-math.ts";
 import { mapPrompt } from "./seg/track.ts";
 import { gridWanted, type SeedCandidate } from "./seg/seeds.ts";
-import { exportWaitS, SEG_EXPORT_RUNNING, SEG_EXPORT_UNAVAILABLE, segCoverageNote, SegExportUse } from "./seg/export-use.ts";
+import { exportWaitS, headWait, SEG_EXPORT, SEG_EXPORT_RUNNING, SEG_EXPORT_UNAVAILABLE, segCoverageNote, SegExportUse } from "./seg/export-use.ts";
 import type { ClipInfo } from "./probe.ts";
 import { clipKeyOf, colourSettings, DEFAULT_TOOLS, exportSuffix, neutralNote, profileDefaults, solveParams, type ColourLook, type ColourState, type DewarpState, type NeutralPick, type ToolsState } from "./tools.ts";
 import type { TapSolve } from "../../../aqua-fix/src/engine/tap.ts";
@@ -857,16 +857,14 @@ export class Studio {
     const run = this.seedChain.then(async () => {
       const e = this.engine, v = this.video, file = this.file;
       if (!e || !v || !file || stale() || !this.seg.live || this.seg.hasSegment(k, t)) return;
-      // An export is rendering: the seed frame's analysis is the engine's, and the engine is the export's now (its
-      // tracks and its picture must be the clip's alone). The look waits until the export is over (releaseSeeds);
-      // the pass goes on meanwhile with what it follows, up to this look.
-      if (this.holdSeed(k, t, search)) return;
+      // While an export renders, the engine is the export's (its tracks and its picture must be the clip's alone):
+      // the look's frame is analysed aside from it then (seedAside), so the pass goes on next to the render.
       let objs: ReturnType<typeof seedObjects> = [];
       let regions: SeedCandidate[] = [];
-      try {
+      if (!this.holdSeeds) try {
         // Not while the user scrubs: two <video>s seeking at once (plus the analysis) is what phones fall over on.
         await this.scrubIdle();
-        if (stale() || this.holdSeed(k, t, search)) return;
+        if (stale()) return;
         // One heavy AI job at a time (seg/turns.ts): not while a tap is being followed (the pass stands still for it
         // anyway), and a tap that comes meanwhile waits for this frame's analysis.
         // No frame of the preview's may reach the engine between upload and analysis; one in flight lands first.
@@ -890,8 +888,21 @@ export class Studio {
       } catch (err) {
         console.warn(`[seg] segment ${k} seed frame failed`, err);
       }
-      // (An export began while this look waited for its turn: it is made after it.)
-      if (stale() || this.holdSeed(k, t, search)) return;
+      if (stale()) return;
+      if (this.holdSeeds) {
+        // An export is rendering (it may have begun while this look waited for its turn): the frame is read by the
+        // work <video> and analysed in a pool worker, nothing of the engine touched. Where that cannot be done (a
+        // phone: its worker is shut down for the render anyway; no frame, no worker) the look waits for the
+        // export's end (holdSeed / releaseSeeds).
+        const a = isMobile(deviceFacts()) ? null : await this.seedAside(t);
+        if (stale()) return;
+        if (!a) {
+          if (!this.holdSeed(k, t, search)) void this.seedSegmentCanonical(k, t, search);
+          return;
+        }
+        objs = a.objs;
+        regions = a.regions;
+      }
       // The model is asked about the engine's other regions (they add to its animals), and, when the engine found
       // nothing at all (it only looks in open blue water: a manta over a reef), looks itself on its point grid.
       // (The grid not at an extra start: session.ts reacquire, carryOver.)
@@ -912,7 +923,29 @@ export class Studio {
     return run;
   }
 
-  /** An export's render has the engine (exportVideo): the AI's seed frames wait (holdSeed) until it is over. */
+  /**
+   * The seeds of the look at clip time t without the engine (an export is rendering with it): the work <video>'s
+   * frame, analysed aside (engine analyseAside: a 2D canvas and a pool worker). The frame is the clip's as
+   * recorded, upright, so the prompts are in the session's own space whatever geometry tool is on. Null: no frame
+   * or no answer.
+   */
+  private seedAside(t: number): Promise<{ objs: ReturnType<typeof seedObjects>; regions: SeedCandidate[] } | null> {
+    const file = this.file, e = this.engine;
+    const job = this.workChain.then(async () => {
+      if (!file || !e || this.file !== file || this.workVidFailed === file) return null;
+      const wv = await this.workVideo(file);
+      await seekVideo(wv, t + 1e-3);
+      if (this.file !== file) return null;
+      const a = await e.analyseAside(wv);
+      if (!a) return null;
+      return { objs: seedObjects(a.animals, t, []), regions: seedRegions(a.blobs, a.animals, a.water) };
+    }).catch((err) => { console.warn("[seg] seed frame aside failed", err); return null; });
+    this.workChain = job;
+    return job;
+  }
+
+  /** An export's render has the engine (exportVideo): the AI's seed frames are analysed aside from it (seedAside),
+   * or wait until it is over (holdSeed). */
   private holdSeeds = false;
   private heldSeeds: { k: number; t: number; search: boolean }[] = [];
 
@@ -1051,11 +1084,23 @@ export class Studio {
       this.stageDone();
       complete = this.seg.ready(file, trim);
     }
+    // (Never "complete" while the session is at work: a tap being followed, a replay.)
+    complete = complete && !this.seg.working;
     this.holdSeeds = true;
     // A seed frame in the engine right now ends first.
     await this.workChain.catch(() => undefined);
     if (signal.aborted) throw new DOMException("Export cancelled", "AbortError");
     this.seg.releaseForExport();
+    // The render waits for the pass where it has caught up with it, this long in all (segAwait).
+    this.segWaitLeft = complete || isMobile(deviceFacts()) ? 0 : SEG_EXPORT.headWaitS * 1000;
+    this.segWaited = 0;
+    // A session that has not begun (the model still loading, no first seeds yet) begins next to the render.
+    if (!complete && !isMobile(deviceFacts()) && this.seg.on) {
+      const v = this.video;
+      void this.seg.start(file, v?.duration || this.snap.duration, trim).then((live) => {
+        if (live && !this.seg.autos && this.file === file && this.exporting) void this.seedAutosCanonical();
+      });
+    }
     this.segComplete = complete;
     this.segAvailable = this.seg.on;
     this.segExportNote = complete ? null : this.segAvailable ? SEG_EXPORT_RUNNING : SEG_EXPORT_UNAVAILABLE;
@@ -1069,6 +1114,27 @@ export class Studio {
   private resumeSeg(): void {
     this.seg.resumeAfterExport();
     if (this.seg.on && this.snap.phase === "ready" && this.snap.kind === "video") this.runSeg();
+  }
+
+  /** What is left of this export's wait for the pass at its head (ms), and what it has waited. */
+  private segWaitLeft = 0;
+  private segWaited = 0;
+
+  /**
+   * Before an export's frame at clip time t is graded: the render has caught up with the AI pass and this frame is
+   * the pass's next one (export-use.ts headWait): it waits for the pass's frames, within what is left of
+   * SEG_EXPORT.headWaitS for the whole export. Not for a look that had to be put off (the pass stands still).
+   */
+  private async segAwait(t: number, signal: AbortSignal): Promise<void> {
+    if (!this.segUse || this.segWaitLeft <= 0) return;
+    const wants = () => !signal.aborted && !this.heldSeeds.length && headWait({ t, settled: this.seg.settledAt(t), running: this.seg.passRunning, frontT: this.seg.frontT(), leftMs: this.segWaitLeft });
+    while (wants()) {
+      const t0 = performance.now();
+      await this.seg.framesSoon(500);
+      const dt = performance.now() - t0;
+      this.segWaitLeft -= dt;
+      this.segWaited += dt;
+    }
   }
 
   /** The overlay an export's frame at clip time t is graded with, counted for the sheet's note (segDoneNote). */
@@ -1086,7 +1152,7 @@ export class Studio {
     const cur = this.snap.exp.note, prov = this.segExportNote;
     const note = cur && prov && cur.includes(prov) ? cur.replace(prov, final ?? "").replace(/\s+/g, " ").trim() : [cur, final].filter(Boolean).join(" ");
     this.setExp({ note: note || null });
-    console.info(`[export] AI subjects on ${u.ai} of ${u.total} frames (${Math.round(u.share * 100)}%)${this.segComplete ? ", pass complete" : ""}`);
+    console.info(`[export] AI subjects on ${u.ai} of ${u.total} frames (${Math.round(u.share * 100)}%)${this.segComplete ? ", pass complete" : `, pass unfinished${this.segWaited ? `; waited ${(this.segWaited / 1000).toFixed(1)} s for it at the render's head` : ""}`}`);
   }
 
   // ------------------------------------------------------------ follow mode
@@ -3107,8 +3173,10 @@ export class Studio {
                 prof.add("upload", ta - tp);
                 await eng.analyzeDue(fi.timeSec, engineFrames++ === 0 || segStart || eng.inCutWindow(fi.timeSec)).catch(() => undefined);
                 eng.dropPrecomputedBefore(fi.timeSec);
+                prof.add("analysisWait", performance.now() - ta);
+                // The render has caught up with the AI pass: a moment for the pass's next frames (segAwait).
+                if (!fi.prime) await this.segAwait(fi.timeSec, run.signal);
                 tp = performance.now();
-                prof.add("analysisWait", tp - ta);
                 eng.settings = this.settingsAt(fi.timeSec);
                 eng.tick(fi.timeSec);
                 eng.setSegOverlay(this.segOverlayFor(fi.timeSec, !fi.prime));
@@ -3401,8 +3469,9 @@ export class Studio {
             prof.add("upload", ta - tp);
             await eng.analyzeDue(fi.timeSec, frames === 0 || segStart || eng.inCutWindow(fi.timeSec)).catch(() => undefined);
             eng.dropPrecomputedBefore(fi.timeSec);
+            prof.add("analysisWait", performance.now() - ta);
+            await this.segAwait(fi.timeSec, ctrl.signal);
             tp = performance.now();
-            prof.add("analysisWait", tp - ta);
             eng.settings = this.settingsAt(fi.timeSec);
             eng.tick(fi.timeSec);
             eng.setSegOverlay(this.segOverlayFor(fi.timeSec));

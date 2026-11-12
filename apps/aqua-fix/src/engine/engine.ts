@@ -1197,6 +1197,42 @@ export class GradeEngine {
    * measured once, on the profile.)
    */
   async precompute(timeSec: number, prevSec: number, personOrdinal?: number): Promise<void> {
+    return this.precomputeNow(timeSec, prevSec, personOrdinal);
+  }
+
+  private asideCanvas: HTMLCanvasElement | null = null;
+  /**
+   * One analysis of a frame aside from the picture: `src` (upright, as a <video> or a canvas shows it) is drawn at
+   * the analysis size on a 2D canvas and analysed in a pool worker. Nothing of the engine's own state is read or
+   * written: not the source texture, not the tracks, not the maps the picture is graded with. So it may run while
+   * an export renders with this engine (the studio's AI subjects look for their seeds this way then: the look's
+   * frame used to be uploaded and analysed in the engine itself, which an export cannot lend). Resolves to that
+   * frame's own animals, regions and water validity, as animalMap / subjectBlobs / waterValidity give them after
+   * an analysis of the picture; null when no worker answers in time.
+   */
+  async analyseAside(src: CanvasImageSource, timeoutMs = 15_000): Promise<{ animals: AnimalMap | null; blobs: SubjectBlob[] | null; water: number } | null> {
+    const c = (this.asideCanvas ??= document.createElement("canvas"));
+    c.width = ANALYSIS_W;
+    c.height = ANALYSIS_H;
+    const g = c.getContext("2d", { willReadFrequently: true });
+    if (!g) return null;
+    g.drawImage(src, 0, 0, ANALYSIS_W, ANALYSIS_H);
+    const rgba = g.getImageData(0, 0, ANALYSIS_W, ANALYSIS_H).data;
+    const w = this.poolWorker();
+    if (this.poolLoad[w] === Infinity) return null;
+    const id = ++this.preId;
+    const packet = new Promise<AnalysisPacket | null>((resolve) => this.preWaiters.set(id, { resolve, worker: w }));
+    this.poolLoad[w]++;
+    const req: AnalysisRequest = { id, rgba: rgba.buffer as ArrayBuffer, width: ANALYSIS_W, height: ANALYSIS_H };
+    this.pool[w].postMessage(req, [req.rgba]);
+    const raw = await Promise.race([packet, new Promise<null>((r) => setTimeout(() => r(null), timeoutMs))]);
+    this.preWaiters.delete(id);
+    if (!raw) return null;
+    const water = raw.params.backdrop ?? 0;
+    return { animals: this.settings.subjectPop && water > 0 ? raw.animals ?? null : null, blobs: water > 0 ? raw.blobs ?? null : null, water };
+  }
+
+  private async precomputeNow(timeSec: number, prevSec: number, personOrdinal?: number): Promise<void> {
     if (this.pre.has(timeSec)) return;
     const tr = performance.now();
     const rgba = await this.readback(ANALYSIS_W, ANALYSIS_H);

@@ -17,7 +17,7 @@ import { SegTurns } from "./turns.ts";
 import { blobCandidates, SEEDS, type SeedCandidate } from "./seeds.ts";
 import { buildId } from "../export-key.ts";
 import type { SessionFrameOut } from "./session.ts";
-import { followFrame, SEG_EXPORT, segExportKey } from "./export-use.ts";
+import { followFrame, passComplete, SEG_EXPORT, segExportKey } from "./export-use.ts";
 import { loadAttempts, loadWithRetry } from "./load-retry.ts";
 import { etaSeconds } from "../eta.ts";
 
@@ -696,9 +696,11 @@ export function profileLine(p: Record<string, number>, ep = ""): string {
     `ai: profile${ep ? ` ${ep}` : ""}`,
     `encode ${per("encodeMs", "encodes")}ms×${n("encodes")}`,
     `attn ${per("attendMs", "steps")} dec ${per("decoderMs", "steps")} mem ${per("memEncMs", "steps")}ms×${n("steps")} steps`,
-    `keys ${n("keyframes")} (${n("fps")}/s +${n("extraKeys")} extra${n("strided") ? `, ${n("strided")} steps carried` : ""}) objs ${n("objects")}`,
+    `keys ${n("keyframes")} (${n("fps")}/s +${n("extraKeys")} extra) objs ${n("objects")}`,
     `decode ${s("decodeMs")}s×${n("decodes")} (${n("restarts")} restarts)`,
     `guard ${s("guardMs")}s fill ${s("fillMs")}s×${n("filledFrames")} maps ${s("productMs")}s seeds ${s("waitSeedsMs")}s${n("gridsSkipped") ? ` (${n("gridsSkipped")} grids skipped)` : ""}${n("flowPxS") ? ` flow ${n("flowPxS").toFixed(1)}px/s` : ""}`,
+    // The stride: steps carried of the keyframes a subject could have been carried over, and what kept the rest.
+    ...(n("strideOdd") ? [`stride ${n("strided")}/${n("strideOdd")} (large ${n("strideBig")}, re-prompted ${n("stridePrompt")}, new ${n("strideFirst")}, other ${n("strideOther")})`] : []),
     `total ${s("runMs")}s for ${n("clipS").toFixed(1)}s${n("heapMB") ? ` · heap ${n("heapMB")} MB` : ""}`,
   ].join(" · ");
 }
@@ -910,6 +912,9 @@ export class SubjectSeg {
     if (e.ev === "frames") {
       live.put(e.items);
       this.cache = null;
+      const fw = this.frameWaiters;
+      this.frameWaiters = [];
+      for (const r of fw) r();
       this.onFrames?.();
     } else if (e.ev === "keys") {
       live.setConf(e.conf);
@@ -937,7 +942,9 @@ export class SubjectSeg {
       this.busy = false;
       this.passSince = 0;
       this.tapDone();
-      this.passDone = this.autos !== null;
+      // (Through only with every frame answered: export-use.ts passComplete. An idle from before the seeds reached
+      // the session can arrive after they were noted here.)
+      this.passDone = passComplete({ seeded: this.autos !== null, filled: live.filled, n: live.n });
       segLog(`session idle: ${live.filled}/${live.n} frames filled, ${(live.bytes / 1e6).toFixed(1)} MB`);
       this.lastProfile = e.profile;
       segLog(`pass profile ${JSON.stringify(Object.fromEntries(Object.entries(e.profile).map(([k, v]) => [k, Math.round(v)])))}`);
@@ -1500,7 +1507,7 @@ export class SubjectSeg {
 
   /** The pass for this clip and trim has run to its end: an export has nothing to wait for (no share of its bar). */
   ready(file: File, trim: TrimRange | null): boolean {
-    return this.file === file && !!this.live && !this.opening && this.passDone && scopeServes(this.scope, trim, true);
+    return this.file === file && !!this.live && !this.opening && this.passDone && passComplete({ seeded: this.autos !== null, filled: this.live.filled, n: this.live.n }) && scopeServes(this.scope, trim, true);
   }
 
   /** Resolves when the session has nothing left to do (an export waits for it: the same masks as the preview). */
@@ -1527,6 +1534,25 @@ export class SubjectSeg {
    * of an export that starts while the pass runs must not move with the pass, or it could never be resumed. */
   exportKey(): string {
     return this.on && this.live ? segExportKey(this.log.filter((l) => l.op !== "seeds")) : "";
+  }
+
+  private frameWaiters: (() => void)[] = [];
+  /** Resolves when the session posts frames, or after ms. */
+  framesSoon(ms: number): Promise<void> {
+    return new Promise<void>((r) => { this.frameWaiters.push(r); setTimeout(r, ms); });
+  }
+
+  /** The frame at clip time t has its masks at full weight (filled, and past the hand-over toward unfilled frames). */
+  settledAt(t: number): boolean {
+    const live = this.live;
+    if (!this.on || !live) return false;
+    const i = Math.round(t * SEG.sampleHz) - live.i0;
+    return i >= 0 && i < live.n && live.has(t) && live.hand(i) >= 1;
+  }
+
+  /** The newest frame the pass has finished, whatever the pass's state (SegLive.followT). */
+  frontT(): number | null {
+    return this.on && this.live ? this.live.followT() : null;
   }
 
   /** An export's frame at clip time t is graded with what the AI has for it (SegLive.covered). */

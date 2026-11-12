@@ -1,20 +1,28 @@
 // AI subjects and the export (studio.ts exportVideo). An export never waits for the AI pass: it starts at once and
 // every frame is graded with what the AI has for it then, its mask where the pass has been, the engine's own subject
 // detection where it has not (the preview's fallback: studio-seg.ts SegLive.at is null there, and the mask's weight
-// eases out over 0.3 s toward frames that are not filled). The pass goes on next to the render for as long as it
-// needs nothing from the main thread's engine (its next look is held until the export is over: studio.ts holdSeeds).
+// eases out over 0.3 s toward frames that are not filled). The pass goes on next to the render: its looks are made
+// aside from the engine the export renders with (studio.ts seedAside), and the masks it makes meanwhile are used by
+// every frame rendered after them. On a phone the model's worker is shut down for the render instead (memory).
 //
-// Why not wait where the export's head catches up with the pass: a keyframe of the pass is seconds (18–28 s of
-// work per clip second on a desktop's WASM with the lite model, about a fifth of that on an iPhone's WebGPU), a
-// rendered frame is tens of milliseconds. The export is ahead of the pass within the first seconds and stays
-// there, so a wait at the head either lasts as long as the rest of the pass (the old behaviour) or buys a second
-// of clip. The one wait that pays is a pass that is nearly through when the export starts: it is given
-// SEG_EXPORT.waitS to finish, when its own estimate says it will (exportWaitS). Pure; tested in
-// test/seg-export.test.ts.
+// The export waits for the pass in two places only, both bounded:
+//   - a pass whose own estimate says it is about to finish when the export starts is given SEG_EXPORT.waitS;
+//   - where the render has caught up with the pass (the next frame is the pass's next one: headWait) it waits for
+//     the pass's frames, SEG_EXPORT.headWaitS in all for the export, then goes on with the engine's detection.
+// How much the second buys depends on the two speeds: 18–28 s of pass per clip second on a desktop's WASM with
+// the lite model (about a fifth of that on an iPhone's WebGPU), against a render of tens of milliseconds a frame
+// on a GPU, or 18 s per clip second in a headless browser without one (where the pass nearly keeps up).
+// Pure; tested in test/seg-export.test.ts.
 
 export const SEG_EXPORT = {
   /** An export waits at most this long (s) for a pass that says it is about to finish; never for any other. */
   waitS: 15,
+  /** While it renders, an export that has caught up with the pass waits for the pass's next frames, this long (s)
+   * in all (headWait); after that it goes on with the engine's detection where the pass has not been. */
+  headWaitS: 60,
+  /** ...and only for a frame at most this far (s of clip) past the pass's newest finished frame: the pass is about
+   * to get there. A frame further on (or one the pass left behind unfilled) is not waited for. */
+  headReachS: 1,
   /** A frame counts as graded with the AI's mask from this share of the mask's hand-over weight (SegLive.hand). */
   minHand: 0.5,
 };
@@ -94,4 +102,29 @@ export function followFrame(n: number, filled: (i: number) => boolean, hand: num
     if (ok) return i;
   }
   return -1;
+}
+
+/**
+ * The pass is through: its first seeds were given and every frame of its range has its answer (the session posts
+ * the frames nothing was found on too, once it is done). Not "an idle came after the seeds": the session's idle
+ * after the model's own search of the first frame is posted before the seeds reach it, and arrives after the main
+ * thread has noted them. An export that asked then was told "pass complete" with 2% of the frames filled (owner's
+ * ray clip, 12 Nov: "AI subjects on 16 of 754 frames (2%), pass complete").
+ */
+export function passComplete(o: { seeded: boolean; filled: number; n: number }): boolean {
+  return o.seeded && o.n > 0 && o.filled >= o.n;
+}
+
+/**
+ * Whether an export's render waits for the AI pass before it grades the frame at clip time t (studio.ts segAwait).
+ * The pass goes on while the export renders; where the render has caught up with it, the frame is the pass's next
+ * one, and waiting a moment gives it its AI mask instead of the engine's detection.
+ *   settled   the frame has its masks at full weight already: nothing to wait for;
+ *   running   the pass is at work (not through, not shut down, not held up by a look it cannot make);
+ *   frontT    the newest frame the pass has finished (SegLive.followT; null: none);
+ *   leftMs    what is left of the export's wait in all (SEG_EXPORT.headWaitS).
+ */
+export function headWait(o: { t: number; settled: boolean; running: boolean; frontT: number | null; leftMs: number }, reachS = SEG_EXPORT.headReachS): boolean {
+  if (o.settled || !o.running || o.leftMs <= 0 || o.frontT === null) return false;
+  return o.t > o.frontT - 1e-6 && o.t <= o.frontT + reachS + 1e-6;
 }

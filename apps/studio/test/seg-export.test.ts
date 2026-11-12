@@ -3,7 +3,7 @@
 // chip in follow mode; a failure after the page was in the background.
 //   node --experimental-strip-types apps/studio/test/seg-export.test.ts
 import assert from "node:assert/strict";
-import { exportWaitS, followFrame, SEG_EXPORT, SEG_EXPORT_UNAVAILABLE, segCoverageNote, segExportKey, SegExportUse } from "../src/pipeline/seg/export-use.ts";
+import { exportWaitS, followFrame, headWait, passComplete, SEG_EXPORT, SEG_EXPORT_UNAVAILABLE, segCoverageNote, segExportKey, SegExportUse } from "../src/pipeline/seg/export-use.ts";
 import { backgroundFailure, SEG_HAND, SegLive, segStatusText, subjectChip, type SegStatus } from "../src/pipeline/seg/studio-seg.ts";
 import { rleEncode } from "../src/pipeline/seg/mask.ts";
 import type { SessionFrameOut } from "../src/pipeline/seg/session.ts";
@@ -118,4 +118,74 @@ import type { SessionFrameOut } from "../src/pipeline/seg/session.ts";
   assert.equal(backgroundFailure(10_000, 40_000, 45_000, false), true, "failed 5 s after coming back");
   assert.equal(backgroundFailure(10_000, 40_000, 90_000, false), false, "failed long after: not the suspension's");
   console.log("background: a pass that fails while hidden or right after the return is started again, not ended: ok");
+}
+
+// ---------------------------------------------------------------- "pass complete" (owner's ray clip, 12 Nov)
+{
+  // The export at 106 s: the model's first search had ended (its idle), the first seeds had been given, the pass
+  // was at 1% with 16 of 780 frames posted. It logged "pass complete" and then "AI subjects on 16 of 754 frames".
+  assert.equal(passComplete({ seeded: true, filled: 16, n: 780 }), false, "an idle after the seeds were noted is not the pass's end");
+  assert.equal(passComplete({ seeded: false, filled: 0, n: 780 }), false, "the idle before any seeds");
+  assert.equal(passComplete({ seeded: true, filled: 779, n: 780 }), false);
+  assert.equal(passComplete({ seeded: true, filled: 780, n: 780 }), true, "every frame has its answer: through");
+  assert.equal(passComplete({ seeded: false, filled: 780, n: 780 }), false);
+  assert.equal(passComplete({ seeded: true, filled: 0, n: 0 }), false);
+  console.log("export: the pass is complete only when every frame has its answer (not at an idle after the seeds): ok");
+}
+
+// ---------------------------------------------------------------- the render and the pass side by side
+{
+  const base = { t: 2, settled: false, running: true, frontT: 1.7, leftMs: 60_000 };
+  assert.equal(headWait(base), true, "the render has caught up with the pass: this frame is the pass's next");
+  assert.equal(headWait({ ...base, settled: true }), false, "the frame has its mask");
+  assert.equal(headWait({ ...base, running: false }), false, "no pass at work");
+  assert.equal(headWait({ ...base, leftMs: 0 }), false, "the export's wait is used up: on with the engine's detection");
+  assert.equal(headWait({ ...base, frontT: null }), false, "the pass has finished no frame yet");
+  assert.equal(headWait({ ...base, t: 1.7 + SEG_EXPORT.headReachS + 0.5 }), false, "the pass is not about to get there");
+  assert.equal(headWait({ ...base, t: 1.0 }), false, "a frame the pass left behind unfilled is not waited for");
+  assert.ok(SEG_EXPORT.headWaitS <= 120, "the wait in all is bounded");
+
+  // A render next to a pass, as studio.ts runs them: the pass has the first 2 s when the export starts and makes
+  // half a second of frames per tick it is given; the render takes a frame at a time, waits where headWait says
+  // (a tick each time) within its budget, and counts what each frame was graded with.
+  const mw = 32, mh = 18, n = 300, hz = 30;
+  const frame = (i: number): SessionFrameOut => {
+    const al = new Uint8Array(mw * mh).fill(255, 100, 160), q = new Uint8Array(Math.ceil(mw / 4) * Math.ceil(mh / 4));
+    return { i, alpha: rleEncode(al), nearQ: rleEncode(q), excQ: null, depQ: rleEncode(q), pop: null };
+  };
+  const render = (budgetTicks: number, passTicksPerFrame: number) => {
+    const live = new SegLive({ mw, mh, i0: 0, n });
+    let made = 60, credit = 0;
+    live.put(Array.from({ length: made }, (_, i) => frame(i)));
+    const pass = () => { if (made >= n) return; const k = Math.min(n, made + 15); live.put(Array.from({ length: k - made }, (_, j) => frame(made + j))); made = k; };
+    const use = new SegExportUse();
+    let left = budgetTicks, waited = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / hz, settled = () => live.has(t) && live.hand(i) >= 1;
+      // (The pass also works while frames render: `passTicksPerFrame` of a tick per rendered frame.)
+      credit += passTicksPerFrame;
+      while (credit >= 1) { credit--; pass(); }
+      while (headWait({ t, settled: settled(), running: made < n, frontT: live.followT(), leftMs: left })) { pass(); left--; waited++; }
+      use.add(live.covered(t));
+    }
+    return { use, waited, made };
+  };
+  // No wait at all, a pass that makes nothing meanwhile: the frames it had at the start, less the hand-over.
+  const none = render(0, 0);
+  assert.equal(none.waited, 0);
+  assert.ok(none.use.ai >= 60 - SEG_HAND && none.use.ai < 60, `the masks that existed when the render began are used (${none.use.ai} of 60)`);
+  // The same with a wait of 4 ticks: 2 s more of the pass's frames, made while the export rendered, are used too.
+  const some = render(4, 0);
+  assert.equal(some.waited, 4, "the wait is spent where the render caught up, and no more than the budget");
+  assert.ok(some.use.ai >= 120 - SEG_HAND && some.use.ai < 120, `the masks made while rendering are used and counted (${some.use.ai} of 300)`);
+  assert.equal(some.made, 120);
+  // A pass as fast as the render stays ahead of it: every frame, and no wait.
+  const fast = render(4, 1 / 15);
+  assert.equal(fast.use.ai, n, "a pass that keeps ahead of the render gives every frame its mask");
+  assert.equal(fast.waited, 0);
+  // A pass a little slower than the render: the budget carries it part of the way, then the engine's detection.
+  const slow = render(4, 1 / 30);
+  assert.ok(slow.use.ai > some.use.ai && slow.use.ai < n, `a slower pass: more than the wait alone, not all (${slow.use.ai} of 300)`);
+  assert.match(segCoverageNote(slow.use, { complete: false, available: true })!, /^AI subjects on \d+% of frames/);
+  console.log(`export: masks made while the render runs are used and counted (none ${none.use.ai}, waited ${some.use.ai}, slower pass ${slow.use.ai}, pass ahead ${fast.use.ai} of 300): ok`);
 }

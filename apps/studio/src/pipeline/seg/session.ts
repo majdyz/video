@@ -52,7 +52,7 @@ import type { EdgeTam } from "./edgetam.ts";
 import { cellLab, nearMapNear, departFromCells, framePop, sdfFeatherNear, area, bbox, centroid, guidedFilterNear, iou, promptFromMask, rleDecode, rleEncode, shiftMap, waterContrast } from "./mask.ts";
 import { denseFlow, warp, type Gray } from "./flow.ts";
 import { fillInterval, HOLD, keyTimes, lockStep, maskSize, newLock, remap, SEG, sigmoidResize, toU8, type Keyframe, type Lock, type SegObject } from "./track.ts";
-import { assignSlots, edgeShare, gridWanted, inCorner, overlap, SEEDS, strideDue, topUpAt, type SeedCandidate } from "./seeds.ts";
+import { assignSlots, edgeShare, gridWanted, inCorner, overlap, SEEDS, STRIDE, strideDue, topUpAt, type SeedCandidate } from "./seeds.ts";
 
 /** Reads one frame (as a VideoFrame-like source) at clip time t; the session draws it on its own canvases. */
 export type SessionFrames = {
@@ -224,6 +224,8 @@ type ObjState = {
   skipF: number;
   /** The last real forward step was an easy one: a mask, no fresh prompt, no runaway, not a hard step. */
   calmF: boolean;
+  /** Why it was not ("" when it was): first, prompt, runaway, hard, empty (the profile counts them: strideAt). */
+  uncalm: string;
 };
 
 /** fps: keyframes a second, fixed (no adaptive extra ones unless `adapt` says so). Default: by the model (see header). */
@@ -294,7 +296,7 @@ export class SegSession {
   private asked = NaN;
   /** Steps done (for the progress). */
   private stepsDone = 0;
-  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0, extraKeys: 0, carried: 0, runMs: 0, held: 0, rechecks: 0, recovered: 0, strided: 0, gridsSkipped: 0, flowPx: 0, flows: 0 };
+  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0, extraKeys: 0, carried: 0, runMs: 0, held: 0, rechecks: 0, recovered: 0, strided: 0, strideOdd: 0, strideBig: 0, stridePrompt: 0, strideFirst: 0, strideOther: 0, gridsSkipped: 0, flowPx: 0, flows: 0 };
   private waitSince = 0;
 
   private model: EdgeTam;
@@ -403,7 +405,7 @@ export class SegSession {
   }
 
   private newObj(o: SegObject & { id: number }, auto: boolean, seg: number, hidden: boolean, fwd: number[], bwd: number[]): ObjState {
-    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0, ranF: 0, ranB: 0, keptF: false, keptB: false, lastF: 0, lastB: 0, anchor: 0, anchor0: 0, anchorT: 0, viaF: null, skipF: 0, calmF: false };
+    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0, ranF: 0, ranB: 0, keptF: false, keptB: false, lastF: 0, lastB: 0, anchor: 0, anchor0: 0, anchorT: 0, viaF: null, skipF: 0, calmF: false, uncalm: "first" };
   }
 
   /** Canonical frame of segment k (k = 0: the first seeds' frame; then every SEG.segmentS, snapped). */
@@ -1506,7 +1508,11 @@ export class SegSession {
       // or the last one kept when this one was dropped.)
       const size = Math.max(area(m), goFwd ? s.lastF : s.lastB);
       // (Nor is a dropped mask of theirs a reason for one: a keyframe a quarter of a second on is dropped as well.)
-      s.hard = !first && (s.auto ? !ranAway && (reprompts > 0 || agree < SEG.adaptAgree) && size >= SEG.fineMinArea * this.mw * this.mh : reprompts > 0 || ranAway || agree < SEG.adaptAgree);
+      // (After a keyframe the stride carried the object over, the flow-carried mask came in two hops and overlaps a
+      // good mask less than a one-hop one does: its agreement alone puts no object on the fine grid. On the owner's
+      // hammerhead clip it did, for subjects around 1% of the frame: a carried keyframe bought extra ones.)
+      const twoHop = goFwd && !!s.viaF;
+      s.hard = !first && (s.auto ? !ranAway && (reprompts > 0 || (!twoHop && agree < SEG.adaptAgree)) && size >= SEG.fineMinArea * this.mw * this.mh : reprompts > 0 || ranAway || agree < SEG.adaptAgree);
       if (s.hard && s.auto) console.info(`[seg] hard step at ${t.toFixed(2)} s: object ${s.o.id}${dir} (${reprompts ? "re-prompted" : `agrees ${agree.toFixed(2)} with the flow`}; ${(100 * size / (this.mw * this.mh)).toFixed(2)}% of the frame)`);
     }
     // Hysteresis (track.ts HOLD): a locked subject the model still sees at about its size keeps its weight through a
@@ -1538,7 +1544,13 @@ export class SegSession {
         }
       }
     }
-    if (goFwd) { s.prevF = { m, luma }; s.viaF = null; s.calmF = !first && !reprompts && !ranAway && !s.hard && area(m) > 0; s.fi++; } else { s.prevB = { m, luma }; s.bi++; }
+    if (goFwd) {
+      s.prevF = { m, luma };
+      s.viaF = null;
+      s.uncalm = first ? "first" : reprompts ? "prompt" : ranAway ? "runaway" : s.hard ? "hard" : area(m) > 0 ? "" : "empty";
+      s.calmF = s.uncalm === "";
+      s.fi++;
+    } else { s.prevB = { m, luma }; s.bi++; }
     const mu = toU8(m);
     s.keys.set(t, rleEncode(mu));
     if (area(mu, 127) > 0) s.shown.add(t); else s.shown.delete(t);
@@ -1688,14 +1700,28 @@ export class SegSession {
    */
   private strideAt(s: ObjState, t: number): boolean {
     if (!this.stride || !s.auto || s.peek || s.o.kind !== "include" || !s.prevF) return false;
-    return strideDue({
+    const o = {
       index: this.base.indexOf(t),
       start: this.segStarts.some((x) => Math.abs(x - t) < 1e-6),
       last: s.fi >= s.fwd.length - 1,
       real: !s.viaF && s.fi > 0,
       calm: s.calmF && s.ranF === 0 && s.fineF <= 0,
       area: area(s.prevF.m) / (this.mw * this.mh),
-    });
+    };
+    const due = strideDue(o);
+    // For the profile: of the keyframes a subject could have been carried over (its place on the grid), how many
+    // were, and what stood in the way of the rest (too large, a fresh prompt at the step before, a new track's
+    // second keyframe, anything else: no mask, a runaway, the fine grid).
+    if (o.index > 0 && o.index % 2 === 1 && !o.start && !o.last && o.real) {
+      this.prof.strideOdd++;
+      if (!due) {
+        if (o.area >= STRIDE.area) this.prof.strideBig++;
+        else if (s.uncalm === "prompt") this.prof.stridePrompt++;
+        else if (s.uncalm === "first") this.prof.strideFirst++;
+        else this.prof.strideOther++;
+      }
+    }
+    return due;
   }
 
   /**
