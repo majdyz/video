@@ -310,7 +310,7 @@ export function Stage({
 
   const zoomed = view.z > 1.01;
   const lineX = split !== null ? view.tx + split * box.w * view.z : 0;
-  const lineVisible = split !== null && lineX >= 0 && lineX <= box.w;
+  const lineVisible = split !== null && lineX >= 0 && lineX < box.w - 0.5; // parked at the right edge (colour still being read): no line or knob
   const label = !aspect ? undefined
     : `Preview${zoomed ? `, zoomed ${view.z.toFixed(1)} times` : ""}. ${split !== null ? "Drag to move the before and after line. " : onHold ? "Press and hold to see the original. " : ""}Double-tap or pinch to zoom${onTapAt ? `, ${tapHint ?? "tap an animal to include or exclude it"}` : onTap ? ", tap to play or pause" : ""}.`;
 

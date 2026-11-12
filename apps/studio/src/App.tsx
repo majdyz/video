@@ -157,6 +157,38 @@ export default function App() {
   const colourPending = ready && tools.colour.enabled && !s.colourProfiled && studio.hasColourEngine;
   const photo = s.kind === "photo";
 
+  // ---- before/after reveal: while the colour is being read the line waits at the right edge (all original);
+  // once the grade is in it sweeps to where the user left it, so the result wipes in instead of jumping.
+  const [splitAnim, setSplitAnim] = useState<number | null>(null);
+  const revealRaf = useRef(0);
+  const wasPending = useRef(false);
+  const splitNow = useRef(split);
+  splitNow.current = split;
+  useEffect(() => {
+    const was = wasPending.current;
+    wasPending.current = colourPending;
+    cancelAnimationFrame(revealRaf.current);
+    if (colourPending) { setSplitAnim(1); return; }
+    const target = splitNow.current;
+    const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!was || target === null || reduce) { setSplitAnim(null); return; }
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const p = Math.min(1, (now - t0) / 900);
+      const e = 1 - (1 - p) ** 3;
+      setSplitAnim(p < 1 ? 1 + (target - 1) * e : null);
+      if (p < 1) revealRaf.current = requestAnimationFrame(step);
+    };
+    revealRaf.current = requestAnimationFrame(step);
+  }, [colourPending]);
+  useEffect(() => () => cancelAnimationFrame(revealRaf.current), []);
+  const splitShown = split === null ? null : splitAnim ?? split;
+  const moveSplit = useCallback((v: number) => {
+    cancelAnimationFrame(revealRaf.current);
+    setSplitAnim(null);
+    setSplit(v);
+  }, []);
+
   // ---- split / per-segment colour
   const segs = s.segments;
   const visibleSegs = visibleSegments(segs.cuts, s.trim, s.duration);
@@ -392,7 +424,7 @@ export default function App() {
   const neutralControls = { active: pickActive, pick: neutralPick, onToggle: () => setPicking((v) => !v), onReset: () => studio.clearNeutral() };
   // The mark sits where the tap was: on a clip, only around the frame it was made on (the scene moves on).
   const neutralMark = neutralPick && (photo || Math.abs(s.currentTime - neutralPick.t) < 0.25) ? neutralPick : null;
-  useEffect(() => studio.setSplit(holding ? 1 : selectActive || pickActive ? null : split), [studio, split, holding, selectActive, pickActive]);
+  useEffect(() => studio.setSplit(holding ? 1 : selectActive || pickActive ? null : splitShown), [studio, splitShown, holding, selectActive, pickActive]);
   const getSelection = useCallback(() => studio.outlineSelection(), [studio]);
   const openPane = (id: Pane) => {
     setPane(id);
@@ -544,9 +576,9 @@ export default function App() {
             liveRef={liveRef}
             liveOn={liveOn}
             visible={s.visible}
-            split={ready && !exporting && !selectActive && !pickActive ? split : null}
+            split={ready && !exporting && !selectActive && !pickActive ? splitShown : null}
             holding={holding}
-            onSplit={setSplit}
+            onSplit={moveSplit}
             onHold={ready && !exporting ? setHolding : undefined}
             onTap={selectActive || pickActive || photo ? undefined : () => studio.togglePlay()}
             onTapAt={pickActive ? (u, v) => void studio.tapNeutral(u, v) : selectActive ? (u, v) => { void studio.toggleSubjectAt(u, v); setTapPulse({ u, v, t: performance.now() }); } : undefined}
