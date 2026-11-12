@@ -52,7 +52,7 @@ import type { EdgeTam } from "./edgetam.ts";
 import { cellLab, nearMap, departFromCells, framePop, sdfFeather, area, bbox, centroid, guidedFilter, iou, promptFromMask, rleDecode, rleEncode, shiftMap, waterContrast } from "./mask.ts";
 import { denseFlow, warp, type Gray } from "./flow.ts";
 import { fillInterval, HOLD, keyTimes, lockStep, maskSize, newLock, remap, SEG, sigmoidResize, toU8, type Keyframe, type Lock, type SegObject } from "./track.ts";
-import { assignSlots, edgeShare, overlap, SEEDS, topUpAt, type SeedCandidate } from "./seeds.ts";
+import { assignSlots, edgeShare, inCorner, overlap, SEEDS, topUpAt, type SeedCandidate } from "./seeds.ts";
 
 /** Reads one frame (as a VideoFrame-like source) at clip time t; the session draws it on its own canvases. */
 export type SessionFrames = {
@@ -193,8 +193,11 @@ type ObjState = {
   /** The size (mask px) of its last mask that was kept, forward / backward (0: none yet). */
   lastF: number;
   lastB: number;
-  /** One of the engine's own subjects: the size (mask px) its masks are held against (SEG.bloat; 0: no mask yet). */
+  /** One of the engine's own subjects: the size (mask px) its masks are held against (SEG.bloat; 0: no mask yet),
+   * and its first mask's size and time (the anchor settles over SEG.bloatSettleS from there). */
   anchor: number;
+  anchor0: number;
+  anchorT: number;
 };
 
 /** fps: keyframes a second, fixed (no adaptive extra ones unless `adapt` says so). Default: by the model (see header). */
@@ -367,7 +370,7 @@ export class SegSession {
   }
 
   private newObj(o: SegObject & { id: number }, auto: boolean, seg: number, hidden: boolean, fwd: number[], bwd: number[]): ObjState {
-    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0, ranF: 0, ranB: 0, keptF: false, keptB: false, lastF: 0, lastB: 0, anchor: 0 };
+    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0, ranF: 0, ranB: 0, keptF: false, keptB: false, lastF: 0, lastB: 0, anchor: 0, anchor0: 0, anchorT: 0 };
   }
 
   /** Canonical frame of segment k (k = 0: the first seeds' frame; then every SEG.segmentS, snapped). */
@@ -559,10 +562,14 @@ export class SegSession {
    * subject was lost) to the first look that finds something had no mask at all.
    */
   private backList(t0: number): number[] {
+    // (Back to the last keyframe a subject was followed at, shown or not: where a track stepped and had nothing, or
+    // had its masks dropped, a second track coming from the other side is tracker steps and a turn of the decoder
+    // for a stretch the model has already looked at. It was the last keyframe a subject was shown at: on the owner's
+    // hammerhead clip every dropped mask opened such a stretch, five back-fills and 35 decoder restarts.)
     let lo = -Infinity;
     for (const s of this.objs.values()) {
       if (s.o.kind !== "include" || s.peek) continue;
-      for (const k of s.shown) if (k < t0 - 1e-6 && k > lo) lo = k;
+      for (const k of s.keys.keys()) if (k < t0 - 1e-6 && k > lo) lo = k;
     }
     return this.stepsBetween(Math.max(lo, t0 - SEG.reachS), t0, [t0]).filter((k) => k > lo + 1e-6).reverse();
   }
@@ -907,7 +914,7 @@ export class SegSession {
         if (!b || b.x1 - b.x0 > A.span * w || b.y1 - b.y0 > A.span * h) continue;
         // Something else's mask, or the subject with the water around it: larger than what the engine saw there.
         if (a > A.blobGrow * Math.max(c.area, SEEDS.minArea)) continue;
-        if (edgeShare(m, w, h) > A.edge) continue;
+        if (edgeShare(m, w, h) > A.edge || inCorner(m, w, h)) continue;
         // The water test, whatever the size: a region of haze or of plain water is not a subject.
         if (dE === null || dE < (a < A.areaLo ? A.smallContrast : RECHECK.contrast)) continue;
         // Followed from the region's own points: the same prompt gives the same mask on the track's first step (a
@@ -948,7 +955,7 @@ export class SegSession {
       const b = bbox(m, w, h);
       if (!b || b.x1 - b.x0 > A.span * w || b.y1 - b.y0 > A.span * h) continue;
       // Along the frame's edge: a subject the frame cuts through, with the water next to it (AUTO.edge).
-      if (edgeShare(m, w, h) > A.edge) continue;
+      if (edgeShare(m, w, h) > A.edge || inCorner(m, w, h)) continue;
       // A small one (a fish of a school) must stand off its water: a speck of haze does not.
       if (a < A.areaLo) { const dE = cells ? waterContrast(m, cells, w, h) : null; if (dE === null || dE < A.smallContrast) continue; }
       const c = cells ? ringContrast(m, cells, w, h) : A.contrast;
@@ -969,7 +976,7 @@ export class SegSession {
     // this frame when the look is a segment start's: followedAt).
     const olds = quick ? [] : this.followedAt(t);
     // A followed subject the model has just masked afresh: that is its size from here on (SEG.bloat).
-    for (const o of olds) for (const c of found) if (overlap(o.m, c.m).iou >= SEEDS.sameIoU) o.s.anchor = area(c.m);
+    for (const o of olds) for (const c of found) if (overlap(o.m, c.m).iou >= SEEDS.sameIoU) o.s.anchor = Math.max(area(c.m), o.area);
     const items = found.map((c, i) => ({ id: i, area: area(c.m), m: c.m }));
     const slots = assignSlots(olds, items, (o, n) => overlap(o.m, n.m), (a, b) => overlap(a.m, b.m), this.autoCap);
     const keep = slots.take.slice(0, quick ? A.peekMax : A.max).map((i) => found[i]);
@@ -1115,7 +1122,13 @@ export class SegSession {
           continue;
         }
         // Autos in lockstep: the earliest keyframe any auto is due at; past a segment start, its seeds first.
-        const autos = [...this.objs.values()].filter((s) => s.auto && this.nextOf(s) !== null);
+        // A back-fill (but for its first step, on its seed's own frame) waits until nothing is left to follow
+        // forward and every start has its seeds: the decoder reads the clip through once, then turns for the
+        // back-fills, earliest first. A back-fill used to run as soon as its own subject's forward track ended,
+        // with the other subjects in mid-pass: the decoder went back for it and forward again each time (owner's
+        // hammerhead clip: 37 restarts; a restart is the decoder's memory peak on a phone).
+        const forwardLeft = [...this.objs.values()].some((s) => s.auto && s.fi < s.fwd.length) || this.segStarts.some((s) => !this.seeded.has(s));
+        const autos = [...this.objs.values()].filter((s) => s.auto && this.nextOf(s) !== null && !(forwardLeft && s.bi > 0 && this.dirOf(s) === "b"));
         // (A start the followed subjects have stepped on comes before anything else of theirs, its seeds' first step
         // included: a back-fill waiting behind a forward track that ended there runs once the track is through, not
         // in the middle of it.)
@@ -1425,11 +1438,20 @@ export class SegSession {
       else { s.ranB = ranAway ? s.ranB + 1 : 0; if (!ranAway && a > 0) s.keptB = true; }
       if (!ranAway && a > 0) {
         if (goFwd) s.lastF = a; else s.lastB = a;
-        // (The anchor follows a subject that comes nearer, slowly: doubling takes it seconds, a bloat a few keyframes.)
-        s.anchor = s.anchor > 0 ? (a > s.anchor ? s.anchor + 0.02 * (a - s.anchor) : s.anchor) : a;
+        // The anchor: the first mask, what the track settles at over its first second (within bounds), then
+        // following a subject that comes nearer, slowly (doubling takes it seconds, a bloat a few keyframes).
+        if (!(s.anchor > 0)) { s.anchor = s.anchor0 = a; s.anchorT = t; }
+        else if (a > s.anchor) s.anchor = Math.abs(t - s.anchorT) <= SEG.bloatSettleS + 1e-6 ? Math.max(s.anchor, Math.min(a, SEG.bloatSettle * s.anchor0)) : s.anchor + 0.02 * (a - s.anchor);
       }
     }
-    s.hard = !first && (reprompts > 0 || ranAway || (agree < SEG.adaptAgree && (!s.auto || area(m) >= SEG.fineMinArea * this.mw * this.mh)));
+    {
+      // (A small one of the engine's own subjects is never on the fine grid: SEG.fineMinArea. Its size: this mask's,
+      // or the last one kept when this one was dropped.)
+      const size = Math.max(area(m), goFwd ? s.lastF : s.lastB);
+      // (Nor is a dropped mask of theirs a reason for one: a keyframe a quarter of a second on is dropped as well.)
+      s.hard = !first && (s.auto ? !ranAway && (reprompts > 0 || agree < SEG.adaptAgree) && size >= SEG.fineMinArea * this.mw * this.mh : reprompts > 0 || ranAway || agree < SEG.adaptAgree);
+      if (s.hard && s.auto) console.info(`[seg] hard step at ${t.toFixed(2)} s: object ${s.o.id}${dir} (${reprompts ? "re-prompted" : `agrees ${agree.toFixed(2)} with the flow`}; ${(100 * size / (this.mw * this.mh)).toFixed(2)}% of the frame)`);
+    }
     // Hysteresis (track.ts HOLD): a locked subject the model still sees at about its size keeps its weight through a
     // keyframe whose raw confidence dips, and a keyframe that is not sure (or whose mask shrank) is re-checked.
     let conf = reprompts ? 0.5 : (r.score > 0 ? Math.min(1, Math.max(0, (r.score + 1) / 3)) : 0) * (agree < 1 ? Math.min(1, Math.max(0, (agree - 0.3) / 0.4)) : 1);
@@ -1490,7 +1512,7 @@ export class SegSession {
       // swimming out). Let go, and the pass looks soon for what came in meanwhile (lookSoon). A lone subject is
       // followed on: its tracker knows it again when it is back.
       const seen = (o: ObjState) => Math.max(-Infinity, ...o.shown);
-      if (t - seen(s) >= SEG.goneS - 1e-6 && [...this.objs.values()].some((o) => o !== s && o.auto && !o.peek && o.o.kind === "include" && o.fi < o.fwd.length && t - seen(o) < SEG.goneS - 1e-6)) {
+      if (s.ranF === 0 && t - seen(s) >= SEG.goneS - 1e-6 && [...this.objs.values()].some((o) => o !== s && o.auto && !o.peek && o.o.kind === "include" && o.fi < o.fwd.length && t - seen(o) < SEG.goneS - 1e-6)) {
         s.fwd.length = s.fi;
         this.model.drop(key);
         this.freed = true;

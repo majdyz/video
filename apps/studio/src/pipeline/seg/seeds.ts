@@ -87,6 +87,19 @@ export function edgeShare(m: ArrayLike<number>, w: number, h: number, thr = 0.5)
   return Math.max(top / w, bottom / w, left / h, right / h);
 }
 
+/**
+ * A mask that sits in a corner of the frame: it lies along two adjacent sides, each over `min` of the side's length.
+ * What the frame cuts off at a corner (a diver's hair in a selfie shot: a patch of it was seeded there) is not a
+ * subject to start on; an animal swimming in is found at the next look, once it is in the picture.
+ */
+export function inCorner(m: ArrayLike<number>, w: number, h: number, min = 0.05, thr = 0.5): boolean {
+  let top = 0, bottom = 0, left = 0, right = 0;
+  for (let x = 0; x < w; x++) { if (m[x] > thr) top++; if (m[(h - 1) * w + x] > thr) bottom++; }
+  for (let y = 0; y < h; y++) { if (m[y * w] > thr) left++; if (m[y * w + w - 1] > thr) right++; }
+  const T = top > min * w, B = bottom > min * w, L = left > min * h, R = right > min * h;
+  return (T || B) && (L || R);
+}
+
 /** A subject at a look: one followed so far (its mask now) or a new find (its first mask). */
 export type SlotItem = { id: number; area: number };
 /** How two masks overlap: their IoU, and the share of the smaller one under the other. */

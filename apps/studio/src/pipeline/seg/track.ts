@@ -102,17 +102,25 @@ export const SEG = {
   /** A tracked mask over this share of the frame, or growing past runawayGrow × the flow-carried one, is dropped. */
   runawayArea: 0.3,
   runawayGrow: 2.5,
-  /** One of the engine's own subjects whose mask is more than `bloat` × its anchor (its first mask's size, set anew
-   * to the model's fresh mask of it at every look that finds it again, and creeping up slowly with the track) and
-   * over bloatMinArea of the frame has grown onto the water around its subject (the lite tracker rounds a faint,
-   * far shark into an oval several times its size within a couple of seconds, each step under runawayGrow): it is
-   * prompted afresh from the flow-carried mask, and dropped when that is no better. */
+  /** One of the engine's own subjects whose mask is more than `bloat` × its anchor and over bloatMinArea of the
+   * frame has grown onto the water around its subject (the lite tracker rounds a faint, far shark into an oval
+   * several times its size within a couple of seconds, each step under runawayGrow: 0.9% → 4.5% of the frame on the
+   * owner's hammerhead clip): it is prompted afresh from the flow-carried mask, and dropped when that is no better.
+   * The anchor is the track's size once it has settled: its first mask's, or what its masks of the first
+   * bloatSettleS seconds reach, up to bloatSettle × that (the tracker's mask of a subject is often twice the prompted
+   * one: against the first mask alone, two in three small sharks were dropped at their second keyframe, let go and
+   * found again under a new id, each time a back-fill and its decoder restarts); set anew to the model's fresh mask
+   * at every look that finds the subject again, and creeping up slowly with the track. Small masks are left alone
+   * (bloatMinArea): an oval on a far shark is a faint pop, a dropped one is a look, a new track and a back-fill. */
   bloat: 2.2,
-  bloatMinArea: 0.004,
-  /** Adaptive keyframes: a step of one of the engine's own subjects under this share of the frame is not a hard one
-   * for its disagreement with the flow alone (a mask a few px thick never overlaps its flow-carried self by
-   * adaptAgree: a school of far sharks was on the fine grid all through, 86 extra keyframes of 100 possible). */
-  fineMinArea: 0.004,
+  bloatMinArea: 0.015,
+  bloatSettle: 1.5,
+  bloatSettleS: 1,
+  /** Adaptive keyframes: one of the engine's own subjects under this share of the frame stays on the regular grid
+   * whatever its steps are like (a mask a few px thick never overlaps its flow-carried self by adaptAgree, and is
+   * re-prompted often: a school of far sharks was on the fine grid all through, 86 extra keyframes of 100
+   * possible; its pop is faint, and its masks between keyframes come from the flow either way). */
+  fineMinArea: 0.01,
   /** One of the engine's own subjects that has shown nothing for this long (s) while another is being followed
    * has left the picture: it is let go (its tracker steps are a third of the pass each)... */
   goneS: 2,

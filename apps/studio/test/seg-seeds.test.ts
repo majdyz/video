@@ -7,7 +7,7 @@ import { analyzeThumbnail, ANALYSIS_H, ANALYSIS_W } from "../../aqua-fix/src/eng
 import { animalTarget } from "../../aqua-fix/src/engine/animals.ts";
 import type { SubjectBlob } from "../../aqua-fix/src/engine/backdrop.ts";
 import type { EdgeTam } from "../src/pipeline/seg/edgetam.ts";
-import { assignSlots, blobCandidates, blobRank, edgeShare, overlap, SEEDS, topUpAt, type SeedCandidate, type SlotItem } from "../src/pipeline/seg/seeds.ts";
+import { assignSlots, blobCandidates, blobRank, edgeShare, inCorner, overlap, SEEDS, topUpAt, type SeedCandidate, type SlotItem } from "../src/pipeline/seg/seeds.ts";
 import { AUTO, SegSession, type SessionEvents, type SessionFrames, type SessionOptions } from "../src/pipeline/seg/session.ts";
 import { seedObjects, seedRegions } from "../src/pipeline/seg/studio-seg.ts";
 import { SEG, type SegObject } from "../src/pipeline/seg/track.ts";
@@ -108,6 +108,12 @@ const blob = (o: Partial<SubjectBlob> & { u: number; v: number; area: number }):
   assert.equal(edgeShare(rect(0, 0, 9, 4), w, h), 0.45, "a head in the corner: 45% of the top side");
   assert.equal(edgeShare(rect(0, 4, 3, 6), w, h), 0.2, "a fin over the left side");
   assert.equal(edgeShare(rect(17, 0, 20, 10), w, h), 1);
+  assert.equal(inCorner(rect(0, 0, 4, 2), w, h), true, "a patch in the top-left corner (under the edge limit on both sides)");
+  assert.ok(edgeShare(rect(0, 0, 4, 2), w, h) <= 0.25);
+  assert.equal(inCorner(rect(16, 8, 20, 10), w, h), true);
+  assert.equal(inCorner(rect(0, 4, 3, 6), w, h), false, "one side only");
+  assert.equal(inCorner(rect(5, 0, 9, 3), w, h), false);
+  assert.equal(inCorner(a, w, h), false);
   console.log("seeds: mask overlap and the share of the frame's edge: ok");
 }
 
@@ -245,6 +251,9 @@ function fake(iou = 0.5): Fake {
 
 const region = (s: Sub): SeedCandidate => ({ points: [[s.u, s.v]], box: { x0: s.u - s.hu, y0: s.v - s.hv, x1: s.u + s.hu, y1: s.v + s.hv }, area: 4 * s.hu * s.hv, rank: 4 * s.hu * s.hv });
 
+/** The fake engine reports no region before this clip time (its looks find nothing there). */
+let blindUntil = 0;
+
 type Run = { s: SegSession; looks: { t: number; search: boolean; found: number }[]; errors: string[]; done: Promise<void> };
 
 /**
@@ -256,7 +265,7 @@ function run(f: Fake, end: number, opts: SessionOptions, handed: (t: number) => 
   let ids = 1, finish: () => void = () => undefined;
   const r: Run = { s: null as unknown as SegSession, looks: [], errors: [], done: new Promise<void>((res) => { finish = res; }) };
   const look = async (t: number, search: boolean) => {
-    const regions = [...school.filter((s) => on(s, t)), ...extra].sort((a, b) => b.hu * b.hv - a.hu * a.hv).map(region);
+    const regions = [...school.filter((s) => on(s, t) && t >= blindUntil - 1e-6), ...extra].sort((a, b) => b.hu * b.hv - a.hu * a.hv).map(region);
     const found = await r.s.autoSeeds(t, regions, false);
     r.looks.push({ t, search, found: found.length });
     r.s.seeds(t, [...handed(t), ...found].map((o) => ({ ...o, id: ids++ })));
@@ -434,5 +443,27 @@ await quiet(async () => {
   assert.deepEqual(off("1f"), [], "A beside it keeps to 2 keyframes a second");
 });
 console.log("session: extra keyframes for the subject with a hard step only: ok");
+
+// Back-fills wait for the end of the forward pass: the decoder reads the clip through once, then turns.
+await quiet(async () => {
+  // Both sharks are in the picture from 0 s; the first look that finds them is the one at 6 s (both are followed
+  // back to 0 s). A leaves at 9 s and is let go at 11 s, with B in mid-pass.
+  school = [{ ...A, to: 9.1 }, B];
+  blindUntil = 5;
+  const f = fake(0.5);
+  const r = run(f, 20, { autoCap: 3 });
+  await r.done;
+  blindUntil = 0;
+  assert.deepEqual(r.errors, []);
+  const back = f.stepped.map((x, i) => ({ ...x, i })).filter((x) => x.key.endsWith("b") && x.t < 6 - 1e-6);
+  const lastFwd = f.stepped.findLastIndex((x) => x.key.endsWith("f"));
+  assert.ok(back.length >= 2 * 12, `both are followed back (${back.length} steps)`);
+  assert.ok(back.every((x) => x.i > lastFwd), "no back-fill step before the last forward step of the pass");
+  let turns = 0;
+  for (let i = 1; i < f.stepped.length; i++) if (f.stepped[i].t < f.stepped[i - 1].t - 1e-6 && f.stepped[i - 1].key.endsWith("f")) turns++;
+  assert.equal(turns, 1, "the pass turns back once");
+  assert.equal(Math.max(...f.stepped.filter((x) => x.key.endsWith("f")).map((x) => x.t)), 20);
+});
+console.log("session: back-fills run after the forward pass (one turn of the decoder): ok");
 
 console.log("seg-seeds tests passed");
