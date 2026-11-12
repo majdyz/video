@@ -208,7 +208,6 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
               </div>
               <div className="bar" role="progressbar" aria-label="Export progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}><div style={{ width: `${pct}%` }} /></div>
             </div>
-            {exp.canSkipSeg && <button type="button" className="btn btn--secondary btn--block" onClick={() => studio.skipSegWait()}>Export now without AI subjects</button>}
             {!photo && <button type="button" className="btn btn--ghost btn--block" onClick={() => studio.cancelExport()}>Cancel</button>}
             {exp.note && <p className="export__note" role="status">{exp.note}</p>}
             {DEBUG && exp.profile && <p className="export__note mono" data-testid="export-profile">{exp.profile}</p>}

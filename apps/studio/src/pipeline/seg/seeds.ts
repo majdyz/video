@@ -192,3 +192,42 @@ export function topUpAt(t: number, followed: number, cap: number, next: number, 
   const r = t + every;
   return r < next - margin ? r : null;
 }
+
+/**
+ * Whether a look goes through the model's blind point grid (session.ts autoSeedsNow: 12, then 24 decoder runs on
+ * the lite model, about 10 s on a desktop's WASM and what most of a pass's "seeds" time was on the owner's ray
+ * clip: five grids, four of them while the ray was being followed). The grid is for a frame nothing else speaks
+ * for. Not when
+ *   - the look is one without a search (`search` false: an extra start, session.ts reacquire / carryOver);
+ *   - the engine has its own animals on the frame (`engineAnimals`: they are the seeds, and its regions are asked
+ *     about next to them);
+ *   - one of the engine's regions is a subject (`regionFinds`);
+ *   - a subject is followed surely on that frame already (`followed`: tracks whose lock holds, track.ts HOLD). The
+ *     grid found that same subject again, or water. A subject that swims in next to it is found by the engine's
+ *     regions at the next look, or by the grid once nothing is followed surely.
+ */
+export function gridWanted(o: { search: boolean; engineAnimals: number; regionFinds: number; followed: number }): boolean {
+  return o.search && o.engineAnimals <= 0 && o.regionFinds <= 0 && o.followed <= 0;
+}
+
+/** The stride: one of the engine's own subjects under this share of the frame steps at every other regular keyframe. */
+export const STRIDE = { area: 0.01 };
+
+/**
+ * The stride (session.ts strideAt): whether a subject is carried over a regular keyframe along the flow instead of
+ * stepping at it. A tracker step is 2.6 s on a desktop's WASM (memory attention, decoder, memory encoder) against
+ * 20 ms for the flow, and a far subject (a shark of a school: 0.2–0.8% of the frame) moves little in half a second.
+ *   index  the keyframe's place on the regular grid (−1: not on it, an extra or a prompt's keyframe): only the odd
+ *          ones are skipped, so every small subject skips the same keyframes (one all of them skip is not encoded)
+ *          and no subject skips two in a row;
+ *   start  the keyframe is a segment start (a look compares the masks there: always a real step);
+ *   last   it is the object's last keyframe (its track ends on a mask of the tracker's own);
+ *   real   the object's keyframe before was a real step;
+ *   calm   that step was an easy one: a mask, no fresh prompt, no runaway, not on the fine grid;
+ *   area   that step's mask, as a share of the frame.
+ * What keeps the guard and the runaway checks honest is in the session: a carried keyframe never becomes the mask
+ * they compare against (session.ts ObjState.viaF).
+ */
+export function strideDue(o: { index: number; start: boolean; last: boolean; real: boolean; calm: boolean; area: number }, maxArea = STRIDE.area): boolean {
+  return o.index > 0 && o.index % 2 === 1 && !o.start && !o.last && o.real && o.calm && o.area > 0 && o.area < maxArea;
+}

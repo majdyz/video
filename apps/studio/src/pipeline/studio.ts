@@ -14,7 +14,6 @@
 // (colour right after first paint, mediabunny when a clip opens, motion when
 // Stabilise is switched on, the lens maths when Dewarp is).
 
-import { Eta } from "./eta.ts";
 import { crumb, exportCrashed, lastCrash } from "./crumbs.ts";
 import { EXPORT_SHARE, ExportBar } from "./export-progress.ts";
 import { isRealtimeExportSupported, isWebCodecsSupported, isWebKit } from "./env.ts";
@@ -33,7 +32,8 @@ import { GeometryRenderer, type GeometryRenderOptions, type GeometrySource } fro
 import { GpuGeometryRenderer } from "./geometry-gpu.ts";
 import { outputToUpright, previewFitWanted, type GeometryParams, type QuarterTurns } from "./geometry-math.ts";
 import { mapPrompt } from "./seg/track.ts";
-import type { SeedCandidate } from "./seg/seeds.ts";
+import { gridWanted, type SeedCandidate } from "./seg/seeds.ts";
+import { exportWaitS, SEG_EXPORT_RUNNING, SEG_EXPORT_UNAVAILABLE, segCoverageNote, SegExportUse } from "./seg/export-use.ts";
 import type { ClipInfo } from "./probe.ts";
 import { clipKeyOf, colourSettings, DEFAULT_TOOLS, exportSuffix, neutralNote, profileDefaults, solveParams, type ColourLook, type ColourState, type DewarpState, type NeutralPick, type ToolsState } from "./tools.ts";
 import type { TapSolve } from "../../../aqua-fix/src/engine/tap.ts";
@@ -124,15 +124,21 @@ export type StabStatus = {
   /** File name of the motion log (.gcsv / Sensor Logger CSV) added for this clip, if any. */
   motionLog: string | null;
 };
-/** Export waits for the AI pass; with no progress for this long it exports with the engine's masks instead. */
-const SEG_EXPORT_STALL_MS = 60_000;
+/** Follow mode (followStep): the preview steps to the newest finished AI frame at most this often (ms). */
+const FOLLOW_MS = 700;
+/** Follow mode is on for a new pass unless the address says `?segfollow=0` (timing runs: the preview stays put). */
+function followDefault(): boolean {
+  try {
+    return new URLSearchParams(location.search).get("segfollow") !== "0";
+  } catch {
+    return true;
+  }
+}
 /** The background passes' own <video> must have its first frame within this long (ms), else they use the preview's. */
 const WORK_VIDEO_LOAD_MS = 8000;
 
 export type ExportStatus = {
   state: "idle" | "preparing" | "running" | "done" | "error";
-  /** Waiting for the AI subject pass: the sheet offers to export without it. */
-  canSkipSeg?: boolean;
   progress: number;
   frames: number;
   fps: number;
@@ -222,6 +228,9 @@ export type Snapshot = {
    * status chip on the preview (studio-seg.ts subjectChip).
    */
   subjectFrame: { ai: SegFrameState; peek?: SegPeekState } | null;
+  /** Follow mode ("watch it work"): while the AI pass runs, the preview shows the frame it has just finished
+   * (followStep). On for every new pass; playing, scrubbing or a tap turns it off, the chip's action on again. */
+  segFollow: boolean;
   /** Subject taps that can be undone (newest last). */
   subjectUndo: number;
 };
@@ -301,6 +310,7 @@ export class Studio {
     neutralNote: null,
     seg: { on: false, phase: "off", progress: null, note: null },
     subjectFrame: null,
+    segFollow: followDefault(),
     subjectUndo: 0,
   };
   private listeners = new Set<() => void>();
@@ -459,6 +469,14 @@ export class Studio {
       this.fail(e);
     }
     video.addEventListener("play", () => this.set({ playing: true }));
+    // iOS Safari suspends a page in the background: the AI pass stands still with it and goes on when it is back
+    // (nothing here restarts it). The session is told, so a failure of its first steps after the return (the GPU
+    // device or the decoder taken meanwhile) starts the pass again instead of ending it (SubjectSeg.fail).
+    document.addEventListener("visibilitychange", () => {
+      this.seg.visibility(document.hidden);
+      crumb(document.hidden ? "page hidden" : "page shown");
+      if (!document.hidden) this.followStep();
+    });
     video.addEventListener("pause", () => {
       this.set({ playing: false });
       void this.captureStill();
@@ -602,7 +620,7 @@ export class Studio {
   private noteSubjectFrame(t: number | null): void {
     // The same condition as segOverlay: what the frame was drawn with.
     const on = t !== null && this.tools.colour.enabled && !!this.tools.colour.subjectPop && this.snap.kind === "video";
-    const ai = on && !(this.exporting && this.segExportEngine) ? this.seg.frameState(t) : null;
+    const ai = on ? this.seg.frameState(t) : null;
     // The look at the paused frame (playhead first): the chip says the AI is on this frame, or found nothing on it.
     const peek = on && !this.exporting && this.paused() ? this.seg.peekFor(t) : null;
     const cur = this.snap.subjectFrame;
@@ -619,6 +637,7 @@ export class Studio {
   async toggleSubjectAt(u: number, v: number): Promise<number> {
     crumb(`tap ${u.toFixed(2)},${v.toFixed(2)} ai=${this.seg.live ? "live" : this.seg.on ? this.seg.status.phase : "off"}`);
     if (this.snap.subjectTracking !== null || this.exporting) return 0;
+    this.endFollow();
     // AI on but its model / session still starting: the tap waits for it (else it ran the engine's track pass, heavy,
     // right next to the model starting up: the iPhone page crashed there, 31 Oct).
     if (this.snap.kind === "video" && this.seg.on && !this.seg.live) {
@@ -778,6 +797,8 @@ export class Studio {
   /** AI subject detection toggle (per device; `?seg=ml` forces it on). The model downloads the first time. */
   setSegEnabled(on: boolean): void {
     this.seg.setOn(on);
+    // A new pass is watched at work by default (follow mode).
+    if (on && !this.snap.segFollow && followDefault()) this.set({ segFollow: true });
     // Paused: the frame is analysed afresh first (refreshSubjects starts the pass), so the engine's own choice the
     // ML follows is this frame's.
     if (on) { if (this.paused() && this.snap.kind === "video") void this.refreshSubjects(); else this.runSeg(); }
@@ -836,16 +857,20 @@ export class Studio {
     const run = this.seedChain.then(async () => {
       const e = this.engine, v = this.video, file = this.file;
       if (!e || !v || !file || stale() || !this.seg.live || this.seg.hasSegment(k, t)) return;
+      // An export is rendering: the seed frame's analysis is the engine's, and the engine is the export's now (its
+      // tracks and its picture must be the clip's alone). The look waits until the export is over (releaseSeeds);
+      // the pass goes on meanwhile with what it follows, up to this look.
+      if (this.holdSeed(k, t, search)) return;
       let objs: ReturnType<typeof seedObjects> = [];
       let regions: SeedCandidate[] = [];
       try {
         // Not while the user scrubs: two <video>s seeking at once (plus the analysis) is what phones fall over on.
         await this.scrubIdle();
-        if (stale()) return;
+        if (stale() || this.holdSeed(k, t, search)) return;
         // One heavy AI job at a time (seg/turns.ts): not while a tap is being followed (the pass stands still for it
         // anyway), and a tap that comes meanwhile waits for this frame's analysis.
         // No frame of the preview's may reach the engine between upload and analysis; one in flight lands first.
-        objs = await this.seg.seedJob(t, () => stale() ? Promise.resolve([]) : this.workFrame(t + 1e-3, async (sv) => {
+        objs = await this.seg.seedJob(t, () => stale() || this.holdSeeds ? Promise.resolve([]) : this.workFrame(t + 1e-3, async (sv) => {
           e.resetTracking();
           e.setTime(t);
           this.uploadToEngine(sv, t, false);
@@ -865,11 +890,14 @@ export class Studio {
       } catch (err) {
         console.warn(`[seg] segment ${k} seed frame failed`, err);
       }
-      if (stale()) return;
+      // (An export began while this look waited for its turn: it is made after it.)
+      if (stale() || this.holdSeed(k, t, search)) return;
       // The model is asked about the engine's other regions (they add to its animals), and, when the engine found
       // nothing at all (it only looks in open blue water: a manta over a reef), looks itself on its point grid.
       // (The grid not at an extra start: session.ts reacquire, carryOver.)
-      const grid = !objs.length && search;
+      // (seeds.ts gridWanted: never with the engine's own animals on the frame; the session leaves it out too while
+      // it follows a subject surely there.)
+      const grid = gridWanted({ search, engineAnimals: objs.length, regionFinds: 0, followed: 0 });
       if (regions.length || grid) objs = [...objs, ...await this.seg.autoSeeds(t, regions, grid)];
       if (stale()) return;
       await this.seg.seedSegment(k, t, objs);
@@ -882,6 +910,30 @@ export class Studio {
     });
     this.seedChain = run.catch(() => undefined);
     return run;
+  }
+
+  /** An export's render has the engine (exportVideo): the AI's seed frames wait (holdSeed) until it is over. */
+  private holdSeeds = false;
+  private heldSeeds: { k: number; t: number; search: boolean }[] = [];
+
+  /** True when the seed frame of segment k at t must wait for the export that is rendering (it is noted for after). */
+  private holdSeed(k: number, t: number, search: boolean): boolean {
+    if (!this.holdSeeds) return false;
+    if (!this.heldSeeds.some((h) => h.k === k && h.t === t)) {
+      this.heldSeeds.push({ k, t, search });
+      console.info(`[seg] segment ${k} (${t.toFixed(2)} s): the look waits for the export to finish`);
+    }
+    return true;
+  }
+
+  /** The export is over: the looks it held back are made now (a pass shut down for the export asks again itself). */
+  private releaseSeeds(): void {
+    this.holdSeeds = false;
+    const held = this.heldSeeds.splice(0);
+    if (!this.seg.passRunning) return;
+    for (const h of held) void this.seedSegmentCanonical(h.k, h.t, h.search);
+    // (A session the export found without its first seeds.)
+    if (!this.seg.autos) this.runSeg();
   }
 
   private dropSeedVideo(): void {
@@ -967,55 +1019,137 @@ export class Studio {
   }
   private segKick = 0;
 
-  /** The export falls back to the engine's masks (AI unavailable or too slow; segForExport). */
-  private segExportEngine = false;
+  /** The line about the AI subjects on the export sheet while it renders (export-use.ts), null: none. */
   private segExportNote: string | null = null;
+  /** What this export's frames are graded with, counted as they render (segOverlayFor); null: Subject pop's AI is off. */
+  private segUse: SegExportUse | null = null;
+  /** The AI pass was through when this export's render began / the AI could be used at all. */
+  private segComplete = false;
+  private segAvailable = false;
+  /** This export picked up an interrupted one (the journal): its frame count is of the frames rendered now. */
+  private exportResumed = false;
 
   /**
-   * Export with Subject pop + AI: preview playback is already stopped (beginExport); the clip's session opens if it
-   * has not, the engine's own subjects are seeded on the current frame if they are not yet, and the pass runs to idle
-   * ("Finding subjects 40%… then exporting"). "engine" when the AI is unavailable, stalls, or has nothing to follow.
+   * Export with Subject pop + AI: never waits for the pass (export-use.ts). Every frame is graded with what the AI
+   * has for it when it renders: its mask where the pass has been, the engine's own detection where it has not, as
+   * in the preview. Only a pass that is about to finish (its own estimate within SEG_EXPORT.waitS) is given that
+   * long. From here on the pass's looks wait for the export (holdSeeds: a seed frame is analysed in the engine the
+   * export renders with), and on a phone the model's worker is shut down for the render (releaseForExport: its
+   * memory next to a 4K export's frames), its masks kept.
    */
-  private segSkip: AbortController | null = null;
-  /** Export sheet: stop waiting for the AI pass and export with the standard subject masks. */
-  skipSegWait(): void {
-    this.segSkip?.abort();
+  private async segBeginExport(file: File, trim: TrimRange | null, signal: AbortSignal): Promise<void> {
+    this.segUse = new SegExportUse();
+    this.segTrim = trim;
+    let complete = this.seg.ready(file, trim);
+    const waitS = complete ? 0 : exportWaitS(this.seg.etaS());
+    if (waitS > 0) {
+      this.bar?.stage(EXPORT_SHARE.subjectsWait);
+      this.setExp({ detail: "Finishing AI subjects…" });
+      const done = this.seg.settle({ signal, stallMs: waitS * 1000, onProgress: (p) => { if (p !== null) this.setExp({ progress: p }); } });
+      done.catch(() => undefined);
+      await Promise.race([done, new Promise((r) => setTimeout(r, waitS * 1000))]);
+      this.stageDone();
+      complete = this.seg.ready(file, trim);
+    }
+    this.holdSeeds = true;
+    // A seed frame in the engine right now ends first.
+    await this.workChain.catch(() => undefined);
+    if (signal.aborted) throw new DOMException("Export cancelled", "AbortError");
+    this.seg.releaseForExport();
+    this.segComplete = complete;
+    this.segAvailable = this.seg.on;
+    this.segExportNote = complete ? null : this.segAvailable ? SEG_EXPORT_RUNNING : SEG_EXPORT_UNAVAILABLE;
+    if (this.segExportNote) this.setExp({ note: this.segExportNote });
+    const live = this.seg.live;
+    console.info(`[export] AI subjects: ${complete ? "pass complete" : this.segAvailable ? `pass unfinished (${live ? Math.round(live.coverage * 100) : 0}% of its frames filled${waitS ? `, after waiting ${waitS} s` : ""}): exporting now with what it has` : "not available: engine masks"}`);
   }
 
-  private async segForExport(signal: AbortSignal): Promise<"ai" | "engine"> {
-    const v = this.video, file = this.file;
-    if (!v || !file) return "engine";
-    // The pass's progress moves the export's bar (its share of it: exportVideo), so the label carries no number.
-    // An estimate once the pass has shown its pace; before that, say it can take a while (phones: minutes).
-    const eta = new Eta();
-    const label = (p: number | null) => {
-      const t = eta.text(p);
-      const detail = `Finding subjects… ${t ?? "can take a few minutes"}, then exporting`;
-      this.setExp(p === null ? { detail } : { detail, progress: p });
-    };
-    label(null);
-    // The selection as it is exported (a drag still settling was applied by exportVideo).
-    this.segTrim = this.trim;
-    const live = await this.seg.start(file, v.duration || this.snap.duration, this.segTrim);
-    if (signal.aborted) throw new DOMException("Export cancelled", "AbortError");
-    if (!live) return "engine";
-    // The engine's own subjects on the canonical frame (as the preview seeds them).
-    if (!this.seg.autos) await this.seedAutosCanonical();
-    // "Export without AI" in the sheet ends the wait (skipSegWait).
-    const skip = new AbortController();
-    this.segSkip = skip;
-    this.setExp({ canSkipSeg: true });
-    const r = await Promise.race([
-      this.seg.settle({ signal, stallMs: SEG_EXPORT_STALL_MS, onProgress: label }),
-      new Promise<"engine">((res) => skip.signal.addEventListener("abort", () => res("engine"))),
-    ]).finally(() => { this.segSkip = null; this.setExp({ canSkipSeg: false }); });
-    console.info(`[export] AI subjects: ${r === "ai" ? `pass complete (${Math.round(live.coverage * 100)}% of the clip filled)` : "engine masks"}`);
-    return r;
+  /** After an export: a pass that was shut down for it (a phone) starts again, and a session without its first
+   * seeds gets them. */
+  private resumeSeg(): void {
+    this.seg.resumeAfterExport();
+    if (this.seg.on && this.snap.phase === "ready" && this.snap.kind === "video") this.runSeg();
+  }
+
+  /** The overlay an export's frame at clip time t is graded with, counted for the sheet's note (segDoneNote). */
+  private segOverlayFor(t: number, count = true): SegOverlay | null {
+    const o = this.segOverlay(t);
+    if (count) this.segUse?.add(!!o && this.seg.coveredAt(t));
+    return o;
+  }
+
+  /** The export is done: the sheet says what its frames were graded with ("AI subjects on 82% of frames"). */
+  private segDoneNote(): void {
+    const u = this.segUse;
+    if (!u) return;
+    const final = segCoverageNote(u, { complete: this.segComplete, available: this.segAvailable, resumed: this.exportResumed });
+    const cur = this.snap.exp.note, prov = this.segExportNote;
+    const note = cur && prov && cur.includes(prov) ? cur.replace(prov, final ?? "").replace(/\s+/g, " ").trim() : [cur, final].filter(Boolean).join(" ");
+    this.setExp({ note: note || null });
+    console.info(`[export] AI subjects on ${u.ai} of ${u.total} frames (${Math.round(u.share * 100)}%)${this.segComplete ? ", pass complete" : ""}`);
+  }
+
+  // ------------------------------------------------------------ follow mode
+
+  /** Follow mode paused a clip that was playing (it plays again when the pass is through). */
+  private followPaused = false;
+  private followAt = 0;
+  private followTimer = 0;
+
+  /** The chip's "Follow AI": follow mode on (or off). */
+  setSegFollow(on: boolean): void {
+    if (this.snap.segFollow !== on) this.set({ segFollow: on });
+    if (on) this.followStep();
+    else this.followPaused = false;
+  }
+
+  /** The user took the playhead (play / pause, a scrub, a tap): follow mode ends. */
+  private endFollow(): void {
+    clearTimeout(this.followTimer);
+    this.followTimer = 0;
+    this.followPaused = false;
+    if (this.snap.segFollow) this.set({ segFollow: false });
+  }
+
+  /**
+   * Follow mode ("watch it work"): while the AI pass runs, the preview stands on the newest frame the pass has
+   * finished (SegLive.followT: filled, with its mask at full weight), so the user sees the subjects being found
+   * instead of a percentage. Called when new frames arrive. It only shows masks that exist: no model work, no
+   * second decoder (the preview's own <video> seeks, paused, at most every FOLLOW_MS; a clip that was playing is
+   * paused, which also leaves the pass more of the device), and never next to a seed frame's job or a tap (the
+   * one-job rules, seg/turns.ts) or while the page is hidden.
+   */
+  private followStep(): void {
+    const v = this.video;
+    if (!this.snap.segFollow || !v || this.exporting || this.snap.kind !== "video" || this.snap.phase !== "ready") return;
+    if (!this.tools.colour.enabled || !this.tools.colour.subjectPop || this.snap.subjectTracking !== null) return;
+    if (typeof document !== "undefined" && document.hidden) return;
+    let t = this.seg.followT();
+    if (t === null) return;
+    const again = (ms: number) => { if (!this.followTimer) this.followTimer = window.setTimeout(() => { this.followTimer = 0; this.followStep(); }, ms); };
+    const since = performance.now() - this.followAt;
+    if (since < FOLLOW_MS) return again(FOLLOW_MS - since + 10);
+    if (v.seeking || this.segSeedBusy || this.seg.tapBusy) return again(250);
+    t = clampToRange(t, this.trim, v.duration || 0);
+    if (!v.paused) { this.followPaused = true; v.pause(); }
+    if (Math.abs(v.currentTime - t) < 0.01) return;
+    this.followAt = performance.now();
+    this.seekTo(t);
+  }
+
+  /** The pass is through (or gone): a clip follow mode had paused plays again, from the start of the selection. */
+  private followDone(): void {
+    if (!this.followPaused || this.seg.passRunning) return;
+    this.followPaused = false;
+    const v = this.video;
+    if (!v || this.exporting || this.snap.kind !== "video" || this.snap.phase !== "ready" || !v.paused) return;
+    try { v.currentTime = this.trim?.start ?? 0; } catch { /* ignore */ }
+    void v.play().catch(() => undefined);
   }
 
   /** The ML overlay for the frame at clip time t (null: the engine's own subject masks). */
   private segOverlay(t: number): SegOverlay | null {
-    const o = this.tools.colour.subjectPop && this.snap.kind === "video" && !(this.exporting && this.segExportEngine) ? this.seg.overlayAt(t) : null;
+    const o = this.tools.colour.subjectPop && this.snap.kind === "video" ? this.seg.overlayAt(t) : null;
     return o && this.geometryActive() ? this.mapSegOverlay(o, t) : o;
   }
 
@@ -1112,7 +1246,7 @@ export class Studio {
   private tracking: Promise<void> | null = null;
   /** AI subject detection (beta): the ML segmenter's toggle, model and pass; null overlay = the engine's masks. */
   private seg = (() => {
-    const s = new SubjectSeg(() => this.set({ seg: this.seg.status }));
+    const s = new SubjectSeg(() => { this.set({ seg: this.seg.status }); this.followDone(); });
     // New AI frames: a paused frame shows them (and its outlines, and the status chip) right away, and the last of
     // a burst too (a trailing repaint: the throttle used to drop it, leaving the paused frame on the basic masks).
     let last = 0, trail = 0;
@@ -1120,6 +1254,8 @@ export class Studio {
     // The session asks for the next segment's seeds as its tracking reaches it (long clips).
     s.onNeedSeeds = (k, t, search) => { if (k > 0) void this.seedSegmentCanonical(k, t, search); };
     s.onFrames = () => {
+      // Follow mode: on to the frame the pass has just finished.
+      this.followStep();
       if (!this.paused()) return;
       const now = performance.now();
       if (now - last > 250) { last = now; this.repaint(); }
@@ -1398,7 +1534,7 @@ export class Studio {
     const gen = ++this.gen;
     crumb(`open ${file.type || "?"} ${(file.size / 1e6).toFixed(1)} MB`);
     this.file = file;
-    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [], neutralNote: null });
+    this.set({ phase: "loading", kind: "video", busy: "Reading clip…", error: null, fileName: file.name, colourProfiled: false, segFollow: followDefault(), exp: IDLE_EXPORT, stab: STAB_OFF, photoLimited: null, camera: null, footage: { ...FOOTAGE_NONE, choice: this.footageChoice }, trim: null, thumbs: null, segments: NO_SEGMENTS, subjectOverrides: [], neutralNote: null });
     try {
       await touchFile(file);
       const media = await loadMedia();
@@ -1657,6 +1793,11 @@ export class Studio {
   private teardown(): void {
     this.gen++;
     this.pendingSeek = null;
+    this.followPaused = false;
+    clearTimeout(this.followTimer);
+    this.followTimer = 0;
+    this.holdSeeds = false;
+    this.heldSeeds = [];
     this.seg.reset();
     this.subjectUndo = [];
     this.snap = { ...this.snap, subjectUndo: 0 };
@@ -1983,6 +2124,7 @@ export class Studio {
   togglePlay(): void {
     const v = this.video;
     if (!v || this.exporting || this.snap.phase !== "ready" || this.snap.kind !== "video") return;
+    this.endFollow();
     if (v.paused) {
       const r = this.trim;
       if (r && (v.currentTime < r.start || v.currentTime >= r.end - 0.02)) {
@@ -1993,6 +2135,7 @@ export class Studio {
   }
 
   pause(): void {
+    this.endFollow();
     this.video?.pause();
   }
 
@@ -2003,6 +2146,12 @@ export class Studio {
   }
 
   seek(t: number): void {
+    this.endFollow();
+    this.seekTo(t);
+  }
+
+  /** seek without ending follow mode (its own steps). */
+  private seekTo(t: number): void {
     const v = this.video;
     if (!v || this.exporting || this.snap.phase !== "ready" || this.snap.kind !== "video") return;
     const to = clampToRange(t, this.trim, v.duration || 0);
@@ -2602,23 +2751,12 @@ export class Studio {
         await this.profiling;
         this.stageDone();
       }
-      // Subject pop with AI: the pass finishes first, so the export has the same masks whenever it starts.
+      // Subject pop with AI: the export starts now, with the masks the pass has made so far (segBeginExport).
       this.segExportNote = null;
-      this.segExportEngine = false;
+      this.segUse = null;
+      this.exportResumed = false;
       // (the AI toggle as the user set it: an AI that turned out unavailable still gets its note)
-      if (colourOn && this.tools.colour.subjectPop && this.seg.status.on && this.snap.kind === "video") {
-        // A share of the bar only when there is a pass to wait for (one that has run to its end takes no time).
-        const wait = !this.seg.ready(file, trim);
-        if (wait) this.bar?.stage(EXPORT_SHARE.subjects);
-        const r = await this.segForExport(ctrl.signal);
-        if (wait) this.stageDone();
-        this.seg.releaseForExport();
-        if (r === "engine") {
-          this.segExportEngine = true;
-          this.segExportNote = "AI subject detection wasn't available for this export: standard subject detection was used.";
-          this.setExp({ note: this.segExportNote });
-        }
-      }
+      if (colourOn && this.tools.colour.subjectPop && this.seg.status.on && this.snap.kind === "video") await this.segBeginExport(file, trim, ctrl.signal);
       const motion = this.tools.stabilise.enabled && (!this.path || !!this.stabAbort);
       if (motion) this.bar?.stage(EXPORT_SHARE.motion);
       await this.waitForPath();
@@ -2646,6 +2784,7 @@ export class Studio {
         const res = await this.runNative(media, file, info, bitrate, total, colourOn, ctrl, trim);
         console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (native), audio ${res.audioIncluded ? "kept" : "dropped"}`);
         this.setExp({ state: "done", progress: 1, etaSec: 0, frames: res.frames, detail: "", result: res });
+        this.segDoneNote();
       } else {
         let used = mode;
         let res = mode === "realtime"
@@ -2689,6 +2828,7 @@ export class Studio {
           detail: "",
           result: { ...res, native: null, bytes: res.blob.size, mime: res.blob.type, name: this.outName(res.blob.type === "video/webm" ? "webm" : "mp4"), url: URL.createObjectURL(res.blob), width: "width" in res ? (res.width as number) : info.displayW, height: "height" in res ? (res.height as number) : info.displayH },
         });
+        this.segDoneNote();
       }
     } catch (err) {
       const help = err instanceof Error && /not decodable/i.test(err.message) ? codecHelp(info.codecString) : null;
@@ -2720,6 +2860,11 @@ export class Studio {
         await v.play().catch(() => undefined);
         this.startPreview();
       }
+      // The engine is the preview's again: the AI's looks the export held back are made now. A pass shut down for
+      // the export (a phone) starts again when the export failed or was cancelled; after a finished one, when the
+      // user leaves its result (dismissExport: the file is still in memory until then).
+      this.releaseSeeds();
+      if (failure) this.resumeSeg();
     }
   }
 
@@ -2853,6 +2998,8 @@ export class Studio {
     }
     await this.engineForExport();
     this.setExp({ state: "running", detail: "Rendering" });
+    // (A render that starts over, offline after the recorder gave up, counts its own frames.)
+    if (this.segUse) this.segUse = new SegExportUse();
     const prof = this.startProfile();
     const worker0 = e ? { ...e.workerMs } : null;
     const workerTimes = () => {
@@ -2964,7 +3111,7 @@ export class Studio {
                 prof.add("analysisWait", tp - ta);
                 eng.settings = this.settingsAt(fi.timeSec);
                 eng.tick(fi.timeSec);
-                eng.setSegOverlay(this.segOverlay(fi.timeSec));
+                eng.setSegOverlay(this.segOverlayFor(fi.timeSec, !fi.prime));
                 pending = eng.renderToFrame(rotE, ts, dur);
                 prof.add("render", performance.now() - tp);
               } finally {
@@ -3049,6 +3196,7 @@ export class Studio {
         maxLongEdge: req.maxLongEdge,
         onPlan: (plan, resume) => {
           startProgress = resume?.progress ?? 0;
+          this.exportResumed = !!resume;
           const notes = [plan.note, this.segExportNote, resume ? `Resumed at ${Math.round(resume.progress * 100)}%.` : null].filter(Boolean);
           this.setExp({ note: notes.length ? notes.join(" ") : null, progress: startProgress });
         },
@@ -3257,7 +3405,7 @@ export class Studio {
             prof.add("analysisWait", tp - ta);
             eng.settings = this.settingsAt(fi.timeSec);
             eng.tick(fi.timeSec);
-            eng.setSegOverlay(this.segOverlay(fi.timeSec));
+            eng.setSegOverlay(this.segOverlayFor(fi.timeSec));
             out = await eng.renderToFrame(rotE, ts, dur);
           }
           prof.add("readback", performance.now() - tp);
@@ -3395,6 +3543,8 @@ export class Studio {
           },
           startRendering: (onFrame) => {
             let active = true;
+            // (Each try at a speed counts its own frames.)
+            if (this.segUse) this.segUse = new SegExportUse();
             const vv = v as VideoWithRVFC;
             const step = (_n?: number, meta?: { mediaTime?: number }) => {
               if (!active || !this.exporting) return;
@@ -3405,6 +3555,9 @@ export class Studio {
                   // Real time can't wait for an analysis: a new segment asks for one at once and the lock snaps in tick.
                   const segStart = this.applyLook(t);
                   e.tick(t, segStart);
+                  // (This frame's AI mask: the recorder used to render every frame with the last overlay the
+                  // preview had set.)
+                  e.setSegOverlay(this.segOverlayFor(t));
                   e.render();
                 } else {
                   geo.resize(W, H);
@@ -3554,6 +3707,7 @@ export class Studio {
   /** Batch: the finished export handed over (the caller releases it); the sheet's state back to idle. */
   takeExportResult(): ExportResult | null {
     if (this.exporting) return null;
+    this.resumeSeg();
     const r = this.snap.exp.state === "done" ? this.snap.exp.result : null;
     if (r) this.set({ exp: IDLE_EXPORT });
     return r;
@@ -3561,6 +3715,7 @@ export class Studio {
 
   dismissExport(): void {
     if (this.exporting) return;
+    this.resumeSeg();
     const r = this.snap.exp.result;
     if (r?.blob) {
       URL.revokeObjectURL(r.url);

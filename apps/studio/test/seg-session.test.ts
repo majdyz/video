@@ -775,7 +775,9 @@ function jobsOf(tl: Timeline): Job[] {
     const f = fake({ lite: true });
     let searchIds = 5000, tapped = false;
     const found: { t: number; n: number }[] = [];
-    const r = open(f, { start: 0, end: 12 }, (t) => (t < 1 ? [subject(t)] : null));
+    // (gridAlways: the searches here are the blind grid's, made while the first subject is followed; the session
+    // leaves that grid out by default now, seeds.ts gridWanted. What is tested is how a search and a tap take turns.)
+    const r = open(f, { start: 0, end: 12 }, (t) => (t < 1 ? [subject(t)] : null), { gridAlways: true });
     const tl = watch(f, r, (k) => {
       // The tap lands while the search is on its probes.
       if (o.tapAt === "probe" && k === "probe" && !tapped) { tapped = true; r.s.add(tap); }

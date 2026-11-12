@@ -51,6 +51,23 @@ export function segFps(): number | undefined {
     return undefined;
   }
 }
+/** `?seggrid=1`: the model's blind grid also while a subject is followed surely (session.ts gridAlways). */
+export function segGridAlways(): boolean {
+  try {
+    return new URLSearchParams(location.search).get("seggrid") === "1";
+  } catch {
+    return false;
+  }
+}
+/** `?segstride=0 | 1`: the stride for small subjects (session.ts strideAt) off / on; without it, by the model. */
+export function segStride(): boolean | undefined {
+  try {
+    const v = new URLSearchParams(location.search).get("segstride");
+    return v === "0" ? false : v === "1" ? true : undefined;
+  } catch {
+    return undefined;
+  }
+}
 export function segLog(...a: unknown[]): void {
   if (segDebug()) console.info("[seg]", ...a);
 }
@@ -182,8 +199,10 @@ export class WorkerSegModel implements SegModel {
   /** fps: keyframes a second, fixed (`?segfps=N`); without it the session picks by the model (session.ts). */
   /** autoCap: the engine's own subjects followed at a time (a phone: SEG.liteAutos whatever the model). */
   /** weak: a phone short of memory (device.ts isWeakDevice): the session keeps less (session.ts SessionOptions.weak). */
+  /** (`?segstride=0 | 1`: small subjects at every regular keyframe / at every other one, whatever the model;
+   * `?seggrid=1`: the blind grid at every regular look, as before.) */
   async sessionOpen(file: File, start: number, end: number, fps?: number, autoCap?: number, weak?: boolean): Promise<SessionInfo> {
-    return (await this.call({ type: "session-open", file, start, end, fps, autoCap, weak })) as unknown as SessionInfo;
+    return (await this.call({ type: "session-open", file, start, end, fps, autoCap, weak, stride: segStride(), gridAlways: segGridAlways() })) as unknown as SessionInfo;
   }
 
   /** Playhead first (session.ts focus): the subjects of the paused frame at t, followed ahead of the pass. */

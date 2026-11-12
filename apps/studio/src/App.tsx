@@ -353,7 +353,9 @@ export default function App() {
     : null);
   // Subject pop on a clip: one chip says what the frame on screen is graded with (its AI mask, the search still
   // running, or the basic detection), in place of the old "AI subjects 73% · about a minute left" pill that wrapped.
-  const chip = !pill && ready && s.subjectFrame && !exporting && !immersive ? subjectChip(s.subjectFrame.ai, s.seg, segEtaShort, s.subjectFrame.peek ?? null) : null;
+  const chip = !pill && ready && s.subjectFrame && !exporting && !immersive ? subjectChip(s.subjectFrame.ai, s.seg, segEtaShort, s.subjectFrame.peek ?? null, s.segFollow) : null;
+  // Follow mode off while the pass runs: the chip offers it ("watch it work").
+  const canFollow = !!chip && s.seg.on && s.seg.phase === "tracking" && !s.segFollow;
 
   const closeSheet = useCallback(() => setSheetOpen(false), []);
   const popOn = !!panelTools.colour.subjectPop || new URLSearchParams(location.search).get("pop") === "1";
@@ -565,6 +567,7 @@ export default function App() {
               <div className={`pill pill--subject is-${chip.tone}${selectActive ? " is-under-bar" : ""}`} role="status" data-subject-chip={chip.tone}>
                 {chip.tone === "busy" && <span className="pill__dot" aria-hidden="true" />}
                 <span className="pill__lines"><span>{chip.line}</span>{chip.sub && <small>{chip.sub}</small>}</span>
+                {canFollow && <button type="button" className="pill__action" data-follow-ai onClick={(e) => { e.stopPropagation(); studio.setSegFollow(true); }}>Follow AI</button>}
               </div>
             )}
             {rail}

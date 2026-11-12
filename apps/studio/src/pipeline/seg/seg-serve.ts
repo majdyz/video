@@ -15,7 +15,7 @@ type Req =
   | { id: number; type: "step"; key: string; frame: number; points: [number, number][] | null; labels: number[] | null; reverse: boolean }
   | { id: number; type: "drop"; key: string }
   // The background session (session.ts): the clip's own decoder, objects, per-frame masks posted as events.
-  | { id: number; type: "session-open"; file: File; start: number; end: number; fps?: number; autoCap?: number; weak?: boolean }
+  | { id: number; type: "session-open"; file: File; start: number; end: number; fps?: number; autoCap?: number; weak?: boolean; stride?: boolean; gridAlways?: boolean }
   | { id: number; type: "session-focus"; t: number; objects: SegObject[]; search: boolean }
   | { id: number; type: "session-add"; object: SegObject & { id: number } }
   | { id: number; type: "session-remove"; object: number }
@@ -103,7 +103,7 @@ async function openSession(model: EdgeTam, r: Extract<Req, { type: "session-open
     error: (msg) => { if (session === s) session = null; emit({ ev: "error", msg, heapMB: wasmHeapMB() }); },
     // Each breadcrumb carries the WASM heap (it only grows: the step that took it past the phone's limit shows).
     trace: (msg) => emit({ ev: "trace", msg: `${msg} · heap ${wasmHeapMB()} MB` }),
-  }, { fps: r.fps, autoCap: r.autoCap, weak: r.weak });
+  }, { fps: r.fps, autoCap: r.autoCap, weak: r.weak, stride: r.stride, gridAlways: r.gridAlways });
   session = s;
   stages = 0;
   return { s, frames };
