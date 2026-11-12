@@ -109,8 +109,15 @@ function blur(src: Float32Array, W: number, H: number, r: number): Float32Array 
  *           trustLo..trustHi, smoothed again: ~1 all over an animal (a shaded part included), ~0 over a region of
  *           water the mask leaked onto. It scales the tone and varies only over ≥ 2·region (≈ 80 px at 1280): a
  *           leak is under-popped as a region, never as patches.
+ *   rampK / rampLong / thickR  the tone's feather inside the contour (composeSegStrength): rampK × the part's
+ *           half-width (the largest inside distance within thickR mask px), between SEG_TONE.rampIn and rampLong
+ *           mask px. It was half the half-width, up to 28 px: half of an animal's body was a slow fade, its wing
+ *           tips and edges kept the water's blue, and the correction read as "barely there" (user clip, 12 Nov).
+ *           Now a feather: 2.5 mask px on a fish, up to 8 on a body that fills the frame, enough for no halo;
+ *           the water a fat contour covers is held back by the per-pixel test instead (thin parts: most of them
+ *           now) and by the regional trust.
  */
-export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02, evLo: 0.012, evHi: 0.035, nearBand: 1 / 8, farLo: 0.05, farHi: 0.09, region: 1 / 32, trustLo: 0.15, trustHi: 0.45, rampK: 0.5, rampLong: 28 };
+export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02, evLo: 0.012, evHi: 0.035, nearBand: 1 / 8, farLo: 0.05, farHi: 0.09, region: 1 / 32, trustLo: 0.15, trustHi: 0.45, rampK: 0.15, rampLong: 8, thickR: 28 };
 
 type Guide = { width: number; height: number; data: Float32Array };
 
@@ -254,9 +261,8 @@ function maxFilter(src: Float32Array, w: number, h: number, r: number): Float32A
  *   G  the regional trust (waterField: a leak onto the water is under-popped as a region; 1 without a guide);
  *   B  the ML alpha as the mask's signed distance (0.5 on the contour, SEG_TONE.alphaR), its inside slope eased by
  *      the local thickness: the tone ramps in over rampK × the part's half-width, between SEG_TONE.rampIn and
- *      SEG_WATER.rampLong mask px. A thin tail or fin is toned nearly to its edge; a big body fades in gently from
- *      its contour, so a contour that runs across the animal (a belly the mask missed) is a long soft fade, not a
- *      step, and a fat contour's water band gets next to nothing. No guess of which edge is which: nothing flips;
+ *      SEG_WATER.rampLong mask px. A thin tail or fin is toned nearly to its edge; a big body fades in over a
+ *      little more, so its edge is a feather, never a step or a halo. No guess of which edge is which: nothing flips;
  *   A  the ML weight (near map).
  */
 export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): { width: number; height: number; data: Float32Array } {
@@ -266,7 +272,7 @@ export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): {
   const bin = Uint8Array.from(o.alpha, (a) => (a > 0.5 ? 1 : 0));
   const dIn = chamfer(bin, W, H);
   // Local half-width: the largest inside distance nearby (a body's spine), smoothed so the ramp length varies slowly.
-  const thick = blur(maxFilter(Float32Array.from(dIn, (d, i) => (bin[i] ? d : 0)), W, H, SEG_WATER.rampLong), W, H, Math.round(SEG_WATER.rampLong / 2));
+  const thick = blur(maxFilter(Float32Array.from(dIn, (d, i) => (bin[i] ? d : 0)), W, H, SEG_WATER.thickR), W, H, Math.round(SEG_WATER.thickR / 2));
   for (let i = 0; i < W * H; i++) {
     let a = o.alpha[i];
     const ramp = Math.min(SEG_WATER.rampLong, Math.max(SEG_TONE.rampIn, SEG_WATER.rampK * thick[i]));

@@ -8,7 +8,11 @@ const PULSE_MS = 450;
 /**
  * Thin outlines of the Subject pop animals over the preview while selecting
  * subjects: selected animals solid, the others the engine found dashed (tap
- * to add them). Neutral white at low opacity; no fills, glows or colour.
+ * to add them). A provisional selection (the engine's own detection shown
+ * while the AI mask of the frame is not there) is all dashed and dimmer: it
+ * is not the mask the AI will give. The selection is always the frame on
+ * screen's own (studio outlineSelection: null otherwise, nothing is drawn).
+ * Neutral white at low opacity; no fills, glows or colour.
  * Drawn inside the zoomed content, so outlines follow pinch and pan.
  */
 export function SubjectOutlines({ getSelection, pulse }: {
@@ -37,7 +41,7 @@ export function SubjectOutlines({ getSelection, pulse }: {
       const p = pulseRef.current;
       const age = p ? performance.now() - p.t : Infinity;
       // Redraw only when something changed (the selection eases for a moment after a tap; otherwise it is still).
-      const key = sel ? `${w}x${h}|${sel.animals.map((a) => `${a.id}:${a.strength.toFixed(2)}:${a.override ?? ""}`).join(",")}|${idsKey(sel.ids)}` : "";
+      const key = sel ? `${w}x${h}|${sel.provisional ? "p" : ""}|${sel.animals.map((a) => `${a.id}:${a.strength.toFixed(2)}:${a.override ?? ""}`).join(",")}|${idsKey(sel.ids)}` : "";
       if (key === lastKey && age >= PULSE_MS + 50) return;
       lastKey = key;
       g.clearRect(0, 0, w, h);
@@ -45,10 +49,13 @@ export function SubjectOutlines({ getSelection, pulse }: {
       const pulseId = p && age < PULSE_MS ? subjectAt(sel, p.u, p.v) : 0;
       for (const a of sel.animals) {
         const on = a.override === "include" || (a.override !== "exclude" && a.strength > 0.5);
+        // Provisional: only what would be popped, dashed and dim (the unpicked candidates are left out).
+        if (sel.provisional && !on) continue;
+        const solid = on && !sel.provisional;
         const k = a.id === pulseId ? 1 - age / PULSE_MS : 0;
         g.lineWidth = (1.25 + 2 * k) * dpr;
-        g.strokeStyle = `rgba(255, 255, 255, ${on ? 0.6 + 0.35 * k : 0.35 + 0.5 * k})`;
-        g.setLineDash(on ? [] : [3 * dpr, 3 * dpr]);
+        g.strokeStyle = `rgba(255, 255, 255, ${solid ? 0.6 + 0.35 * k : sel.provisional ? 0.28 + 0.5 * k : 0.35 + 0.5 * k})`;
+        g.setLineDash(solid ? [] : [3 * dpr, 3 * dpr]);
         g.beginPath();
         contour(sel, a.id, w, h, (x0, y0, x1, y1) => { g.moveTo(x0, y0); g.lineTo(x1, y1); });
         g.stroke();

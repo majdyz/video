@@ -28,7 +28,7 @@ export type ColourState = {
   veil: number;
   /** Advanced: "Subject pop" (opt-in): subjects in open blue water toned silver and lifted. */
   subjectPop?: boolean;
-  /** Subject pop Strength, 0..100 (50 = the tuned default; 0 = colour clearing only, 100 = strong). */
+  /** Subject pop Strength, 0..100 (50 = the tuned default, 100 = strong; 0 = colour clearing only with the engine's own masks, nothing at all with an AI mask: aqua-fix SEG_RESTORE). */
   popStrength?: number;
   /** Warm pop on the subjects, 0..100 (0 = off): a red push on the subject only, the water keeps its colour. */
   popWarmth?: number;

@@ -76,7 +76,7 @@ export function segStatusText(s: SegStatus): string | null {
   switch (s.phase) {
     case "download": return `Downloading the model…${pc}`;
     case "starting": return "Starting the model…";
-    case "tracking": return `AI subjects${pc}`;
+    case "tracking": return `Finding subjects${pc}`;
     case "unavailable": return s.note ?? "Not available here; using standard detection";
     default: return "On: tap a subject to follow it with AI";
   }
@@ -148,28 +148,65 @@ export function seedObjects(am: AnimalMap | null, t: number, boxes: readonly Per
 export const ML_OUTLINE_ID = 65000;
 
 /**
- * The selection the tap outlines draw with AI on: what the ML mask pops (alpha > 0.5 where it rules) as one solid
- * subject, over the engine's other animals (still dashed, tappable), on the overlay's grid. Without an overlay:
- * the engine's selection unchanged.
+ * The selection the tap outlines draw: only what the frame on screen is graded with.
+ *   `o`       the AI overlay of exactly that frame (SegLive.at of its clip time; centred on it, so it neither leads
+ *             nor trails), or null when the AI has no mask for it. With it, the outline is what the ML mask pops
+ *             (alpha > 0.5 where it rules), solid, and nothing else: the grade ignores the engine's own animals on
+ *             such a frame (grade-shader toneWeight), so outlining them marked things that are not popped (a patch
+ *             of seabed beside the ray, user clip 12 Nov).
+ *   `engine`  the engine's own selection, and only when it was made from that same frame (`fresh`: the paused
+ *             frame's analysis; in play the engine's map lags the picture, which is the outline that trailed the
+ *             animal). With the AI on (`ai`) it is the fallback while the frame's mask is not there: drawn dashed
+ *             and dim (`provisional`). With the AI off it is the detection in use, as before (picked solid, the
+ *             other candidates dashed).
+ * Null: nothing to draw (a mask from another frame is never drawn).
  */
-export function outlineSelection(o: SegOverlay | null, engine: SubjectSelection | null): SubjectSelection | null {
-  if (!o) return engine;
+export function outlineSelection(o: SegOverlay | null, engine: SubjectSelection | null, opts: { ai?: boolean; fresh?: boolean } = {}): SubjectSelection | null {
+  if (!o) {
+    if (!engine || opts.fresh === false) return null;
+    return opts.ai ? { ...engine, provisional: true } : engine;
+  }
   const { width: w, height: h } = o, ids = new Uint16Array(w * h);
   let ml = 0;
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const i = y * w + x;
-    if (o.near[i] > 0.3) {
-      // Where the ML is trusted its answer is the outline, "not the subject" included (an excluded fin).
-      if (o.alpha[i] > 0.5) { ids[i] = ML_OUTLINE_ID; ml++; }
-      continue;
-    }
-    if (engine) ids[i] = engine.ids[Math.min(engine.height - 1, Math.floor(((y + 0.5) / h) * engine.height)) * engine.width + Math.min(engine.width - 1, Math.floor(((x + 0.5) / w) * engine.width))];
-  }
-  // With the AI on, the engine's unpicked candidates (dashed) are left out: on a reef they are rock patches, a maze
-  // of lines over the picture. Its picked animals and the AI's outline stay.
-  const animals = (engine?.animals ?? []).filter((a) => ids.includes(a.id) && (a.override === "include" || (a.override !== "exclude" && a.strength > 0.5)));
-  if (ml) animals.push({ id: ML_OUTLINE_ID, strength: 1 });
-  return { width: w, height: h, ids, animals };
+  for (let i = 0; i < w * h; i++) if (o.near[i] > 0.3 && o.alpha[i] > 0.5) { ids[i] = ML_OUTLINE_ID; ml++; }
+  return { width: w, height: h, ids, animals: ml ? [{ id: ML_OUTLINE_ID, strength: 1 }] : [] };
+}
+
+/**
+ * What the AI has for the frame on screen: its mask in use ("mask"), a mask that does not weigh enough to be popped
+ * yet or any more ("weak": easing in beside frames the pass has not filled, or a track too unsure), its answer that
+ * no subject is there ("none"), or nothing (null: the frame is not filled).
+ */
+export type SegFrameState = "mask" | "weak" | "none" | null;
+
+/** The status chip on the preview (subjectChip): `tone` styles it, `line` is what is applied now, `sub` the small second line. */
+export type SubjectChip = { tone: "ai" | "busy" | "basic"; line: string; sub: string | null };
+
+/**
+ * The one chip on the preview that says what the picture is graded with right now (Subject pop on a clip):
+ *   "AI subject ✓"                    this frame's own AI mask is in use (while the pass still runs: how far it is);
+ *   "AI: no subject here"             the AI has this frame and found nothing to pop on it ("AI unsure, not applied"
+ *                                     when it has a mask it does not trust enough to pop);
+ *   "Finding subjects 73%"            the pass is running and has not reached this frame (second line: time left),
+ *                                     the picture shows the basic detection meanwhile;
+ *   "Basic detection, AI not ready"   the fallback, with the reason below it (model loading, AI off, unavailable).
+ * `eta` is the pass's time left in short form (eta.ts Eta.short), or null. Each line is short enough for one row at
+ * 390 px (the chip never wraps).
+ */
+export function subjectChip(frame: SegFrameState, s: SegStatus, eta: string | null): SubjectChip {
+  const pc = s.progress !== null ? ` ${Math.round(s.progress * 100)}%` : "";
+  const tracking = s.on && s.phase === "tracking";
+  if (s.on && frame === "mask") return { tone: "ai", line: "AI subject ✓", sub: tracking ? `Rest of clip${pc || "…"}` : null };
+  if (s.on && frame === "none") return { tone: "ai", line: "AI: no subject here", sub: tracking ? `Rest of clip${pc || "…"}` : null };
+  // A mask still easing in while the pass runs is the search, not an answer.
+  if (tracking) return { tone: "busy", line: `Finding subjects${pc || "…"}`, sub: eta };
+  if (s.on && frame === "weak") return { tone: "basic", line: "AI unsure, not applied", sub: null };
+  const why = !s.on ? (s.crashed ? "AI is off (it crashed here)" : "AI detection is off")
+    : s.phase === "download" ? `Loading AI model${pc || "…"}`
+    : s.phase === "starting" ? "Starting AI model…"
+    : s.phase === "unavailable" ? "AI not available here"
+    : null;
+  return { tone: s.on && (s.phase === "download" || s.phase === "starting") ? "busy" : "basic", line: "Basic detection, AI not ready", sub: why };
 }
 
 /**
@@ -222,6 +259,9 @@ export function promptFor(o: Pick<SubjectOverride, "u" | "v">, boxes: readonly P
  */
 /** SegLive.at: the alpha is averaged over ±alphaFrames filled frames. */
 export const SEG_LIVE = { alphaFrames: 2 };
+
+/** SegLive.stateAt: a frame's mask counts as in use from this ML weight (the grade's SEG_TONE.popLo: nothing is popped below it). */
+export const SEG_FRAME = { minWeight: 0.2 };
 
 /** SegLive.qualityAt: the mask consistency check (see there). */
 export const SEG_QUALITY = { glitchS: 0.15, jumpS: 0.2, dropLo: 0.5, dropHi: 0.72, holdS: 2.0, recover: 0.85, partMin: 0.04, easeS: 0.5 };
@@ -387,11 +427,8 @@ export class SegLive {
     return this.conf.length ? confWeight(this.conf, t) : 0;
   }
 
-  /** The overlay at clip time t, or null where nothing is filled near t. */
-  at(t: number): SegOverlay | null {
-    const i = Math.round(t * SEG.sampleHz) - this.i0;
-    const f = i >= 0 && i < this.n ? this.frames[i] : undefined;
-    if (!f) return null;
+  /** The ML weight of filled frame i (clip time t): the eased confidence × the hand-over toward unfilled frames. */
+  private frameWeight(i: number, t: number): number {
     // Hand-over: the weight eases out over HAND frames toward unfilled frames.
     const HAND = Math.round(0.3 * SEG.sampleHz);
     let gap = HAND;
@@ -399,7 +436,28 @@ export class SegLive {
       const a = i - d, b = i + d;
       if ((a >= 0 && !this.frames[a]) || (b < this.n && !this.frames[b])) { gap = d - 1; break; }
     }
-    const w = this.weightAt(t) * smoothstep(0, HAND, gap);
+    return this.weightAt(t) * smoothstep(0, HAND, gap);
+  }
+
+  /**
+   * What the frame at clip time t has: "mask" when its own mask is there and weighs enough to be popped (over
+   * SEG_FRAME.minWeight: the grade pops nothing under SEG_TONE.popLo), "weak" when it does not (easing in beside
+   * unfilled frames, or a track too unsure to pop), "none" when the frame is filled without a subject, null when
+   * it is not filled.
+   */
+  stateAt(t: number): SegFrameState {
+    const i = Math.round(t * SEG.sampleHz) - this.i0;
+    if (i < 0 || i >= this.n || !this.frames[i]) return null;
+    if (!((this.stats[i]?.area ?? 0) > 0)) return "none";
+    return this.frameWeight(i, t) > SEG_FRAME.minWeight ? "mask" : "weak";
+  }
+
+  /** The overlay at clip time t, or null where nothing is filled near t. */
+  at(t: number): SegOverlay | null {
+    const i = Math.round(t * SEG.sampleHz) - this.i0;
+    const f = i >= 0 && i < this.n ? this.frames[i] : undefined;
+    if (!f) return null;
+    const w = this.frameWeight(i, t);
     const { mw, mh } = this, qw = Math.ceil(mw / 4), qh = Math.ceil(mh / 4);
     // The maps arrive run-length coded (session.ts): decoded here, one frame at a time.
     const up = (q: Uint8Array) => resize(Float32Array.from(rleDecode(q, qw * qh), (x) => x / 255), qw, qh, mw, mh);
@@ -1104,6 +1162,11 @@ export class SubjectSeg {
   get pending(): Promise<void> | null {
     if (!this.live || !this.busy) return null;
     return new Promise((r) => this.idleWaiters.push(r));
+  }
+
+  /** What the AI has for the frame at clip time t (SegLive.stateAt); null also when the AI is off or has no session. */
+  frameState(t: number): SegFrameState {
+    return this.on && this.live ? this.live.stateAt(t) : null;
   }
 
   /** The overlay for the frame at clip time t (null: the engine's own masks). */

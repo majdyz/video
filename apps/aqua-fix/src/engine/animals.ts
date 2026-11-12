@@ -135,6 +135,8 @@ export type SubjectSelection = {
   width: number;
   height: number;
   ids: Uint16Array;
+  /** Not the mask the picture is graded with for sure (the studio: the engine's own detection shown while the AI mask of the frame is not there): outlines are drawn dashed and dim. */
+  provisional?: boolean;
   animals: { id: number; strength: number; override?: "include" | "exclude"; /** Index of the correction bound to it. */ overrideIndex?: number; /** The automatic target (0..1) without corrections. */ auto?: number }[];
 };
 

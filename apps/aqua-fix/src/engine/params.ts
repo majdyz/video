@@ -325,6 +325,41 @@ export const WARM_POP = { hue: (78 * Math.PI) / 180, cMin: 0.05, cMax: 0.075, ke
 
 export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
 
+/**
+ * AI subject restore: what a real AI mask on the frame adds to Subject pop (grade-shader segRestore; never with the
+ * engine's own masks, which reach past the animal). The engine's pop was tuned for those blobs and is hard to see on
+ * a small or dark animal (user clip, 12 Nov: a spotted eagle ray, under 1% mean change, Pop 100 the same as Pop 50).
+ * With the animal's own outline in hand the subject is corrected like a subject: its water cast taken off, a little
+ * of the red the water took put back, more of its own contrast. Everything scales with S = the AI tone weight (the
+ * mask's feathered ramp × its confidence × the regional trust: grade-shader toneWeight) × the Pop slider's multiplier
+ * (p23.w: 0 at Pop 0, 1 at 50, 2 at 100), so Pop 0 leaves the plain grade, Pop 100 is plain to see, and nothing
+ * outside the mask's contour changes.
+ *   darkLo/Hi  S fades out as the graded lightness (cube root of the luminance) drops through lo..hi. Lower than the
+ *              engine pop's own fade (SUBJECT_POP.darkLo..Hi): an AI mask on a dark back is still the animal;
+ *   popGate    the AI tone weight itself (the pop's clearing and warmth included) is scaled by min(1, popGate × p23.w):
+ *              full from Pop ≈ 12 up, nothing at Pop 0;
+ *   cast/castMax  the share of a cool pixel's chroma taken off per unit S, and its ceiling (hue kept; "cool" = the
+ *              cosine of its hue to the opposite of `hue`: a warm, green or magenta pixel keeps its colour);
+ *   hue/warm/warmMax  then chroma is added along the warm hue (radians; a skin / sand tone, between orange and
+ *              yellow): `warm` per unit S × twice the Warmth slider (p24.z; Warmth 0 = none), never past warmMax
+ *              along that hue (an already warm subject gets nothing: no orange), on lit parts only (litLo..litHi
+ *              of Oklab L; blacks stay neutral) and not on highlights (hiLo..hiHi; white spots stay white);
+ *   detail     local contrast against the analysis guide (the source's low-pass, plain bilinear): the graded
+ *              lightness × (pixel luminance / guide luminance, clamped to rMin..rMax)^(detail × S): spots and
+ *              markings stand out from the back. (More of the frame's CLAHE was tried first: its tiles are mostly
+ *              water, so it only pushed a dark animal darker);
+ *   lift       the midtone lift (4·L·(1 − L)) per unit S the subject gets in all: what Subject pop's own lift
+ *              (SUBJECT_POP.lift × P × the clip's direction) has not given is made up, so its dark fade and its
+ *              deepening of a subject darker than the water no longer apply under an AI mask. Deepened, the ray
+ *              above was a black cut-out; cleared of its cast and lifted it is a grey-brown animal on blue water,
+ *              and the colour carries the separation.
+ * Offline, with the CPU reference on that ray frame and a hand-made mask (the ray is 4% of the frame): the mean
+ * change over the ray went from 4.3% of full scale at Pop 50 (5.4% at 100) to 7.4% (9.8% at 100; 0 at Pop 0); its
+ * mean colour from navy (4, 34, 56) to (42, 45, 48), (52, 52, 51) at Pop 100; nothing outside the mask moves. A
+ * light subject (a whitetip shark in open water) goes from 13% to 15% (19% to 21%): it was popped before.
+ */
+export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, cast: 0.65, castMax: 0.9, hue: (65 * Math.PI) / 180, warm: 0.014, warmMax: 0.045, litLo: 0.1, litHi: 0.35, hiLo: 0.85, hiHi: 0.97, detail: 0.25, rMin: 0.7, rMax: 1.45, lift: 0.1 };
+
 /** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
 export function popStrengthK(s: { subjectPopStrength?: number }): number {
   return 2 * Math.min(1, Math.max(0, s.subjectPopStrength ?? 0.5));
