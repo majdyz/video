@@ -7,6 +7,15 @@ const DONE = "· page closed";
 const MAX = 60;
 
 let previous: string[] | null = null;
+/**
+ * The page is being left (its pagehide has come: the session is marked as ended). Steps written after that are
+ * dropped: they would take the mark off again, and the next load would read a session that ended cleanly as a
+ * crash. A browser sends visibilitychange after pagehide when a page is reloaded or closed, and the studio's
+ * "page hidden" step (studio.ts, since fe4a1b3) came exactly there: the first visit's reload for cross-origin
+ * isolation (main.tsx) then showed "The page crashed last time" in a browser that had never run the app. A page
+ * that comes back from the back/forward cache (pageshow, persisted) is alive again.
+ */
+let leaving = false;
 
 /** Reads the last session's steps (once, at start-up), then starts a fresh list. Null when it ended cleanly. */
 export function startCrumbs(build: string): void {
@@ -22,9 +31,10 @@ export function startCrumbs(build: string): void {
   } catch { /* no storage */ }
   aiBusy = false;
   aiShown = undefined;
+  leaving = false;
   crumb(`start build ${build} · ${navigator.userAgent.replace(/^Mozilla\/5\.0 /, "").slice(0, 90)}`);
-  addEventListener("pagehide", () => { crumb(DONE); writeAi(true); });
-  addEventListener("pageshow", (e) => { if ((e as PageTransitionEvent).persisted) crumb("back from cache"); writeAi(); });
+  addEventListener("pagehide", () => { crumb(DONE); leaving = true; writeAi(true); });
+  addEventListener("pageshow", (e) => { if ((e as PageTransitionEvent).persisted) { leaving = false; crumb("back from cache"); } writeAi(); });
   // A hidden page is fair game for the system whatever it was doing (and a swiped-away Safari may never get its
   // pagehide): only a page that dies while it is on screen with the model at work counts against the AI.
   if (typeof document !== "undefined") document.addEventListener("visibilitychange", () => writeAi());
@@ -90,6 +100,8 @@ export function aiCrashedLast(): boolean {
 
 /** One step (kept short: it is written synchronously). */
 export function crumb(msg: string): void {
+  // (After the page's pagehide: see `leaving`.)
+  if (leaving) return;
   try {
     const a = JSON.parse(localStorage.getItem(KEY) || "[]") as string[];
     if (a[a.length - 1] === DONE && msg !== DONE) a.pop();
