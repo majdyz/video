@@ -3117,3 +3117,39 @@ a {
   color: var(--accent);
   font-weight: 600;
 }
+
+/* Subject status chip (Subject pop on a clip): what the frame on screen is graded with, in two short lines that
+   never wrap ("Finding subjects 73%" / "1 min left"). It takes the status pill's place; while subjects are being
+   picked on a phone the hint bar is there, so it sits under it. */
+.pill--subject {
+  max-width: none;
+  padding: 5px 12px 5px 10px;
+  text-align: left;
+  white-space: nowrap;
+  line-height: 1.25;
+  pointer-events: none;
+}
+.pill__lines {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.pill__lines > span,
+.pill__lines > small {
+  white-space: nowrap;
+}
+.pill__lines > small {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
+.pill--subject.is-ai {
+  padding-left: 12px;
+}
+.pill--subject.is-basic {
+  padding-left: 12px;
+  color: var(--text-2);
+}
+.is-narrow .pill--subject.is-under-bar {
+  top: calc(var(--topbar-h) + env(safe-area-inset-top) + var(--s-2) + 46px);
+}

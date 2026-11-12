@@ -25,7 +25,7 @@ import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validat
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
 import { pickAnimal, type SubjectOverride, type SubjectPathPoint, type SubjectSelection } from "../../../aqua-fix/src/engine/animals.ts";
 import { toggleOverride } from "./subjects.ts";
-import { outlineSelection, seedObjects, segPopsAt, SubjectSeg, type SegStatus } from "./seg/studio-seg.ts";
+import { outlineSelection, seedObjects, segPopsAt, SubjectSeg, type SegFrameState, type SegStatus } from "./seg/studio-seg.ts";
 import type { SegOverlay } from "../../../aqua-fix/src/engine/seg-overlay.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
@@ -214,6 +214,13 @@ export type Snapshot = {
   neutralNote: string | null;
   /** AI subject detection (beta, Subject pop): toggle, model download and ML track pass (seg/studio-seg.ts). */
   seg: SegStatus;
+  /**
+   * Subject pop on the frame on screen (as last drawn); null when it is not applied to the preview (off, Colour
+   * off, a photo). `ai`: what the AI has for that frame: its own mask in use ("mask"), its answer that no subject
+   * is there ("none"), or nothing, the engine's basic detection is what shows (null). With `seg` it makes the
+   * status chip on the preview (studio-seg.ts subjectChip).
+   */
+  subjectFrame: { ai: SegFrameState } | null;
   /** Subject taps that can be undone (newest last). */
   subjectUndo: number;
 };
@@ -292,6 +299,7 @@ export class Studio {
     subjectNote: null,
     neutralNote: null,
     seg: { on: false, phase: "off", progress: null, note: null },
+    subjectFrame: null,
     subjectUndo: 0,
   };
   private listeners = new Set<() => void>();
@@ -553,10 +561,31 @@ export class Studio {
     return this.engine?.subjectSelection() ?? null;
   }
 
-  /** What the tap outlines draw: with AI on, the ML mask at the paused frame over the engine's other animals. */
+  /** Clip time of the frame last drawn into the preview (draw): what the outlines and the status chip describe. */
+  private shownT: number | null = null;
+  /** Clip time of the frame the engine's own subject selection was last made from (refreshSubjects); null: none. */
+  private subjectsAt: number | null = null;
+
+  /**
+   * What the tap outlines draw (studio-seg.ts outlineSelection): the AI mask of exactly the frame on screen, solid;
+   * else the engine's own selection, only when it was analysed from that same frame (paused), and dashed and dim
+   * while the AI is on (the fallback). Never a mask made from another frame: in play the engine's map lags the
+   * picture (the outline that trailed the animal).
+   */
   outlineSelection(): SubjectSelection | null {
-    const t = this.snap.kind === "video" ? this.video?.currentTime ?? 0 : 0;
-    return outlineSelection(this.segOverlay(t), this.subjectSelection());
+    const video = this.snap.kind === "video";
+    const t = video ? this.shownT ?? this.video?.currentTime ?? 0 : 0;
+    const fresh = !video || (this.paused() && this.subjectsAt !== null && Math.abs(this.subjectsAt - t) < 1e-3);
+    return outlineSelection(this.segOverlay(t), this.subjectSelection(), { ai: video && this.seg.on, fresh });
+  }
+
+  /** The status chip's input: what the AI has for the frame just drawn (Snapshot.subjectFrame), set when it changes. */
+  private noteSubjectFrame(t: number | null): void {
+    // The same condition as segOverlay: what the frame was drawn with.
+    const on = t !== null && this.tools.colour.enabled && !!this.tools.colour.subjectPop && this.snap.kind === "video";
+    const ai = on && !(this.exporting && this.segExportEngine) ? this.seg.frameState(t) : null;
+    const cur = this.snap.subjectFrame;
+    if ((cur !== null) !== on || (cur !== null && cur.ai !== ai)) this.set({ subjectFrame: on ? { ai } : null });
   }
 
   /**
@@ -1023,6 +1052,8 @@ export class Studio {
     if (this.snap.kind === "video" && this.video) this.uploadToEngine(this.still ?? this.video, t, true);
     await e.analyzeNow(true).catch(() => undefined);
     this.openWater = e.openWater();
+    // The engine's selection is now this frame's own (the outlines draw it only then).
+    this.subjectsAt = t;
     this.repaint();
     if (this.snap.kind === "video" && this.seg.on) { this.runSeg(); this.focusSeg(t); }
   }
@@ -1048,12 +1079,18 @@ export class Studio {
   /** AI subject detection (beta): the ML segmenter's toggle, model and pass; null overlay = the engine's masks. */
   private seg = (() => {
     const s = new SubjectSeg(() => this.set({ seg: this.seg.status }));
-    // New AI frames: a paused frame shows them (and its outlines) right away.
-    let last = 0;
+    // New AI frames: a paused frame shows them (and its outlines, and the status chip) right away, and the last of
+    // a burst too (a trailing repaint: the throttle used to drop it, leaving the paused frame on the basic masks).
+    let last = 0, trail = 0;
     s.onRejected = () => this.set({ subjectNote: "Nothing there: tap the animal" });
     // The session asks for the next segment's seeds as its tracking reaches it (long clips).
     s.onNeedSeeds = (k, t, search) => { if (k > 0) void this.seedSegmentCanonical(k, t, search); };
-    s.onFrames = () => { const now = performance.now(); if (now - last > 250 && this.paused()) { last = now; this.repaint(); } };
+    s.onFrames = () => {
+      if (!this.paused()) return;
+      const now = performance.now();
+      if (now - last > 250) { last = now; this.repaint(); }
+      else if (!trail) trail = window.setTimeout(() => { trail = 0; if (this.paused() && !this.exporting) { last = performance.now(); this.repaint(); } }, 250);
+    };
     // A tap has been followed through: the paused frame's analysis that was held back for it.
     s.onTapDone = () => { if (this.paused() && this.snap.kind === "video") this.schedulePausedAnalysis(); };
     // The pass is done and its worker shut down: the seed-frame <video> (a decoder of its own) goes too.
@@ -1817,6 +1854,7 @@ export class Studio {
   private draw(src: GeometrySource, t: number, advance: boolean): void {
     const info = this.snap.info;
     if (!info || this.segSeedBusy) return;
+    this.shownT = t;
     if (this.tools.colour.enabled && this.engine) {
       this.uploadToEngine(src, t, true);
       // Crossing into another segment while playing: analyse this frame now (the lock snaps in tick).
@@ -1827,7 +1865,9 @@ export class Studio {
       if (this.seg.on && !this.seg.autos && this.tools.colour.subjectPop && performance.now() - this.segKick > 1000) { this.segKick = performance.now(); this.runSeg(); }
       this.engine.setSegOverlay(this.segOverlay(t));
       this.engine.render();
+      this.noteSubjectFrame(t);
     } else if (this.geo) {
+      this.noteSubjectFrame(null);
       const [w, h] = this.previewSize();
       this.geo.resize(w, h);
       this.geo.render(src, this.geoParams(t, info.rot), this.uprightOpts(this.split));

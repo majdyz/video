@@ -1,7 +1,7 @@
 import { Eta } from "./pipeline/eta.ts";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Studio } from "./pipeline/studio.ts";
-import { segStatusText } from "./pipeline/seg/studio-seg.ts";
+import { segStatusText, subjectChip } from "./pipeline/seg/studio-seg.ts";
 import { DEFAULT_TOOLS, NEUTRAL_HINT, TOOL_LABEL, TOOL_ORDER, detectedProfile, enabledTools, initialStyle, lookOf, neutralFor, profileDefaults, savedVivid, styleFlags, styleOf, subjectPopVisible, type ColourState, type ToolId, type ToolsState } from "./pipeline/tools.ts";
 import { BRAND, SAMPLE, donateUrl } from "./brand.ts";
 import { Stage } from "./ui/stage";
@@ -347,12 +347,13 @@ export default function App() {
   // The preview's AI pass: a rough time left once it has shown its pace (reset when it stops tracking).
   const segEta = useRef(new Eta()).current;
   if (s.seg.phase !== "tracking") segEta.reset();
-  const segEtaText = s.seg.phase === "tracking" ? segEta.text(s.seg.progress) : null;
+  const segEtaShort = s.seg.phase === "tracking" ? segEta.short(s.seg.progress) : null;
   const pill = s.busy ?? (tools.stabilise.enabled && !photo && !exporting && (s.stab.state === "analysing" || s.stab.state === "solving")
     ? (s.stab.state === "solving" ? "Planning a smooth path…" : `Analysing motion ${Math.round(s.stab.progress * 100)}%`)
-    // AI subject detection works in the background, also while the clip plays.
-    : s.seg.on && s.seg.phase === "tracking" && !exporting && tools.colour.enabled && tools.colour.subjectPop ? `AI subjects ${Math.round((s.seg.progress ?? 0) * 100)}%${segEtaText ? ` · ${segEtaText}` : ""}`
     : null);
+  // Subject pop on a clip: one chip says what the frame on screen is graded with (its AI mask, the search still
+  // running, or the basic detection), in place of the old "AI subjects 73% · about a minute left" pill that wrapped.
+  const chip = !pill && ready && s.subjectFrame && !exporting && !immersive ? subjectChip(s.subjectFrame.ai, s.seg, segEtaShort) : null;
 
   const closeSheet = useCallback(() => setSheetOpen(false), []);
   const popOn = !!panelTools.colour.subjectPop || new URLSearchParams(location.search).get("pop") === "1";
@@ -559,6 +560,12 @@ export default function App() {
             {s.phase === "empty" && <EmptyState accept={ACCEPT} onFiles={openFiles} onPick={native ? pick : undefined} onSample={openSample} busy={s.busy} />}
             {s.phase !== "empty" && pill && !selectActive && !pickActive && (
               <div className="pill" role="status"><span className="pill__dot" aria-hidden="true" />{pill}</div>
+            )}
+            {chip && !pickActive && (
+              <div className={`pill pill--subject is-${chip.tone}${selectActive ? " is-under-bar" : ""}`} role="status" data-subject-chip={chip.tone}>
+                {chip.tone === "busy" && <span className="pill__dot" aria-hidden="true" />}
+                <span className="pill__lines"><span>{chip.line}</span>{chip.sub && <small>{chip.sub}</small>}</span>
+              </div>
             )}
             {rail}
             {pickActive && (

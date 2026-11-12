@@ -4,13 +4,13 @@ import assert from "node:assert/strict";
 import { assembleMemory, frameIndex, isEmpty, MEM_DIM, MEM_TOKENS, newBank, pruneBank, storeMemory, type MemEntry } from "../src/pipeline/seg/bank.ts";
 import { denseFlow, warp, type Gray } from "../src/pipeline/seg/flow.ts";
 import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, framePop, guidedFilter, iou, nearMap, promptFromMask, rleDecode, rleEncode, sdfFeather } from "../src/pipeline/seg/mask.ts";
-import { clipPopDirection, composeSegStrength, popDirection, SEG_THICK, waterField } from "../../aqua-fix/src/engine/seg-overlay.ts";
+import { clipPopDirection, composeSegStrength, popDirection, SEG_THICK, SEG_WATER, waterField } from "../../aqua-fix/src/engine/seg-overlay.ts";
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
 import { SUBJECT_CLEAR } from "../../aqua-fix/src/engine/params.ts";
 import { confWeight, fillInterval, keyTimes, mapPrompt, sampleRange, SEG, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
 import { linearToOklab } from "../../aqua-fix/src/engine/color.ts";
-import { autoObjects, maskStats, ML_OUTLINE_ID, seedObjects, outlineSelection, popComponentBox, promptFor, SegLive, segPopsAt } from "../src/pipeline/seg/studio-seg.ts";
+import { autoObjects, maskStats, ML_OUTLINE_ID, seedObjects, outlineSelection, popComponentBox, promptFor, SegLive, segPopsAt, subjectChip, type SegStatus } from "../src/pipeline/seg/studio-seg.ts";
 
 const entry = (v: number): MemEntry => ({ mem: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), pos: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), ptr: new Float32Array(256).fill(v), score: 1 });
 const tpos = Float32Array.from({ length: 7 * 64 }, (_, i) => Math.floor(i / 64) * 100);
@@ -178,17 +178,25 @@ const img = (dx: number, dy: number): Gray => {
   assert.equal(segPopsAt({ width: 4, height: 4, alpha, exclude: null, near }, 3.5 / 4, 3.5 / 4), false);
   assert.equal(segPopsAt({ width: 4, height: 4, alpha, exclude: null, near: new Float32Array(16) }, 1.5 / 4, 1.5 / 4), false);
   assert.equal(segPopsAt(null, 0.5, 0.5), false);
-  // Outlines with AI on: the ML subject (solid) over the engine's other animals, on the overlay grid.
-  // (The engine's animal is one it picked: since 3cca855 its unpicked candidates are left out with AI on.)
+  // Outlines: only what the frame on screen is graded with. With the frame's own AI overlay: the ML subject, solid,
+  // and nothing of the engine's (the grade ignores its animals there: outlining them marked a patch of seabed).
   const eng = { width: 2, height: 2, ids: Uint16Array.from([0, 0, 0, 7]), animals: [{ id: 7, strength: 0.9 }] };
   const nearPart = near.slice(); nearPart[15] = 0; // the ML is trusted everywhere but the far corner
-  const os = outlineSelection({ width: 4, height: 4, alpha, exclude: null, near: nearPart }, eng)!;
+  const os = outlineSelection({ width: 4, height: 4, alpha, exclude: null, near: nearPart }, eng, { ai: true, fresh: true })!;
   assert.equal(os.ids[5], ML_OUTLINE_ID);
-  assert.equal(os.ids[15], 7, "the engine's animal where the ML is not trusted, resampled");
-  assert.equal(os.ids[10], 0, "where the ML is trusted, its 'not the subject' wins over the engine's animal");
-  assert.deepEqual(os.animals.map((a) => a.id).sort(), [7, ML_OUTLINE_ID].sort());
-  assert.deepEqual(outlineSelection({ width: 4, height: 4, alpha, exclude: null, near: nearPart }, { ...eng, animals: [{ id: 7, strength: 0.1 }] })!.animals.map((a) => a.id), [ML_OUTLINE_ID], "an unpicked candidate has no outline with AI on");
-  assert.equal(outlineSelection(null, eng), eng, "AI off: the engine's selection");
+  assert.equal(os.ids[15], 0, "the engine's animal is not outlined on a frame the AI has");
+  assert.deepEqual(os.animals.map((a) => a.id), [ML_OUTLINE_ID]);
+  assert.ok(!os.provisional, "the frame's own AI mask is the solid outline");
+  assert.deepEqual(outlineSelection({ width: 4, height: 4, alpha: new Float32Array(16), exclude: null, near }, eng, { ai: true, fresh: true })!.animals, [], "the AI has the frame and no subject on it: nothing is outlined");
+  assert.deepEqual(outlineSelection({ width: 4, height: 4, alpha, exclude: null, near: new Float32Array(16) }, eng, { ai: true, fresh: true })!.animals, [], "a mask without weight is not popped, so not outlined");
+  // No AI mask for the frame: the engine's selection, only when it was made from this very frame, and as the
+  // provisional fallback (dashed, dim) while the AI is on. A selection from another frame is never drawn.
+  const prov = outlineSelection(null, eng, { ai: true, fresh: true })!;
+  assert.ok(prov.provisional && prov.ids === eng.ids && prov.animals === eng.animals, "AI on, frame not there yet: the engine's, provisional");
+  assert.equal(outlineSelection(null, eng, { ai: true, fresh: false }), null, "a stale engine selection is not drawn (in play it trails the animal)");
+  assert.equal(outlineSelection(null, eng, { ai: false, fresh: false }), null, "nor with the AI off");
+  assert.equal(outlineSelection(null, eng, { ai: false, fresh: true }), eng, "AI off: the engine's selection, as it is");
+  assert.equal(outlineSelection(null, null, { ai: true, fresh: true }), null);
   // Taking out a popped subject: the exclude gets the popped region's box.
   const ba = new Float32Array(100), bn = new Float32Array(100).fill(1);
   for (let y = 2; y < 6; y++) for (let x = 3; x < 9; x++) ba[y * 10 + x] = 1;
@@ -262,13 +270,17 @@ const img = (dx: number, dy: number): Gray => {
   for (let i = 0; i < gw * gh; i++) g.fill(0.05, i * 4, i * 4 + 3);
   const c = composeSegStrength({ width: W, height: H, alpha: a, exclude: null, near: new Float32Array(W * H).fill(1), depart: null }, { width: gw, height: gh, data: g }).data;
   const dOf = (x: number, y: number) => (c[(y * W + x) * 4 + 2] - 0.5) * 2 * SEG_TONE.alphaR;
-  assert.ok(dOf(60, 14) < 0.5 * SEG_TONE.rampIn, `a big body ramps in slowly (${dOf(60, 14).toFixed(2)} mask px read back 4 px in)`);
+  // (A feather, not a long fade: up to SEG_WATER.rampLong mask px. It used to be half the body's half-width, which
+  // left half of an animal barely toned.)
+  assert.ok(dOf(60, 11) < 0.5 * SEG_TONE.rampIn && dOf(60, 11) < dOf(130, 39), `a big body ramps in a little slower than a fin (${dOf(60, 11).toFixed(2)} mask px read back 1 px in)`);
+  assert.ok(dOf(60, 10 + SEG_WATER.rampLong) >= SEG_TONE.rampIn, `and is toned in full within the feather (${dOf(60, 10 + SEG_WATER.rampLong).toFixed(2)} at ${SEG_WATER.rampLong} px in)`);
   assert.ok(dOf(60, 40) >= SEG_TONE.rampIn, `its middle is toned in full (${dOf(60, 40).toFixed(2)})`);
   assert.ok(dOf(130, 39) > 0.5 && dOf(130, 39) > 0.9 * Math.max(0, (a[39 * W + 130] - 0.5) * 2 * SEG_TONE.alphaR), `a thin fin keeps its short ramp (${dOf(130, 39).toFixed(2)})`);
   assert.ok(c[(39 * W + 130) * 4] < 2 && c[(14 * W + 60) * 4] === SEG_THICK, "the per-pixel water test on thin parts only (R)");
   let step = 0;
   for (let y = 11; y < 69; y++) for (let x = 21; x < 99; x++) step = Math.max(step, Math.abs(dOf(x + 1, y) - dOf(x, y)), Math.abs(dOf(x, y + 1) - dOf(x, y)));
-  assert.ok(step < 0.5, `the ramp varies smoothly (max ${step.toFixed(2)} per texel)`);
+  // (Never steeper than the plain feather of a thin part, 1 per texel: the thickness changes the slope gently.)
+  assert.ok(step < 0.9, `the ramp varies smoothly (max ${step.toFixed(2)} per texel)`);
 }
 
 // The pop tone (subject clearing): shrinks the water cast along the pixel's own hue, bounded, never a fixed target.
@@ -318,6 +330,40 @@ const img = (dx: number, dy: number): Gray => {
   for (let k = 1; k < ws.length; k++) assert.ok(ws[k] <= ws[k - 1] + 1e-6, `eases out toward the gap (${ws.map((w) => w.toFixed(2))})`);
   assert.ok(ws[ws.length - 1] < 0.05 && ws[0] > 0.95, "reaches nothing at the edge");
   assert.equal(live.coverage, 0.5);
+  // What the status chip reads: the frame's own mask in use, the AI's "nothing here", or no AI frame at all.
+  assert.equal(live.stateAt(0.3), "mask", "a filled frame with a mask at full weight");
+  assert.equal(live.stateAt(1.2), null, "an unfilled frame");
+  assert.equal(live.stateAt(-1), null);
+  assert.equal(live.stateAt(29 / 30), "weak", "eased out toward the gap: the mask is not popped, so not 'in use'");
+  live.put([{ ...frame(40), alpha: rleEncode(new Uint8Array(mw * mh)) }]);
+  assert.equal(live.stateAt(40 / 30), "none", "filled without a subject");
+  const unsure = new SegLive({ mw, mh, i0: 0, n });
+  unsure.put(Array.from({ length: 30 }, (_, i) => frame(i)));
+  assert.equal(unsure.stateAt(0.3), "weak", "no confidence yet: nothing is popped");
+}
+
+// The status chip on the preview: exactly what the frame on screen is graded with, in two short lines.
+{
+  const st = (p: Partial<SegStatus>): SegStatus => ({ on: true, phase: "ready", progress: null, note: null, ...p });
+  assert.deepEqual(subjectChip("mask", st({}), null), { tone: "ai", line: "AI subject ✓", sub: null });
+  assert.deepEqual(subjectChip("mask", st({ phase: "tracking", progress: 0.731 }), "1 min left"), { tone: "ai", line: "AI subject ✓", sub: "Rest of clip 73%" });
+  assert.deepEqual(subjectChip(null, st({ phase: "tracking", progress: 0.731 }), "1 min left"), { tone: "busy", line: "Finding subjects 73%", sub: "1 min left" });
+  assert.deepEqual(subjectChip(null, st({ phase: "tracking", progress: 0.02 }), null), { tone: "busy", line: "Finding subjects 2%", sub: null }, "no estimate yet: one line");
+  assert.deepEqual(subjectChip(null, st({ phase: "tracking" }), null).line, "Finding subjects…");
+  assert.deepEqual(subjectChip(null, st({}), null), { tone: "basic", line: "Basic detection, AI not ready", sub: null }, "the pass is idle and has nothing for this frame");
+  assert.deepEqual(subjectChip(null, st({ phase: "download", progress: 0.4 }), null), { tone: "busy", line: "Basic detection, AI not ready", sub: "Loading AI model 40%" });
+  assert.equal(subjectChip(null, st({ phase: "starting" }), null).sub, "Starting AI model…");
+  assert.equal(subjectChip(null, st({ phase: "unavailable" }), null).sub, "AI not available here");
+  assert.deepEqual(subjectChip(null, st({ on: false, phase: "off" }), null), { tone: "basic", line: "Basic detection, AI not ready", sub: "AI detection is off" });
+  assert.equal(subjectChip("mask", st({ on: false, phase: "off" }), null).line, "Basic detection, AI not ready", "AI off: never the AI tick");
+  assert.equal(subjectChip("none", st({}), null).line, "AI: no subject here");
+  assert.deepEqual(subjectChip("weak", st({ phase: "tracking", progress: 0.5 }), "2 min left"), { tone: "busy", line: "Finding subjects 50%", sub: "2 min left" }, "a mask still easing in is the search");
+  assert.equal(subjectChip("weak", st({}), null).line, "AI unsure, not applied");
+  // No line is long enough to wrap in the chip at 390 px (about 30 characters of 13 px text beside the rail).
+  for (const f of ["mask", "weak", "none", null] as const) for (const s of [st({}), st({ phase: "tracking", progress: 1 }), st({ phase: "download", progress: 1 }), st({ phase: "starting" }), st({ phase: "unavailable" }), st({ on: false, phase: "off", crashed: true })]) {
+    const c = subjectChip(f, s, "under 1 min left");
+    assert.ok(c.line.length <= 30 && (c.sub?.length ?? 0) <= 30, `${c.line} / ${c.sub}`);
+  }
 }
 
 // Pop direction: one number for the clip. Each filled frame carries its own subject / water contrast (framePop); the
