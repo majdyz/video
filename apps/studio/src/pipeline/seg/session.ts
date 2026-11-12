@@ -7,7 +7,10 @@
 //   next segment's seeds when its tracking reaches it and waits for them, so every run of the clip (preview or
 //   export, started whenever) tracks the same objects. Autos are tracked forward through their segment in lockstep
 //   (every auto due at a keyframe steps on one encode). At the next segment's start an auto the new seeds do not
-//   cover carries on (its memory bank and all), so a subject the engine misses there is still followed.
+//   cover carries on (its memory bank and all), so a subject the engine misses there is still followed. A subject
+//   first found after a stretch nothing was followed in (the start of the clip, a gap) is also followed backward
+//   through that stretch, once its forward track is through (backList): it was in the picture before the look that
+//   found it. On the lite model the first looks often find nothing (owner's ray clip: no mask for the first 6 s).
 // - Taps (include, exclude) are tracked outward from their keyframe within SEG.reachS, ahead of the autos (the auto
 //   pass stands still meanwhile): forward to the end of their reach first, then backward in chunks read in one
 //   sequential decode each (readBack), with the intervals behind each step filled right away. Forward and backward
@@ -39,9 +42,9 @@
 //   iPhone's page died there, 12 Nov). Every job leaves a breadcrumb when it starts and when it ends, with its
 //   number, so a crash log shows what was alive.
 import type { EdgeTam } from "./edgetam.ts";
-import { cellLab, nearMap, departFromCells, framePop, sdfFeather, area, bbox, guidedFilter, iou, promptFromMask, rleDecode, rleEncode } from "./mask.ts";
+import { cellLab, nearMap, departFromCells, framePop, sdfFeather, area, bbox, centroid, guidedFilter, iou, promptFromMask, rleDecode, rleEncode, shiftMap, waterContrast } from "./mask.ts";
 import { denseFlow, warp, type Gray } from "./flow.ts";
-import { fillInterval, keyTimes, maskSize, remap, SEG, sigmoidResize, toU8, type Keyframe, type SegObject } from "./track.ts";
+import { fillInterval, HOLD, keyTimes, lockStep, maskSize, newLock, remap, SEG, sigmoidResize, toU8, type Keyframe, type Lock, type SegObject } from "./track.ts";
 
 /** Reads one frame (as a VideoFrame-like source) at clip time t; the session draws it on its own canvases. */
 export type SessionFrames = {
@@ -58,7 +61,13 @@ export type SessionFrames = {
 
 /** autoSeeds: the point grid and what counts as a subject. */
 /** peekMax: the playhead's peek (SegSession.focus) follows at most this many subjects. */
-export const AUTO = { cols: 4, rows: 6, liteCols: 3, liteRows: 4, iou: 0.8, areaLo: 0.004, areaHi: 0.3, span: 0.9, contrast: 0.05, max: 2, peekMax: 2 };
+/** areaSmall / smallContrast: a candidate between areaSmall and areaLo of the frame (one fish of a school: a
+ * hammerhead 60 × 15 px on a 480-px frame is 0.2%) counts when it stands off the water around it by this much (CIE76
+ * ΔE, mask.ts waterContrast: pale sharks in blue-green water and a far ray measure 3–6, plain water and haze under
+ * 1). Smaller than areaSmall is a speck. */
+/** max: the search hands over at most this many subjects (the lite model and phones follow SEG.liteAutos of them:
+ * every subject is a tracker step per keyframe, about as long as the frame's own encode). */
+export const AUTO = { cols: 4, rows: 6, liteCols: 3, liteRows: 4, iou: 0.8, areaLo: 0.004, areaSmall: 0.0015, smallContrast: 2.5, areaHi: 0.3, span: 0.9, contrast: 0.05, max: 4, peekMax: 2 };
 
 /** How far a mask's colour stands out from a ring around it (mean cell-colour distance; cells: cellLab, 3 per px). */
 function ringContrast(m: Float32Array, cells: Float32Array, w: number, h: number): number {
@@ -79,6 +88,18 @@ function ringContrast(m: Float32Array, cells: Float32Array, w: number, h: number
   if (!ni || !nr) return 0;
   return Math.hypot(inner[0] / ni - ring[0] / nr, inner[1] / ni - ring[1] / nr, inner[2] / ni - ring[2] / nr);
 }
+
+/**
+ * The re-check of a locked track (SegSession.recheck; track.ts HOLD): the mask a fresh prompt gives is taken when it
+ * is a subject (object score > 0) that stands off the water around it by at least `contrast` (CIE76 ΔE of the mean
+ * cell colours, mask.ts waterContrast: a far ray in haze measures 4–6, plain water under 1), holds at least `cover`
+ * of the tracker's own mask, is at least `gain` × its size and within HOLD.areaLo..areaHi of the locked size. `box`:
+ * the prompt's box is the expected subject's, grown by this share of its size each side.
+ */
+export const RECHECK = { contrast: 2, cover: 0.5, gain: 1.25, box: 0.15 };
+
+/** A track's last sure keyframe (per direction): its mask, where it was and how fast it moved (mask px a second). */
+type SureRef = { m: Float32Array; t: number; x: number; y: number; vx: number; vy: number };
 
 export type SessionObjectInfo = { id: number; kind: "include" | "exclude"; t: number };
 /** One filled frame's maps, run-length coded (mask.ts rleEncode): alpha on the mask grid, the rest at quarter size. */
@@ -138,6 +159,13 @@ type ObjState = {
   /** Adaptive keyframes: steps this object still takes on the fine grid, forward / backward (taps; autos share one). */
   fineF: number;
   fineB: number;
+  /** Hysteresis (track.ts lockStep), forward / backward, and the last sure keyframe of each (the re-check's prompt). */
+  lockF: Lock;
+  lockB: Lock;
+  sureF: SureRef | null;
+  sureB: SureRef | null;
+  /** An auto's backward steps in a row that found nothing (its back-fill stops after a second of them). */
+  emptyB: number;
 };
 
 /** fps: keyframes a second, fixed (no adaptive extra ones unless `adapt` says so). Default: by the model (see header). */
@@ -208,7 +236,7 @@ export class SegSession {
   private asked = NaN;
   /** Steps done (for the progress). */
   private stepsDone = 0;
-  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0, extraKeys: 0, carried: 0, runMs: 0 };
+  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0, extraKeys: 0, carried: 0, runMs: 0, held: 0, rechecks: 0, recovered: 0 };
   private waitSince = 0;
 
   private model: EdgeTam;
@@ -312,7 +340,7 @@ export class SegSession {
   }
 
   private newObj(o: SegObject & { id: number }, auto: boolean, seg: number, hidden: boolean, fwd: number[], bwd: number[]): ObjState {
-    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0 };
+    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0 };
   }
 
   /** Canonical frame of segment k (k = 0: the first seeds' frame; then every SEG.segmentS, snapped). */
@@ -348,7 +376,8 @@ export class SegSession {
    * (Infinity: the pass is through). */
   private front(): number {
     let f = Infinity;
-    for (const s of this.objs.values()) if (s.auto) { const n = this.nextOf(s); if (n !== null && n < f) f = n; }
+    // (An auto's forward steps: its back-fill of an earlier gap, after them, is not where the pass stands.)
+    for (const s of this.objs.values()) if (s.auto && s.fi < s.fwd.length && s.fwd[s.fi] < f) f = s.fwd[s.fi];
     if (f === Infinity) for (const s of this.segStarts) if (!this.seeded.has(s)) { f = s; break; }
     return f;
   }
@@ -475,11 +504,33 @@ export class SegSession {
     const span = this.stepsBetween(t0, t1, [t0, t1]);
     // The seeds come most important first (the engine's largest animals, the model's best finds): the lite model
     // takes the first SEG.liteAutos.
-    for (const o of objs.slice(0, this.autoCap)) this.objs.set(o.id, this.newObj({ ...o, t: t0 }, true, k, this.gone.delete(o.id), span.slice(), []));
+    // (Before they are made: the stretch behind them nothing was followed in.)
+    const back = this.backList(t0);
+    for (const o of objs.slice(0, this.autoCap)) this.objs.set(o.id, this.newObj({ ...o, t: t0 }, true, k, this.gone.delete(o.id), span.slice(), o.kind === "include" && back.length > 1 ? back.slice() : []));
+    if (objs.length && back.length > 1) {
+      this.ev.trace?.(`back-fill ${back[back.length - 1].toFixed(2)}-${t0.toFixed(2)}s`);
+      console.info(`[seg] back-fill: the subject(s) found at ${t0.toFixed(2)} s are followed back to ${back[back.length - 1].toFixed(2)} s (${back.length - 1} keyframes), after their forward track`);
+    }
     // Nothing seeded and nothing tracked into this segment: look again a little later (re-acquire).
     if (objs.length) this.emptyRun = 0;
     else if (![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) { this.emptyRun++; this.reacquire(k); }
     return true;
+  }
+
+  /**
+   * The keyframes a subject first seen at segment start t0 is followed backward over (t0 first, then earlier): the
+   * stretch before t0 in which no subject was shown, back to the last keyframe one was (not included), the start of
+   * the range, or SEG.reachS. Just [t0] (or nothing) when a subject was shown right up to t0. The seeds of a look
+   * are on screen before the look: without this the frames from the start of the clip (or from where the last
+   * subject was lost) to the first look that finds something had no mask at all.
+   */
+  private backList(t0: number): number[] {
+    let lo = -Infinity;
+    for (const s of this.objs.values()) {
+      if (s.o.kind !== "include" || s.peek) continue;
+      for (const k of s.shown) if (k < t0 - 1e-6 && k > lo) lo = k;
+    }
+    return this.stepsBetween(Math.max(lo, t0 - SEG.reachS), t0, [t0]).filter((k) => k > lo + 1e-6).reverse();
   }
 
   /** How many of the engine's own subjects are followed at a time (SEG.liteAutos on the lite model and on a phone:
@@ -749,35 +800,45 @@ export class SegSession {
     this.lastEncoded = t;
     const cands: { m: Float32Array; q: number }[] = [];
     const stats: string[] = [];
-    // The lite (phone) model probes a coarser grid: each probe is a full decoder run, and the phone's memory is tight.
-    const cols = this.model.lite ? A.liteCols : A.cols, rows = this.model.lite ? A.liteRows : A.rows;
-    let probes = 0;
+    // The lite (phone) model probes a coarser grid first: each probe is a full decoder run. When that finds nothing
+    // (a segment's seeds, not the playhead's quick look) it goes on to the full grid: 3 × 4 points 160 px apart on a
+    // 480-px frame pass a ray at the frame's edge by (owner's clip: nothing found at 0 s and 2 s, the full model's
+    // 4 × 6 grid found it at 0 s), and the looks that find nothing are the ones a subject is lost for seconds at.
+    const grids: [number, number][] = this.model.lite ? (quick ? [[A.liteCols, A.liteRows]] : [[A.liteCols, A.liteRows], [A.cols, A.rows]]) : [[A.cols, A.rows]];
+    let probes = 0, total = 0;
     const pts: [number, number][] = [];
-    for (let gy = 0; gy < rows; gy++) for (let gx = 0; gx < cols; gx++) pts.push([(gx + 0.5) / cols, (gy + 0.5) / rows]);
+    for (const [cols, rows] of grids) {
+      if (cands.length) break;
+      total += cols * rows;
+      pts.length = 0;
+      for (let gy = 0; gy < rows; gy++) for (let gx = 0; gx < cols; gx++) pts.push([(gx + 0.5) / cols, (gy + 0.5) / rows]);
     // (A stable sort: points equally far from the centre keep their grid order.)
     if (quick) pts.sort((a, b) => Math.hypot(a[0] - 0.5, a[1] - 0.5) - Math.hypot(b[0] - 0.5, b[1] - 0.5));
     for (const [u, v] of pts) {
       if (quick && cands.length) break;
       if (this.tapWaiting()) throw PREEMPT;
-      if (probes < 2) this.ev.trace?.(`auto: probe ${probes + 1}/${cols * rows}`);
+      if (probes < 2) this.ev.trace?.(`auto: probe ${probes + 1}/${total}`);
       const r = await this.model.probe([[u * 1024, v * 1024]], [1]);
       if (probes++ < 2) this.ev.trace?.("auto: probed");
       const m = sigmoidResize(r.logits, r.lw, r.lh, w, h);
       const a = area(m) / (w * h);
       stats.push(`${r.score.toFixed(1)}/${r.iou.toFixed(2)}/${(a * 100).toFixed(1)}%`);
       if (r.score <= 0 || r.iou < A.iou) continue;
-      if (a < A.areaLo || a > A.areaHi) continue;
+      if (a < A.areaSmall || a > A.areaHi) continue;
       const b = bbox(m, w, h);
       if (!b || b.x1 - b.x0 > A.span * w || b.y1 - b.y0 > A.span * h) continue;
+      // A small one (a fish of a school) must stand off its water: a speck of haze does not.
+      if (a < A.areaLo) { const dE = cells ? waterContrast(m, cells, w, h) : null; if (dE === null || dE < A.smallContrast) continue; }
       const c = cells ? ringContrast(m, cells, w, h) : A.contrast;
       if (c < A.contrast) continue;
       cands.push({ m, q: r.iou + c });
     }
+    }
     cands.sort((x, y) => y.q - x.q);
-    console.info(`[seg] auto seeds at ${t.toFixed(2)} s${quick ? " (quick)" : ""}: ${cands.length} candidate(s) of ${quick ? `${probes} of ` : ""}${cols * rows} points (${stats.join(" ")})`);
+    console.info(`[seg] auto seeds at ${t.toFixed(2)} s${quick ? " (quick)" : ""}: ${cands.length} candidate(s) of ${quick ? `${probes} of ` : ""}${total} points (${stats.join(" ")})`);
     const keep: Float32Array[] = [];
     for (const c of cands) {
-      if (keep.length >= A.max) break;
+      if (keep.length >= (quick ? A.peekMax : A.max)) break;
       if (keep.some((k) => iou(k, c.m) > 0.4)) continue;
       keep.push(c.m);
     }
@@ -927,9 +988,14 @@ export class SegSession {
           this.enter("pass", "");
           // Newer first: at a segment start the new seeds step before the autos they may replace.
           const batch = autos.filter((s) => Math.abs(this.nextOf(s)! - t) < 1e-6).sort((a, b) => b.o.id - a.o.id);
-          for (const s of batch) await this.stepObject(s);
-          this.carryOver(t, batch);
-          this.refineAutos(t, batch.some((s) => s.hard));
+          // (Forward steps only decide the carry-over and the fine grid: a back-fill step is its object's alone.)
+          const ahead: ObjState[] = [];
+          for (const s of batch) { const d = this.dirOf(s); await this.stepObject(s); if (d === "f") ahead.push(s); }
+          if (ahead.length) {
+            this.carryOver(t, ahead);
+            this.refineAutos(t, ahead.some((s) => s.hard));
+          }
+          if (!autos.some((s) => this.dirOf(s) === "b")) this.backRgba.clear();
           await this.fillReady();
           this.postKeys();
           this.postProgress();
@@ -1083,10 +1149,11 @@ export class SegSession {
     }
     const prev = goFwd ? s.prevF : s.prevB;
     let reprompts = 0, agree = 1, carriedArea = 0;
+    let carried: Float32Array | null = null;
     if (prev && !first) {
       const tg = performance.now();
       const fl = denseFlow(gray(luma, this.mw, this.mh), gray(prev.luma, this.mw, this.mh));
-      const carried = warp(prev.m, fl);
+      carried = warp(prev.m, fl);
       this.prof.guardMs += performance.now() - tg;
       const ca = area(carried);
       carriedArea = ca;
@@ -1116,13 +1183,47 @@ export class SegSession {
       }
     }
     s.hard = !first && (reprompts > 0 || ranAway || agree < SEG.adaptAgree);
+    // Hysteresis (track.ts HOLD): a locked subject the model still sees at about its size keeps its weight through a
+    // keyframe whose raw confidence dips, and a keyframe that is not sure (or whose mask shrank) is re-checked.
+    let conf = reprompts ? 0.5 : (r.score > 0 ? Math.min(1, Math.max(0, (r.score + 1) / 3)) : 0) * (agree < 1 ? Math.min(1, Math.max(0, (agree - 0.3) / 0.4)) : 1);
+    if (s.o.kind === "include") {
+      const lock = goFwd ? s.lockF : s.lockB;
+      const st = lockStep(lock, { conf, score: ranAway ? -1 : r.score, area: area(m) }, this.fps);
+      conf = st.conf;
+      if (st.held) this.prof.held++;
+      if (st.recheck && !first && !ranAway) {
+        const fix = await this.recheck(s, key, frame, reverse, m, t, goFwd, carried);
+        if (fix) {
+          m = fix;
+          reprompts++;
+          s.hard = true;
+          // As a guard re-prompt: sure enough to be popped in full, not sure enough to count toward the lock.
+          conf = Math.max(conf, 0.5);
+          // It worked: the next keyframe that needs it is re-checked too (a refused one waits HOLD.recheckEvery).
+          lock.miss = 0;
+        }
+      }
+      if (lock.miss === 0 && lock.good > 0) {
+        const c = centroid(m, this.mw, this.mh), was = goFwd ? s.sureF : s.sureB;
+        if (c) {
+          const dt = was ? t - was.t : 0, moved = !!was && Math.abs(dt) > 1e-6 && Math.abs(dt) <= 2 / this.fps + 1e-6;
+          const ref: SureRef = { m, t, x: c.x, y: c.y, vx: moved ? (c.x - was!.x) / dt : 0, vy: moved ? (c.y - was!.y) / dt : 0 };
+          if (goFwd) s.sureF = ref; else s.sureB = ref;
+        }
+      }
+    }
     if (goFwd) { s.prevF = { m, luma }; s.fi++; } else { s.prevB = { m, luma }; s.bi++; }
-    const conf = reprompts ? 0.5 : (r.score > 0 ? Math.min(1, Math.max(0, (r.score + 1) / 3)) : 0) * (agree < 1 ? Math.min(1, Math.max(0, (agree - 0.3) / 0.4)) : 1);
     const mu = toU8(m);
     s.keys.set(t, rleEncode(mu));
     if (area(mu, 127) > 0) s.shown.add(t); else s.shown.delete(t);
     s.conf.set(t, conf);
-    if (!s.auto && (goFwd ? s.fi >= s.fwd.length : s.bi >= s.bwd.length)) this.model.drop(key);
+    if (s.auto && !goFwd) {
+      // A back-fill that has found nothing for a second has left the subject behind (it came into the picture
+      // there): it stops.
+      s.emptyB = area(m) > 0 ? 0 : s.emptyB + 1;
+      if (s.emptyB >= Math.max(2, Math.round(this.fps))) s.bwd.length = s.bi;
+    }
+    if ((!s.auto || !goFwd) && (goFwd ? s.fi >= s.fwd.length : s.bi >= s.bwd.length)) this.model.drop(key);
     // Taps: the intervals the step changed are filled right away (the caller); autos: once both ends are final.
     // (The backward list starts on the prompted keyframe again: the same frame, prompt and empty bank as the forward
     // one's first step just before it, so the same mask: nothing changed.)
@@ -1130,6 +1231,59 @@ export class SegSession {
     this.lastTouched = again ? [] : this.touch(t, idx > 0 ? list[idx - 1] : t);
     if (!s.auto && !s.peek) this.refine(s, goFwd, t);
     return { t, dir, first };
+  }
+
+  /**
+   * The re-check of a locked track at keyframe t (track.ts HOLD; RECHECK): the tracker's mask `m` is unsure or has
+   * shrunk, so the frame is asked afresh where the subject should be: a box around the last sure mask moved on at
+   * its last speed (or as the flow carried it, when that kept its size) and the tracker's own mask, with points
+   * inside what the tracker still has (or inside the expected mask when it has nothing). The answer is first read
+   * without touching the track's memory (probe); only one that passes the tests (a subject, off the water, the
+   * tracker's own mask and more, about the locked size) is written into the track, as a prompted step. A subject
+   * that is leaving the frame is left alone (its mask shrinks because it is going). Returns the new mask, or null
+   * (the tracker's stays). Never fills plain water: a mask that has the colour of the water around it is refused.
+   */
+  private async recheck(s: ObjState, key: string, frame: number, reverse: boolean, m: Float32Array, t: number, goFwd: boolean, carried: Float32Array | null): Promise<Float32Array | null> {
+    const ref = goFwd ? s.sureF : s.sureB, lock = goFwd ? s.lockF : s.lockB;
+    const { mw: w, mh: h } = this, N = w * h;
+    if (!ref || !(lock.area > 0)) return null;
+    const cur = bbox(m, w, h), am = area(m);
+    if (cur && (cur.x0 === 0 || cur.y0 === 0 || cur.x1 === w - 1 || cur.y1 === h - 1)) return null;
+    this.prof.rechecks++;
+    // Where the subject should be now.
+    const flowOk = !!carried && area(carried) >= 0.7 * area(ref.m);
+    const exp = flowOk ? carried! : shiftMap(ref.m, w, h, ref.vx * (t - ref.t), ref.vy * (t - ref.t));
+    const eb = bbox(exp, w, h);
+    if (!eb && !cur) return null;
+    const x0 = Math.min(eb?.x0 ?? w, cur?.x0 ?? w), y0 = Math.min(eb?.y0 ?? h, cur?.y0 ?? h), x1 = Math.max(eb?.x1 ?? 0, cur?.x1 ?? 0) + 1, y1 = Math.max(eb?.y1 ?? 0, cur?.y1 ?? 0) + 1;
+    const gx = RECHECK.box * (x1 - x0) + 1, gy = RECHECK.box * (y1 - y0) + 1;
+    const pr = promptFromMask(am > 0 ? m : exp, w, h, w / 640, 3, 0);
+    if (!pr) return null;
+    const mp = (x: number, y: number): [number, number] => [(Math.min(w, Math.max(0, x)) / w) * 1024, (Math.min(h, Math.max(0, y)) / h) * 1024];
+    const P: [number, number][] = [mp(x0 - gx, y0 - gy), mp(x1 + gx, y1 + gy), ...pr.pos.map(([x, y]) => mp(x + 0.5, y + 0.5))];
+    const L = [2, 3, ...pr.pos.map(() => 1)];
+    const ok = (q: { score: number }, c: Float32Array): boolean => {
+      const a = area(c);
+      if (!(q.score > 0) || a < RECHECK.gain * am || a < HOLD.areaLo * lock.area || a > HOLD.areaHi * lock.area || a > SEG.runawayArea * N) return false;
+      if (am > 0) { let both = 0; for (let i = 0; i < N; i++) if (m[i] > 0.5 && c[i] > 0.5) both++; if (both < RECHECK.cover * am) return false; }
+      const cells = this.cellCache.get(frameKey(t));
+      const dE = cells ? waterContrast(c, cells, w, h) : null;
+      return dE === null || dE >= RECHECK.contrast;
+    };
+    const p = await this.model.probe(P, L);
+    const cand = sigmoidResize(p.logits, p.lw, p.lh, w, h);
+    if (!ok(p, cand)) return null;
+    // Into the track's memory: the same prompt as a (non-conditioning) step of this keyframe.
+    const r = await this.model.step(key, frame, P, L, reverse);
+    const out = sigmoidResize(r.logits, r.lw, r.lh, w, h);
+    if (ok(r, out)) {
+      this.prof.recovered++;
+      console.info(`[seg] re-check at ${t.toFixed(2)} s: object ${s.o.id} ${am} → ${area(out)} px (locked at ${Math.round(lock.area)})`);
+      return out;
+    }
+    // With the track's memory the prompt came out otherwise: the keyframe's own step again (its memory as it was).
+    await this.model.step(key, frame, null, null, reverse);
+    return null;
   }
 
   /** Model inputs (RGBA 1024²) of the keyframes of the backward chunk read last, by frameKey (readBack). */

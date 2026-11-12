@@ -22,7 +22,7 @@
 
 import { assembleMemory, frameIndex, isEmpty, newBank, pruneBank, storeMemory, type MemEntry, type MemoryInputs, type ObjectBank } from "./bank.ts";
 import { denseFlow, warp, type Flow, type Gray } from "./flow.ts";
-import { area, bbox, DEPART_STEP, departMap, guidedFilter, iou, nearMap, promptFromMask, resize, sdfFeather, smoothstep } from "./mask.ts";
+import { area, bbox, bigParts, centroid, DEPART_STEP, departMap, guidedFilter, iou, nearMap, promptFromMask, resize, sdfFeather, shiftMap, smoothstep } from "./mask.ts";
 
 export const SEG = {
   /** Keyframes per clip second. */
@@ -114,7 +114,66 @@ export const SEG = {
   fillFlowScale: 0.5,
   /** Share of an ML step one filled frame counts for in the progress. */
   fillCost: 0.25,
+  /** The fill's fallback where the flow cannot follow the subject (fillInterval; a far ray on plain water while the
+   * camera pans: nothing for the flow to hold on to): a single subject that moved at least fillMovePx mask px
+   * between its two keyframes, and that the flow carried less than fillCarried of the way (or lost more than half
+   * of), is moved along the straight line between its two keyframe positions instead. */
+  fillMovePx: 1.5,
+  fillCarried: 0.65,
 };
+
+/**
+ * Hysteresis of a track (lockStep). A subject followed with a keyframe confidence of at least lockConf for lockSteps
+ * keyframes in a row is locked. A locked subject the model still sees (object score > 0) at about its size (areaLo..
+ * areaHi × the size it was locked at, eased) keeps a confidence of at least `floor` (over SEG.confHi: full weight)
+ * on keyframes where the raw confidence dips: on a far, low-contrast subject the flow the confidence is checked
+ * against has nothing to hold on to, and the raw value fell to 0 while the mask was fine ("AI unsure, not applied").
+ * The lock is given up after missS seconds of keyframes without a sure one. While it holds, a keyframe that is not
+ * sure, or whose mask shrank under dropShare of the locked size, asks for a re-check (the session re-prompts from
+ * the last good mask's box): on the first such keyframe and every recheckEvery-th after.
+ */
+export const HOLD = { lockConf: 0.6, lockSteps: 3, floor: 0.35, areaLo: 0.4, areaHi: 2.5, dropShare: 0.6, missS: 2, recheckEvery: 4, ease: 0.3 };
+
+/** A track's lock (one per object and direction). area: the locked subject's size (mask px, eased over its sure keyframes). */
+export type Lock = { good: number; locked: boolean; miss: number; area: number };
+
+export function newLock(): Lock {
+  return { good: 0, locked: false, miss: 0, area: 0 };
+}
+
+/**
+ * One keyframe of a track through its lock (HOLD). `conf`: the keyframe's raw confidence (object score × agreement
+ * with the flow-carried mask), `score`: the model's object score logit, `area`: the mask's size (mask px), `fps`:
+ * keyframes a second (for missS). Returns the confidence to use and whether to re-check the mask. Mutates `L`.
+ * Never raises the confidence of a keyframe the model itself calls empty (score ≤ 0 or no mask): what is not there
+ * is not held.
+ */
+export function lockStep(L: Lock, o: { conf: number; score: number; area: number }, fps: number): { conf: number; recheck: boolean; held: boolean } {
+  const H = HOLD, present = o.score > 0 && o.area > 0;
+  const sized = !L.locked || (o.area >= H.dropShare * L.area && o.area <= H.areaHi * L.area);
+  if (present && o.conf >= H.lockConf && sized) {
+    L.good++;
+    L.miss = 0;
+    L.area = L.area > 0 ? L.area + H.ease * (o.area - L.area) : o.area;
+    if (L.good >= H.lockSteps) L.locked = true;
+    return { conf: o.conf, recheck: false, held: false };
+  }
+  L.good = 0;
+  if (!L.locked) return { conf: o.conf, recheck: false, held: false };
+  L.miss++;
+  const recheck = (L.miss - 1) % H.recheckEvery === 0;
+  if (L.miss > Math.max(1, Math.round(H.missS * fps))) {
+    L.locked = false;
+    L.miss = 0;
+    L.area = 0;
+    return { conf: o.conf, recheck: false, held: false };
+  }
+  const hold = present && o.area >= H.areaLo * L.area && o.area <= H.areaHi * L.area;
+  // A held keyframe whose mask is about the locked size: the size follows it slowly (a subject swimming away). Not
+  // one that lost part of the body: the locked size is what the re-check measures its answer against.
+  if (hold && sized) L.area += 0.5 * H.ease * (o.area - L.area);
+  return { conf: hold ? Math.max(o.conf, H.floor) : o.conf, recheck, held: hold };
+}
 
 export type SegPrompt = { points: [number, number][]; labels: number[]; box?: { x0: number; y0: number; x1: number; y1: number } };
 /** A subject to follow: include (pop it) or exclude (never pop it); prompt in upright uv (0..1) at clip time t. */
@@ -415,6 +474,8 @@ export function fillInterval(a: Keyframe, b: Keyframe | null, times: number[], l
     }
     bwd[j] = cb;
   }
+  // Where the flow could not follow the subject, it is moved along the line between its keyframe positions.
+  const line = straightCarry(a.inc, b.inc, fwd[n - 1].inc, bwd[0].inc, (times[n - 1] - a.t) / (b.t - a.t), (times[0] - a.t) / (b.t - a.t), w, h);
   return fwd.map((F, j) => {
     const wt = (times[j] - a.t) / (b.t - a.t);
     const mix = (p: Float32Array | null, q: Float32Array | null) => {
@@ -423,8 +484,36 @@ export function fillInterval(a: Keyframe, b: Keyframe | null, times: number[], l
       for (let i = 0; i < o.length; i++) o[i] = (1 - wt) * p[i] + wt * q[i];
       return o;
     };
-    return { inc: mix(F.inc, bwd[j].inc)!, exc: mix(F.exc, bwd[j].exc) };
+    const fi = line?.fwd ? shiftMap(a.inc, w, h, wt * line.dx, wt * line.dy) : F.inc;
+    const bi = line?.bwd ? shiftMap(b.inc, w, h, -(1 - wt) * line.dx, -(1 - wt) * line.dy) : bwd[j].inc;
+    return { inc: mix(fi, bi)!, exc: mix(F.exc, bwd[j].exc) };
   });
+}
+
+/**
+ * The fill's fallback (SEG.fillMovePx / fillCarried): whether keyframe a's include mask, and b's, are to be moved
+ * along the straight line from a's subject to b's instead of along the flow, and that line (dx, dy: b's centre less
+ * a's, mask px). `fLast`: a's mask as the flow carried it to the interval's last frame (at share `wLast` of the way
+ * to b), `bFirst`: b's carried back to the first frame (at share `wFirst`). A chain is replaced when its subject
+ * ended up less than fillCarried of the way it had to go, or with less than half the area it should have there. Null: nothing
+ * to do (no subject at one end, more than one subject: which is which is not known here, or hardly any motion).
+ */
+export function straightCarry(a: Float32Array, b: Float32Array, fLast: Float32Array, bFirst: Float32Array, wLast: number, wFirst: number, w: number, h: number): { dx: number; dy: number; fwd: boolean; bwd: boolean } | null {
+  const ca = centroid(a, w, h), cb = centroid(b, w, h);
+  if (!ca || !cb) return null;
+  const dx = cb.x - ca.x, dy = cb.y - ca.y, D = Math.hypot(dx, dy);
+  if (D < SEG.fillMovePx || bigParts(a, w, h) !== 1 || bigParts(b, w, h) !== 1) return null;
+  // How far along the line (as a share of it) a chain's subject got, from its own keyframe.
+  // (Its area against what it should be there: a subject leaving the frame shrinks between its keyframes.)
+  const failed = (m: Float32Array, from: { x: number; y: number; n: number }, to: { n: number }, sign: number, share: number): boolean => {
+    if (share * D < SEG.fillMovePx) return false;
+    const c = centroid(m, w, h);
+    if (!c || c.n < 0.5 * (from.n + share * (to.n - from.n))) return true;
+    const along = (sign * ((c.x - from.x) * dx + (c.y - from.y) * dy)) / (D * D);
+    return along < SEG.fillCarried * share;
+  };
+  const fwd = failed(fLast, ca, cb, 1, wLast), bwd = failed(bFirst, cb, ca, -1, 1 - wFirst);
+  return fwd || bwd ? { dx, dy, fwd, bwd } : null;
 }
 
 function max(a: Float32Array, b: Float32Array): Float32Array {

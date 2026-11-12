@@ -213,7 +213,7 @@ const along = (a: number, b: number) => a * wx + b * wy;
   const sClose = composeSegStrength(overlay, close.guide), sFar = composeSegStrength(overlay, far.guide), sNone = composeSegStrength(overlay, null);
   assert.equal(unpackSegR(sClose.data[mid * 4])[1], 1);
   assert.ok(unpackSegR(sFar.data[mid * 4])[1] < 0.2);
-  assert.deepEqual(unpackSegR(sNone.data[mid * 4]), [-1, 1], "no guide: no water test, the colour as for a close subject");
+  assert.deepEqual(unpackSegR(sNone.data[mid * 4]).slice(0, 2), [-1, 1], "no guide: no water test, the colour as for a close subject");
   for (let i = 0; i < W * H; i++) for (const c of [2, 3]) assert.equal(sFar.data[i * 4 + c], sClose.data[i * 4 + c], "the mask's distance and the ML weight do not depend on the closeness");
   // Graded: the far animal keeps clearly more of its cast than the same mask on the close one, at the same Pop.
   const kept = (f: typeof close, strength: typeof sClose) => {

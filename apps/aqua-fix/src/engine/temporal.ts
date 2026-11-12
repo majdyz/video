@@ -188,6 +188,8 @@ in vec2 v_uv;
 layout(location = 0) out vec4 o_f0;
 layout(location = 1) out vec4 o_f1;
 ${TP_CONSTS_GLSL}
+// No guide here (grade-shader animalStrength reads the AI mask plainly bilinear at 1/8 resolution).
+float segGuideLum(vec2 uv) { return -1.0; }
 ${GRADE_GLSL}
 void main() {
   ivec2 x = ivec2(gl_FragCoord.xy);
@@ -227,6 +229,8 @@ struct Params { p: array<vec4<f32>, 36> };
 struct FieldOut { @location(0) f0: vec4<f32>, @location(1) f1: vec4<f32> };
 ${VS_WGSL}
 ${TP_CONSTS_WGSL}
+// No guide here (grade-shader animalStrength reads the AI mask plainly bilinear at 1/8 resolution).
+fn segGuideLum(uv: vec2<f32>) -> f32 { return -1.0; }
 ${GRADE_WGSL}
 @fragment fn fs(in: VSOut) -> FieldOut {
   let x = vec2<i32>(in.pos.xy);

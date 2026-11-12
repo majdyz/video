@@ -37,7 +37,41 @@ export const SEG_TONE = {
   trustHi: 4.5,
   evLo: 0.025,
   evHi: 0.07,
+  /** ...measured against the subject's own contrast: a far subject (closeness 0, seg-overlay.ts subjectCloseness: it
+   * stands off its water by under SEG_RESTORE.veilLo) is tested at evFar × evLo..evHi, a close one at evLo..evHi. A
+   * far ray in haze is ΔL ≈ 0.035 off the water all over: under the close bar it read as water to its spine, and its
+   * tone was a fraction of the mask's (owner's clip, 12 Nov: "the marking is not full"). */
+  evFar: 0.4,
+  /** ...and on the thinnest parts (seg-overlay.ts segThin, packed into R: half-width under SEG_WATER.thinHi mask px)
+   * a pixel that passes that test is toned from rampEv mask px inside the contour instead of rampIn (in between by
+   * how far it passes and how thin the part is): a far animal is 6–8 mask px thick, and at the fixed 2.5 px of
+   * feather each side only its spine was toned in full. The picture itself says the pixel is the animal, so the
+   * feather there is the picture's own edge; a pixel of water under a fat contour keeps the long feather and the
+   * test (nothing until trustLo). */
+  rampEv: 1,
+  /** The thinness rides in R in this many steps (seg-overlay.ts packSegR). */
+  thinLevels: 4,
+  /** The ML alpha is read edge-aware where the contour passes (animalStrength / apply.ts segSample: a joint
+   * bilateral upsample): the four mask texels around the pixel are weighted, on top of the bilinear weights, by how
+   * close the source's luma at each texel's centre is to the pixel's own (a Gaussian of width jbuK × the range of
+   * those five lumas, at least jbuNoise: flat water gives the plain bilinear read). The contour then follows the
+   * picture's edge between mask texels (6 px apart on a 1080p frame) instead of cutting straight across it. Only
+   * where the texels' alphas reach into jbuLo..jbuHi (the contour and the tone's ramp). */
+  jbuK: 0.5,
+  jbuNoise: 0.02,
+  jbuLo: 0.46,
+  jbuHi: 0.72,
 };
+
+/**
+ * The joint bilateral weights of animalStrength / segSample (SEG_TONE.jbu*): `wb` the four bilinear weights, `g` the
+ * source luma at the four texel centres, `g0` at the pixel. Returns the weights (not normalised). The shaders spell
+ * the same arithmetic out.
+ */
+export function segJbuWeights(wb: readonly number[], g: readonly number[], g0: number): number[] {
+  const lo = Math.min(g0, ...g), hi = Math.max(g0, ...g), s = 1 / Math.max(SEG_TONE.jbuNoise, SEG_TONE.jbuK * (hi - lo));
+  return wb.map((w, k) => w * Math.exp(-(((g[k] - g0) * s) ** 2)));
+}
 
 // Look constants shared by both shaders, emitted as literals.
 const LOOK_CONSTS_GLSL = `
@@ -173,6 +207,13 @@ const float SEG_TRUST_LO = ${SEG_TONE.trustLo.toFixed(4)};
 const float SEG_TRUST_HI = ${SEG_TONE.trustHi.toFixed(4)};
 const float SEG_EV_LO = ${SEG_TONE.evLo.toFixed(4)};
 const float SEG_EV_HI = ${SEG_TONE.evHi.toFixed(4)};
+const float SEG_EV_FAR = ${SEG_TONE.evFar.toFixed(4)};
+const float SEG_RAMP_EV = ${SEG_TONE.rampEv.toFixed(4)};
+const float SEG_THIN_LEVELS = ${SEG_TONE.thinLevels.toFixed(4)};
+const float SEG_JBU_K = ${SEG_TONE.jbuK.toFixed(4)};
+const float SEG_JBU_NOISE = ${SEG_TONE.jbuNoise.toFixed(4)};
+const float SEG_JBU_LO = ${SEG_TONE.jbuLo.toFixed(4)};
+const float SEG_JBU_HI = ${SEG_TONE.jbuHi.toFixed(4)};
 const float SR_DARK_LO = ${SEG_RESTORE.darkLo.toFixed(4)};
 const float SR_DARK_HI = ${SEG_RESTORE.darkHi.toFixed(4)};
 const float SR_POP_GATE = ${SEG_RESTORE.popGate.toFixed(4)};
@@ -553,9 +594,12 @@ float subjectWeight(vec2 uv, float coreJbu, float dev) {
 // With an AI overlay R also carries the subject's closeness (seg-overlay.ts packSegR: R + SEG_PACK x its step of
 // SEG_LEVELS): each texel is unpacked before the bilinear mix; the closeness comes out in g_segClose (segColourK).
 float g_segClose = 1.0;
-vec2 segUnpack(float r) {
+// ...and the part's thinness (packSegR: (SEG_LEVELS + 1) x its step of SEG_THIN_LEVELS on top), out in g_segThin.
+float g_segThin = 0.0;
+vec3 segUnpack(float r) {
   float n = floor((r + 8.0) / SEG_PACK);
-  return vec2(r - SEG_PACK * n, n / SEG_LEVELS);
+  float th = floor((n + 0.5) / (SEG_LEVELS + 1.0));
+  return vec3(r - SEG_PACK * n, (n - (SEG_LEVELS + 1.0) * th) / SEG_LEVELS, th / SEG_THIN_LEVELS);
 }
 vec4 animalStrength(vec2 uv) {
   ivec2 size = textureSize(u_data3, 0);
@@ -570,15 +614,38 @@ vec4 animalStrength(vec2 uv) {
   vec4 c01 = texelFetch(u_data3, ivec2(i0.x, i1.y), 0);
   vec4 c11 = texelFetch(u_data3, i1, 0);
   g_segClose = 1.0;
+  g_segThin = 0.0;
   if (p[24].y > 0.5) {
-    vec2 u00 = segUnpack(c00.r);
-    vec2 u10 = segUnpack(c10.r);
-    vec2 u01 = segUnpack(c01.r);
-    vec2 u11 = segUnpack(c11.r);
+    vec3 u00 = segUnpack(c00.r);
+    vec3 u10 = segUnpack(c10.r);
+    vec3 u01 = segUnpack(c01.r);
+    vec3 u11 = segUnpack(c11.r);
     c00.r = u00.x; c10.r = u10.x; c01.r = u01.x; c11.r = u11.x;
     g_segClose = mix(mix(u00.y, u10.y, t.x), mix(u01.y, u11.y, t.x), t.y);
+    g_segThin = mix(mix(u00.z, u10.z, t.x), mix(u01.z, u11.z, t.x), t.y);
   }
   vec4 c = mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+  // The ML alpha edge-aware where the contour passes (SEG_TONE.jbu*; apply.ts segSample): the four texels weighted
+  // by the source's luma at their centres against the pixel's own (segGuideLum, the including program's; < 0: none).
+  if (p[24].y > 0.5) {
+    vec4 b4 = vec4(c00.b, c10.b, c01.b, c11.b);
+    float blo = min(min(b4.x, b4.y), min(b4.z, b4.w));
+    float bhi = max(max(b4.x, b4.y), max(b4.z, b4.w));
+    if (bhi - blo > 1e-4 && blo < SEG_JBU_HI && bhi > SEG_JBU_LO) {
+      float g0 = segGuideLum(uv);
+      if (g0 >= 0.0) {
+        vec2 ts = 1.0 / vec2(size);
+        vec4 g4 = vec4(segGuideLum((vec2(i0) + 0.5) * ts), segGuideLum((vec2(float(i1.x), float(i0.y)) + 0.5) * ts),
+                       segGuideLum((vec2(float(i0.x), float(i1.y)) + 0.5) * ts), segGuideLum((vec2(i1) + 0.5) * ts));
+        float glo = min(g0, min(min(g4.x, g4.y), min(g4.z, g4.w)));
+        float ghi = max(g0, max(max(g4.x, g4.y), max(g4.z, g4.w)));
+        vec4 e = (g4 - g0) / max(SEG_JBU_NOISE, SEG_JBU_K * (ghi - glo));
+        vec4 w4 = vec4((1.0 - t.x) * (1.0 - t.y), t.x * (1.0 - t.y), (1.0 - t.x) * t.y, t.x * t.y) * exp(-e * e);
+        float ws = w4.x + w4.y + w4.z + w4.w;
+        if (ws > 1e-5) c.b = dot(w4, b4) / ws;
+      }
+    }
+  }
   return vec4(p[24].y > 0.5 ? c.r : texelFetch(u_data3, i, 0).r, c.g, c.b, c.a);
 }
 // Object weight and warm clamp (see apply.ts objectWeight / warmClamp).
@@ -640,10 +707,12 @@ vec2 popHue(vec2 ab, vec2 abSrc, float w) {
 }
 // How far the source pixel (Oklab lab0) departs from the local water (an.x: its L; its hue is the veil's, p14.xy):
 // 0 on water, 1 on a clear subject; 1 where there is no water to compare with.
+// The bar follows the subject's own contrast (SEG_TONE.evFar; g_segClose, set by animalStrength).
 float segEvidence(vec4 an, vec3 lab0) {
   if (an.x < 0.0 || an.x > 2.0) return 1.0;
   float perp = lab0.y * p[14].y - lab0.z * p[14].x;
-  return smoothstepf(SEG_EV_LO, SEG_EV_HI, length(vec2(lab0.x - an.x, perp)));
+  float k = mix(SEG_EV_FAR, 1.0, clamp(g_segClose, 0.0, 1.0));
+  return smoothstepf(SEG_EV_LO * k, SEG_EV_HI * k, length(vec2(lab0.x - an.x, perp)));
 }
 // The subject weight the tone uses: the engine's (depart, 0..1: how far the pixel departs from the water, softens
 // it), or with an AI overlay on the frame (p24.y) the AI's alone (the engine's coarse per-animal map would show its
@@ -656,10 +725,14 @@ float toneWeight(float subj, vec4 an, float depart, vec3 lab0) {
   if (p[24].y <= 0.5) return SP_ENGINE * objectWeight(subj) * mix(SC_EDGE, 1.0, depart);
   if (an.w <= 0.0) return 0.0;
   float d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
-  float inner = mix(segEvidence(an, lab0), 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));
+  float ev = segEvidence(an, lab0);
+  float inner = mix(ev, 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));
+  // On the thinnest parts (g_segThin; the per-pixel test runs there), a pixel that is the animal is toned from
+  // SEG_RAMP_EV inside the contour.
+  float rin = an.x >= 0.0 && an.x <= 2.0 ? mix(SEG_RAMP_IN, SEG_RAMP_EV, ev * clamp(g_segThin, 0.0, 1.0)) : SEG_RAMP_IN;
   // G: the regional trust (seg-overlay.ts waterField) scales the tone, even where the open-water amount (p22.z)
   // would pop it in full.
-  return smoothstepf(0.0, SEG_RAMP_IN, d) * inner * max(p[22].z, segPop(an)) * an.y * min(1.0, SR_POP_GATE * p[23].w);
+  return smoothstepf(0.0, rin, d) * inner * max(p[22].z, segPop(an)) * an.y * min(1.0, SR_POP_GATE * p[23].w);
 }
 // The analysis guide's luminance at uv, plain bilinear (no range weight): the source's low-pass (apply.ts guideLum).
 float guideLum(vec2 uv) {
@@ -1245,9 +1318,11 @@ fn subjectWeight(uv: vec2<f32>, coreJbu: f32, dev: f32) -> f32 {
 }
 // With an AI overlay R also carries the subject's closeness (see the GLSL animalStrength).
 var<private> g_segClose: f32 = 1.0;
-fn segUnpack(r: f32) -> vec2<f32> {
+var<private> g_segThin: f32 = 0.0;
+fn segUnpack(r: f32) -> vec3<f32> {
   let n = floor((r + 8.0) / SEG_PACK);
-  return vec2<f32>(r - SEG_PACK * n, n / SEG_LEVELS);
+  let th = floor((n + 0.5) / (SEG_LEVELS + 1.0));
+  return vec3<f32>(r - SEG_PACK * n, (n - (SEG_LEVELS + 1.0) * th) / SEG_LEVELS, th / SEG_THIN_LEVELS);
 }
 fn animalStrength(uv: vec2<f32>) -> vec4<f32> {
   let size = vec2<i32>(textureDimensions(u_data3, 0));
@@ -1261,6 +1336,7 @@ fn animalStrength(uv: vec2<f32>) -> vec4<f32> {
   var c01 = textureLoad(u_data3, vec2<i32>(i0.x, i1.y), 0);
   var c11 = textureLoad(u_data3, i1, 0);
   g_segClose = 1.0;
+  g_segThin = 0.0;
   if (params.p[24].y > 0.5) {
     let u00 = segUnpack(c00.r);
     let u10 = segUnpack(c10.r);
@@ -1268,8 +1344,29 @@ fn animalStrength(uv: vec2<f32>) -> vec4<f32> {
     let u11 = segUnpack(c11.r);
     c00.r = u00.x; c10.r = u10.x; c01.r = u01.x; c11.r = u11.x;
     g_segClose = mix(mix(u00.y, u10.y, t.x), mix(u01.y, u11.y, t.x), t.y);
+    g_segThin = mix(mix(u00.z, u10.z, t.x), mix(u01.z, u11.z, t.x), t.y);
   }
-  let c = mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+  var c = mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+  // The ML alpha edge-aware where the contour passes (see the GLSL animalStrength).
+  if (params.p[24].y > 0.5) {
+    let b4 = vec4<f32>(c00.b, c10.b, c01.b, c11.b);
+    let blo = min(min(b4.x, b4.y), min(b4.z, b4.w));
+    let bhi = max(max(b4.x, b4.y), max(b4.z, b4.w));
+    if (bhi - blo > 1e-4 && blo < SEG_JBU_HI && bhi > SEG_JBU_LO) {
+      let g0 = segGuideLum(uv);
+      if (g0 >= 0.0) {
+        let ts = 1.0 / vec2<f32>(size);
+        let g4 = vec4<f32>(segGuideLum((vec2<f32>(i0) + 0.5) * ts), segGuideLum((vec2<f32>(f32(i1.x), f32(i0.y)) + 0.5) * ts),
+                           segGuideLum((vec2<f32>(f32(i0.x), f32(i1.y)) + 0.5) * ts), segGuideLum((vec2<f32>(i1) + 0.5) * ts));
+        let glo = min(g0, min(min(g4.x, g4.y), min(g4.z, g4.w)));
+        let ghi = max(g0, max(max(g4.x, g4.y), max(g4.z, g4.w)));
+        let e = (g4 - g0) / max(SEG_JBU_NOISE, SEG_JBU_K * (ghi - glo));
+        let w4 = vec4<f32>((1.0 - t.x) * (1.0 - t.y), t.x * (1.0 - t.y), (1.0 - t.x) * t.y, t.x * t.y) * exp(-e * e);
+        let ws = w4.x + w4.y + w4.z + w4.w;
+        if (ws > 1e-5) { c.b = dot(w4, b4) / ws; }
+      }
+    }
+  }
   return vec4<f32>(select(textureLoad(u_data3, i, 0).r, c.r, params.p[24].y > 0.5), c.g, c.b, c.a);
 }
 fn objectWeight(conf: f32) -> f32 { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
@@ -1326,14 +1423,17 @@ fn clearCast(ab: vec2<f32>, vh: vec2<f32>, g: f32) -> vec2<f32> {
 fn segEvidence(an: vec4<f32>, lab0: vec3<f32>) -> f32 {
   if (an.x < 0.0 || an.x > 2.0) { return 1.0; }
   let perp = lab0.y * params.p[14].y - lab0.z * params.p[14].x;
-  return smoothstepf(SEG_EV_LO, SEG_EV_HI, length(vec2<f32>(lab0.x - an.x, perp)));
+  let k = mix(SEG_EV_FAR, 1.0, clamp(g_segClose, 0.0, 1.0));
+  return smoothstepf(SEG_EV_LO * k, SEG_EV_HI * k, length(vec2<f32>(lab0.x - an.x, perp)));
 }
 fn toneWeight(subj: f32, an: vec4<f32>, depart: f32, lab0: vec3<f32>) -> f32 {
   if (params.p[24].y <= 0.5) { return SP_ENGINE * objectWeight(subj) * mix(SC_EDGE, 1.0, depart); }
   if (an.w <= 0.0) { return 0.0; }
   let d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
-  let inner = mix(segEvidence(an, lab0), 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));
-  return smoothstepf(0.0, SEG_RAMP_IN, d) * inner * max(params.p[22].z, segPop(an)) * an.y * min(1.0, SR_POP_GATE * params.p[23].w);
+  let ev = segEvidence(an, lab0);
+  let inner = mix(ev, 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));
+  let rin = select(SEG_RAMP_IN, mix(SEG_RAMP_IN, SEG_RAMP_EV, ev * clamp(g_segThin, 0.0, 1.0)), an.x >= 0.0 && an.x <= 2.0);
+  return smoothstepf(0.0, rin, d) * inner * max(params.p[22].z, segPop(an)) * an.y * min(1.0, SR_POP_GATE * params.p[23].w);
 }
 fn guideLum(uv: vec2<f32>) -> f32 {
   let size = vec2<i32>(textureDimensions(u_data2, 0));
