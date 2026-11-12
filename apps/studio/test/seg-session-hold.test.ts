@@ -54,10 +54,16 @@ type Fake = {
   blank: [number, number] | null;
   /** In this stretch the tracker (and any prompt) gives a fifth of the frame, over the water. */
   blow: [number, number] | null;
+  /** In this stretch the mask of an object seeded on the water is a quarter of the frame (else: half of it). */
+  small: [number, number] | null;
 };
 
-function fake(o: Partial<Pick<Fake, "from" | "half" | "blank" | "blow">> & { lite?: boolean } = {}): Fake {
-  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, stepped: [], probes: [], from: o.from ?? -Infinity, half: o.half ?? null, blank: o.blank ?? null, blow: o.blow ?? null };
+function fake(o: Partial<Pick<Fake, "from" | "half" | "blank" | "blow" | "small">> & { lite?: boolean } = {}): Fake {
+  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, stepped: [], probes: [], from: o.from ?? -Infinity, half: o.half ?? null, blank: o.blank ?? null, blow: o.blow ?? null, small: o.small ?? null };
+  // An object whose first prompt is not on the subject (a seed on the water): half the frame at every keyframe,
+  // except in the `small` stretch, where its mask happens to be smaller.
+  const water = new Set<string>();
+  const half = () => out((_u, v) => v < 0.5, 5);
   const big = () => out((u, v) => Math.abs(u - 0.65) < 0.3 && Math.abs(v - 0.5) < 0.2, 5);
   let encT = 0;
   const lw = 64, lh = 36;
@@ -75,6 +81,8 @@ function fake(o: Partial<Pick<Fake, "from" | "half" | "blank" | "blow">> & { lit
     async step(key: string, _frame: number, points: [number, number][] | null, labels: number[] | null) {
       const boxed = !!labels && labels.includes(2);
       f.stepped.push({ key, t: encT, prompted: !!points, boxed });
+      if (points && !boxed && !f.stepped.some((x, i) => x.key === key && i < f.stepped.length - 1) && !inSubject(points[0][0] / 1024, points[0][1] / 1024, encT)) water.add(key);
+      if (water.has(key)) return within(f.small, encT) ? big() : half();
       if (within(f.blow, encT)) return big();
       if (!points && within(f.half, encT)) return out((u, v) => inSubject(u, v, encT) && u < subjectX(encT), 5);
       if (within(f.blank, encT)) return boxed ? out((u, v) => Math.abs(u - 0.85) < 0.1 && Math.abs(v - 0.5) < 0.2, 5) : out(() => false, 5);
@@ -245,6 +253,46 @@ for (const lite of [true, false]) {
   assert.ok(areaAt(r, 4.5) > 0.75 * FULL, "the subject is followed again when the tracker has it back");
   assert.equal(r.s.profile().recovered, 0);
   console.log(`session: ${lite ? "lite" : "full"} model, the tracker runs away over the water after losing the subject → dropped (largest mask ${maxA} of ${FULL} px): ok`);
+}
+
+// A seed on the water (the engine's, on the bright surface at the top of the frame: owner's ray clip at 16 s): the
+// model draws half the frame for it at every keyframe, and at one keyframe a mask just under the limit, which was
+// kept (22% of the frame at 19.25 s). It is let go at its first mask; the subject next to it is followed as before.
+{
+  const f = fake({ small: [2.4, 2.6] });
+  const seedOnWater = (t: number): SegObject & { id: number } => ({ id: ids++, kind: "include", t, prompt: { points: [[0.9, 0.1]], labels: [1] } });
+  let wid = -1;
+  const r = open(f, { start: 0, end: 6 }, () => []);
+  const end = r.settled();
+  const ws = seedOnWater(0);
+  wid = ws.id;
+  r.s.seeds(0, [subject(0), ws]);
+  await end;
+  assert.deepEqual(r.errors, []);
+  const steps = f.stepped.filter((x) => x.key.startsWith(`${wid}`));
+  assert.equal(steps.length, 1, `the seed on the water is stepped once and let go (${steps.length} steps; it was every keyframe)`);
+  let maxA = 0;
+  for (let i = 0; i < r.s.grid.n; i++) maxA = Math.max(maxA, areaAt(r, i / 30));
+  assert.ok(maxA < 1.2 * FULL, `no mask but the subject's (largest ${maxA} of ${FULL} px)`);
+  assert.ok(areaAt(r, 2.5) > 0.75 * FULL && areaAt(r, 5.5) > 0.75 * FULL, "the subject is followed throughout");
+  console.log(`session: a seed on the water → let go at its first mask (1 step), largest mask ${maxA} of ${FULL} px: ok`);
+}
+// The same when its first mask happens to be under the limit (kept: it could be a subject) and the runaways come
+// after: let go after HOLD.missS of them (an object that never had a mask kept: after one second).
+{
+  const f = fake({ small: [-1, 0.1] });
+  const ws: SegObject & { id: number } = { id: ids++, kind: "include", t: 0, prompt: { points: [[0.9, 0.1]], labels: [1] } };
+  const r = open(f, { start: 0, end: 6 }, () => []);
+  const end = r.settled();
+  r.s.seeds(0, [subject(0), ws]);
+  await end;
+  const steps = f.stepped.filter((x) => x.key.startsWith(`${ws.id}`));
+  assert.ok(steps.length <= 1 + 2 * r.s.fps + 1, `let go after two seconds of runaways (${steps.length} steps; it was every keyframe: ${6 * r.s.fps + 1})`);
+  assert.ok(Math.max(...steps.map((x) => x.t)) <= 2.01);
+  let maxLate = 0;
+  for (let i = 75; i < r.s.grid.n; i++) maxLate = Math.max(maxLate, areaAt(r, i / 30));
+  assert.ok(maxLate < 1.2 * FULL, `nothing but the subject after it is let go (largest ${maxLate} px)`);
+  console.log(`session: an object that runs away after its first mask → let go after two seconds (${steps.length} steps): ok`);
 }
 
 console.log("seg session hold tests passed");

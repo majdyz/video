@@ -166,6 +166,12 @@ type ObjState = {
   sureB: SureRef | null;
   /** An auto's backward steps in a row that found nothing (its back-fill stops after a second of them). */
   emptyB: number;
+  /** Keyframes in a row whose mask was a runaway (forward / backward), and whether a mask of this object was ever
+   * kept in that direction: an object that is nothing but runaways is let go (stepObject). */
+  ranF: number;
+  ranB: number;
+  keptF: boolean;
+  keptB: boolean;
 };
 
 /** fps: keyframes a second, fixed (no adaptive extra ones unless `adapt` says so). Default: by the model (see header). */
@@ -340,7 +346,7 @@ export class SegSession {
   }
 
   private newObj(o: SegObject & { id: number }, auto: boolean, seg: number, hidden: boolean, fwd: number[], bwd: number[]): ObjState {
-    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0 };
+    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0, ranF: 0, ranB: 0, keptF: false, keptB: false };
   }
 
   /** Canonical frame of segment k (k = 0: the first seeds' frame; then every SEG.segmentS, snapped). */
@@ -1060,6 +1066,9 @@ export class SegSession {
    */
   private carryOver(t: number, batch: ObjState[]): void {
     const k = this.segStarts.findIndex((s) => Math.abs(s - t) < 1e-6);
+    // The first segment's seeds were all let go at their first mask (runaways: stepObject): look again soon, as when
+    // the first look finds nothing.
+    if (k === 0 && batch.length && ![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) { this.emptyRun++; this.reacquire(0); }
     if (k <= 0) return;
     const seeds = batch.filter((s) => s.seg === k && s.fi === 1);
     const n = this.mw * this.mh, cover = new Uint8Array(n);
@@ -1183,18 +1192,26 @@ export class SegSession {
       const N = this.mw * this.mh, a = area(m), ca = carriedArea, pa = prev && !first ? area(prev.m) : 0;
       const lk = s.o.kind === "include" ? (goFwd ? s.lockF : s.lockB) : null;
       const grew = (ref: number, floor: number) => ref > SEG.guardMinArea * N && a > SEG.runawayGrow * ref && a > floor;
+      const ranBefore = goFwd ? s.ranF : s.ranB, kept = goFwd ? s.keptF : s.keptB;
       let why = a > SEG.runawayArea * N ? "over the frame" : grew(ca, 0.05 * N) ? "outgrew the flow-carried mask" : grew(pa, 0.05 * N) ? "outgrew its last keyframe" : lk?.locked && grew(lk.area, SEG.guardMinArea * N) ? "outgrew its locked size" : "";
       if (!why && s.o.kind === "include" && prev && !first && pa === 0 && a > 0) {
         const cells = this.cellCache.get(frameKey(t));
         const dE = cells ? waterContrast(m, cells, this.mw, this.mh) : null;
         if (dE !== null && dE < RECHECK.contrast) why = "back from nothing on plain water";
       }
+      // An object that has only ever run away (a seed on the bright water at the top of the frame: half the frame at
+      // every keyframe) is no subject at the one keyframe where its mask happens to stay under the limit (owner's
+      // clip, 19.25 s: 22% of the frame, between keyframes of 44% and 61%).
+      if (!why && ranBefore > 0 && !kept && a > 0.05 * N) why = "after runaways only, never a subject";
+      if (!why && s.o.kind === "include" && a > 0.1 * N) console.info(`[seg] large mask at ${t.toFixed(2)} s: object ${s.o.id}${dir} (${s.auto ? "auto" : s.peek ? "peek" : "tap"}) ${a} px (${(100 * a / N).toFixed(1)}% of the frame) kept: last keyframe ${pa} px, flow-carried ${ca} px, ${lk?.locked ? `locked at ${Math.round(lk.area)} px` : "not locked"}`);
       if (why) {
         console.info(`[seg] runaway at ${t.toFixed(2)} s: object ${s.o.id} ${a} px (${(100 * a / N).toFixed(1)}% of the frame) ${why}: dropped`);
         m = new Float32Array(N);
         agree = 0;
         ranAway = true;
       }
+      if (goFwd) { s.ranF = ranAway ? s.ranF + 1 : 0; if (!ranAway && a > 0) s.keptF = true; }
+      else { s.ranB = ranAway ? s.ranB + 1 : 0; if (!ranAway && a > 0) s.keptB = true; }
     }
     s.hard = !first && (reprompts > 0 || ranAway || agree < SEG.adaptAgree);
     // Hysteresis (track.ts HOLD): a locked subject the model still sees at about its size keeps its weight through a
@@ -1231,6 +1248,20 @@ export class SegSession {
     s.keys.set(t, rleEncode(mu));
     if (area(mu, 127) > 0) s.shown.add(t); else s.shown.delete(t);
     s.conf.set(t, conf);
+    // A runaway is let go, not dropped keyframe after keyframe (each is a tracker step: about a frame's encode): at
+    // once when its very first, prompted mask is one (the seed was on the water or the background, not on a subject),
+    // else after a second of them in a row (the tracker has slid off for good; a look at a later segment start finds
+    // the subject again). Its masks so far stay.
+    // (An object that was a subject before gets HOLD.missS, as long as its lock holds: the tracker may find it again.)
+    if (ranAway && s.o.kind === "include" && (first || (goFwd ? s.ranF : s.ranB) >= Math.max(2, Math.round(this.fps * ((goFwd ? s.keptF : s.keptB) ? HOLD.missS : 1))))) {
+      const left = first ? s.fwd.length - s.fi + s.bwd.length - s.bi : goFwd ? s.fwd.length - s.fi : s.bwd.length - s.bi;
+      if (goFwd || first) s.fwd.length = s.fi;
+      if (!goFwd || first) s.bwd.length = s.bi;
+      this.model.drop(key);
+      if (first) { this.model.drop(`${s.o.id}f`); this.model.drop(`${s.o.id}b`); }
+      this.ev.trace?.(`released ${s.o.id}${dir} at ${t.toFixed(2)}s (runaway)`);
+      console.info(`[seg] released at ${t.toFixed(2)} s: object ${s.o.id}${dir} ${first ? "was a runaway from its first mask" : `ran away for ${goFwd ? s.ranF : s.ranB} keyframes in a row`}: no longer followed (${left} step(s) saved)`);
+    }
     if (s.auto && !goFwd) {
       // A back-fill that has found nothing for a second has left the subject behind (it came into the picture
       // there): it stops.
