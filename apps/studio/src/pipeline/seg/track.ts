@@ -68,6 +68,9 @@ export const SEG = {
   carryCover: 0.5,
   /** Decoded frames the background session keeps (luma + colour cells, ~70 KB each). */
   frameCache: 240,
+  /** The same on a phone short of memory (SessionOptions.weak): three seconds of frames (a tap's backward chunk is
+   * one, an interval's fill half of one), 7 MB instead of 17. */
+  weakFrameCache: 96,
   /** Flow guard: re-prompt when the tracker keeps less than this share of the carried mask... */
   guardShare: 0.25,
   /** The same for the lite encoder (vision_encoder_lite). */

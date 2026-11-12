@@ -12,6 +12,7 @@ import { segFps, segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
 import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
 import { confWeight, mapPrompt, maskSize, SEG, type SegObject } from "./track.ts";
 import { spanCovers, type TrimRange } from "../trim.ts";
+import { SegTurns } from "./turns.ts";
 import type { SessionFrameOut } from "./session.ts";
 
 const PREF_KEY = "deepfix.subjectPop.ai";
@@ -762,7 +763,20 @@ export class SubjectSeg {
   private tapDone(): void {
     if (!this.tapBusy || this.inflight) return;
     this.tapBusy = false;
+    this.turns.tapEnded();
     this.onTapDone?.();
+  }
+
+  /** A tap and a seed frame's analysis take turns (turns.ts). */
+  private turns = new SegTurns({ tapActive: () => this.tapBusy || this.inflight > 0, log: crumb });
+
+  /**
+   * A seed frame's job on the main thread (studio.ts seedSegmentCanonical: the work <video>'s seek and the engine's
+   * analysis of the frame): it starts once no tap is with the session, and a tap that comes while it runs waits for
+   * it (turns.ts). Breadcrumbs at its start and end.
+   */
+  seedJob<T>(t: number, fn: () => Promise<T>): Promise<T> {
+    return this.turns.seedJob(`${t.toFixed(2)}s`, fn);
   }
 
   /** The session is at work: the pass is running, or a tap is with it. */
@@ -788,7 +802,7 @@ export class SubjectSeg {
   /** focus(t) would do something: a pass under way that has not filled the frame at t, and no tap in its way. */
   wantsFocus(t: number): boolean {
     if (!this.on || !this.live || !this.model || this.hibernated || this.waking || this.opening) return false;
-    if (this.autos === null || this.passDone || this.tapBusy || this.inflight) return false;
+    if (this.autos === null || this.passDone || this.tapBusy || this.inflight || this.turns.seedBusy) return false;
     return t >= this.span.start - 1e-6 && t <= this.span.end + 1e-6 && !this.live.has(t);
   }
 
@@ -816,6 +830,7 @@ export class SubjectSeg {
     this.cache = null;
     this.busy = false;
     this.tapBusy = false;
+    this.turns.tapEnded();
     this.hibernated = false;
     // The clip's session is gone with its worker: nothing of it is kept, so turning AI off and on again (or the
     // next clip) starts a clean one instead of a session that believes its seeds were already given.
@@ -885,7 +900,7 @@ export class SubjectSeg {
       // The replay re-tracks the clip: at work until its idle.
       aiWorking(true);
       const span = this.span;
-      await model.sessionOpen(file, span.start, span.end, segFps(), autoCap());
+      await model.sessionOpen(file, span.start, span.end, segFps(), autoCap(), isWeakDevice());
       if (this.file !== file || this.span !== span) return false;
       this.hibernated = false;
       for (const l of this.log) {
@@ -960,7 +975,7 @@ export class SubjectSeg {
       try {
         crumb("ai: session open");
         aiWorking(true);
-        const info = await model.sessionOpen(file, span.start, span.end, segFps(), autoCap());
+        const info = await model.sessionOpen(file, span.start, span.end, segFps(), autoCap(), isWeakDevice());
         crumb(`ai: session ${info.width}x${info.height}, ${info.n} frames`);
         if (this.file !== file || this.span !== span) return null;
         this.live = new SegLive(info);
@@ -1029,8 +1044,13 @@ export class SubjectSeg {
     aiWorking(true);
     this.tapBusy = true;
     this.inflight++;
+    // A seed frame in the engine right now ends first (turns.ts): its analysis next to the tap's first steps was the
+    // page's memory peak. (The next seed frame waits for this tap.)
+    await this.turns.seedIdle();
     // False: the worker failed meanwhile (fail has told the user).
-    if (!(await this.model.sessionAdd(object).then(() => true, () => false).finally(() => { this.inflight--; }))) { this.tapBusy = false; return false; }
+    const sent = this.model ? await this.model.sessionAdd(object).then(() => true, () => false) : false;
+    this.inflight = Math.max(0, this.inflight - 1);
+    if (!sent) { this.tapBusy = false; this.turns.tapEnded(); return false; }
     this.undoOps.push({ kind: "added", id });
     this.onChange();
     return true;
@@ -1047,9 +1067,12 @@ export class SubjectSeg {
     this.inflight++;
     this.tapBusy = true;
     aiWorking(true);
-    const r = await this.model.sessionExclude(id, t, u, v).catch(() => null).finally(() => { this.inflight--; });
+    // As for an include: after the seed frame in the engine right now.
+    await this.turns.seedIdle();
+    const r = this.model ? await this.model.sessionExclude(id, t, u, v).catch(() => null) : null;
+    this.inflight = Math.max(0, this.inflight - 1);
     // Null: the worker failed in or before the tap's own step (fail has told the user).
-    if (!r) { this.tapBusy = false; return null; }
+    if (!r) { this.tapBusy = false; this.turns.tapEnded(); return null; }
     // The tap's outcome depends on the masks tracked when it came, so the log keeps what it resolved to, not the tap:
     // a subject taken out, or an exclude object added (excludeOutcome). Replayed, either gives the same masks, so the
     // session can still hibernate and be released for an export (it used to stay awake for good after one exclude).
@@ -1064,6 +1087,9 @@ export class SubjectSeg {
   /** Subjects the model finds by itself on frame t (for a segment the engine found none in); [] without a session. */
   async autoSeeds(t: number): Promise<SegObject[]> {
     if (!this.live || !(await this.wake()) || !this.model) return [];
+    // Not next to a tap (the session holds it back too, session.ts autoSeeds: this keeps the breadcrumb honest).
+    await this.turns.tapIdle();
+    if (!this.live || !this.model) return [];
     crumb(`ai: auto seeds ${t.toFixed(2)}s`);
     aiWorking(true);
     this.lastActivity = performance.now();
@@ -1105,6 +1131,7 @@ export class SubjectSeg {
     this.undoOps = [];
     this.busy = false;
     this.tapBusy = false;
+    this.turns.tapEnded();
     this.log = [];
     this.hibernated = false;
     this.passDone = false;
