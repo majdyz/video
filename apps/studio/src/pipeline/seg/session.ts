@@ -6,8 +6,14 @@
 //   (studio.ts seedSegment: the export range's start + k × SEG.segmentS, analysed alone), the session asks for the
 //   next segment's seeds when its tracking reaches it and waits for them, so every run of the clip (preview or
 //   export, started whenever) tracks the same objects. Autos are tracked forward through their segment in lockstep
-//   (every auto due at a keyframe steps on one encode). At the next segment's start an auto the new seeds do not
-//   cover carries on (its memory bank and all), so a subject the engine misses there is still followed. A subject
+//   (every auto due at a keyframe steps on one encode). At the next segment's start the autos step on its frame
+//   first, then the start's seeds are asked for: an auto goes on under its id (its memory bank and all) unless a
+//   seed took its place (the track had shrunk to a part of its subject, or run past it) or there is no room for it
+//   (autoCap), and a seed on a subject that is followed already is let go (carryOver, seeds.ts assignSlots): the
+//   same shark of a school is not followed twice, nor started over at every look. While something is followed the
+//   next look comes SEG.topUpS later (an extra start), so a subject that swims in is picked up soon. The seeds are
+//   the engine's animals plus what the model finds on the engine's other regions (autoSeeds: small subjects of a
+//   school, which the engine does not tone and the model's blind grid passes between). A subject
 //   first found after a stretch nothing was followed in (the start of the clip, a gap) is also followed backward
 //   through that stretch, once its forward track is through (backList): it was in the picture before the look that
 //   found it. On the lite model the first looks often find nothing (owner's ray clip: no mask for the first 6 s).
@@ -45,6 +51,7 @@ import type { EdgeTam } from "./edgetam.ts";
 import { cellLab, nearMap, departFromCells, framePop, sdfFeather, area, bbox, centroid, guidedFilter, iou, promptFromMask, rleDecode, rleEncode, shiftMap, waterContrast } from "./mask.ts";
 import { denseFlow, warp, type Gray } from "./flow.ts";
 import { fillInterval, HOLD, keyTimes, lockStep, maskSize, newLock, remap, SEG, sigmoidResize, toU8, type Keyframe, type Lock, type SegObject } from "./track.ts";
+import { assignSlots, edgeShare, overlap, SEEDS, topUpAt, type SeedCandidate } from "./seeds.ts";
 
 /** Reads one frame (as a VideoFrame-like source) at clip time t; the session draws it on its own canvases. */
 export type SessionFrames = {
@@ -67,7 +74,16 @@ export type SessionFrames = {
  * 1). Smaller than areaSmall is a speck. */
 /** max: the search hands over at most this many subjects (the lite model and phones follow SEG.liteAutos of them:
  * every subject is a tracker step per keyframe, about as long as the frame's own encode). */
-export const AUTO = { cols: 4, rows: 6, liteCols: 3, liteRows: 4, iou: 0.8, areaLo: 0.004, areaSmall: 0.0015, smallContrast: 2.5, areaHi: 0.3, span: 0.9, contrast: 0.05, max: 4, peekMax: 2 };
+/** blobIou: the model's own IoU estimate a mask prompted on one of the engine's regions needs (seeds.ts
+ * blobCandidates). Far lower than the blind grid's `iou`: the region is evidence of its own that something is there,
+ * and the lite model rates its masks of pale, far sharks 0.4–0.75 however good they are (owner's hammerhead clip:
+ * every shark the grid did land on was refused at 0.8). What keeps the water out there is the size test, the region
+ * (blobGrow) and the water test (smallContrast / RECHECK.contrast), not the estimate.
+ * blobGrow: such a mask may be at most this many times its region's box (else it is something else's: the water). */
+/** edge: a find whose mask lies along more than this share of one side of the frame is not started on: a subject
+ * the frame cuts through (a diver's head and hair in a selfie shot, with the water above it in the mask), the
+ * surface, the seabed. Its next look finds it once it is in the picture. */
+export const AUTO = { cols: 4, rows: 6, liteCols: 3, liteRows: 4, iou: 0.8, blobIou: 0.35, blobGrow: 8, edge: 0.25, areaLo: 0.004, areaSmall: 0.0015, smallContrast: 2.5, areaHi: 0.3, span: 0.9, contrast: 0.05, max: 4, peekMax: 2 };
 
 /** How far a mask's colour stands out from a ring around it (mean cell-colour distance; cells: cellLab, 3 per px). */
 function ringContrast(m: Float32Array, cells: Float32Array, w: number, h: number): number {
@@ -294,7 +310,7 @@ export class SegSession {
     const fixed = !!opts.fps && opts.fps > 0;
     this.fps = fixed ? opts.fps! : model.lite ? SEG.liteFps : SEG.fps;
     this.adapt = opts.adapt ?? (!fixed && !!model.lite);
-    this.autoCap = opts.autoCap && opts.autoCap > 0 ? opts.autoCap : model.lite ? SEG.liteAutos : Infinity;
+    this.autoCap = opts.autoCap && opts.autoCap > 0 ? opts.autoCap : model.lite ? SEG.liteAutos : SEG.fullAutos;
     this.frameCap = opts.weak ? SEG.weakFrameCache : SEG.frameCache;
     this.carriedCap = opts.weak ? 4 : 8;
     this.peekCap = opts.weak ? 1 : AUTO.peekMax;
@@ -517,8 +533,16 @@ export class SegSession {
       this.ev.trace?.(`back-fill ${back[back.length - 1].toFixed(2)}-${t0.toFixed(2)}s`);
       console.info(`[seg] back-fill: the subject(s) found at ${t0.toFixed(2)} s are followed back to ${back[back.length - 1].toFixed(2)} s (${back.length - 1} keyframes), after their forward track`);
     }
+    // Seeds, and subjects that stepped on this frame ahead of the look (the loop): who goes on is decided once the
+    // seeds have their first mask (carryOver), which comes next.
+    if (objs.length) { this.emptyRun = 0; if (this.endedAt(t0).length) this.settling = t0; }
+    // No seeds: decided now.
+    else if (this.endedAt(t0).length) {
+      this.carryOver(t0);
+      this.refineAutos(t0, this.dueHard);
+      this.dueHard = false;
+    }
     // Nothing seeded and nothing tracked into this segment: look again a little later (re-acquire).
-    if (objs.length) this.emptyRun = 0;
     else if (![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) { this.emptyRun++; this.reacquire(k); }
     return true;
   }
@@ -539,6 +563,26 @@ export class SegSession {
     return this.stepsBetween(Math.max(lo, t0 - SEG.reachS), t0, [t0]).filter((k) => k > lo + 1e-6).reverse();
   }
 
+  /** The segment start whose seeds have still to take their first step before its carry-over is decided (NaN: none). */
+  private settling = NaN;
+  /** A step of the subjects followed up to a segment start, on its frame, was a hard one (refineAutos, once the start is settled). */
+  private dueHard = false;
+  /** Segment starts whose carry-over is decided (carryOver: once each). */
+  private carriedAt = new Set<number>();
+
+  /** The engine's own subjects of earlier segments whose forward track has ended on segment start t (they stepped on
+   * it): carryOver decides which go on. */
+  private endedAt(t: number): ObjState[] {
+    const k = this.segStarts.findIndex((s) => Math.abs(s - t) < 1e-6);
+    return [...this.objs.values()].filter((s) => s.auto && s.seg < k && s.fwd.length > 0 && s.fi >= s.fwd.length && Math.abs(s.fwd[s.fwd.length - 1] - t) < 1e-6);
+  }
+
+  /** The next unseeded segment start, when subjects followed up to it have stepped on it and wait for its seeds. */
+  private pendingStart(): number | null {
+    const k = this.segStarts.findIndex((s) => !this.seeded.has(s));
+    return k >= 0 && this.endedAt(this.segStarts[k]).length ? k : null;
+  }
+
   /** How many of the engine's own subjects are followed at a time (SEG.liteAutos on the lite model and on a phone:
    * every one is a tracker step, and its memory, per keyframe). */
   readonly autoCap: number;
@@ -556,16 +600,20 @@ export class SegSession {
    */
   private reacquire(k: number): number | null {
     // (Not within a second of the next start, or of the range's end: nothing is left to follow from there.)
-    const t = this.segStarts[k], next = this.segStarts[k + 1] ?? this.base[this.base.length - 1] ?? Infinity;
     const wait = Math.min(SEG.reacquireMaxS, SEG.reacquireS * 2 ** Math.max(0, this.emptyRun - 1));
-    const r = this.snap(t + wait);
-    if (r > t + 1e-6 && r < next - SEG.reacquireS / 2) {
-      this.segStarts.splice(k + 1, 0, r);
-      this.activate(r);
-      if (this.emptyRun >= SEG.reacquireSearches) this.noSearch.add(r);
-      return r;
-    }
-    return null;
+    return this.addStart(k, this.segStarts[k] + wait, this.emptyRun < SEG.reacquireSearches);
+  }
+
+  /** A segment start at r0 (snapped to a keyframe) after segment k's, when it lies between that and the next one
+   * (not within a second of it, or of the range's end). search: false = without the model's grid search there. */
+  private addStart(k: number, r0: number, search: boolean): number | null {
+    const t = this.segStarts[k], next = this.segStarts[k + 1] ?? this.base[this.base.length - 1] ?? Infinity;
+    const r = this.snap(r0);
+    if (!(r > t + 1e-6 && r < next - SEG.reacquireS / 2)) return null;
+    this.segStarts.splice(k + 1, 0, r);
+    this.activate(r);
+    if (!search) this.noSearch.add(r);
+    return r;
   }
 
   /** Ids removed before their object exists (a replay removes an auto whose seeds are still held): hidden on arrival. */
@@ -760,8 +808,17 @@ export class SegSession {
    * AUTO.iou), neither speck nor background (AUTO.areaLo..Hi of the frame, not spanning it), and stands out from the
    * ring around it (AUTO.contrast in Oklab-ish cell colour). Duplicates merge; the best AUTO.max become prompts.
    * Deterministic for the frame (same seeds whenever and wherever the clip is seeded).
+   *
+   * `regions`: the engine's own regions of that frame (seeds.ts blobCandidates: everything that departs from the
+   * water, most promising first) are asked first, each with its own points: a school of small, pale sharks lies
+   * between the grid's points, and the engine sees every one of them. A region counts when the model sees an object
+   * there (blobIou), of a subject's size, about where the region is (blobGrow), not along the frame's edge, and off
+   * the water around it (the water test: a region of plain water is refused). The grid is only gone through when no
+   * region is a subject, and `grid` says so (false: the engine's own seeds cover the frame, or the look is an extra
+   * one). Finds that are followed already (the subjects' masks on this frame: seeds.ts assignSlots) are left out,
+   * as are those there is no room for.
    */
-  autoSeeds(t: number): Promise<SegObject[]> {
+  autoSeeds(t: number, regions: readonly SeedCandidate[] | null = null, grid = true): Promise<SegObject[]> {
     if (this.closed) return Promise.reject(new Error(this.failed ?? "session closed"));
     // Not between two steps of a tap, as it used to (see the header): after the taps, and a tap that comes while it
     // runs stops it (it starts over after the tap; the same frame gives the same seeds).
@@ -770,7 +827,7 @@ export class SegSession {
         what: `${this.snap(t).toFixed(2)}s`,
         run: async () => {
           try {
-            const out = await this.autoSeedsNow(t);
+            const out = await this.autoSeedsNow(t, false, regions, grid);
             resolve(out);
             return `${out.length} found`;
           } catch (e) {
@@ -790,28 +847,65 @@ export class SegSession {
    * playhead's peek): the points nearest the centre first, and the first candidate ends the search (a few decoder
    * runs instead of every point's); not for a segment's seeds, which must be the same whenever they are made.
    */
-  private async autoSeedsNow(t0: number, quick = false): Promise<SegObject[]> {
-    const t = this.snap(t0), A = AUTO, { mw: w, mh: h } = this;
+  private async autoSeedsNow(t0: number, quick = false, regions: readonly SeedCandidate[] | null = null, grid = true): Promise<SegObject[]> {
+    const t = this.snap(t0), A = AUTO, { mw: w, mh: h } = this, N = w * h;
     if (this.tapWaiting()) throw PREEMPT;
+    // The model may hold this very frame already (at a segment start the subjects followed so far have just stepped
+    // on it: the loop): it is not encoded a second time.
+    const need = t !== this.lastEncoded;
     this.ev.trace?.("auto: decode");
-    const { rgba1024 } = await this.pixels(t, true);
+    const { rgba1024 } = await this.pixels(t, need);
     const cells = this.cellCache.get(frameKey(t));
     if (this.tapWaiting()) throw PREEMPT;
-    this.ev.trace?.("auto: encode");
-    await this.model.encode(rgba1024!);
+    if (need) {
+      this.ev.trace?.("auto: encode");
+      await this.model.encode(rgba1024!);
+    }
     this.ev.trace?.("auto: encoded; probing");
     // The model holds this frame's features from here on (a probe reads them and leaves them): the first step of the
     // seeds this search finds, on this same frame, runs on them. It used to encode the frame a second time (seconds
     // on a phone or on WASM, right when the pass could at last begin).
     this.lastEncoded = t;
-    const cands: { m: Float32Array; q: number }[] = [];
-    const stats: string[] = [];
+    const cands: { m: Float32Array; q: number; prompt?: SegObject["prompt"] }[] = [];
+    let stats: string[] = [];
+    let probes = 0, total = 0;
+    // The engine's regions first (not the playhead's quick look: it has the engine's subjects or the grid's centre).
+    if (regions?.length && !quick) {
+      total = regions.length;
+      for (const c of regions) {
+        if (this.tapWaiting()) throw PREEMPT;
+        if (probes < 2) this.ev.trace?.(`auto: region ${probes + 1}/${total}`);
+        const r = await this.model.probe(c.points.map(([u, v]) => [u * 1024, v * 1024]), c.points.map(() => 1));
+        if (probes++ < 2) this.ev.trace?.("auto: probed");
+        const m = sigmoidResize(r.logits, r.lw, r.lh, w, h);
+        const a = area(m) / N;
+        const dE = cells && a > 0 ? waterContrast(m, cells, w, h) : null;
+        stats.push(`${r.score.toFixed(1)}/${r.iou.toFixed(2)}/${(a * 100).toFixed(2)}%/${dE === null ? "-" : dE.toFixed(1)}`);
+        if (r.score <= 0 || r.iou < A.blobIou) continue;
+        if (a < A.areaSmall || a > A.areaHi) continue;
+        const b = bbox(m, w, h);
+        if (!b || b.x1 - b.x0 > A.span * w || b.y1 - b.y0 > A.span * h) continue;
+        // Something else's mask (the water's, a neighbour's): far larger than what the engine saw there.
+        if (a > A.blobGrow * Math.max(c.area, (c.box.x1 - c.box.x0) * (c.box.y1 - c.box.y0))) continue;
+        if (edgeShare(m, w, h) > A.edge) continue;
+        // The water test, whatever the size: a region of haze or of plain water is not a subject.
+        if (dE === null || dE < (a < A.areaLo ? A.smallContrast : RECHECK.contrast)) continue;
+        // Followed from the region's own points: the same prompt gives the same mask on the track's first step (a
+        // box would not: the lite model fills a box, water and all).
+        cands.push({ m, q: dE * Math.sqrt(a), prompt: { points: c.points.map(([u, v]) => [u, v] as [number, number]), labels: c.points.map(() => 1) } });
+      }
+      console.info(`[seg] engine regions at ${t.toFixed(2)} s: ${cands.length} subject(s) of ${total} region(s) (score/iou/area/dE: ${stats.join(" ")})`);
+    }
+    const fromRegions = cands.length > 0;
+    if (!fromRegions && (grid || quick)) {
+    stats = [];
+    probes = 0;
+    total = 0;
     // The lite (phone) model probes a coarser grid first: each probe is a full decoder run. When that finds nothing
     // (a segment's seeds, not the playhead's quick look) it goes on to the full grid: 3 × 4 points 160 px apart on a
     // 480-px frame pass a ray at the frame's edge by (owner's clip: nothing found at 0 s and 2 s, the full model's
     // 4 × 6 grid found it at 0 s), and the looks that find nothing are the ones a subject is lost for seconds at.
     const grids: [number, number][] = this.model.lite ? (quick ? [[A.liteCols, A.liteRows]] : [[A.liteCols, A.liteRows], [A.cols, A.rows]]) : [[A.cols, A.rows]];
-    let probes = 0, total = 0;
     const pts: [number, number][] = [];
     for (const [cols, rows] of grids) {
       if (cands.length) break;
@@ -827,12 +921,14 @@ export class SegSession {
       const r = await this.model.probe([[u * 1024, v * 1024]], [1]);
       if (probes++ < 2) this.ev.trace?.("auto: probed");
       const m = sigmoidResize(r.logits, r.lw, r.lh, w, h);
-      const a = area(m) / (w * h);
+      const a = area(m) / N;
       stats.push(`${r.score.toFixed(1)}/${r.iou.toFixed(2)}/${(a * 100).toFixed(1)}%`);
       if (r.score <= 0 || r.iou < A.iou) continue;
       if (a < A.areaSmall || a > A.areaHi) continue;
       const b = bbox(m, w, h);
       if (!b || b.x1 - b.x0 > A.span * w || b.y1 - b.y0 > A.span * h) continue;
+      // Along the frame's edge: a subject the frame cuts through, with the water next to it (AUTO.edge).
+      if (edgeShare(m, w, h) > A.edge) continue;
       // A small one (a fish of a school) must stand off its water: a speck of haze does not.
       if (a < A.areaLo) { const dE = cells ? waterContrast(m, cells, w, h) : null; if (dE === null || dE < A.smallContrast) continue; }
       const c = cells ? ringContrast(m, cells, w, h) : A.contrast;
@@ -840,16 +936,26 @@ export class SegSession {
       cands.push({ m, q: r.iou + c });
     }
     }
-    cands.sort((x, y) => y.q - x.q);
     console.info(`[seg] auto seeds at ${t.toFixed(2)} s${quick ? " (quick)" : ""}: ${cands.length} candidate(s) of ${quick ? `${probes} of ` : ""}${total} points (${stats.join(" ")})`);
-    const keep: Float32Array[] = [];
-    for (const c of cands) {
-      if (keep.length >= (quick ? A.peekMax : A.max)) break;
-      if (keep.some((k) => iou(k, c.m) > 0.4)) continue;
-      keep.push(c.m);
     }
+    cands.sort((x, y) => y.q - x.q);
+    const found: typeof cands = [];
+    for (const c of cands) {
+      // (Two regions on one animal, or two grid points: the better one stands for both.)
+      if (found.some((k) => { const o = overlap(k.m, c.m); return o.iou > 0.4 || (fromRegions && o.share >= SEEDS.partShare); })) continue;
+      found.push(c);
+    }
+    // Not what is followed already, and no more than there is room for (the subjects followed so far have stepped on
+    // this frame when the look is a segment start's: followedAt).
+    const olds = quick ? [] : this.followedAt(t);
+    const items = found.map((c, i) => ({ id: i, area: area(c.m), m: c.m }));
+    const slots = assignSlots(olds, items, (o, n) => overlap(o.m, n.m), (a, b) => overlap(a.m, b.m), this.autoCap);
+    const keep = slots.take.slice(0, quick ? A.peekMax : A.max).map((i) => found[i]);
+    if (olds.length || fromRegions) console.info(`[seg] seeds at ${t.toFixed(2)} s: ${keep.length} new, ${slots.dup.length} followed already, ${found.length - slots.dup.length - keep.length} left out (${olds.length} followed, room for ${this.autoCap})`);
     const out: SegObject[] = [];
-    for (const m of keep) {
+    for (const c of keep) {
+      if (c.prompt) { out.push({ kind: "include", t, prompt: c.prompt }); continue; }
+      const m = c.m;
       const pr = promptFromMask(m, w, h, w / 640);
       if (!pr) continue;
       const b = bbox(m, w, h)!;
@@ -858,6 +964,21 @@ export class SegSession {
         labels: [...pr.pos.map(() => 1), ...pr.neg.map(() => 0)],
         box: { x0: b.x0 / w, y0: b.y0 / h, x1: (b.x1 + 1) / w, y1: (b.y1 + 1) / h },
       } });
+    }
+    return out;
+  }
+
+  /** The engine's own subjects that have a mask of some size on keyframe t (as 0 / 1), for the looks (autoSeedsNow, carryOver). */
+  private followedAt(t: number): { id: number; area: number; m: Uint8Array; s: ObjState }[] {
+    const n = this.mw * this.mh, out: { id: number; area: number; m: Uint8Array; s: ObjState }[] = [];
+    for (const s of this.objs.values()) {
+      if (!s.auto || s.peek || s.o.kind !== "include") continue;
+      const k = this.key(s, t);
+      if (!k) continue;
+      const m = new Uint8Array(n);
+      let a = 0;
+      for (let i = 0; i < n; i++) if (k[i] > 127) { m[i] = 1; a++; }
+      if (a > SEG.guardMinArea * n) out.push({ id: s.o.id, area: a, m, s });
     }
     return out;
   }
@@ -973,8 +1094,12 @@ export class SegSession {
         }
         // Autos in lockstep: the earliest keyframe any auto is due at; past a segment start, its seeds first.
         const autos = [...this.objs.values()].filter((s) => s.auto && this.nextOf(s) !== null);
-        const t = autos.length ? Math.min(...autos.map((s) => this.nextOf(s)!)) : Infinity;
-        const k = this.nextSegment(t);
+        // (A start the followed subjects have stepped on comes before anything else of theirs, its seeds' first step
+        // included: a back-fill waiting behind a forward track that ended there runs once the track is through, not
+        // in the middle of it.)
+        const settling = !Number.isNaN(this.settling) && autos.some((s) => Math.abs(this.nextOf(s)! - this.settling) < 1e-6);
+        const t = settling ? this.settling : autos.length ? Math.min(...autos.map((s) => this.nextOf(s)!)) : Infinity;
+        const k = this.nextSegment(t) ?? this.pendingStart();
         // The pass has reached the playhead's peek (or is through): the peek goes, the pass's own masks come.
         if (this.peekFrom < Infinity && (t === Infinity ? k === null : t >= this.peekFrom - 1e-6)) {
           if (this.dropPeek()) this.postKeys();
@@ -982,8 +1107,22 @@ export class SegSession {
           continue;
         }
         if (k !== null) {
+          const ts = this.segStarts[k];
+          // The subjects followed so far step on the start's frame first: the look that follows knows where they
+          // are on it (what is followed already is not found again: autoSeedsNow, carryOver) and runs on that encode.
+          // (They used to step after the new seeds, which then took their place whenever they overlapped: a shark
+          // of a school changed its track, and its memory, at every look.)
+          const due = autos.filter((s) => s.seg < k && this.dirOf(s) === "f" && Math.abs(s.fwd[s.fi] - ts) < 1e-6).sort((a, b) => b.o.id - a.o.id);
+          if (due.length) {
+            this.enter("pass", "");
+            for (const s of due) await this.stepObject(s);
+            // (Its intervals are filled, and the fine grid decided, once the start's seeds have stepped too: carryOver.)
+            this.dueHard = due.some((s) => s.hard);
+            this.postProgress();
+            await yieldNow();
+            continue;
+          }
           if (!this.takeSeeds(k)) {
-            const ts = this.segStarts[k];
             if (this.asked !== ts) { this.asked = ts; this.waitSince = performance.now(); this.ev.needSeeds(k, ts, !this.noSearch.has(ts)); }
             break;
           }
@@ -992,14 +1131,16 @@ export class SegSession {
         }
         if (autos.length) {
           this.enter("pass", "");
-          // Newer first: at a segment start the new seeds step before the autos they may replace.
+          // (Newer first. At a segment start these are its new seeds: what was followed up to it has stepped on
+          // its frame already, ahead of the look.)
           const batch = autos.filter((s) => Math.abs(this.nextOf(s)! - t) < 1e-6).sort((a, b) => b.o.id - a.o.id);
           // (Forward steps only decide the carry-over and the fine grid: a back-fill step is its object's alone.)
           const ahead: ObjState[] = [];
           for (const s of batch) { const d = this.dirOf(s); await this.stepObject(s); if (d === "f") ahead.push(s); }
           if (ahead.length) {
-            this.carryOver(t, ahead);
-            this.refineAutos(t, ahead.some((s) => s.hard));
+            const start = this.carryOver(t);
+            this.refineAutos(t, ahead.some((s) => s.hard) || (start && this.dueHard));
+            if (start) this.dueHard = false;
           }
           if (!autos.some((s) => this.dirOf(s) === "b")) this.backRgba.clear();
           await this.fillReady();
@@ -1061,37 +1202,64 @@ export class SegSession {
   }
 
   /**
-   * At a segment start: an auto of an earlier segment that ended here carries on through this segment when the new
-   * seeds do not cover it (less than SEG.carryCover of its mask under theirs); else it stops.
+   * At a segment start (false: t is not one, or its carry-over is decided): who is followed from here on (seeds.ts
+   * assignSlots), once everything that was followed up to t and the start's seeds have a mask on its frame.
+   * - A subject followed so far goes on, under its id and with its memory, unless a new seed took its place (the
+   *   seed's mask holds much of it without being the same extent: the track had shrunk to a part of the subject, or
+   *   run past it) or there is no room for it (autoCap: the largest stay, a followed one counting double).
+   * - A seed on a subject that is followed already (the same extent) is let go: the same shark is not followed twice.
+   * - While something is followed, the next look comes SEG.topUpS later rather than at the next regular start: a
+   *   subject that swims into the picture (a school passing) is picked up then, and a track whose subject has left
+   *   gives up its slot.
    */
-  private carryOver(t: number, batch: ObjState[]): void {
+  private carryOver(t: number): boolean {
     const k = this.segStarts.findIndex((s) => Math.abs(s - t) < 1e-6);
-    // The first segment's seeds were all let go at their first mask (runaways: stepObject): look again soon, as when
-    // the first look finds nothing.
-    if (k === 0 && batch.length && ![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) { this.emptyRun++; this.reacquire(0); }
-    if (k <= 0) return;
-    const seeds = batch.filter((s) => s.seg === k && s.fi === 1);
-    const n = this.mw * this.mh, cover = new Uint8Array(n);
-    for (const s of seeds) { const m = this.key(s, t); if (m) for (let i = 0; i < n; i++) if (m[i] > 127) cover[i] = 1; }
-    const t1 = this.segStarts[k + 1] ?? this.base[this.base.length - 1];
-    const carry: { s: ObjState; a: number }[] = [], ended: ObjState[] = [];
-    for (const s of batch) {
-      if (s.seg >= k || s.fi < s.fwd.length) continue;
-      const m = this.key(s, t);
-      let a = 0, c = 0;
-      if (m) for (let i = 0; i < n; i++) if (m[i] > 127) { a++; if (cover[i]) c++; }
-      if (a > SEG.guardMinArea * n && c < SEG.carryCover * a) carry.push({ s, a });
-      else ended.push(s);
+    if (k < 0 || this.carriedAt.has(t)) return false;
+    this.carriedAt.add(t);
+    if (Math.abs(this.settling - t) < 1e-6) this.settling = NaN;
+    const n = this.mw * this.mh;
+    const bin = (s: ObjState) => {
+      const key = this.key(s, t), m = new Uint8Array(n);
+      let a = 0;
+      if (key) for (let i = 0; i < n; i++) if (key[i] > 127) { m[i] = 1; a++; }
+      return { id: s.o.id, area: a, m, s };
+    };
+    // (A seed let go at its first mask, a runaway, is out already: stepObject.)
+    const seeds = [...this.objs.values()].filter((s) => s.auto && s.seg === k && s.fi === 1 && s.fi < s.fwd.length && Math.abs(s.fwd[0] - t) < 1e-6).sort((a, b) => a.o.id - b.o.id).map(bin);
+    const was = this.endedAt(t).map(bin);
+    // A subject whose mask is next to nothing here has been lost (it may still be followed on: below).
+    const olds = was.filter((o) => o.area > SEG.guardMinArea * n);
+    const ended = was.filter((o) => o.area <= SEG.guardMinArea * n).map((o) => o.s);
+    const rel = (a: { m: Uint8Array }, b: { m: Uint8Array }) => overlap(a.m, b.m);
+    const slots = assignSlots(olds, seeds, rel, rel, this.autoCap);
+    for (const o of olds) if (slots.ended.includes(o.id)) ended.push(o.s);
+    for (const x of seeds) {
+      const dup = slots.dup.includes(x.id);
+      if (!dup && !slots.over.includes(x.id)) continue;
+      // Its one mask goes with it (a duplicate's subject keeps its own track's).
+      x.s.fwd.length = x.s.fi;
+      x.s.bwd.length = x.s.bi;
+      x.s.keys.delete(t);
+      x.s.shown.delete(t);
+      x.s.conf.delete(t);
+      this.model.drop(`${x.s.o.id}f`);
+      this.model.drop(`${x.s.o.id}b`);
+      console.info(`[seg] seed ${x.s.o.id} at ${t.toFixed(2)} s ${dup ? "is a subject followed already" : `has no room (${this.autoCap} followed at a time)`}: let go`);
     }
-    // The lite model's limit holds across the start: the new seeds, then the largest subjects carried in.
-    carry.sort((x, y) => y.a - x.a || x.s.o.id - y.s.o.id);
-    const room = Math.max(0, this.autoCap - seeds.length);
-    carry.forEach(({ s }, i) => {
-      if (i >= room) { this.model.drop(`${s.o.id}f`); return; }
-      s.fwd = [...s.fwd, ...this.stepsBetween(t, t1, [t1]).filter((x) => x > t + 1e-6)];
-      s.seg = k;
-    });
-    if (![...this.objs.values()].some((s) => s.auto && s.seg === k && this.nextOf(s) !== null)) {
+    const t1 = this.segStarts[k + 1] ?? this.base[this.base.length - 1];
+    const going = slots.keep.length + slots.take.length;
+    // Something is followed: the next look comes soon (the engine's regions only, no grid search), and everything
+    // is followed up to it.
+    const r = topUpAt(t, going, t1, SEG.topUpS, SEG.reacquireS / 2);
+    const to = (r !== null ? this.addStart(k, r, false) : null) ?? t1;
+    const steps = this.stepsBetween(t, to, [to]).filter((x) => x > t + 1e-6);
+    for (const o of olds) if (slots.keep.includes(o.id)) { o.s.fwd = [...o.s.fwd, ...steps]; o.s.seg = k; }
+    if (to !== t1) for (const x of seeds) if (slots.take.includes(x.id)) x.s.fwd = [t, ...steps];
+    if (k === 0) {
+      // The first segment's seeds were all let go at their first mask (runaways: stepObject): look again soon, as when
+      // the first look finds nothing.
+      if (![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) { this.emptyRun++; this.reacquire(0); }
+    } else if (![...this.objs.values()].some((s) => s.auto && s.seg === k && this.nextOf(s) !== null)) {
       const r = this.reacquire(k);
       // Nothing to follow from here, but a subject was in the picture a moment ago (out of frame, behind a rock): the
       // one seen last is followed on to the next look (or the next start). Its tracker knows it again the keyframe it
@@ -1108,6 +1276,7 @@ export class SegSession {
       }
     }
     for (const s of ended) this.model.drop(`${s.o.id}f`);
+    return true;
   }
 
   /** The intervals the last step changed (touch). */

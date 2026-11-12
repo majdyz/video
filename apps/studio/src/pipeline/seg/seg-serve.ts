@@ -7,6 +7,7 @@ import { EdgeTam, type BankParams, type GraphName } from "./edgetam.ts";
 import { SegSession, type SessionFrames } from "./session.ts";
 import { openSessionFrames } from "./frames.ts";
 import type { SegObject } from "./track.ts";
+import type { SeedCandidate } from "./seeds.ts";
 
 type Req =
   | { id: number; type: "init"; models: Record<GraphName, ArrayBuffer>; bank: BankParams; threads: number; prefer: "auto" | "wasm"; lite?: boolean; debug?: boolean }
@@ -22,7 +23,7 @@ type Req =
   | { id: number; type: "session-exclude"; object: number; t: number; u: number; v: number }
   | { id: number; type: "session-close" }
   | { id: number; type: "session-busy" }
-  | { id: number; type: "session-autoseeds"; t: number }
+  | { id: number; type: "session-autoseeds"; t: number; regions?: SeedCandidate[]; grid?: boolean }
   | { id: number; type: "session-seeds"; t: number; objects: (SegObject & { id: number })[] };
 
 let model: EdgeTam | null = null;
@@ -158,7 +159,7 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
     } else if (!session) {
       throw new Error("no session");
     } else if (r.type === "session-autoseeds") {
-      post({ ok: true, objects: await session.autoSeeds(r.t) });
+      post({ ok: true, objects: await session.autoSeeds(r.t, r.regions ?? null, r.grid ?? true) });
     } else if (r.type === "session-seeds") {
       session.seeds(r.t, r.objects);
       post({ ok: true });

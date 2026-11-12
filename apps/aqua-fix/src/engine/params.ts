@@ -3,6 +3,7 @@
 // temporal smoother blends them; packUniforms() serialises them.
 
 import type { AnimalMap } from "./animals.ts";
+import type { SubjectBlob } from "./backdrop.ts";
 import { UNIFORM_FLOATS } from "./backend.ts";
 import { linearToOklab } from "./color.ts";
 import { calmParams, calmSettings, type CalmEvidence } from "./calm.ts";
@@ -1176,6 +1177,8 @@ export type DepthMap = {
   person?: Float32Array;
   /** Open water: the animals of the subject map (animals.ts), labelled on this grid. */
   animals?: AnimalMap;
+  /** Open water: every region that departs from the water, toned or not (backdrop.ts SubjectBlob). */
+  blobs?: SubjectBlob[];
   /** Per-animal strength texture (animals.ts AnimalTracker.strength, RGBA at the animals' grid) in place of the still targets (harness / CPU reference). */
   strength?: Float32Array;
 };

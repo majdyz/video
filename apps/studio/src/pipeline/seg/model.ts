@@ -4,6 +4,7 @@
 import type { GraphName } from "./edgetam.ts";
 import type { SegModel, SegObject, StepResult } from "./track.ts";
 import type { SessionFrameOut } from "./session.ts";
+import type { SeedCandidate } from "./seeds.ts";
 import { deviceFacts, segThreads } from "../device.ts";
 
 /** Background-session events from the worker (session.ts). */
@@ -202,8 +203,8 @@ export class WorkerSegModel implements SegModel {
   }
 
   /** Subjects the model finds by itself on frame t (session.ts autoSeeds). */
-  async sessionAutoSeeds(t: number): Promise<SegObject[]> {
-    return ((await this.call({ type: "session-autoseeds", t })).objects as SegObject[]) ?? [];
+  async sessionAutoSeeds(t: number, regions: readonly SeedCandidate[] = [], grid = true): Promise<SegObject[]> {
+    return ((await this.call({ type: "session-autoseeds", t, regions, grid })).objects as SegObject[]) ?? [];
   }
 
   async sessionRemove(object: number): Promise<void> {

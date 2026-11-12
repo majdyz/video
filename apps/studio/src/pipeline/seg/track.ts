@@ -56,8 +56,24 @@ export const SEG = {
    * the next look (session.ts carryOver): the tracker knows it again when it comes back, a look may not. */
   lostS: 3,
   /** The lite model, and any model on a phone (SessionOptions.autoCap), follows at most this many of the engine's
-   * own subjects at a time (every one is a tracker step per keyframe); taps are always followed. */
-  liteAutos: 2,
+   * own subjects at a time (every one is a tracker step per keyframe); taps are always followed. Three: a school
+   * shows more than two animals at once, and a slot costs time only while a subject is in it (a clip with one or
+   * two subjects takes as long as before). Measured on a desktop's WASM with the lite model (owner's hammerhead
+   * clip, 50 s, 135 keyframes): 0.7 s a keyframe's encode, ~1.1 s its decode, fill and maps, and 2.6 s per subject
+   * step (memory attention 1.65, decoder 0.28, memory encoder 0.68). With every slot taken all through: 2 → about
+   * 16 min, 3 → 22 min, 4 → 28 min for the 50 s (20 / 27 / 34 s per clip second). */
+  liteAutos: 3,
+  /** ...and a phone short of memory (device.ts isWeakDevice) this many. */
+  weakAutos: 2,
+  /** The full model on a desktop: this many (it had no limit while a look added at most its own four; the engine's
+   * regions now add finds at every look, and a school would grow without end). */
+  fullAutos: 6,
+  /** While a subject is followed, the engine's regions are looked at again every this long (s), not only at the
+   * regular starts (segmentS): a subject that swims into the picture (a school passing) is picked up within this
+   * long, and a track whose subject has left gives up its slot (session.ts carryOver, seeds.ts topUpAt). A look is
+   * a seek and an analysis on the main thread and a decoder run per region (at most seeds.ts SEEDS.probes: ~2 s on
+   * a desktop's WASM), on the frame the pass has encoded anyway: a few per cent of the pass. */
+  topUpS: 4,
   /** A tap's backward steps are read a chunk this long (s) at a time, in one sequential decode (session.ts readBack). */
   backChunkS: 1,
   /** Playhead first (session.ts focus): the playhead's subjects are followed this far ahead of it (s)... */

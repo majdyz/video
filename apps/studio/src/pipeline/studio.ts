@@ -25,7 +25,7 @@ import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validat
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
 import { pickAnimal, type SubjectOverride, type SubjectPathPoint, type SubjectSelection } from "../../../aqua-fix/src/engine/animals.ts";
 import { toggleOverride } from "./subjects.ts";
-import { outlineSelection, seedObjects, segPopsAt, SubjectSeg, type SegFrameState, type SegPeekState, type SegStatus } from "./seg/studio-seg.ts";
+import { outlineSelection, seedObjects, seedRegions, segPopsAt, SubjectSeg, type SegFrameState, type SegPeekState, type SegStatus } from "./seg/studio-seg.ts";
 import type { SegOverlay } from "../../../aqua-fix/src/engine/seg-overlay.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
@@ -33,6 +33,7 @@ import { GeometryRenderer, type GeometryRenderOptions, type GeometrySource } fro
 import { GpuGeometryRenderer } from "./geometry-gpu.ts";
 import { outputToUpright, previewFitWanted, type GeometryParams, type QuarterTurns } from "./geometry-math.ts";
 import { mapPrompt } from "./seg/track.ts";
+import type { SeedCandidate } from "./seg/seeds.ts";
 import type { ClipInfo } from "./probe.ts";
 import { clipKeyOf, colourSettings, DEFAULT_TOOLS, exportSuffix, neutralNote, profileDefaults, solveParams, type ColourLook, type ColourState, type DewarpState, type NeutralPick, type ToolsState } from "./tools.ts";
 import type { TapSolve } from "../../../aqua-fix/src/engine/tap.ts";
@@ -836,6 +837,7 @@ export class Studio {
       const e = this.engine, v = this.video, file = this.file;
       if (!e || !v || !file || stale() || !this.seg.live || this.seg.hasSegment(k, t)) return;
       let objs: ReturnType<typeof seedObjects> = [];
+      let regions: SeedCandidate[] = [];
       try {
         // Not while the user scrubs: two <video>s seeking at once (plus the analysis) is what phones fall over on.
         await this.scrubIdle();
@@ -851,18 +853,24 @@ export class Studio {
           // From this one analysis's own animals (deterministic for the frame), not the tracker's confidence (which
           // depends on how many analyses happened to run since the reset).
           const found = seedObjects(e.animalMap(), t, e.personBoxesNow());
+          // Everything else the engine sees in the water there, whatever its size (a school of small sharks is no
+          // "animal" to it): the model is asked about each (seg.autoSeeds).
+          const places = seedRegions(e.subjectBlobs(), e.animalMap());
           e.resetTracking();
           // The engine analysed the frame after the geometry pass; the session tracks on the frame as recorded.
           const toSource = this.segToSource(t);
+          regions = toSource ? places.map((c) => { const p = mapPrompt({ points: c.points, labels: c.points.map(() => 1), box: c.box }, toSource); return { ...c, points: p.points, box: p.box ?? c.box }; }) : places;
           return toSource ? found.map((o) => ({ ...o, prompt: mapPrompt(o.prompt, toSource) })) : found;
         }, true));
       } catch (err) {
         console.warn(`[seg] segment ${k} seed frame failed`, err);
       }
       if (stale()) return;
-      // The engine found nothing (it only looks in open blue water: a manta over a reef): the model looks itself.
-      // (Not at an extra start after several empty ones in a row: session.ts reacquire.)
-      if (!objs.length && search) objs = await this.seg.autoSeeds(t);
+      // The model is asked about the engine's other regions (they add to its animals), and, when the engine found
+      // nothing at all (it only looks in open blue water: a manta over a reef), looks itself on its point grid.
+      // (The grid not at an extra start: session.ts reacquire, carryOver.)
+      const grid = !objs.length && search;
+      if (regions.length || grid) objs = [...objs, ...await this.seg.autoSeeds(t, regions, grid)];
       if (stale()) return;
       await this.seg.seedSegment(k, t, objs);
       // Paused: the frame on screen is analysed again (the engine's maps are the seed frame's now) and looked at
