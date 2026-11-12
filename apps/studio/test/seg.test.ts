@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { assembleMemory, frameIndex, isEmpty, MEM_DIM, MEM_TOKENS, newBank, pruneBank, storeMemory, type MemEntry } from "../src/pipeline/seg/bank.ts";
 import { denseFlow, warp, type Gray } from "../src/pipeline/seg/flow.ts";
 import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, framePop, guidedFilter, iou, nearMap, promptFromMask, rleDecode, rleEncode, sdfFeather } from "../src/pipeline/seg/mask.ts";
-import { clipPopDirection, composeSegStrength, popDirection, SEG_THICK, SEG_WATER, waterField } from "../../aqua-fix/src/engine/seg-overlay.ts";
+import { clipPopDirection, composeSegStrength, popDirection, SEG_THICK, SEG_WATER, unpackSegR, waterField } from "../../aqua-fix/src/engine/seg-overlay.ts";
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
 import { SUBJECT_CLEAR } from "../../aqua-fix/src/engine/params.ts";
@@ -256,7 +256,8 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(noGuide[0] === -1 && noGuide[1] === 1 && noGuide[(30 * W + 70) * 4 + 3] === 1, "no guide: no water to compare with, the mask rules");
   assert.equal(c[(30 * W + 70) * 4 + 3], 1, "the ML weight (A) passes as is");
   const full = { width: W, height: H, alpha: new Float32Array(W * H).fill(1), exclude: null, near: ov.near, depart: null };
-  assert.equal(composeSegStrength(full, { width: gw, height: gh, data: g }).data[0], -1, "no water in the frame: -1");
+  // (R also carries the subject's closeness, packed: unpackSegR. Nothing to compare with: as close.)
+  assert.deepEqual(unpackSegR(composeSegStrength(full, { width: gw, height: gh, data: g }).data[0]), [-1, 1], "no water in the frame: -1");
 }
 
 // The ramp-in follows the part's thickness: a big body fades in gently from its contour (a contour that runs
@@ -276,7 +277,7 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(dOf(60, 10 + SEG_WATER.rampLong) >= SEG_TONE.rampIn, `and is toned in full within the feather (${dOf(60, 10 + SEG_WATER.rampLong).toFixed(2)} at ${SEG_WATER.rampLong} px in)`);
   assert.ok(dOf(60, 40) >= SEG_TONE.rampIn, `its middle is toned in full (${dOf(60, 40).toFixed(2)})`);
   assert.ok(dOf(130, 39) > 0.5 && dOf(130, 39) > 0.9 * Math.max(0, (a[39 * W + 130] - 0.5) * 2 * SEG_TONE.alphaR), `a thin fin keeps its short ramp (${dOf(130, 39).toFixed(2)})`);
-  assert.ok(c[(39 * W + 130) * 4] < 2 && c[(14 * W + 60) * 4] === SEG_THICK, "the per-pixel water test on thin parts only (R)");
+  assert.ok(unpackSegR(c[(39 * W + 130) * 4])[0] < 2 && unpackSegR(c[(14 * W + 60) * 4])[0] === SEG_THICK, "the per-pixel water test on thin parts only (R)");
   let step = 0;
   for (let y = 11; y < 69; y++) for (let x = 21; x < 99; x++) step = Math.max(step, Math.abs(dOf(x + 1, y) - dOf(x, y)), Math.abs(dOf(x, y + 1) - dOf(x, y)));
   // (Never steeper than the plain feather of a thin part, 1 per texel: the thickness changes the slope gently.)
@@ -350,7 +351,16 @@ const img = (dx: number, dy: number): Gray => {
   assert.deepEqual(subjectChip(null, st({ phase: "tracking", progress: 0.731 }), "1 min left"), { tone: "busy", line: "Finding subjects 73%", sub: "1 min left" });
   assert.deepEqual(subjectChip(null, st({ phase: "tracking", progress: 0.02 }), null), { tone: "busy", line: "Finding subjects 2%", sub: null }, "no estimate yet: one line");
   assert.deepEqual(subjectChip(null, st({ phase: "tracking" }), null).line, "Finding subjects…");
-  assert.deepEqual(subjectChip(null, st({}), null), { tone: "basic", line: "Basic detection, AI not ready", sub: null }, "the pass is idle and has nothing for this frame");
+  assert.deepEqual(subjectChip(null, st({}), null), { tone: "basic", line: "Basic detection", sub: "No AI mask for this frame" }, "the model is loaded, the pass idle, nothing for this frame: not 'AI not ready'");
+  // The model is loaded and finds the clip's first subjects (the proof run read "AI not ready" for 44 s here).
+  assert.deepEqual(subjectChip(null, st({ phase: "looking" }), null), { tone: "busy", line: "Looking for subjects…", sub: null });
+  assert.equal(subjectChip("mask", st({ phase: "looking" }), null).line, "AI subject ✓");
+  // Paused ahead of the pass: the look at this very frame is said, and so is a look that found nothing.
+  assert.deepEqual(subjectChip(null, st({ phase: "tracking", progress: 0.02 }), "9 min left", "looking"), { tone: "busy", line: "Looking at this frame…", sub: "Rest of clip 2%" });
+  assert.deepEqual(subjectChip("weak", st({ phase: "tracking", progress: 0.02 }), null, "looking").line, "Looking at this frame…", "its mask is still easing in");
+  assert.deepEqual(subjectChip(null, st({ phase: "tracking", progress: 0.02 }), "9 min left", "none"), { tone: "busy", line: "Finding subjects 2%", sub: "Nothing found here yet" });
+  assert.equal(subjectChip("mask", st({ phase: "tracking", progress: 0.02 }), null, "looking").line, "AI subject ✓", "the frame has its mask: the look is over");
+  assert.equal(subjectChip(null, st({}), null, "looking").line, "Basic detection", "no pass running: no look either");
   assert.deepEqual(subjectChip(null, st({ phase: "download", progress: 0.4 }), null), { tone: "busy", line: "Basic detection, AI not ready", sub: "Loading AI model 40%" });
   assert.equal(subjectChip(null, st({ phase: "starting" }), null).sub, "Starting AI model…");
   assert.equal(subjectChip(null, st({ phase: "unavailable" }), null).sub, "AI not available here");
@@ -360,8 +370,8 @@ const img = (dx: number, dy: number): Gray => {
   assert.deepEqual(subjectChip("weak", st({ phase: "tracking", progress: 0.5 }), "2 min left"), { tone: "busy", line: "Finding subjects 50%", sub: "2 min left" }, "a mask still easing in is the search");
   assert.equal(subjectChip("weak", st({}), null).line, "AI unsure, not applied");
   // No line is long enough to wrap in the chip at 390 px (about 30 characters of 13 px text beside the rail).
-  for (const f of ["mask", "weak", "none", null] as const) for (const s of [st({}), st({ phase: "tracking", progress: 1 }), st({ phase: "download", progress: 1 }), st({ phase: "starting" }), st({ phase: "unavailable" }), st({ on: false, phase: "off", crashed: true })]) {
-    const c = subjectChip(f, s, "under 1 min left");
+  for (const f of ["mask", "weak", "none", null] as const) for (const s of [st({}), st({ phase: "looking" }), st({ phase: "tracking", progress: 1 }), st({ phase: "download", progress: 1 }), st({ phase: "starting" }), st({ phase: "unavailable" }), st({ on: false, phase: "off", crashed: true })]) for (const pk of [null, "looking", "none"] as const) {
+    const c = subjectChip(f, s, "under 1 min left", pk);
     assert.ok(c.line.length <= 30 && (c.sub?.length ?? 0) <= 30, `${c.line} / ${c.sub}`);
   }
 }

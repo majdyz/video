@@ -353,7 +353,7 @@ export default function App() {
     : null);
   // Subject pop on a clip: one chip says what the frame on screen is graded with (its AI mask, the search still
   // running, or the basic detection), in place of the old "AI subjects 73% · about a minute left" pill that wrapped.
-  const chip = !pill && ready && s.subjectFrame && !exporting && !immersive ? subjectChip(s.subjectFrame.ai, s.seg, segEtaShort) : null;
+  const chip = !pill && ready && s.subjectFrame && !exporting && !immersive ? subjectChip(s.subjectFrame.ai, s.seg, segEtaShort, s.subjectFrame.peek ?? null) : null;
 
   const closeSheet = useCallback(() => setSheetOpen(false), []);
   const popOn = !!panelTools.colour.subjectPop || new URLSearchParams(location.search).get("pop") === "1";

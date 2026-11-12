@@ -327,38 +327,66 @@ export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFol
 
 /**
  * AI subject restore: what a real AI mask on the frame adds to Subject pop (grade-shader segRestore; never with the
- * engine's own masks, which reach past the animal). The engine's pop was tuned for those blobs and is hard to see on
- * a small or dark animal (user clip, 12 Nov: a spotted eagle ray, under 1% mean change, Pop 100 the same as Pop 50).
- * With the animal's own outline in hand the subject is corrected like a subject: its water cast taken off, a little
- * of the red the water took put back, more of its own contrast. Everything scales with S = the AI tone weight (the
- * mask's feathered ramp × its confidence × the regional trust: grade-shader toneWeight) × the Pop slider's multiplier
- * (p23.w: 0 at Pop 0, 1 at 50, 2 at 100), so Pop 0 leaves the plain grade, Pop 100 is plain to see, and nothing
- * outside the mask's contour changes.
+ * engine's own masks, which reach past the animal). With the animal's own outline in hand the subject is brought a
+ * little closer: part of its water cast taken off, more of its own contrast. Everything scales with S = the AI tone
+ * weight (the mask's feathered ramp × its confidence × the regional trust: grade-shader toneWeight) × the Pop
+ * slider's multiplier (p23.w: 0 at Pop 0, 1 at 50, 2 at 100), so Pop 0 leaves the plain grade and nothing outside the
+ * mask's contour changes.
+ *
+ * Retuned 12 Nov after the owner's review ("really bad, too jarring"): the first version took 65–90% of the cast
+ * off, pushed the colour past neutral toward a sand hue and lifted the midtones by 0.1 L, and the pop's own
+ * clearing and warm pop came on top. The ray came out a neutral grey-brown (orange when far away) in an all-blue
+ * scene: a cut-out sticker. The subject has to stay in the scene's light, like the same animal seen a little closer:
+ *   - under an AI mask this stage is the only one that touches the subject's cast (the pop's cast clearing, its
+ *     warm pop and its stronger warm clamp are for the engine's own masks: grade-shader gradeD), so the share
+ *     taken off is exactly what is set here;
+ *   - at Pop 50 at most half of a pixel's cast goes (S = 1, deep inside a close subject; less over a whole animal
+ *     with its feathered rim and its dark parts), at Pop 100 at most two thirds; the colour
+ *     never reaches neutral and never crosses to the warm side;
+ *   - a small lift only, and none of the pop's own lightness changes (its lift or deepening, its sparing of
+ *     Vivid's darkening): the subject's lightness against the water stays close to the plain grade's;
+ *   - the colour part fades in from the contour over more of the mask than the tone does (edge), so thin and small
+ *     subjects get less of it, and far or low-contrast subjects get a share of it only (farKeep).
+ *
  *   darkLo/Hi  S fades out as the graded lightness (cube root of the luminance) drops through lo..hi. Lower than the
  *              engine pop's own fade (SUBJECT_POP.darkLo..Hi): an AI mask on a dark back is still the animal;
- *   popGate    the AI tone weight itself (the pop's clearing and warmth included) is scaled by min(1, popGate × p23.w):
- *              full from Pop ≈ 12 up, nothing at Pop 0;
- *   cast/castMax  the share of a cool pixel's chroma taken off per unit S, and its ceiling (hue kept; "cool" = the
- *              cosine of its hue to the opposite of `hue`: a warm, green or magenta pixel keeps its colour);
- *   hue/warm/warmMax  then chroma is added along the warm hue (radians; a skin / sand tone, between orange and
- *              yellow): `warm` per unit S × twice the Warmth slider (p24.z; Warmth 0 = none), never past warmMax
- *              along that hue (an already warm subject gets nothing: no orange), on lit parts only (litLo..litHi
- *              of Oklab L; blacks stay neutral) and not on highlights (hiLo..hiHi; white spots stay white);
+ *   popGate    the AI tone weight itself is scaled by min(1, popGate × p23.w): full from Pop ≈ 12 up, nothing at 0;
+ *   cast/castMax  the share of a cool pixel's chroma taken off per unit S × K, and its ceiling (hue kept; "cool" =
+ *              the cosine of its hue to the opposite of `hue`: a warm, green or magenta pixel keeps its colour);
+ *   hue/warm/warmShare  then a little chroma along the warm hue (radians), `warm` per unit S × K × twice the Warmth
+ *              slider (p24.z; Warmth 0 = none), on lit parts only (litLo..litHi of Oklab L) and not on highlights
+ *              (hiLo..hiHi), and never more than warmShare of what the pixel still has on the cool side of that
+ *              hue: it stays on the water's side of neutral, whatever the sliders (the first version went up to a
+ *              chroma of 0.045 on the warm side: the orange);
+ *   K (edge, farKeep)  the colour share (grade-shader segColourK) = the edge feather × the subject's closeness:
+ *              the feather fades the colour in from the contour over `edge` mask px of the read-back distance (the
+ *              tone itself is in after SEG_TONE.rampIn): no colour step at the mask's edge, and a thin or small
+ *              subject, never that deep, keeps more of the water's colour. The closeness (seg-overlay.ts
+ *              subjectCloseness, one value per animal) is how far the subject stands out from the water around it
+ *              on the analysis guide (mean Oklab ΔE over veilLo..veilHi): water veils what is far away, so a subject
+ *              that hardly stands out is far and gets the farKeep share only, one that stands out clearly all of it;
+ *   pack/levels  how the closeness rides in the R channel of the strength texture next to the local water's L
+ *              (seg-overlay.ts packSegR: R + pack × the closeness in `levels` steps; the shaders unpack each texel
+ *              before they interpolate);
  *   detail     local contrast against the analysis guide (the source's low-pass, plain bilinear): the graded
  *              lightness × (pixel luminance / guide luminance, clamped to rMin..rMax)^(detail × S): spots and
- *              markings stand out from the back. (More of the frame's CLAHE was tried first: its tiles are mostly
- *              water, so it only pushed a dark animal darker);
- *   lift       the midtone lift (4·L·(1 − L)) per unit S the subject gets in all: what Subject pop's own lift
- *              (SUBJECT_POP.lift × P × the clip's direction) has not given is made up, so its dark fade and its
- *              deepening of a subject darker than the water no longer apply under an AI mask. Deepened, the ray
- *              above was a black cut-out; cleared of its cast and lifted it is a grey-brown animal on blue water,
- *              and the colour carries the separation.
- * Offline, with the CPU reference on that ray frame and a hand-made mask (the ray is 4% of the frame): the mean
- * change over the ray went from 4.3% of full scale at Pop 50 (5.4% at 100) to 7.4% (9.8% at 100; 0 at Pop 0); its
- * mean colour from navy (4, 34, 56) to (42, 45, 48), (52, 52, 51) at Pop 100; nothing outside the mask moves. A
- * light subject (a whitetip shark in open water) goes from 13% to 15% (19% to 21%): it was popped before.
+ *              markings stand out from the back;
+ *   lift       the midtone lift (4·L·(1 − L)) per unit S, all the lift the subject gets: Subject pop's own
+ *              (SUBJECT_POP.lift × P × the clip's direction: 0.1 L and more up, or down for a subject darker than
+ *              the water, its chroma scaled along) is left out under an AI mask (grade-shader gradeD), so the
+ *              subject's lightness against the water stays close to the plain grade's.
+ * Measured offline with the CPU reference on the owner's clip (eagleray-dark: the ray close at 7.9 s, farther off
+ * at 15 s; a hand-made mask; apps/aqua-fix/scripts/seg-frames.ts prints the table), subject mean RGB / share of the
+ * plain grade's chroma kept / Oklab hue against the water's 248°:
+ *   close   plain (3, 35, 57) 100% 245°   was Pop 50 (34, 43, 50) 33%, Pop 100 (43, 47, 51) 16%
+ *                                         now Pop 50 (12, 35, 53) 78% 244°, Pop 100 (17, 36, 51) 66% 243°
+ *                                         (in the core, 3.5 px inside the contour: 59% and 39% kept)
+ *   far     plain (4, 37, 63) 100% 247°   was Pop 50 (34, 45, 55) 40%, Pop 100 (43, 49, 56) 23%
+ *                                         now Pop 50 (7, 38, 62) 94% 247°, Pop 100 (10, 39, 61) 88% 246°
+ * and the subject's lightness against the water (Oklab L, −0.085 close / −0.063 far in the plain grade) moves by
+ * under 0.01 (it was 0.04–0.06 L closer to the water: the grey patch).
  */
-export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, cast: 0.65, castMax: 0.9, hue: (65 * Math.PI) / 180, warm: 0.014, warmMax: 0.045, litLo: 0.1, litHi: 0.35, hiLo: 0.85, hiHi: 0.97, detail: 0.25, rMin: 0.7, rMax: 1.45, lift: 0.1 };
+export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, cast: 0.45, castMax: 0.62, hue: (65 * Math.PI) / 180, warm: 0.014, warmShare: 0.12, litLo: 0.1, litHi: 0.35, hiLo: 0.85, hiHi: 0.97, detail: 0.25, rMin: 0.7, rMax: 1.45, lift: 0.012, edge: 3, farKeep: 0.35, veilLo: 0.065, veilHi: 0.125, pack: 32, levels: 16 };
 
 /** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
 export function popStrengthK(s: { subjectPopStrength?: number }): number {

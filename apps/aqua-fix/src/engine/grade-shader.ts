@@ -181,7 +181,11 @@ const float SR_CAST_MAX = ${SEG_RESTORE.castMax.toFixed(4)};
 const float SR_COS = ${Math.cos(SEG_RESTORE.hue).toFixed(6)};
 const float SR_SIN = ${Math.sin(SEG_RESTORE.hue).toFixed(6)};
 const float SR_WARM = ${SEG_RESTORE.warm.toFixed(4)};
-const float SR_WARM_MAX = ${SEG_RESTORE.warmMax.toFixed(4)};
+const float SR_WARM_SHARE = ${SEG_RESTORE.warmShare.toFixed(4)};
+const float SR_FAR_KEEP = ${SEG_RESTORE.farKeep.toFixed(4)};
+const float SR_EDGE = ${SEG_RESTORE.edge.toFixed(4)};
+const float SEG_PACK = ${SEG_RESTORE.pack.toFixed(4)};
+const float SEG_LEVELS = ${SEG_RESTORE.levels.toFixed(4)};
 const float SR_LIT_LO = ${SEG_RESTORE.litLo.toFixed(4)};
 const float SR_LIT_HI = ${SEG_RESTORE.litHi.toFixed(4)};
 const float SR_HI_LO = ${SEG_RESTORE.hiLo.toFixed(4)};
@@ -546,6 +550,13 @@ float subjectWeight(vec2 uv, float coreJbu, float dev) {
 // R = the local water's Oklab L (< 0: no water to compare with; > 2: a thick part, no per-pixel test), G = the
 // regional trust, B = the ML alpha (the mask's signed distance, SEG_TONE.alphaR), A = the ML weight (near map x
 // confidence x regional trust); all bilinear.
+// With an AI overlay R also carries the subject's closeness (seg-overlay.ts packSegR: R + SEG_PACK x its step of
+// SEG_LEVELS): each texel is unpacked before the bilinear mix; the closeness comes out in g_segClose (segColourK).
+float g_segClose = 1.0;
+vec2 segUnpack(float r) {
+  float n = floor((r + 8.0) / SEG_PACK);
+  return vec2(r - SEG_PACK * n, n / SEG_LEVELS);
+}
 vec4 animalStrength(vec2 uv) {
   ivec2 size = textureSize(u_data3, 0);
   ivec2 i = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
@@ -554,8 +565,20 @@ vec4 animalStrength(vec2 uv) {
   ivec2 i0 = ivec2(floor(f));
   ivec2 i1 = min(i0 + 1, size - 1);
   vec2 t = f - vec2(i0);
-  vec4 c = mix(mix(texelFetch(u_data3, i0, 0), texelFetch(u_data3, ivec2(i1.x, i0.y), 0), t.x),
-               mix(texelFetch(u_data3, ivec2(i0.x, i1.y), 0), texelFetch(u_data3, i1, 0), t.x), t.y);
+  vec4 c00 = texelFetch(u_data3, i0, 0);
+  vec4 c10 = texelFetch(u_data3, ivec2(i1.x, i0.y), 0);
+  vec4 c01 = texelFetch(u_data3, ivec2(i0.x, i1.y), 0);
+  vec4 c11 = texelFetch(u_data3, i1, 0);
+  g_segClose = 1.0;
+  if (p[24].y > 0.5) {
+    vec2 u00 = segUnpack(c00.r);
+    vec2 u10 = segUnpack(c10.r);
+    vec2 u01 = segUnpack(c01.r);
+    vec2 u11 = segUnpack(c11.r);
+    c00.r = u00.x; c10.r = u10.x; c01.r = u01.x; c11.r = u11.x;
+    g_segClose = mix(mix(u00.y, u10.y, t.x), mix(u01.y, u11.y, t.x), t.y);
+  }
+  vec4 c = mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
   return vec4(p[24].y > 0.5 ? c.r : texelFetch(u_data3, i, 0).r, c.g, c.b, c.a);
 }
 // Object weight and warm clamp (see apply.ts objectWeight / warmClamp).
@@ -648,20 +671,29 @@ float guideLum(vec2 uv) {
   return lum(mix(mix(texelFetch(u_data2, i0, 0).rgb, texelFetch(u_data2, ivec2(i1.x, i0.y), 0).rgb, t.x),
                  mix(texelFetch(u_data2, ivec2(i0.x, i1.y), 0).rgb, texelFetch(u_data2, i1, 0).rgb, t.x), t.y));
 }
+// The colour share of the AI subject restore (SEG_RESTORE edge / farKeep; apply.ts segColourK): the edge feather over
+// the mask's read-back distance (an.z; whole SR_EDGE mask px inside the contour) x the subject's closeness
+// (g_segClose, set by animalStrength: SR_FAR_KEEP for a far subject, 1 for a close one).
+float segColourK(vec4 an) {
+  float d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
+  return smoothstepf(0.0, SR_EDGE, d) * mix(SR_FAR_KEEP, 1.0, clamp(g_segClose, 0.0, 1.0));
+}
 // AI subject restore (SEG_RESTORE in params.ts; mirrors apply.ts segRestore) on the finished Oklab colour: s = the AI
 // tone weight x the Pop multiplier (0..2), lr = the source pixel's luminance over its neighbourhood's, lifted = the
-// lift Subject pop has already applied. Only with a real AI mask on the frame (s = 0 otherwise).
-vec3 segRestore(vec3 lk, float s, float lr, float lifted) {
+// lift Subject pop has already applied, ck = the colour share (segColourK). Only with a real AI mask on the frame
+// (s = 0 otherwise). The colour stays on the water's side of neutral.
+vec3 segRestore(vec3 lk, float s, float lr, float lifted, float ck) {
   if (s <= 0.0) return lk;
   vec2 wh = vec2(SR_COS, SR_SIN);
   vec2 ab = lk.yz;
-  // De-blue: a cool pixel loses chroma (hue kept); warm, green and magenta pixels keep theirs.
+  // De-blue: a cool pixel loses a share of its chroma (hue kept); warm, green and magenta pixels keep theirs.
   float C = length(ab);
   float cool = C > 1e-5 ? smoothstepf(0.0, 0.5, -dot(ab, wh) / C) : 0.0;
-  ab *= 1.0 - min(SR_CAST_MAX, SR_CAST * s) * cool;
-  // Warm-up: chroma along the warm hue, never past SR_WARM_MAX along it; lit parts only, highlights stay white.
+  ab *= 1.0 - min(SR_CAST_MAX, SR_CAST * s) * cool * ck;
+  // Warm-up: a little chroma along the warm hue, never more than SR_WARM_SHARE of what is left on the cool side of
+  // it; lit parts only, highlights stay white.
   float lit = smoothstepf(SR_LIT_LO, SR_LIT_HI, lk.x) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
-  ab += wh * clamp(SR_WARM_MAX * lit - dot(ab, wh), 0.0, SR_WARM * s * min(1.0, 2.0 * p[24].z) * lit);
+  ab += wh * min(SR_WARM * s * min(1.0, 2.0 * p[24].z) * lit * ck, SR_WARM_SHARE * max(0.0, -dot(ab, wh)));
   // Local contrast against the neighbourhood, then the midtone lift (up to SR_LIFT x s in all).
   float L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * s);
   L += max(0.0, SR_LIFT * s - lifted) * 4.0 * L * max(0.0, 1.0 - L);
@@ -842,9 +874,11 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   float onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
   lab.yz = greenNeutral(lab.x, lab.yz, p[22].w * (1.0 - RED_GN_OBJ_KEEP * conf));
   // Dark parts (a thresher's long tail) keep their colour: no cast clearing below SUBJECT_POP.keepDarkLo..Hi.
-  float tN = objectNeutral(lab.x, lab.yz, lin, onFar, ow, popS) * smoothstepf(SP_KEEP_LO, SP_KEEP_HI, lab.x);
+  // Under an AI mask (p24.y) the subject's cast is the AI restore's alone (SEG_RESTORE: a set share of it goes, never
+  // all): the pop's own cast clearing, its warm pop and its stronger warm clamp are for the engine's masks.
+  float tN = objectNeutral(lab.x, lab.yz, lin, onFar, p[24].y > 0.5 ? 0.0 : ow, popS) * smoothstepf(SP_KEEP_LO, SP_KEEP_HI, lab.x);
   float personS = person * (1.0 - p[16].w * (1.0 - redKeep));
-  scale *= warmClamp(lab.yz, lin, onFar, personS, popS);
+  scale *= warmClamp(lab.yz, lin, onFar, personS, p[24].y > 0.5 ? p[16].w : popS);
   vec2 nab = clearCast(lab.yz * scale, veilHue, tN / ON_MIX);
   float Ls = lab.x;
   vec3 lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - veilConf, p[16].x, p[16].y);
@@ -854,8 +888,12 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // its water darkening, then lifted; the chroma follows part of the lift: a lifted blue-grey stays blue-grey, not
   // a grey that reads peach next to saturated water, nor a cast belly turned cyan.
   vec3 lkV = vividLook(lk, p[23].z, p[22].w);
-  float Lv = popP > 0.0 ? vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w).x : lkV.x;
-  float Lp = popLift(Lv, popP);
+  // (Not under an AI mask: there the subject keeps the plain grade's lightness, see below.)
+  float Lv = popP > 0.0 && p[24].y <= 0.5 ? vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w).x : lkV.x;
+  // Under an AI mask the pop's own lift (or its deepening of a subject darker than the water) is left out: the AI
+  // restore's small lift is all the subject gets (SEG_RESTORE.lift), so its lightness against the water stays the
+  // plain grade's, and its chroma is not scaled along.
+  float Lp = p[24].y > 0.5 ? Lv : popLift(Lv, popP);
   // ...and their chroma follows the lift in full (saturation kept): a lifted navy tail stays navy, not grey-mauve.
   float cf = mix(SP_CHROMA_DARK, SP_CHROMA, smoothstepf(SP_KEEP_LO, SP_KEEP_HI, Lv));
   lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
@@ -863,7 +901,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   lk.yz = popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0));
   // The engine's own masks are blobs reaching past the animal: there the warmth also needs the pixel's own departure
   // from the water (it hugs the animal's outline); an AI mask is the outline already.
-  float wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * (p[24].y > 0.5 ? 1.0 : depart) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);
+  float wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * (p[24].y > 0.5 ? 0.0 : depart) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);
   lk.yz = warmPop(lk.x, lk.yz, wk);
   // Blue water style (opt-in, p25.w): cobalt water, orange warm subjects, neutral silver, deeper shadows.
   vec4 bl = blueLook(lk, p[25].w, p[22].w);
@@ -879,11 +917,11 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
   // AI subject restore: after every look, so none of them amplifies it.
-  if (segS > 0.0) lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), SP_LIFT * popP * p[24].x);
+  if (segS > 0.0) lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an));
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
   if (p[24].w > 1.0) lk.x = pow(max(lk.x, 0.0), p[24].w);
   // The warm chroma may exceed the source-relative cap (a cyan shark has little to start from).
-  vec3 o1 = oklabToLinear(capChroma(lk, max(max(max(cSrc, wk * WP_CMIN * 1.5), bl.w), segS > 0.0 ? SR_WARM_MAX : 0.0)));
+  vec3 o1 = oklabToLinear(capChroma(lk, max(max(cSrc, wk * WP_CMIN * 1.5), bl.w)));
   vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
   vec3 outS = linearToSrgb(o2);
   return mix(src, outS, strength);
@@ -1205,6 +1243,12 @@ fn subjectWeight(uv: vec2<f32>, coreJbu: f32, dev: f32) -> f32 {
   let trim = smoothstepf(BD_SUBJ_LO, BD_SUBJ_HI, dev);
   return max(core * mix(smoothstepf(BD_CORE_IN, 1.0, core) * smoothstepf(BD_CORE_LO, BD_CORE_HI, dev), 1.0, trim), min(min(1.0, ring), trim));
 }
+// With an AI overlay R also carries the subject's closeness (see the GLSL animalStrength).
+var<private> g_segClose: f32 = 1.0;
+fn segUnpack(r: f32) -> vec2<f32> {
+  let n = floor((r + 8.0) / SEG_PACK);
+  return vec2<f32>(r - SEG_PACK * n, n / SEG_LEVELS);
+}
 fn animalStrength(uv: vec2<f32>) -> vec4<f32> {
   let size = vec2<i32>(textureDimensions(u_data3, 0));
   let i = clamp(vec2<i32>(uv * vec2<f32>(size)), vec2<i32>(0), size - 1);
@@ -1212,8 +1256,20 @@ fn animalStrength(uv: vec2<f32>) -> vec4<f32> {
   let i0 = vec2<i32>(floor(f));
   let i1 = min(i0 + 1, size - 1);
   let t = f - vec2<f32>(i0);
-  let c = mix(mix(textureLoad(u_data3, i0, 0), textureLoad(u_data3, vec2<i32>(i1.x, i0.y), 0), t.x),
-              mix(textureLoad(u_data3, vec2<i32>(i0.x, i1.y), 0), textureLoad(u_data3, i1, 0), t.x), t.y);
+  var c00 = textureLoad(u_data3, i0, 0);
+  var c10 = textureLoad(u_data3, vec2<i32>(i1.x, i0.y), 0);
+  var c01 = textureLoad(u_data3, vec2<i32>(i0.x, i1.y), 0);
+  var c11 = textureLoad(u_data3, i1, 0);
+  g_segClose = 1.0;
+  if (params.p[24].y > 0.5) {
+    let u00 = segUnpack(c00.r);
+    let u10 = segUnpack(c10.r);
+    let u01 = segUnpack(c01.r);
+    let u11 = segUnpack(c11.r);
+    c00.r = u00.x; c10.r = u10.x; c01.r = u01.x; c11.r = u11.x;
+    g_segClose = mix(mix(u00.y, u10.y, t.x), mix(u01.y, u11.y, t.x), t.y);
+  }
+  let c = mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
   return vec4<f32>(select(textureLoad(u_data3, i, 0).r, c.r, params.p[24].y > 0.5), c.g, c.b, c.a);
 }
 fn objectWeight(conf: f32) -> f32 { return smoothstepf(ON_CONF_LO, ON_CONF_HI, conf); }
@@ -1288,17 +1344,22 @@ fn guideLum(uv: vec2<f32>) -> f32 {
   return lum(mix(mix(textureLoad(u_data2, i0, 0).rgb, textureLoad(u_data2, vec2<i32>(i1.x, i0.y), 0).rgb, t.x),
                  mix(textureLoad(u_data2, vec2<i32>(i0.x, i1.y), 0).rgb, textureLoad(u_data2, i1, 0).rgb, t.x), t.y));
 }
+// The colour share of the AI subject restore (see the GLSL segColourK).
+fn segColourK(an: vec4<f32>) -> f32 {
+  let d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
+  return smoothstepf(0.0, SR_EDGE, d) * mix(SR_FAR_KEEP, 1.0, clamp(g_segClose, 0.0, 1.0));
+}
 // AI subject restore (SEG_RESTORE; see the GLSL segRestore).
-fn segRestore(lk: vec3<f32>, s: f32, lr: f32, lifted: f32) -> vec3<f32> {
+fn segRestore(lk: vec3<f32>, s: f32, lr: f32, lifted: f32, ck: f32) -> vec3<f32> {
   if (s <= 0.0) { return lk; }
   let wh = vec2<f32>(SR_COS, SR_SIN);
   var ab = lk.yz;
   let C = length(ab);
   var cool = 0.0;
   if (C > 1e-5) { cool = smoothstepf(0.0, 0.5, -dot(ab, wh) / C); }
-  ab = ab * (1.0 - min(SR_CAST_MAX, SR_CAST * s) * cool);
+  ab = ab * (1.0 - min(SR_CAST_MAX, SR_CAST * s) * cool * ck);
   let lit = smoothstepf(SR_LIT_LO, SR_LIT_HI, lk.x) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
-  ab = ab + wh * clamp(SR_WARM_MAX * lit - dot(ab, wh), 0.0, SR_WARM * s * min(1.0, 2.0 * params.p[24].z) * lit);
+  ab = ab + wh * min(SR_WARM * s * min(1.0, 2.0 * params.p[24].z) * lit * ck, SR_WARM_SHARE * max(0.0, -dot(ab, wh)));
   var L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * s);
   L = L + max(0.0, SR_LIFT * s - lifted) * 4.0 * L * max(0.0, 1.0 - L);
   return vec3<f32>(L, ab);
@@ -1448,9 +1509,10 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let onFar = hueFar(lab0.yz, veilHue, ON_FAR_LO, ON_FAR_HI, achroma);
   let gnab = greenNeutral(lab.x, lab.yz, p[22].w * (1.0 - RED_GN_OBJ_KEEP * conf));
   lab = vec3(lab.x, gnab);
-  let tN = objectNeutral(lab.x, lab.yz, lin, onFar, ow, popS) * smoothstepf(SP_KEEP_LO, SP_KEEP_HI, lab.x);
+  // Under an AI mask the subject's cast is the AI restore's alone (see the GLSL).
+  let tN = objectNeutral(lab.x, lab.yz, lin, onFar, select(ow, 0.0, p[24].y > 0.5), popS) * smoothstepf(SP_KEEP_LO, SP_KEEP_HI, lab.x);
   let personS = person * (1.0 - p[16].w * (1.0 - redKeep));
-  scale *= warmClamp(lab.yz, lin, onFar, personS, popS);
+  scale *= warmClamp(lab.yz, lin, onFar, personS, select(popS, p[16].w, p[24].y > 0.5));
   let nab = clearCast(lab.yz * scale, veilHue, tN / ON_MIX);
   let Ls = lab.x;
   var lk = deepBlueLook(vec3(Ls, skinTone(Ls, nab, personS)), look, 1.0 - veilConf, p[16].x, p[16].y);
@@ -1458,13 +1520,14 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   lk = vec3(lk.x, gab);
   let lkV = vividLook(lk, p[23].z, p[22].w);
   var Lv = lkV.x;
-  if (popP > 0.0) { Lv = vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w).x; }
-  let Lp = popLift(Lv, popP);
+  if (popP > 0.0 && p[24].y <= 0.5) { Lv = vividLook(lk, p[23].z * (1.0 - SP_VIVID * min(1.0, popP)), p[22].w).x; }
+  // Under an AI mask the pop's own lift is left out (see the GLSL).
+  let Lp = select(popLift(Lv, popP), Lv, p[24].y > 0.5);
   let cf = mix(SP_CHROMA_DARK, SP_CHROMA, smoothstepf(SP_KEEP_LO, SP_KEEP_HI, Lv));
   lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
   lk = vec3(lk.x, highlightPink(lk.x, lk.yz));
   lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0)));
-  let wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * select(depart, 1.0, p[24].y > 0.5) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);
+  let wk = smoothstepf(WP_WLO, WP_WHI, ow) * p[24].z * select(depart, 0.0, p[24].y > 0.5) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);
   lk = vec3(lk.x, warmPop(lk.x, lk.yz, wk));
   let bl = blueLook(lk, params.p[25].w, p[22].w);
   lk = bl.xyz;
@@ -1475,10 +1538,10 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2<f32>(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
   // AI subject restore: after every look, so none of them amplifies it.
-  if (segS > 0.0) { lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), SP_LIFT * popP * p[24].x); }
+  if (segS > 0.0) { lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an)); }
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
   if (params.p[24].w > 1.0) { lk = vec3(pow(max(lk.x, 0.0), params.p[24].w), lk.yz); }
-  let o1 = oklabToLinear(capChroma(lk, max(max(max(cSrc, wk * WP_CMIN * 1.5), bl.w), select(0.0, SR_WARM_MAX, segS > 0.0))));
+  let o1 = oklabToLinear(capChroma(lk, max(max(cSrc, wk * WP_CMIN * 1.5), bl.w)));
   let o2 = fitToGamut(o1 * detailRatio(src, lin));
   let outS = linearToSrgb(o2);
   return mix(src, outS, strength);

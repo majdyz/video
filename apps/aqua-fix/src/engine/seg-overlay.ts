@@ -3,6 +3,7 @@
 // (composeSegStrength; grade-shader toneWeight). Without an overlay it is the engine's alone (B = A = 0).
 import { SEG_TONE } from "./grade-shader.ts";
 import { linearToOklab } from "./color.ts";
+import { SEG_RESTORE } from "./params.ts";
 
 function sstep(lo: number, hi: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - lo) / (hi - lo)));
@@ -31,6 +32,18 @@ export type SegOverlay = {
    */
   pop?: number | null;
 };
+
+/**
+ * Whether the engine's own subject maps tone the frame: Subject pop on and no AI overlay on it. Only then does the
+ * engine make its maps follow the picture at the subject's pace (the guide and the backdrop surface eased fast, the
+ * animals' part of the map led along their motion: engine.ts smooth / leadAnimals). Those steps move every pixel a
+ * little (the guide rebuilds the chroma, the backdrop surface decides water against object), so with an AI overlay,
+ * where the AI's mask alone weights the pop, they are left out: outside the AI's mask the picture is the plain
+ * grade's, to the code value (owner's proof run, 12 Nov: the AI export was ~0.4% greener all over the frame).
+ */
+export function engineSubjectMaps(subjectPop: boolean, aiOverlay: boolean): boolean {
+  return subjectPop && !aiOverlay;
+}
 
 /**
  * Subject pop lift direction for a frame drawn with overlay `o`: the clip's own measure when the overlay carries one
@@ -124,6 +137,22 @@ type Guide = { width: number; height: number; data: Float32Array };
 /** R value of composeSegStrength on thick parts (the grade skips its per-pixel water test above 2). */
 export const SEG_THICK = 9;
 
+/**
+ * The R channel of the strength texture with an AI overlay: its value (the local water's L, −1 or SEG_THICK) and the
+ * subject's closeness (0..1, in SEG_RESTORE.levels steps) in one float: R + pack × the step. The readers (grade-shader
+ * animalStrength, apply.ts segSample) unpack each texel before they interpolate, so both come out bilinear. A
+ * closeness of 0 leaves R as it was.
+ */
+export function packSegR(r: number, close: number): number {
+  return r + SEG_RESTORE.pack * Math.round(Math.min(1, Math.max(0, close)) * SEG_RESTORE.levels);
+}
+
+/** packSegR back: [R, closeness]. */
+export function unpackSegR(r: number): [number, number] {
+  const n = Math.floor((r + 8) / SEG_RESTORE.pack);
+  return [r - SEG_RESTORE.pack * n, n / SEG_RESTORE.levels];
+}
+
 /** Bilinear resize of a w × h map to W × H (pixel centres aligned). */
 function resample(f: Float32Array, w: number, h: number, W: number, H: number): Float32Array {
   const out = new Float32Array(W * H);
@@ -162,7 +191,7 @@ function chamfer(bin: Uint8Array, w: number, h: number): Float32Array {
  * The local water's Oklab L and the regional trust (see SEG_WATER) on the overlay grid, from the
  * analysis guide (linear RGB, RGBA). Null when the frame shows no water clear of the mask (the subject fills it).
  */
-export function waterField(g: Guide, o: SegOverlay): { L: Float32Array; trust: Float32Array } | null {
+export function waterField(g: Guide, o: SegOverlay): { L: Float32Array; trust: Float32Array; sep: { width: number; height: number; dE: Float32Array; inside: Float32Array } } | null {
   const gw = g.width, gh = g.height, W = o.width, H = o.height, n = gw * gh;
   const lab = new Float32Array(n * 3), clear = new Uint8Array(n), inside = new Float32Array(n);
   for (let y = 0; y < gh; y++) {
@@ -234,7 +263,47 @@ export function waterField(g: Guide, o: SegOverlay): { L: Float32Array; trust: F
   const num = blur(evIn, gw, gh, rr), den = blur(inside, gw, gh, rr);
   const share = Float32Array.from(num, (v, i) => (den[i] > 1e-3 ? v / den[i] : 1));
   const trust = blur(share.map((v) => sstep(SEG_WATER.trustLo, SEG_WATER.trustHi, v)), gw, gh, rr);
-  return { L: resample(water[0], gw, gh, W, H), trust: resample(trust, gw, gh, W, H) };
+  // How far each guide texel stands off its local water (Oklab ΔE), for the subjects' closeness (subjectCloseness).
+  const dE = new Float32Array(n);
+  for (let i = 0; i < n; i++) dE[i] = Math.hypot(lab[i * 3] - water[0][i], lab[i * 3 + 1] - water[1][i], lab[i * 3 + 2] - water[2][i]);
+  return { L: resample(water[0], gw, gh, W, H), trust: resample(trust, gw, gh, W, H), sep: { width: gw, height: gh, dE, inside } };
+}
+
+/**
+ * How close each subject of the mask is, 0..1 per overlay texel (0 off the mask), for the colour share of the AI
+ * subject restore (SEG_RESTORE veilLo..veilHi): water veils what is far away, so a subject that hardly stands out
+ * from the water around it (the mean Oklab ΔE of its texels on the analysis guide against the local water) is far,
+ * whatever its size, and keeps most of the water's colour; one that stands out clearly is close. One value per
+ * connected part of the mask (alpha over 0.5): the whole animal gets the same share, no patches. A part too small
+ * to cover a guide texel is not measured: 0 (it is thin anyway: the colour share never gets past farKeep there).
+ * `sep` null (no guide, or no water to compare with): 1 everywhere on the mask.
+ */
+export function subjectCloseness(o: SegOverlay, sep: { width: number; height: number; dE: Float32Array; inside: Float32Array } | null): Float32Array {
+  const W = o.width, H = o.height, out = new Float32Array(W * H);
+  if (!sep) { for (let i = 0; i < W * H; i++) out[i] = o.alpha[i] > 0.5 ? 1 : 0; return out; }
+  const lab = new Int32Array(W * H), stack: number[] = [];
+  let parts = 0;
+  for (let s = 0; s < W * H; s++) {
+    if (!(o.alpha[s] > 0.5) || lab[s]) continue;
+    lab[s] = ++parts; stack.push(s);
+    while (stack.length) {
+      const i = stack.pop()!, x = i % W;
+      if (x > 0 && o.alpha[i - 1] > 0.5 && !lab[i - 1]) { lab[i - 1] = parts; stack.push(i - 1); }
+      if (x < W - 1 && o.alpha[i + 1] > 0.5 && !lab[i + 1]) { lab[i + 1] = parts; stack.push(i + 1); }
+      if (i >= W && o.alpha[i - W] > 0.5 && !lab[i - W]) { lab[i - W] = parts; stack.push(i - W); }
+      if (i < W * H - W && o.alpha[i + W] > 0.5 && !lab[i + W]) { lab[i + W] = parts; stack.push(i + W); }
+    }
+  }
+  if (!parts) return out;
+  const sum = new Float64Array(parts + 1), cnt = new Float64Array(parts + 1);
+  for (let y = 0; y < sep.height; y++) for (let x = 0; x < sep.width; x++) {
+    const gi = y * sep.width + x;
+    if (!sep.inside[gi]) continue;
+    const l = lab[Math.min(H - 1, Math.floor(((y + 0.5) / sep.height) * H)) * W + Math.min(W - 1, Math.floor(((x + 0.5) / sep.width) * W))];
+    if (l) { sum[l] += sep.dE[gi]; cnt[l]++; }
+  }
+  for (let i = 0; i < W * H; i++) if (lab[i] && cnt[lab[i]] > 0) out[i] = sstep(SEG_RESTORE.veilLo, SEG_RESTORE.veilHi, sum[lab[i]] / cnt[lab[i]]);
+  return out;
 }
 
 /** Square max filter of radius r (separable). */
@@ -257,7 +326,8 @@ function maxFilter(src: Float32Array, w: number, h: number, r: number): Float32A
  * Overlay (+ the analysis guide) → the RGBA texture the grade reads with an AI overlay on the frame (grade-shader
  * animalStrength / toneWeight, at the overlay's size):
  *   R  the local water's Oklab L (waterField; −1 without water to compare with, or without a guide), on thin parts
- *      (a short ramp-in, see B) only: thick parts carry SEG_THICK (no per-pixel water test);
+ *      (a short ramp-in, see B) only: thick parts carry SEG_THICK (no per-pixel water test); packed with the
+ *      subject's closeness (packSegR; subjectCloseness: the AI restore's colour share, SEG_RESTORE.farKeep);
  *   G  the regional trust (waterField: a leak onto the water is under-popped as a region; 1 without a guide);
  *   B  the ML alpha as the mask's signed distance (0.5 on the contour, SEG_TONE.alphaR), its inside slope eased by
  *      the local thickness: the tone ramps in over rampK × the part's half-width, between SEG_TONE.rampIn and
@@ -273,6 +343,8 @@ export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): {
   const dIn = chamfer(bin, W, H);
   // Local half-width: the largest inside distance nearby (a body's spine), smoothed so the ramp length varies slowly.
   const thick = blur(maxFilter(Float32Array.from(dIn, (d, i) => (bin[i] ? d : 0)), W, H, SEG_WATER.thickR), W, H, Math.round(SEG_WATER.thickR / 2));
+  // (Spread a little past the mask: the texels just outside the contour are read with it, bilinearly.)
+  const close = maxFilter(subjectCloseness(o, wf ? wf.sep : null), W, H, 2);
   for (let i = 0; i < W * H; i++) {
     let a = o.alpha[i];
     const ramp = Math.min(SEG_WATER.rampLong, Math.max(SEG_TONE.rampIn, SEG_WATER.rampK * thick[i]));
@@ -281,7 +353,7 @@ export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): {
       a = Math.min(a, 0.5 + Math.min(R, Math.max(0, dIn[i] - 0.5) * (SEG_TONE.rampIn / ramp)) / (2 * R));
     }
     // Thick parts carry R = SEG_THICK (no per-pixel test: their ramp is long, the contour's water gets next to nothing).
-    out[i * 4] = !wf ? -1 : ramp > 1.5 * SEG_TONE.rampIn ? SEG_THICK : wf.L[i];
+    out[i * 4] = packSegR(!wf ? -1 : ramp > 1.5 * SEG_TONE.rampIn ? SEG_THICK : wf.L[i], close[i]);
     out[i * 4 + 1] = (wf ? wf.trust[i] : 1) * (o.quality ?? 1);
     out[i * 4 + 2] = a;
     out[i * 4 + 3] = o.near[i];

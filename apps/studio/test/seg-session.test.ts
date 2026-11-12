@@ -108,6 +108,7 @@ type Run = {
   traces: string[];
   /** Called on every progress event (taps: tapped objects still being followed). */
   onProgress: ((done: number, total: number, taps: number) => void) | null;
+  onPeek?: (k0: number, state: string) => void;
   /** Resolves at the next idle or error. */
   settled(): Promise<void>;
 };
@@ -125,6 +126,7 @@ function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: numbe
     keys: () => undefined,
     progress: (d, t, taps) => r.onProgress?.(d, t, taps),
     trace: (msg) => { r.traces.push(msg); },
+    peek: (k0, state) => r.onPeek?.(k0, state),
     idle: () => { r.idles++; done(); },
     rejected: () => undefined,
     needSeeds: (k, t, search) => {
@@ -623,8 +625,10 @@ const restarts = (reads: number[]) => reads.filter((t, i) => i > 0 && (t < reads
   const f = fake({ lite: true });
   const r = open(f, { start: 0, end: 14 }, (t) => [subject(t)]);
   assert.equal(r.s.focus(at, [subject(at)]), false, "not before the pass has its first seeds");
-  let asked = false, shownAt = -1, taken = false, near = true, again = true;
+  let asked = false, shownAt = -1, taken = false, near = true, again = true, margin = -1;
   const on = () => { const x = r.frames.get(gi); return !!x && rleDecode(x.alpha, 320 * 40).some((a) => a > 127); };
+  const peeks: string[] = [];
+  r.onPeek = (k0, state) => peeks.push(`${k0} ${state}`);
   r.onProgress = () => {
     if (!asked) {
       asked = true;
@@ -634,11 +638,18 @@ const restarts = (reads: number[]) => reads.filter((t, i) => i > 0 && (t < reads
       again = r.s.focus(at + 0.05, [subject(at)]);
     }
     if (shownAt < 0 && on()) shownAt = f.encodes;
+    // Once the peek's forward step has come (the pass itself is seconds of clip away): how far behind the playhead
+    // the frames are filled.
+    if (margin < 0 && f.encoded.includes(9.5) && !f.encoded.includes(1.5)) { let i = gi; while (r.frames.has(i - 1)) i--; margin = gi - i; }
   };
   end = r.settled();
   r.s.seeds(0, [subject(0)]);
   await end;
   assert.equal(r.errors.length, 0);
+  assert.deepEqual(peeks, ["9 looking", "9 following"], "the look says when it is taken up and that it has a subject");
+  // The overlay's weight eases to nothing over 9 frames (0.3 s) toward unfilled frames: the playhead's frame, 3
+  // frames after its keyframe, had a mask too weak to be popped. Now the peek fills at least that far behind it.
+  assert.ok(margin >= 9, `the frames are filled ${margin} frames behind the playhead`);
   assert.equal(near, false, "no peek where the pass is within SEG.peekSkipS");
   assert.equal(taken, true);
   assert.equal(again, false, "the same keyframe is looked at once");
@@ -646,7 +657,8 @@ const restarts = (reads: number[]) => reads.filter((t, i) => i > 0 && (t < reads
   // the pass needs to get there.
   assert.ok(shownAt > 0 && shownAt <= 4, `the playhead's frame was popped after ${shownAt} encodes`);
   const order = f.encoded.slice(0, 6);
-  assert.deepEqual(order.slice(1, 4), [9, 9.5, 10], `the peek's keyframes right after the pass's first (${order})`);
+  // (9, the keyframe before it for the margin behind the playhead, then ahead.)
+  assert.deepEqual(order.slice(1, 5), [9, 8.5, 9.5, 10], `the peek's keyframes right after the pass's first (${order})`);
   assert.ok(f.stepped.some((x) => x.key === "-1f"), "followed as a provisional object");
   // Provisional: the finished pass is the pass without it (keyframes, every frame's maps), so an export is too.
   assert.deepEqual(r.s.keys, p.s.keys, "the peek adds no keyframe");
@@ -670,6 +682,9 @@ const restarts = (reads: number[]) => reads.filter((t, i) => i > 0 && (t < reads
   q.s.seeds(0, [subject(0)]);
   await end;
   assert.deepEqual(g.encoded.slice(1, 5), [9, 8.5, 9.5, 10], `${g.encoded.slice(0, 6)}`);
+  // The look's own search is the short one: it ends at its first find (the full one probes all 12 points here).
+  assert.equal(q.traces.filter((x) => x.startsWith("auto: probe ")).length, 1, "one probe, not twelve");
+  assert.equal(g.encoded.filter((x) => x === 9).length, 2, "the searched frame is not encoded again for the peek's first step (once more by the pass)");
   assert.ok(seen > 0 && seen <= 3, `popped after ${seen} encodes`);
   sameFrames(p.frames, q.frames, "with / without a look just before a keyframe");
 

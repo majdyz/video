@@ -16,7 +16,10 @@
 // - Playhead first (focus): where the user is paused ahead of the pass, the subjects of that frame are followed for
 //   a few keyframes right away ("peek" objects, on regular keyframes only), so the frame on screen has its masks
 //   within seconds. They are provisional: dropped when the pass gets there (or ends), so the finished pass, and an
-//   export, are the same as without them.
+//   export, are the same as without them. The peek reaches SEG.peekBackS behind the playhead as well as SEG.peekS
+//   ahead of it (the overlay's weight eases to nothing toward unfilled frames, studio-seg.ts frameWeight: a playhead
+//   at the edge of the peek had a mask too weak to be popped), and with no subject from the engine it looks itself
+//   with a short search (autoSeedsNow quick: the first find, centre first; the full 24-point one is the pass's).
 // - Tracking uses the EdgeTAM memory tracker on a keyframe grid with the flow guard of the batch pass: SEG.fps (4) a
 //   second, or, on the lite (phone) model, SEG.liteFps (2) with extra keyframes in between wherever the tracker and
 //   the flow-carried mask disagree (adaptive: a calm clip costs half the model runs, a hard stretch what it did).
@@ -100,6 +103,9 @@ export type SessionEvents = {
   error?(msg: string): void;
   /** Breadcrumbs of the heavy steps (the main thread keeps them: a phone that kills the page leaves no log). */
   trace?(msg: string): void;
+  /** The playhead's peek at keyframe k0 (focus): "looking" when it is taken up (the model's search, the first
+   * steps), "following" once it has subjects to follow, "none" when it found nothing there. */
+  peek?(k0: number, state: "looking" | "following" | "none"): void;
 };
 
 type ObjState = {
@@ -357,12 +363,18 @@ export class SegSession {
    */
   focus(t: number, objs: SegObject[], search = false): boolean {
     if (this.closed || !this.segStarts.length || !this.base.length) return false;
-    let k0 = this.base[0];
-    for (const k of this.base) if (Math.abs(k - t) < Math.abs(k0 - t)) k0 = k;
+    const k0 = this.peekKeyOf(t);
     if (k0 === this.peekKey || k0 === this.peekReq?.k0 || !(k0 > this.front() + SEG.peekSkipS)) return false;
     this.peekReq = { t, k0, objs, search };
     void this.run();
     return true;
+  }
+
+  /** The regular keyframe a look at clip time t is made at (the nearest). */
+  peekKeyOf(t: number): number {
+    let k0 = this.base[0] ?? t;
+    for (const k of this.base) if (Math.abs(k - t) < Math.abs(k0 - t)) k0 = k;
+    return k0;
   }
 
   private async startPeek(): Promise<void> {
@@ -372,10 +384,13 @@ export class SegSession {
     this.dropPeek();
     this.peekKey = r.k0;
     this.enter("peek", `${r.k0.toFixed(2)}s`);
+    this.ev.peek?.(r.k0, "looking");
     let objs = r.objs;
     if (!objs.length && r.search) {
       try {
-        objs = await this.autoSeedsNow(r.k0);
+        // The short search (the first find, centre first): the full one is ~25 decoder runs before the first step,
+        // half a minute on a phone or on WASM, and these objects are provisional anyway.
+        objs = await this.autoSeedsNow(r.k0, true);
       } catch (e) {
         if (e !== PREEMPT) throw e;
         // A tap came in during the search: the look is taken up again after it (unless another place was asked for).
@@ -389,17 +404,26 @@ export class SegSession {
     }
     const i = this.base.indexOf(r.k0);
     const fwd = this.base.filter((k) => k >= r.k0 - 1e-6 && k <= r.k0 + SEG.peekS + 1e-6);
-    // The keyframe is after the playhead: the one before it too, first, so the playhead's interval has both ends.
-    const back = r.k0 > r.t + 1e-6 && i > 0;
-    this.peekFrom = back ? this.base[i - 1] : r.k0;
+    // Backward first, to the regular keyframe at or before the playhead less SEG.peekBackS: the playhead's interval
+    // gets both its ends (a keyframe just after the playhead), and the frames filled reach far enough behind the
+    // playhead for its mask to count in full (the overlay's weight eases to nothing over 0.3 s toward unfilled
+    // frames: a playhead just after its keyframe had a mask under the pop's threshold, "Finding subjects" for good).
+    // Never back to where the pass is about to be.
+    const lo = Math.max(r.t - SEG.peekBackS, this.front() + SEG.peekSkipS);
+    const bwd = [r.k0];
+    for (let j = i - 1; j >= 0 && bwd[bwd.length - 1] > lo + 1e-6 && this.base[j] > this.front() + 1e-6; j--) bwd.push(this.base[j]);
+    const back = bwd.length > 1;
+    this.peekFrom = bwd[bwd.length - 1];
     for (const o of objs.slice(0, Math.min(this.autoCap, this.peekCap))) {
       if (o.kind !== "include") continue;
-      const s = this.newObj({ ...o, t: r.k0, id: this.peekIds-- }, false, -1, false, fwd.slice(), back ? [r.k0, this.base[i - 1]] : []);
+      const s = this.newObj({ ...o, t: r.k0, id: this.peekIds-- }, false, -1, false, fwd.slice(), back ? bwd.slice() : []);
       s.peek = true;
       s.backFirst = back;
       this.objs.set(s.o.id, s);
     }
-    if (![...this.objs.values()].some((s) => s.peek)) this.leave("nothing to follow");
+    const any = [...this.objs.values()].some((s) => s.peek);
+    this.ev.peek?.(r.k0, any ? "following" : "none");
+    if (!any) this.leave("nothing to follow");
   }
 
   /** Drops the peek objects; the intervals they were in are filled again without them (by the pass as it comes). */
@@ -704,8 +728,12 @@ export class SegSession {
     });
   }
 
-  /** Throws PREEMPT when a tap is waiting (checked before the frame is encoded and before every probe). */
-  private async autoSeedsNow(t0: number): Promise<SegObject[]> {
+  /**
+   * Throws PREEMPT when a tap is waiting (checked before the frame is encoded and before every probe). quick (the
+   * playhead's peek): the points nearest the centre first, and the first candidate ends the search (a few decoder
+   * runs instead of every point's); not for a segment's seeds, which must be the same whenever they are made.
+   */
+  private async autoSeedsNow(t0: number, quick = false): Promise<SegObject[]> {
     const t = this.snap(t0), A = AUTO, { mw: w, mh: h } = this;
     if (this.tapWaiting()) throw PREEMPT;
     this.ev.trace?.("auto: decode");
@@ -715,14 +743,21 @@ export class SegSession {
     this.ev.trace?.("auto: encode");
     await this.model.encode(rgba1024!);
     this.ev.trace?.("auto: encoded; probing");
-    this.lastEncoded = NaN;
+    // The model holds this frame's features from here on (a probe reads them and leaves them): the first step of the
+    // seeds this search finds, on this same frame, runs on them. It used to encode the frame a second time (seconds
+    // on a phone or on WASM, right when the pass could at last begin).
+    this.lastEncoded = t;
     const cands: { m: Float32Array; q: number }[] = [];
     const stats: string[] = [];
     // The lite (phone) model probes a coarser grid: each probe is a full decoder run, and the phone's memory is tight.
     const cols = this.model.lite ? A.liteCols : A.cols, rows = this.model.lite ? A.liteRows : A.rows;
     let probes = 0;
-    for (let gy = 0; gy < rows; gy++) for (let gx = 0; gx < cols; gx++) {
-      const u = (gx + 0.5) / cols, v = (gy + 0.5) / rows;
+    const pts: [number, number][] = [];
+    for (let gy = 0; gy < rows; gy++) for (let gx = 0; gx < cols; gx++) pts.push([(gx + 0.5) / cols, (gy + 0.5) / rows]);
+    // (A stable sort: points equally far from the centre keep their grid order.)
+    if (quick) pts.sort((a, b) => Math.hypot(a[0] - 0.5, a[1] - 0.5) - Math.hypot(b[0] - 0.5, b[1] - 0.5));
+    for (const [u, v] of pts) {
+      if (quick && cands.length) break;
       if (this.tapWaiting()) throw PREEMPT;
       if (probes < 2) this.ev.trace?.(`auto: probe ${probes + 1}/${cols * rows}`);
       const r = await this.model.probe([[u * 1024, v * 1024]], [1]);
@@ -739,7 +774,7 @@ export class SegSession {
       cands.push({ m, q: r.iou + c });
     }
     cands.sort((x, y) => y.q - x.q);
-    console.info(`[seg] auto seeds at ${t.toFixed(2)} s: ${cands.length} candidate(s) of ${cols * rows} points (${stats.join(" ")})`);
+    console.info(`[seg] auto seeds at ${t.toFixed(2)} s${quick ? " (quick)" : ""}: ${cands.length} candidate(s) of ${quick ? `${probes} of ` : ""}${cols * rows} points (${stats.join(" ")})`);
     const keep: Float32Array[] = [];
     for (const c of cands) {
       if (keep.length >= A.max) break;
