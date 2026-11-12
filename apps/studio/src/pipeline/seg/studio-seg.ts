@@ -18,6 +18,7 @@ import { blobCandidates, SEEDS, type SeedCandidate } from "./seeds.ts";
 import { buildId } from "../export-key.ts";
 import type { SessionFrameOut } from "./session.ts";
 import { followFrame, SEG_EXPORT, segExportKey } from "./export-use.ts";
+import { loadAttempts, loadWithRetry } from "./load-retry.ts";
 import { etaSeconds } from "../eta.ts";
 
 const PREF_KEY = "deepfix.subjectPop.ai";
@@ -788,8 +789,27 @@ export class SubjectSeg {
   /** The toggle. Turning it on starts the model download (progress in status). */
   setOn(on: boolean): void {
     writePref(on);
+    // Off: the worker goes (its memory, and whatever state its runtime was in: turning AI off and on again is a
+    // user's way out of a model that misbehaves, and must give a fresh worker). The masks made so far stay, as
+    // after a hibernation; turned on again, an unfinished pass starts again from its inputs (wake).
+    if (!on && this.model) {
+      clearTimeout(this.hibTimer);
+      crumb("ai: off, worker shut down");
+      aiWorking(false);
+      this.model.dispose();
+      this.model = null;
+      this.busy = false;
+      this.passSince = 0;
+      this.tapBusy = false;
+      this.turns.tapEnded();
+      this.peek = null;
+      if (this.live) { this.hibernated = true; this.onHibernate?.(); }
+    }
     this.set({ on, phase: on ? (this.model ? "ready" : "download") : "off", progress: null, note: null, crashed: false });
-    if (on && !this.hibernated) void this.ensureModel();
+    if (!on) return;
+    if (!this.hibernated) void this.ensureModel();
+    else if (!this.passDone && this.live && !this.heldForExport) void this.wake();
+    else if (this.live) this.set({ phase: "ready" });
   }
 
   ensureModel(): Promise<WorkerSegModel | null> {
@@ -813,9 +833,22 @@ export class SubjectSeg {
     // WASM when it was on WebGPU, else with AI off.
     aiWorking(true, rt.wasm ? "wasm" : "webgpu");
     this.loading = (async () => {
-      const m = new WorkerSegModel(rt.wasm);
       try {
-        await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: rt.wasm ? "wasm" : "auto", lite });
+        // A start that fails is tried once more in a fresh worker, on plain WASM with one thread (load-retry.ts:
+        // the runtime keeps a failed start for the life of its worker, "previous call to 'initWasm()' failed").
+        const { model: m, tries } = await loadWithRetry({
+          attempts: loadAttempts({ wasm: rt.wasm }),
+          make: (a) => new WorkerSegModel(a.wasm),
+          load: (w, a) => w.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: a.wasm ? "wasm" : "auto", lite, threads: a.threads }),
+          dispose: (w) => w.dispose(),
+          onFailed: (e, a, retrying) => {
+            // The first failure's own words: the one worth having on a phone (About, the crash crumbs).
+            crumb(`ai: model start failed (${a.wasm ? "wasm" : "webgpu"}${a.threads ? `, ${a.threads} thr` : ""}): ${errText(e)}${retrying ? "; once more in a fresh worker (wasm, 1 thread)" : ""}`);
+            segLog(`model failed to start${retrying ? "; trying a fresh worker on WASM with one thread" : ""}`, e);
+            if (retrying) { aiWorking(true, "wasm"); this.set({ phase: "starting", progress: null }); }
+          },
+        });
+        if (tries > 1) crumb("ai: model started at the second try");
         m.onEvent = (e) => this.onEvent(e);
         this.model = m;
         // What it got (WebGPU falls back to WASM in the worker when no adapter comes).
@@ -824,7 +857,6 @@ export class SubjectSeg {
         this.set({ phase: "ready", progress: null });
         return m;
       } catch (e) {
-        m.dispose();
         segLog("model failed to load; using the engine's masks", e);
         crumb(`ai: model failed: ${errText(e)}`);
         // The reason rides along (shown in Subjects): a phone can't be debugged from here otherwise.

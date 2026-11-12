@@ -1,6 +1,7 @@
 // AI subject detection, the background session (seg/session.ts) on a fake model and fake frames: what it does when
 // the model throws, and that its masks are a function of its inputs alone.
 //   node --experimental-strip-types apps/studio/test/seg-session.test.ts
+import { postFrames } from "./seg-post.ts";
 import assert from "node:assert/strict";
 import type { EdgeTam } from "../src/pipeline/seg/edgetam.ts";
 import { frameKey, SegSession, type SessionEvents, type SessionFrameOut, type SessionFrames, type SessionOptions } from "../src/pipeline/seg/session.ts";
@@ -122,7 +123,7 @@ function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: numbe
     settled: () => new Promise<void>((res) => { wake = res; }),
   };
   const ev: SessionEvents = {
-    frames: (items) => { for (const x of items) r.frames.set(x.i, x); },
+    frames: (items) => { for (const x of postFrames(items)) r.frames.set(x.i, x); },
     keys: () => undefined,
     progress: (d, t, taps) => r.onProgress?.(d, t, taps),
     trace: (msg) => { r.traces.push(msg); },

@@ -132,6 +132,16 @@ export type SessionObjectInfo = { id: number; kind: "include" | "exclude"; t: nu
  * Subject pop direction (studio-seg.ts SegLive.pop). */
 export type SessionFrameOut = { i: number; alpha: Uint8Array; nearQ: Uint8Array; excQ: Uint8Array | null; depQ: Uint8Array; pop?: number | null };
 export type SessionProfile = Record<string, number>;
+
+/**
+ * The buffers of posted frames, for the worker's transfer list (seg-serve.ts). Every map of every frame must have a
+ * buffer of its own: a buffer named twice makes postMessage throw ("ArrayBuffer at index 3 is a duplicate of an
+ * earlier ArrayBuffer"), and that throw ends the pass. The tests post their frames through structuredClone with
+ * this list (test/seg-post.ts), as the worker does.
+ */
+export function frameTransfers(items: readonly SessionFrameOut[]): ArrayBuffer[] {
+  return items.flatMap((x) => [x.alpha.buffer, x.nearQ.buffer, x.depQ.buffer, ...(x.excQ ? [x.excQ.buffer] : [])]) as ArrayBuffer[];
+}
 export type SessionEvents = {
   frames(items: SessionFrameOut[]): void;
   keys(conf: { t: number; conf: number }[]): void;
@@ -1737,7 +1747,12 @@ export class SegSession {
     const inc = guidedFilterNear(luma, remap(u.inc), this.mw, this.mh, gr, SEG.guidedEps);
     const exc = u.exc ? guidedFilterNear(luma, remap(u.exc), this.mw, this.mh, gr, SEG.guidedEps) : null;
     const first = this.product(i0, inc, exc, luma), out: SessionFrameOut[] = [];
-    for (let i = i0; i < this.grid.n && i <= i0 + Math.round(SEG.earlyS * hz); i++) if (!this.posted?.[i]) out.push({ ...first, i, pop: null });
+    // (Each frame its own copies: the frames are handed to the main thread by their buffers, frameTransfers, and
+    // one buffer cannot go twice. The first version posted the same four arrays under eleven frame numbers: the
+    // worker's postMessage threw and the pass ended at its first seed.)
+    for (let i = i0; i < this.grid.n && i <= i0 + Math.round(SEG.earlyS * hz); i++) {
+      if (!this.posted?.[i]) out.push({ i, alpha: first.alpha.slice(), nearQ: first.nearQ.slice(), excQ: first.excQ ? first.excQ.slice() : null, depQ: first.depQ.slice(), pop: null });
+    }
     if (out.length && !this.closed) this.ev.frames(out);
   }
 

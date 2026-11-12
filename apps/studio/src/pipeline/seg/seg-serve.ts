@@ -4,7 +4,7 @@
 import { wasmHeapMB } from "./wasm-heap.ts";
 import type * as OrtNS from "onnxruntime-web";
 import { EdgeTam, type BankParams, type GraphName } from "./edgetam.ts";
-import { SegSession, type SessionFrames } from "./session.ts";
+import { frameTransfers, SegSession, type SessionFrames } from "./session.ts";
 import { openSessionFrames } from "./frames.ts";
 import type { SegObject } from "./track.ts";
 import type { SeedCandidate } from "./seeds.ts";
@@ -92,7 +92,7 @@ async function openSession(model: EdgeTam, r: Extract<Req, { type: "session-open
   // frames would land on the new session's grid.
   const mine = () => session === s;
   const s: SegSession = new SegSession(model, frames, { start: r.start, end: r.end }, {
-    frames: (items) => { if (mine()) emit({ ev: "frames", items }, items.flatMap((x) => [x.alpha.buffer, x.nearQ.buffer, x.depQ.buffer, ...(x.excQ ? [x.excQ.buffer] : [])])); },
+    frames: (items) => { if (mine()) emit({ ev: "frames", items }, frameTransfers(items)); },
     keys: (conf) => { if (mine()) emit({ ev: "keys", conf }); },
     progress: (done, total, taps) => { if (mine()) emit({ ev: "progress", done, total, taps, heapMB: wasmHeapMB() }); },
     idle: (profile) => { if (mine()) emit({ ev: "idle", profile: { ...profile, heapMB: wasmHeapMB() } }); },

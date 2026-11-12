@@ -9,6 +9,7 @@ import { SegSession, type SessionEvents, type SessionFrameOut, type SessionFrame
 import type { SegObject } from "../src/pipeline/seg/track.ts";
 import { dilate, dilateBin, guidedFilter, guidedFilterNear, maskWindows, nearMap, nearMapNear, rleDecode, sdfFeather, sdfFeatherNear } from "../src/pipeline/seg/mask.ts";
 import { gridWanted, STRIDE, strideDue } from "../src/pipeline/seg/seeds.ts";
+import { postFrames } from "./seg-post.ts";
 
 // ---------------------------------------------------------------- the rule
 {
@@ -140,7 +141,8 @@ async function run(f: Fake, opts: SessionOptions = {}): Promise<Run> {
   let finish!: () => void;
   const r: Run = { s: null as unknown as SegSession, frames: new Map(), errors: [], done: new Promise<void>((res) => { finish = res; }), posts: [] };
   const ev: SessionEvents = {
-    frames: (items) => { r.posts.push({ is: items.map((x) => x.i), steps: f.stepped.length }); for (const x of items) r.frames.set(x.i, x); },
+    // (Through the worker's transfer rules: seg-post.ts.)
+    frames: (items) => { r.posts.push({ is: items.map((x) => x.i), steps: f.stepped.length }); for (const x of postFrames(items)) r.frames.set(x.i, x); },
     keys: () => undefined, progress: () => undefined, rejected: () => undefined,
     idle: () => finish(),
     // The later looks find nothing new (the subject is followed on).
