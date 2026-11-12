@@ -28,6 +28,12 @@ export const SEEDS = {
   span: 0.9,
   /** A region that looks this much like a column of bubbles is left out. */
   bubble: 0.5,
+  /** Under this much of the engine's confidence that the frame is open water (engine waterValidity: 0.9–1 on a
+   * school in the blue, 0.45–0.67 with big sharks close up, 0.0–0.6 on a clip over the seabed), a region is only a
+   * candidate when the engine itself took it for a subject (a confident seed in it, an outline, not the bottom),
+   * and the model must be surer of it (session.ts AUTO.strictIou / strictContrast): over a seabed the regions are
+   * dark patches and shadows (owner's ray clip, 20 s: three of them seeded, ΔE 2.3–5.7, IoU 0.33–0.69). */
+  openWater: 0.8,
   /** Candidates handed to the model at a look, most promising first: each is one decoder run (~0.3 s on a desktop's
    * WASM, the lite model), against the blind grid's 12 + 36. */
   probes: 8,
@@ -49,6 +55,8 @@ export type SeedCandidate = {
   area: number;
   /** Contrast × size (blobRank): candidates are probed in this order. */
   rank: number;
+  /** The frame is not surely open water (SEEDS.openWater): the model's mask must pass the stricter bar. */
+  strict?: boolean;
 };
 
 /** How promising a region is: its contrast against the water times its linear size (a big faint shark and a small
@@ -61,18 +69,22 @@ export function blobRank(b: SubjectBlob): number {
  * The engine's regions as prompt candidates, most promising first, at most `max`. Left out: specks, the background,
  * haze, frame-wide lines, bubbles, and regions `taken` already (a point of theirs lies in an animal the engine's own
  * seeds cover). Deterministic for the frame (ties go top to bottom, left to right).
+ * `validity`: the engine's confidence that the frame is open water (SEEDS.openWater: under it only regions the
+ * engine itself accepted, with a confident seed, and marked `strict`).
  */
-export function blobCandidates(blobs: readonly SubjectBlob[] | null | undefined, taken: ((u: number, v: number) => boolean) | null = null, max = SEEDS.probes): SeedCandidate[] {
+export function blobCandidates(blobs: readonly SubjectBlob[] | null | undefined, taken: ((u: number, v: number) => boolean) | null = null, max = SEEDS.probes, validity = 1): SeedCandidate[] {
   if (!blobs) return [];
+  const strict = validity < SEEDS.openWater;
   const out: (SeedCandidate & { u: number; v: number })[] = [];
   for (const b of blobs) {
     if (b.area < SEEDS.minArea || b.area > SEEDS.maxArea || b.dev < SEEDS.minDev || b.bubble > SEEDS.bubble) continue;
     if (b.x1 - b.x0 > SEEDS.span || b.y1 - b.y0 > SEEDS.span) continue;
     if (taken && b.pts.some(([u, v]) => taken(u, v))) continue;
-    out.push({ points: b.pts.map(([u, v]) => [u, v] as [number, number]), box: { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 }, area: b.area, rank: blobRank(b), u: b.u, v: b.v });
+    if (strict && !(b.seeded && b.accept >= 0.5)) continue;
+    out.push({ ...(strict ? { strict } : {}), points: b.pts.map(([u, v]) => [u, v] as [number, number]), box: { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 }, area: b.area, rank: blobRank(b), u: b.u, v: b.v });
   }
   out.sort((a, b) => b.rank - a.rank || a.v - b.v || a.u - b.u);
-  return out.slice(0, max).map(({ points, box, area, rank }) => ({ points, box, area, rank }));
+  return out.slice(0, max).map(({ u: _u, v: _v, ...c }) => c);
 }
 
 /**

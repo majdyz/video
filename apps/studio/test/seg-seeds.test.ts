@@ -48,6 +48,12 @@ const blob = (o: Partial<SubjectBlob> & { u: number; v: number; area: number }):
   assert.deepEqual(blobCandidates(twins).map((x) => x.points[0][0]), [0.4, 0.2, 0.6]);
   assert.deepEqual(blobCandidates(twins.slice().reverse()).map((x) => x.points[0][0]), [0.4, 0.2, 0.6]);
   assert.deepEqual(blobCandidates(null), []);
+  // A frame that is not surely open water (a seabed): only what the engine itself took for a subject, marked strict.
+  const sea = blobCandidates(blobs, null, 8, 0.5);
+  assert.deepEqual(sea.map((x) => x.points[0]), [[0.7, 0.6], [0.2, 0.3]], "the region without the engine's acceptance is left out");
+  assert.ok(sea.every((x) => x.strict === true) && c.every((x) => x.strict === undefined));
+  assert.deepEqual(blobCandidates([blob({ u: 0.3, v: 0.3, area: 0.01, seeded: false })], null, 8, 0.5), [], "nor one without a confident seed");
+  assert.equal(blobCandidates(blobs, null, 8, 0.9).length, 3, "open water: as before");
   // The candidate's points are its own copy.
   c[0].points[0][0] = 9;
   assert.equal(blobs[1].pts[0][0], 0.7);
@@ -314,6 +320,9 @@ await quiet(async () => {
   // A mask several times the size of what the engine saw there (the subject and the water around it) is refused.
   assert.equal((await s.autoSeeds(0, [{ ...region(A), area: region(A).area / 3 }], false)).length, 0, "3 × the region: over AUTO.blobGrow");
   assert.equal((await s.autoSeeds(0, [{ ...region(A), area: region(A).area / 2 }], false)).length, 1, "2 × the region: the engine sees the bright flank, the model the animal");
+  // On a frame that is not surely open water (the seabed) the bar is higher: the model must be surer of its mask.
+  assert.ok(0.5 >= AUTO.strictIou);
+  assert.equal((await s.autoSeeds(0, [{ ...region(A), strict: true }], false)).length, 1, "a clear subject passes the strict bar");
   // Twice the same region: one subject.
   assert.equal((await s.autoSeeds(0, [region(A), { ...region(A), points: [[A.u + 0.02, A.v]] }], false)).length, 1);
   // No region is a subject and no grid asked for: nothing, at the cost of the regions' probes alone.
@@ -322,6 +331,15 @@ await quiet(async () => {
   assert.equal(f.probes.length, 2);
   // The frame was encoded once for all of these looks.
   assert.equal(f.encodes, 1);
+  // A mask the model is less sure of (0.45): a subject in open water when it stands off the water clearly; not on
+  // a frame that is not surely open water (the strict bar: dark patches of a seabed).
+  school = [A];
+  const f3 = fake(0.45);
+  const s3 = new SegSession(f3.model, f3.frames, { start: 0, end: 4 }, { frames() {}, keys() {}, progress() {}, trace() {}, peek() {}, rejected() {}, idle() {}, needSeeds() {}, error() {} } as unknown as SessionEvents, { fps: 2 });
+  assert.ok(0.45 >= AUTO.blobIouLow && 0.45 < AUTO.blobIou && 0.45 < AUTO.strictIou);
+  assert.equal((await s3.autoSeeds(0, [region(A)], false)).length, 1, "open water, a clear subject");
+  assert.equal((await s3.autoSeeds(0, [{ ...region(A), strict: true }], false)).length, 0, "over a seabed: refused");
+  school = [A, B, C, ghost];
   // A subject the frame cuts through, lying along a side (a diver's head in a selfie shot): not started on, by a
   // region or by the grid.
   const head: Sub = { name: "head", u: 0.05, v: 0.5, hu: 0.1, hv: 0.3, from: 0, to: 99 };

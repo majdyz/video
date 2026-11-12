@@ -855,7 +855,7 @@ export class Studio {
           const found = seedObjects(e.animalMap(), t, e.personBoxesNow());
           // Everything else the engine sees in the water there, whatever its size (a school of small sharks is no
           // "animal" to it): the model is asked about each (seg.autoSeeds).
-          const places = seedRegions(e.subjectBlobs(), e.animalMap());
+          const places = seedRegions(e.subjectBlobs(), e.animalMap(), e.waterValidity());
           e.resetTracking();
           // The engine analysed the frame after the geometry pass; the session tracks on the frame as recorded.
           const toSource = this.segToSource(t);

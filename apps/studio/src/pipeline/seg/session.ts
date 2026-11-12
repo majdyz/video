@@ -82,10 +82,17 @@ export type SessionFrames = {
  * (blobGrow) and the water test (smallContrast / RECHECK.contrast), not the estimate.
  * blobGrow: such a mask may be at most this many times its region's size (the model's masks of the regions that
  * are sharks measure 0.2–1.6 × the region, two 2.1; a round blob of water around a faint shark 6.6). */
+/** blobIouLow / blobContrastLow: under blobIou, down to blobIouLow, a region still counts when it stands off the
+ * water by blobContrastLow (ΔE): a clear shark the model is unsure of the outline of; over blobIou it must stand
+ * off by blobContrast (blobSmallContrast under areaLo of the frame). (Owner's hammerhead clip,
+ * the sharks: IoU 0.38–0.82, ΔE 2.5–21.)
+ * strictIou / strictContrast: on a frame that is not surely open water (seeds.ts SEEDS.openWater: a seabed, a
+ * reef, a diver close up) the model must rate the mask strictIou and it must stand off its surround by
+ * strictContrast: dark patches of the seabed measured IoU 0.33–0.69 and ΔE 2.3–5.7 (owner's ray clip, 20 s). */
 /** edge: a find whose mask lies along more than this share of one side of the frame is not started on: a subject
  * the frame cuts through (a diver's head and hair in a selfie shot, with the water above it in the mask), the
  * surface, the seabed. Its next look finds it once it is in the picture. */
-export const AUTO = { cols: 4, rows: 6, liteCols: 3, liteRows: 4, iou: 0.8, blobIou: 0.35, blobGrow: 2.5, edge: 0.25, areaLo: 0.004, areaSmall: 0.0015, smallContrast: 2.5, areaHi: 0.3, span: 0.9, contrast: 0.05, max: 4, peekMax: 2 };
+export const AUTO = { cols: 4, rows: 6, liteCols: 3, liteRows: 4, iou: 0.8, blobIou: 0.5, blobIouLow: 0.35, blobContrastLow: 5, blobContrast: 4, blobSmallContrast: 3, strictIou: 0.5, strictContrast: 8, blobGrow: 2.5, edge: 0.25, areaLo: 0.004, areaSmall: 0.0015, smallContrast: 2.5, areaHi: 0.3, span: 0.9, contrast: 0.05, max: 4, peekMax: 2 };
 
 /** How far a mask's colour stands out from a ring around it (mean cell-colour distance; cells: cellLab, 3 per px). */
 function ringContrast(m: Float32Array, cells: Float32Array, w: number, h: number): number {
@@ -908,7 +915,7 @@ export class SegSession {
         const a = area(m) / N;
         const dE = cells && a > 0 ? waterContrast(m, cells, w, h) : null;
         stats.push(`${r.score.toFixed(1)}/${r.iou.toFixed(2)}/${(a * 100).toFixed(2)}%/${dE === null ? "-" : dE.toFixed(1)}`);
-        if (r.score <= 0 || r.iou < A.blobIou) continue;
+        if (r.score <= 0 || r.iou < (c.strict ? A.strictIou : A.blobIouLow)) continue;
         if (a < A.areaSmall || a > A.areaHi) continue;
         const b = bbox(m, w, h);
         if (!b || b.x1 - b.x0 > A.span * w || b.y1 - b.y0 > A.span * h) continue;
@@ -916,12 +923,12 @@ export class SegSession {
         if (a > A.blobGrow * Math.max(c.area, SEEDS.minArea)) continue;
         if (edgeShare(m, w, h) > A.edge || inCorner(m, w, h)) continue;
         // The water test, whatever the size: a region of haze or of plain water is not a subject.
-        if (dE === null || dE < (a < A.areaLo ? A.smallContrast : RECHECK.contrast)) continue;
+        if (dE === null || dE < (c.strict ? A.strictContrast : r.iou < A.blobIou ? A.blobContrastLow : a < A.areaLo ? A.blobSmallContrast : A.blobContrast)) continue;
         // Followed from the region's own points: the same prompt gives the same mask on the track's first step (a
         // box would not: the lite model fills a box, water and all).
         cands.push({ m, q: dE * Math.sqrt(a), prompt: { points: c.points.map(([u, v]) => [u, v] as [number, number]), labels: c.points.map(() => 1) } });
       }
-      console.info(`[seg] engine regions at ${t.toFixed(2)} s: ${cands.length} subject(s) of ${total} region(s) (score/iou/area/dE: ${stats.join(" ")})`);
+      console.info(`[seg] engine regions at ${t.toFixed(2)} s${regions.some((c) => c.strict) ? " (not surely open water: the strict bar)" : ""}: ${cands.length} subject(s) of ${total} region(s) (score/iou/area/dE: ${stats.join(" ")})`);
     }
     const fromRegions = cands.length > 0;
     if (!fromRegions && (grid || quick)) {

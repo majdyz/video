@@ -176,11 +176,11 @@ export function seedObjects(am: AnimalMap | null, t: number, boxes: readonly Per
  * that depart from the water, whatever their size (engine subjectBlobs; seeds.ts blobCandidates), without those
  * that are (part of) an animal seedObjects took. A school of small sharks is all regions and no animal.
  */
-export function seedRegions(blobs: readonly SubjectBlob[] | null, am: AnimalMap | null): SeedCandidate[] {
+export function seedRegions(blobs: readonly SubjectBlob[] | null, am: AnimalMap | null, validity = 1): SeedCandidate[] {
   const taken = new Set<number>();
   if (am) am.list.map((a, i) => ({ a, i })).filter(({ a }) => animalTarget(a) >= SEED.minTarget).sort((x, y) => y.a.area - x.a.area).slice(0, SEED.maxObjects).forEach(({ i }) => taken.add(i + 1));
   const at = (u: number, v: number) => !!am && taken.has(am.labels[Math.min(am.height - 1, Math.max(0, Math.floor(v * am.height))) * am.width + Math.min(am.width - 1, Math.max(0, Math.floor(u * am.width)))]);
-  return blobCandidates(blobs, at);
+  return blobCandidates(blobs, at, SEEDS.probes, validity);
 }
 
 /** Outline id of the ML subject in outlineSelection. */

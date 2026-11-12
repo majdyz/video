@@ -765,6 +765,7 @@ export class GradeEngine {
       if (cut) this.animals.reset();
       this.lastAnimalMap = this.settings.subjectPop && (packet.params.backdrop ?? 0) > 0 ? raw.animals ?? null : null;
       this.lastBlobs = (packet.params.backdrop ?? 0) > 0 ? raw.blobs ?? null : null;
+      this.lastWater = packet.params.backdrop ?? 0;
       if (this.settings.subjectPop && (packet.params.backdrop ?? 0) > 0 && raw.animals) this.animals.update(raw.animals, this.reqTimeSec, packet.fields.data, packet.guide.data);
       // No longer open water (or Subject pop off): the animals fade out where they are, never snap.
       else this.animals.fadeAll();
@@ -1068,6 +1069,16 @@ export class GradeEngine {
     return this.lastBlobs;
   }
   private lastBlobs: SubjectBlob[] | null = null;
+
+  /**
+   * How sure the latest analysis is that the frame is open water behind its subjects (0..1: the share of it the
+   * fitted water surface explains, and how smooth that is). Low over a seabed or a reef: the regions that depart
+   * from the "water" there (subjectBlobs) are rocks and shadows as often as animals.
+   */
+  waterValidity(): number {
+    return this.lastWater;
+  }
+  private lastWater = 0;
 
   subjectSelection(): SubjectSelection | null {
     return this.settings.subjectPop ? this.animals.selection(this.lastTickSec) : null;
