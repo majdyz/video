@@ -124,13 +124,17 @@ function blur(src: Float32Array, W: number, H: number, r: number): Float32Array 
  *           leak is under-popped as a region, never as patches.
  *   rampK / rampLong / thickR  the tone's feather inside the contour (composeSegStrength): rampK × the part's
  *           half-width (the largest inside distance within thickR mask px), between SEG_TONE.rampIn and rampLong
- *           mask px. It was half the half-width, up to 28 px: half of an animal's body was a slow fade, its wing
+ *           mask px (segRamp).
+ *   thinLo / thinHi  how thin a part is (segThin): 1 up to a half-width of thinLo mask px, 0 from
+ *           thinHi, in SEG_TONE.thinLevels steps, packed into R (packSegR). There the grade shortens the feather where the
+ *           pixel itself is the animal (SEG_TONE.rampEv): a far animal is 6–8 mask px thick, and under the plain
+ *           feather only its spine was toned in full. It was half the half-width, up to 28 px: half of an animal's body was a slow fade, its wing
  *           tips and edges kept the water's blue, and the correction read as "barely there" (user clip, 12 Nov).
  *           Now a feather: 2.5 mask px on a fish, up to 8 on a body that fills the frame, enough for no halo;
  *           the water a fat contour covers is held back by the per-pixel test instead (thin parts: most of them
  *           now) and by the regional trust.
  */
-export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02, evLo: 0.012, evHi: 0.035, nearBand: 1 / 8, farLo: 0.05, farHi: 0.09, region: 1 / 32, trustLo: 0.15, trustHi: 0.45, rampK: 0.15, rampLong: 8, thickR: 28 };
+export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02, evLo: 0.012, evHi: 0.035, nearBand: 1 / 8, farLo: 0.05, farHi: 0.09, region: 1 / 32, trustLo: 0.15, trustHi: 0.45, rampK: 0.15, rampLong: 8, thickR: 28, thinLo: 4, thinHi: 9 };
 
 type Guide = { width: number; height: number; data: Float32Array };
 
@@ -138,19 +142,26 @@ type Guide = { width: number; height: number; data: Float32Array };
 export const SEG_THICK = 9;
 
 /**
- * The R channel of the strength texture with an AI overlay: its value (the local water's L, −1 or SEG_THICK) and the
- * subject's closeness (0..1, in SEG_RESTORE.levels steps) in one float: R + pack × the step. The readers (grade-shader
+ * The R channel of the strength texture with an AI overlay: its value (the local water's L, −1 or SEG_THICK), the
+ * subject's closeness (0..1, in SEG_RESTORE.levels steps) and the part's thinness (0..1, in SEG_TONE.thinLevels
+ * steps) in one float: R + pack × (the closeness step + (levels + 1) × the thinness step). The readers (grade-shader
  * animalStrength, apply.ts segSample) unpack each texel before they interpolate, so both come out bilinear. A
  * closeness of 0 leaves R as it was.
  */
-export function packSegR(r: number, close: number): number {
-  return r + SEG_RESTORE.pack * Math.round(Math.min(1, Math.max(0, close)) * SEG_RESTORE.levels);
+export function packSegR(r: number, close: number, thin = 0): number {
+  const c = Math.round(Math.min(1, Math.max(0, close)) * SEG_RESTORE.levels), t = Math.round(Math.min(1, Math.max(0, thin)) * SEG_TONE.thinLevels);
+  return r + SEG_RESTORE.pack * (c + (SEG_RESTORE.levels + 1) * t);
 }
 
-/** packSegR back: [R, closeness]. */
-export function unpackSegR(r: number): [number, number] {
-  const n = Math.floor((r + 8) / SEG_RESTORE.pack);
-  return [r - SEG_RESTORE.pack * n, n / SEG_RESTORE.levels];
+/** packSegR back: [R, closeness, thinness]. */
+export function unpackSegR(r: number): [number, number, number] {
+  const n = Math.floor((r + 8) / SEG_RESTORE.pack), t = Math.floor((n + 0.5) / (SEG_RESTORE.levels + 1));
+  return [r - SEG_RESTORE.pack * n, (n - (SEG_RESTORE.levels + 1) * t) / SEG_RESTORE.levels, t / SEG_TONE.thinLevels];
+}
+
+/** How thin a part of half-width `thick` mask px is, 0..1 (SEG_WATER thinLo..thinHi). */
+export function segThin(thick: number): number {
+  return 1 - sstep(SEG_WATER.thinLo, SEG_WATER.thinHi, thick);
 }
 
 /** Bilinear resize of a w × h map to W × H (pixel centres aligned). */
@@ -166,6 +177,11 @@ function resample(f: Float32Array, w: number, h: number, W: number, H: number): 
     }
   }
   return out;
+}
+
+/** The tone's feather (mask px) on a part of half-width `thick` (SEG_WATER rampK / rampLong; at least SEG_TONE.rampIn). */
+export function segRamp(thick: number): number {
+  return Math.min(SEG_WATER.rampLong, Math.max(SEG_TONE.rampIn, SEG_WATER.rampK * thick));
 }
 
 /** Chamfer (3-4) distance in px from each set texel of `bin` to the nearest unset one (0 on unset texels). */
@@ -330,9 +346,11 @@ function maxFilter(src: Float32Array, w: number, h: number, r: number): Float32A
  *      subject's closeness (packSegR; subjectCloseness: the AI restore's colour share, SEG_RESTORE.farKeep);
  *   G  the regional trust (waterField: a leak onto the water is under-popped as a region; 1 without a guide);
  *   B  the ML alpha as the mask's signed distance (0.5 on the contour, SEG_TONE.alphaR), its inside slope eased by
- *      the local thickness: the tone ramps in over rampK × the part's half-width, between SEG_TONE.rampIn and
- *      SEG_WATER.rampLong mask px. A thin tail or fin is toned nearly to its edge; a big body fades in over a
- *      little more, so its edge is a feather, never a step or a halo. No guess of which edge is which: nothing flips;
+ *      the local thickness: the tone ramps in over segRamp of the part's half-width (SEG_TONE.rampIn..
+ *      SEG_WATER.rampLong mask px). A thin tail or fin is toned nearly to its edge; a big body fades in over a
+ *      little more, so its edge is a feather, never a step or a halo. No guess of which edge is which: nothing
+ *      flips. The distance is the overlay's own (sub-pixel: studio seg/mask.ts sdfFeather) up to alphaR, the
+ *      chamfer's beyond;
  *   A  the ML weight (near map).
  */
 export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): { width: number; height: number; data: Float32Array } {
@@ -347,13 +365,18 @@ export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): {
   const close = maxFilter(subjectCloseness(o, wf ? wf.sep : null), W, H, 2);
   for (let i = 0; i < W * H; i++) {
     let a = o.alpha[i];
-    const ramp = Math.min(SEG_WATER.rampLong, Math.max(SEG_TONE.rampIn, SEG_WATER.rampK * thick[i]));
+    const ramp = segRamp(thick[i]);
     if (a > 0.5) {
-      // The distance the shader reads back, shrunk so its ramp-in (rampIn) spans `ramp` here.
-      a = Math.min(a, 0.5 + Math.min(R, Math.max(0, dIn[i] - 0.5) * (SEG_TONE.rampIn / ramp)) / (2 * R));
+      // The distance the shader reads back, scaled so its ramp-in (rampIn) spans `ramp` here. The overlay's own
+      // distance near the contour (it is good to a fraction of a mask px; the chamfer of the binary mask walks in
+      // whole steps: stairs), the chamfer's where the overlay's has run out (alphaR).
+      const d = a < 0.995 ? (a - 0.5) * 2 * R : Math.max(R, dIn[i] - 0.5);
+      a = 0.5 + Math.min(R, d * (SEG_TONE.rampIn / ramp)) / (2 * R);
     }
     // Thick parts carry R = SEG_THICK (no per-pixel test: their ramp is long, the contour's water gets next to nothing).
-    out[i * 4] = packSegR(!wf ? -1 : ramp > 1.5 * SEG_TONE.rampIn ? SEG_THICK : wf.L[i], close[i]);
+    // (The thinness only where the per-pixel test runs and a part is near: elsewhere nothing reads it.)
+    const tested = !!wf && ramp <= 1.5 * SEG_TONE.rampIn;
+    out[i * 4] = packSegR(!wf ? -1 : tested ? wf.L[i] : SEG_THICK, close[i], tested && thick[i] > 0.01 ? segThin(thick[i]) : 0);
     out[i * 4 + 1] = (wf ? wf.trust[i] : 1) * (o.quality ?? 1);
     out[i * 4 + 2] = a;
     out[i * 4 + 3] = o.near[i];

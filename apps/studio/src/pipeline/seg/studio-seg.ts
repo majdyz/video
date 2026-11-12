@@ -296,8 +296,9 @@ export function promptFor(o: Pick<SubjectOverride, "u" | "v">, boxes: readonly P
  * engine overlay; frames not filled yet are null, and the ML weight eases to nothing over ~0.3 s toward them, so the
  * preview hands over to the engine's mask smoothly.
  */
-/** SegLive.at: the alpha is averaged over ±alphaFrames filled frames. */
-export const SEG_LIVE = { alphaFrames: 2 };
+/** SegLive.at: the alpha is averaged over ±alphaFrames filled frames, each moved onto this frame's subject first
+ * (by the masks' centres, when they are at most maxShift of the mask's width apart: the same subject, moved). */
+export const SEG_LIVE = { alphaFrames: 2, maxShift: 0.12 };
 
 /** SegLive.stateAt: a frame's mask counts as in use from this ML weight (the grade's SEG_TONE.popLo: nothing is popped below it). */
 export const SEG_FRAME = { minWeight: 0.2 };
@@ -305,12 +306,22 @@ export const SEG_FRAME = { minWeight: 0.2 };
 /** SegLive.qualityAt: the mask consistency check (see there). */
 export const SEG_QUALITY = { glitchS: 0.15, jumpS: 0.2, dropLo: 0.5, dropHi: 0.72, holdS: 2.0, recover: 0.85, partMin: 0.04, easeS: 0.5 };
 
-/** A mask's area (alpha over 0.5, 0..255) and its significant parts (4-connected, at least partMin of the area). */
-export function maskStats(alpha: Uint8Array, w: number, h: number): { area: number; parts: number } {
+/** A frame's mask in numbers (maskStats). */
+export type MaskStats = { area: number; parts: number; cx: number; cy: number; edge: boolean };
+
+/**
+ * A mask's area (alpha over 0.5, 0..255), its significant parts (4-connected, at least partMin of the area), its
+ * centre (mask px) and whether it touches the frame's border (a subject entering or leaving the picture).
+ */
+export function maskStats(alpha: Uint8Array, w: number, h: number): MaskStats {
   const n = w * h, lab = new Int32Array(n), sizes: number[] = [];
-  let area = 0;
-  for (let i = 0; i < n; i++) if (alpha[i] > 127) area++;
-  if (!area) return { area: 0, parts: 0 };
+  let area = 0, sx = 0, sy = 0, edge = false;
+  for (let i = 0; i < n; i++) if (alpha[i] > 127) {
+    const x = i % w, y = (i - x) / w;
+    area++; sx += x; sy += y;
+    if (x === 0 || y === 0 || x === w - 1 || y === h - 1) edge = true;
+  }
+  if (!area) return { area: 0, parts: 0, cx: 0, cy: 0, edge: false };
   const stack: number[] = [];
   for (let s = 0; s < n; s++) {
     if (alpha[s] <= 127 || lab[s]) continue;
@@ -326,7 +337,47 @@ export function maskStats(alpha: Uint8Array, w: number, h: number): { area: numb
     }
     sizes.push(size);
   }
-  return { area, parts: sizes.filter((z) => z >= Math.max(20, SEG_QUALITY.partMin * area)).length };
+  return { area, parts: sizes.filter((z) => z >= Math.max(20, SEG_QUALITY.partMin * area)).length, cx: sx / area, cy: sy / area, edge };
+}
+
+/**
+ * The alpha of a frame for the grade: the frame's own (`maps[c]`, 0..255) averaged with its neighbours' (triangular
+ * weights by distance from c), each neighbour first moved onto this frame's subject by the difference of the masks'
+ * centres (`stats`; bilinear). The tracker's mask wobbles by a pixel or so from frame to frame, and unaveraged the
+ * pop's edge shimmers; but averaged where they lie, the masks of a subject that moves (a far ray while the camera
+ * pans: several mask px a frame, on a body a few px thick) smear into a mask that is thinner and weaker than any of
+ * them. A neighbour is left where it is when either frame has no mask, the two masks differ in their number of parts
+ * or by more than a fifth in area (a subject of a school came or went: the centre moved, nothing else did), or the
+ * centres are more than SEG_LIVE.maxShift of the width apart. Returns 0..1.
+ */
+export function averageAlpha(maps: (Uint8Array | null | undefined)[], stats: (MaskStats | null | undefined)[], c: number, w: number, h: number): Float32Array {
+  const R = Math.max(c, maps.length - 1 - c), out = new Float32Array(w * h), sc = stats[c];
+  let wsum = 0;
+  for (let k = 0; k < maps.length; k++) {
+    const a = maps[k];
+    if (!a) continue;
+    const wk = R + 1 - Math.abs(k - c), sk = stats[k];
+    let dx = 0, dy = 0;
+    // (The same subjects in both: as many parts, about the same area. A subject that came or went moves the centre
+    // of what is left without anything having moved.)
+    if (k !== c && sc && sk && sc.area > 0 && sk.area > 0 && sc.parts === sk.parts && Math.min(sc.area, sk.area) > 0.8 * Math.max(sc.area, sk.area)) {
+      dx = sc.cx - sk.cx; dy = sc.cy - sk.cy;
+      if (Math.hypot(dx, dy) > SEG_LIVE.maxShift * w) { dx = 0; dy = 0; }
+    }
+    if (Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) for (let i = 0; i < out.length; i++) out[i] += wk * a[i];
+    else {
+      const ix = Math.floor(-dx), iy = Math.floor(-dy), tx = -dx - ix, ty = -dy - iy;
+      const at = (x: number, y: number) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : a[y * w + x]);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const x0 = x + ix, y0 = y + iy;
+        const p = at(x0, y0), q = at(x0 + 1, y0), r = at(x0, y0 + 1), s = at(x0 + 1, y0 + 1);
+        out[y * w + x] += wk * ((p + (q - p) * tx) * (1 - ty) + (r + (s - r) * tx) * ty);
+      }
+    }
+    wsum += wk;
+  }
+  if (wsum > 0) for (let i = 0; i < out.length; i++) out[i] /= 255 * wsum;
+  return out;
 }
 
 export class SegLive {
@@ -335,8 +386,8 @@ export class SegLive {
   readonly i0: number;
   readonly n: number;
   private frames: (SessionFrameOut | undefined)[];
-  /** Per filled frame: the mask's area (px over 0.5) and its significant parts (maskStats). */
-  private stats: ({ area: number; parts: number } | undefined)[];
+  /** Per filled frame: the mask's area (px over 0.5), its significant parts, centre and border contact (maskStats). */
+  private stats: (MaskStats | undefined)[];
   private qCache = new Map<number, number>();
   private conf: { t: number; conf: number }[] = [];
   filled = 0;
@@ -385,6 +436,8 @@ export class SegLive {
    *   a drop   the area falls to under dropLo..dropHi of its level jumpS earlier (the mask lost the body: the head
    *            alone); held until it recovers to `recover` of that level, at most holdS. The same backwards in time
    *            for a sudden gain (a fragment before the whole animal);
+   *            not where the smaller mask touches the frame's border (the frame cut it: no fault of the mask), nor
+   *            where it has fewer parts (one subject of several went: the others are whole);
    * (The number of parts alone is no sign: a thresher's long thin tail parts from its body at the mask grid's
    * resolution for whole seconds, and penalising that dimmed a good mask. A head-only mask is a sudden area drop.)
    * The raw value is averaged over ±easeS (raised cosine): a fragment is popped less, as a whole and smoothly.
@@ -414,6 +467,12 @@ export class SegLive {
         const ak = areaOf(k), a0 = areaOf(k0);
         if (!ak || !a0) break;
         if (ak >= Q.recover * a0) continue;
+        // A mask at the frame's border is a subject entering or leaving the picture: its area changes with what the
+        // frame cuts off, not because the mask lost the body (a ray panned out of frame went "AI unsure" on its way).
+        if (this.stats[k]?.edge) continue;
+        // Fewer parts than before the drop: one subject of several is gone (out of a school of sharks), the ones
+        // still there are whole. (A mask that lost its body keeps its count, or gains a part: the tail on its own.)
+        if ((this.stats[k]?.parts ?? 0) < (this.stats[k0]?.parts ?? 0)) continue;
         // A sudden drop between k0 and k (within jumpS): the frames from k to j stay under its level.
         const r = ak / a0;
         if (r < Q.dropHi) {
@@ -504,16 +563,14 @@ export class SegLive {
     for (let k = 0; k < near.length; k++) near[k] *= w;
     // The alpha averaged over ±SEG_LIVE.alphaFrames filled frames (triangular weights): a mask that wobbles by a few
     // pixels frame to frame (the tracker's own jitter) would make the pop's edge and ramp shimmer.
-    const R = SEG_LIVE.alphaFrames, alpha = new Float32Array(mw * mh);
-    let wsum = 0;
+    // Each neighbour is moved onto this frame's subject first (averageAlpha): a moving subject's mask stays whole.
+    const R = SEG_LIVE.alphaFrames, maps: (Uint8Array | null)[] = [], st: (MaskStats | undefined)[] = [];
     for (let d = -R; d <= R; d++) {
-      const g = this.frames[i + d];
-      if (!g) continue;
-      const wk = R + 1 - Math.abs(d), a = rleDecode(g.alpha, mw * mh);
-      for (let k = 0; k < a.length; k++) alpha[k] += wk * a[k];
-      wsum += wk;
+      const g = i + d >= 0 && i + d < this.n ? this.frames[i + d] : undefined;
+      maps.push(g ? rleDecode(g.alpha, mw * mh) : null);
+      st.push(g ? this.stats[i + d] : undefined);
     }
-    for (let k = 0; k < alpha.length; k++) alpha[k] /= 255 * wsum;
+    const alpha = averageAlpha(maps, st, R, mw, mh);
     return { width: mw, height: mh, alpha, exclude: f.excQ ? up(f.excQ) : null, near, depart: up(f.depQ), quality: this.qualityAt(i), pop: this.pop };
   }
 
@@ -602,6 +659,12 @@ export function profileLine(p: Record<string, number>, ep = ""): string {
 /** The engine's own subjects followed at a time on a phone, whatever the model runs on (session.ts autoCap): each
  * is a tracker step, with its memory bank, per keyframe. Elsewhere the session's own default. */
 function autoCap(): number | undefined {
+  // `?segautos=N` (1..8): that many whatever the device, to try a school of fish on a phone (each subject adds about
+  // a frame's encode in time per keyframe and ~1.5 MB in the worker: its memory bank and its last masks).
+  try {
+    const n = Number(new URLSearchParams(location.search).get("segautos"));
+    if (n >= 1 && n <= 8) return Math.round(n);
+  } catch { /* no location (a worker, a test) */ }
   return isMobile(deviceFacts()) ? SEG.liteAutos : undefined;
 }
 

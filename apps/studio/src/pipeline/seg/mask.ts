@@ -50,21 +50,110 @@ export function feather(src: Float32Array, w: number, h: number, radius: number)
   return boxMean(a, w, h, r);
 }
 
+/** sdfFeather: the mask is binarised on a grid this many times finer (its soft edge, bilinear), so the distance is
+ * good to ±1/(2·SS) mask px, not ±½: the contour the grade reads back follows the mask's soft edge, not the stairs
+ * of the 320-px grid (owner's clip, 12 Nov: "blocky" outlines on a far ray). */
+export const SDF_SS = 2;
+
 /**
  * The tone's feather: a ramp of about ±r px across the mask's own 0.5 contour, from the signed distance to it. A
  * blur of the same width would erase anything thinner than the blur (a fin, a tail tip); this keeps every part of
- * the mask above 0.5 along its middle, with a soft edge.
+ * the mask above 0.5 along its middle, with a soft edge. The distance is measured on a grid `ss` times finer
+ * (SDF_SS): 0.5 exactly on the soft mask's own contour, to a fraction of a mask px.
  */
-export function sdfFeather(m: Float32Array, w: number, h: number, r: number): Float32Array {
-  const n = w * h, bin = new Uint8Array(n), inv = new Uint8Array(n);
-  for (let i = 0; i < n; i++) { const b = m[i] > 0.5; bin[i] = b ? 1 : 0; inv[i] = b ? 0 : 1; }
-  const din = distanceTransform(bin, w, h), dout = distanceTransform(inv, w, h), out = new Float32Array(n);
-  const k = 1 / (2 * Math.max(0.5, r));
-  for (let i = 0; i < n; i++) {
-    const s = bin[i] ? din[i] - 0.5 : -(dout[i] - 0.5);
-    out[i] = Math.min(1, Math.max(0, 0.5 + s * k));
+export function sdfFeather(m: Float32Array, w: number, h: number, r: number, ss = SDF_SS): Float32Array {
+  const s = signedDistance(m, w, h, ss), k = 1 / (2 * Math.max(0.5, r));
+  for (let i = 0; i < s.length; i++) s[i] = Math.min(1, Math.max(0, 0.5 + s[i] * k));
+  return s;
+}
+
+/**
+ * Signed distance (mask px; > 0 inside) from each texel centre to the 0.5 contour of the soft mask `m`, measured on
+ * a grid `ss` times finer (the mask resampled bilinearly, binarised there, an exact distance transform each way) and
+ * averaged back over each texel's ss × ss samples. ss = 1 is the plain binary mask's distance (±½ px: stairs).
+ */
+export function signedDistance(m: Float32Array, w: number, h: number, ss = SDF_SS): Float32Array {
+  const S = Math.max(1, Math.round(ss)), W = w * S, H = h * S, n = W * H;
+  const f = S === 1 ? m : resize(m, w, h, W, H);
+  const bin = new Uint8Array(n), inv = new Uint8Array(n);
+  for (let i = 0; i < n; i++) { const b = f[i] > 0.5; bin[i] = b ? 1 : 0; inv[i] = b ? 0 : 1; }
+  const din = distanceTransform(bin, W, H), dout = distanceTransform(inv, W, H), out = new Float32Array(w * h);
+  const k = 1 / (S * S * S);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let a = 0;
+    for (let yy = y * S; yy < y * S + S; yy++) for (let xx = x * S; xx < x * S + S; xx++) {
+      const i = yy * W + xx;
+      a += bin[i] ? din[i] - 0.5 : -(dout[i] - 0.5);
+    }
+    out[y * w + x] = a * k;
   }
   return out;
+}
+
+/** The centre of mass of the texels over `thr` (mask px) and their count; null when there are none. */
+export function centroid(m: ArrayLike<number>, w: number, h: number, thr = 0.5): { x: number; y: number; n: number } | null {
+  let sx = 0, sy = 0, n = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (m[y * w + x] > thr) { sx += x; sy += y; n++; }
+  return n ? { x: sx / n, y: sy / n, n } : null;
+}
+
+/** `src` moved by (dx, dy) mask px (bilinear; what comes in from outside the frame is 0). */
+export function shiftMap(src: Float32Array, w: number, h: number, dx: number, dy: number, out = new Float32Array(w * h)): Float32Array {
+  const ix = Math.floor(-dx), iy = Math.floor(-dy), tx = -dx - ix, ty = -dy - iy;
+  const at = (x: number, y: number) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : src[y * w + x]);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const x0 = x + ix, y0 = y + iy;
+    const a = at(x0, y0), b = at(x0 + 1, y0), c = at(x0, y0 + 1), d = at(x0 + 1, y0 + 1);
+    out[y * w + x] = (a + (b - a) * tx) * (1 - ty) + (c + (d - c) * tx) * ty;
+  }
+  return out;
+}
+
+/** The 4-connected parts of a mask (texels over `thr`) holding at least `minShare` of its area: their count. */
+export function bigParts(m: ArrayLike<number>, w: number, h: number, thr = 0.5, minShare = 0.04): number {
+  const n = w * h, seen = new Uint8Array(n), sizes: number[] = [], stack: number[] = [];
+  let area = 0;
+  for (let s = 0; s < n; s++) {
+    if (!(m[s] > thr)) continue;
+    area++;
+    if (seen[s]) continue;
+    let size = 0;
+    seen[s] = 1; stack.push(s);
+    while (stack.length) {
+      const i = stack.pop()!, x = i % w;
+      size++;
+      if (x > 0 && m[i - 1] > thr && !seen[i - 1]) { seen[i - 1] = 1; stack.push(i - 1); }
+      if (x < w - 1 && m[i + 1] > thr && !seen[i + 1]) { seen[i + 1] = 1; stack.push(i + 1); }
+      if (i >= w && m[i - w] > thr && !seen[i - w]) { seen[i - w] = 1; stack.push(i - w); }
+      if (i < n - w && m[i + w] > thr && !seen[i + w]) { seen[i + w] = 1; stack.push(i + w); }
+    }
+    sizes.push(size);
+  }
+  return sizes.filter((z) => z >= Math.max(1, minShare * area)).length;
+}
+
+/**
+ * How far a mask's colour stands off the water right around it: the CIE76 ΔE between the mean colour of the frame's
+ * cells (cellLab: DEPART_STEP mask px each) the mask covers and that of the cells in a ring of `ring` cells around
+ * it. The water test of a re-check (session.ts recheck): a mask the model drew on plain water has the ring's colour
+ * (ΔE ≈ 0). Null when the mask covers no cell or has no ring (it fills the frame).
+ */
+export function waterContrast(m: ArrayLike<number>, cells: Float32Array, w: number, h: number, ring = 3): number | null {
+  const S = DEPART_STEP, qw = Math.max(1, Math.ceil(w / S)), qh = Math.max(1, Math.ceil(h / S));
+  if (cells.length !== qw * qh * 3) return null;
+  // A cell is the mask's when any of its texels is (a far subject is a cell or two thick).
+  const on = new Float32Array(qw * qh);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (m[y * w + x] > 0.5) on[Math.floor(y / S) * qw + Math.floor(x / S)] = 1;
+  // The ring starts a cell away from the mask (the cells next to it hold its soft edge).
+  const near = dilate(on, qw, qh, 1), far = dilate(on, qw, qh, 1 + ring);
+  const a = [0, 0, 0], b = [0, 0, 0];
+  let na = 0, nb = 0;
+  for (let q = 0; q < qw * qh; q++) {
+    if (on[q]) { for (let c = 0; c < 3; c++) a[c] += cells[q * 3 + c]; na++; }
+    else if (far[q] && !near[q]) { for (let c = 0; c < 3; c++) b[c] += cells[q * 3 + c]; nb++; }
+  }
+  if (!na || !nb) return null;
+  return Math.hypot(a[0] / na - b[0] / nb, a[1] / na - b[1] / nb, a[2] / na - b[2] / nb);
 }
 
 /**

@@ -7,7 +7,7 @@ import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
 import { nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, tapParams, waterTintOf, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
-import { SEG_TONE } from "./grade-shader.ts";
+import { SEG_TONE, segJbuWeights } from "./grade-shader.ts";
 import { unpackSegR } from "./seg-overlay.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
@@ -27,7 +27,13 @@ export type ApplyContext = {
    * composeSegStrength) and the clip's pop direction (p24.x; 1 = lift). With it the AI mask alone weights Subject
    * pop (grade-shader toneWeight) and the AI subject restore applies (SEG_RESTORE).
    */
-  seg?: { strength: { width: number; height: number; data: Float32Array }; popDir?: number };
+  seg?: {
+    strength: { width: number; height: number; data: Float32Array };
+    popDir?: number;
+    /** The source's luma (code values, 0..1) at upright (u, v): the guide of the mask's edge-aware read (segSample;
+     * the shaders' segGuideLum). applyGrade supplies it from the image it grades when it is absent. */
+    guide?: (u: number, v: number) => number;
+  };
 };
 
 /** The context as gradePixel reads it: intensity already resolved. */
@@ -223,7 +229,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const subjRaw = ow > 0 && fit && fit.length === 18 ? Math.max(subjectWeight(ctx.depth, u, v, clamp(confMap, 0, 1) * k, bdevP), subjPrior * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) : 0;
   const [anS, anCore] = animalStrengthAt(ctx.depth, u, v);
   // AI subject overlay (grade-shader animalStrength with p24.y): water L / regional trust / ML alpha / ML weight.
-  const an = ctx.seg && ctx.settings.subjectPop ? segSample(ctx.seg.strength, u, v) : null;
+  const an = ctx.seg && ctx.settings.subjectPop ? segSample(ctx.seg.strength, u, v, ctx.seg.guide) : null;
   const popK = ctx.settings.subjectPop ? popStrengthK(ctx.settings) : 0;
   const [, vla, vlb] = linearToOklab(p.veilColor[0], p.veilColor[1], p.veilColor[2]);
   const vln = Math.hypot(vla, vlb) || 1;
@@ -428,11 +434,16 @@ function popHue(a: number, b: number, as: number, bs: number, w: number): [numbe
   return [(C * mx) / n, (C * my) / n];
 }
 
-/** The AI overlay texture (composeSegStrength) at upright (u, v), bilinear (grade-shader animalStrength). */
-function segSample(t: { width: number; height: number; data: Float32Array }, u: number, v: number): [number, number, number, number, number] {
+/**
+ * The AI overlay texture (composeSegStrength) at upright (u, v), bilinear (grade-shader animalStrength); with `guide`
+ * (the source's luma at upright uv) the ML alpha (B) is read edge-aware where the contour passes: a joint bilateral
+ * upsample over the same four texels (SEG_TONE.jbu*, segJbuWeights), so the contour follows the picture's edge.
+ */
+export function segSample(t: { width: number; height: number; data: Float32Array }, u: number, v: number, guide?: (u: number, v: number) => number): [number, number, number, number, number, number] {
   const fx = Math.min(Math.max(u * t.width - 0.5, 0), t.width - 1), fy = Math.min(Math.max(v * t.height - 0.5, 0), t.height - 1);
   const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(x0 + 1, t.width - 1), y1 = Math.min(y0 + 1, t.height - 1), tx = fx - x0, ty = fy - y0;
-  const out: [number, number, number, number, number] = [0, 0, 0, 0, 0];
+  // [R, G, B, A, the subject's closeness, the part's thinness] (the last two unpacked from R).
+  const out: [number, number, number, number, number, number] = [0, 0, 0, 0, 0, 0];
   const mix = (a: number, b: number, d: number, e: number) => (a + (b - a) * tx) * (1 - ty) + (d + (e - d) * tx) * ty;
   for (let c = 0; c < 4; c++) {
     const a = t.data[(y0 * t.width + x0) * 4 + c], b = t.data[(y0 * t.width + x1) * 4 + c], d = t.data[(y1 * t.width + x0) * 4 + c], e = t.data[(y1 * t.width + x1) * 4 + c];
@@ -441,7 +452,20 @@ function segSample(t: { width: number; height: number; data: Float32Array }, u: 
       const ua = unpackSegR(a), ub = unpackSegR(b), ud = unpackSegR(d), ue = unpackSegR(e);
       out[0] = mix(ua[0], ub[0], ud[0], ue[0]);
       out[4] = mix(ua[1], ub[1], ud[1], ue[1]);
+      out[5] = mix(ua[2], ub[2], ud[2], ue[2]);
     } else out[c] = mix(a, b, d, e);
+    if (c === 2 && guide) {
+      const lo = Math.min(a, b, d, e), hi = Math.max(a, b, d, e);
+      if (hi - lo > 1e-4 && lo < SEG_TONE.jbuHi && hi > SEG_TONE.jbuLo) {
+        const g0 = guide(u, v);
+        if (g0 >= 0) {
+          const at = (x: number, y: number) => guide((x + 0.5) / t.width, (y + 0.5) / t.height);
+          const w4 = segJbuWeights([(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty], [at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1)], g0);
+          const ws = w4[0] + w4[1] + w4[2] + w4[3];
+          if (ws > 1e-5) out[2] = (w4[0] * a + w4[1] * b + w4[2] * d + w4[3] * e) / ws;
+        }
+      }
+    }
   }
   return out;
 }
@@ -460,9 +484,15 @@ function segPop(a: number): number {
 export function segToneWeight(an: readonly number[], lab0: readonly [number, number, number], vhx: number, vhy: number, tone: number, popK: number): number {
   if (an[3] <= 0) return 0;
   const d = (an[2] - 0.5) * 2 * SEG_TONE.alphaR;
-  const ev = an[0] < 0 || an[0] > 2 ? 1 : smoothstep(SEG_TONE.evLo, SEG_TONE.evHi, Math.hypot(lab0[0] - an[0], lab0[1] * vhy - lab0[2] * vhx));
+  // The water test's bar follows the subject's own contrast (SEG_TONE.evFar; an[4]: its closeness, 1 when absent).
+  const ek = SEG_TONE.evFar + (1 - SEG_TONE.evFar) * clamp(an[4] ?? 1, 0, 1);
+  const test = an[0] >= 0 && an[0] <= 2;
+  const ev = !test ? 1 : smoothstep(SEG_TONE.evLo * ek, SEG_TONE.evHi * ek, Math.hypot(lab0[0] - an[0], lab0[1] * vhy - lab0[2] * vhx));
   const inner = ev + (1 - ev) * smoothstep(SEG_TONE.trustLo, SEG_TONE.trustHi, d);
-  return smoothstep(0, SEG_TONE.rampIn, d) * inner * Math.max(tone, segPop(an[3])) * an[1] * Math.min(1, SEG_RESTORE.popGate * popK);
+  // On the thinnest parts (an[5], seg-overlay.ts segThin; the per-pixel test runs there), a pixel that is the animal
+  // is toned from rampEv inside the contour.
+  const rin = test ? SEG_TONE.rampIn + (SEG_TONE.rampEv - SEG_TONE.rampIn) * ev * clamp(an[5] ?? 0, 0, 1) : SEG_TONE.rampIn;
+  return smoothstep(0, rin, d) * inner * Math.max(tone, segPop(an[3])) * an[1] * Math.min(1, SEG_RESTORE.popGate * popK);
 }
 
 /** The analysis guide's luminance at upright (u, v), plain bilinear (no range weight): the source's low-pass. */
@@ -866,6 +896,14 @@ export function applyGrade(ctxIn: ApplyContext, rgba: ArrayLike<number>, w: numb
   const guard = detailGuardOf(ctx.params);
   const out = new Uint8ClampedArray(rgba.length);
   const rx = rect?.x ?? 0, ry = rect?.y ?? 0, rw = rect?.w ?? 1, rh = rect?.h ?? 1;
+  // The guide of the AI mask's edge-aware read (segSample): this image's own luma, bilinear (the shaders' segGuideLum).
+  if (ctx.seg && !ctx.seg.guide) {
+    const lumAt = (px: number, py: number) => { const k = (Math.min(h - 1, Math.max(0, py)) * w + Math.min(w - 1, Math.max(0, px))) * 4; return (0.2126 * rgba[k] + 0.7152 * rgba[k + 1] + 0.0722 * rgba[k + 2]) / scale; };
+    ctx.seg = { ...ctx.seg, guide: (gu, gv) => {
+      const fx = ((gu - rx) / rw) * w - 0.5, fy = ((gv - ry) / rh) * h - 0.5, x0 = Math.floor(fx), y0 = Math.floor(fy), tx = fx - x0, ty = fy - y0;
+      return (lumAt(x0, y0) * (1 - tx) + lumAt(x0 + 1, y0) * tx) * (1 - ty) + (lumAt(x0, y0 + 1) * (1 - tx) + lumAt(x0 + 1, y0 + 1) * tx) * ty;
+    } };
+  }
   for (let y = 0; y < h; y++) {
     const v = ry + ((y + 0.5) / h) * rh;
     for (let x = 0; x < w; x++) {

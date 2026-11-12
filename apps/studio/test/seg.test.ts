@@ -257,7 +257,7 @@ const img = (dx: number, dy: number): Gray => {
   assert.equal(c[(30 * W + 70) * 4 + 3], 1, "the ML weight (A) passes as is");
   const full = { width: W, height: H, alpha: new Float32Array(W * H).fill(1), exclude: null, near: ov.near, depart: null };
   // (R also carries the subject's closeness, packed: unpackSegR. Nothing to compare with: as close.)
-  assert.deepEqual(unpackSegR(composeSegStrength(full, { width: gw, height: gh, data: g }).data[0]), [-1, 1], "no water in the frame: -1");
+  assert.deepEqual(unpackSegR(composeSegStrength(full, { width: gw, height: gh, data: g }).data[0]).slice(0, 2), [-1, 1], "no water in the frame: -1");
 }
 
 // The ramp-in follows the part's thickness: a big body fades in gently from its contour (a contour that runs
@@ -447,7 +447,7 @@ const img = (dx: number, dy: number): Gray => {
     }
     return m;
   };
-  assert.deepEqual(maskStats(body(0), mw, mh), { area: 480, parts: 1 });
+  assert.deepEqual(maskStats(body(0), mw, mh), { area: 480, parts: 1, cx: 31.5, cy: 14.5, edge: false });
   assert.equal(maskStats(body(55), mw, mh).parts, 2);
   live.put(Array.from({ length: n }, (_, i) => ({ i, alpha: rleEncode(body(i)), nearQ: rleEncode(new Uint8Array(qw * qh).fill(255)), excQ: null, depQ: rleEncode(new Uint8Array(qw * qh).fill(255)) })));
   const q = Array.from({ length: n }, (_, i) => live.qualityAt(i));

@@ -48,6 +48,8 @@ uniform sampler2D u_tpNr;
 in vec2 v_uv;
 out vec4 o_color;
 ${ROTATE_GLSL}
+// The guide of the AI mask's edge-aware read (grade-shader animalStrength): the source's luma at upright uv.
+float segGuideLum(vec2 uv) { return dot(textureLod(u_source, rotateUV(uv, int(p[0].x + 0.5)), 0.0).rgb, vec3(0.2126, 0.7152, 0.0722)); }
 ${GRADE_GLSL}
 ${DETAIL_GLSL}
 ${DETAIL_NR_GLSL}
@@ -124,6 +126,8 @@ struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
   return o;
 }
 ${ROTATE_WGSL}
+// The guide of the AI mask's edge-aware read (grade-shader animalStrength): the source's luma at upright uv.
+fn segGuideLum(uv: vec2<f32>) -> f32 { return dot(textureSampleLevel(u_source, samp, rotateUV(uv, u32(params.p[0].x + 0.5)), 0.0).rgb, vec3<f32>(0.2126, 0.7152, 0.0722)); }
 ${GRADE_WGSL}
 ${DETAIL_WGSL}
 ${DETAIL_NR_WGSL}
