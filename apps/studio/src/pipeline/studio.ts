@@ -16,6 +16,7 @@
 
 import { crumb, exportCrashed, lastCrash } from "./crumbs.ts";
 import { EXPORT_SHARE, ExportBar } from "./export-progress.ts";
+import { Eta } from "./eta.ts";
 import { isRealtimeExportSupported, isWebCodecsSupported, isWebKit } from "./env.ts";
 import { deviceFacts, isMobile } from "./device.ts";
 import { realtimeSteps } from "./realtime-steps.ts";
@@ -155,7 +156,8 @@ export type ExportStatus = {
 };
 
 /** Export options from the sheet's fallbacks. */
-export type ExportRequest = { maxLongEdge?: number };
+/** waitAi: Subject pop with AI and the pass unfinished: wait for the pass, then export (the sheet's second button). */
+export type ExportRequest = { maxLongEdge?: number; waitAi?: boolean };
 
 export type ExportResult = {
   /** The file in page memory (web exports); null when the native encoder wrote it. */
@@ -1070,11 +1072,30 @@ export class Studio {
    * export renders with), and on a phone the model's worker is shut down for the render (releaseForExport: its
    * memory next to a 4K export's frames), its masks kept.
    */
-  private async segBeginExport(file: File, trim: TrimRange | null, signal: AbortSignal): Promise<void> {
+  private async segBeginExport(file: File, trim: TrimRange | null, signal: AbortSignal, waitAi = false): Promise<void> {
     this.segUse = new SegExportUse();
     this.segTrim = trim;
-    let complete = this.seg.ready(file, trim);
-    const waitS = complete ? 0 : exportWaitS(this.seg.etaS());
+    let complete = this.seg.ready(file, trim) && !this.seg.working;
+    if (!complete && waitAi && this.seg.on) {
+      // "Wait for AI, then export": the pass runs to its end first (the sheet shows how far it is; Cancel ends the
+      // wait), then the render starts by itself. A pass that makes no progress for a minute is not waited for
+      // any longer: the export goes on with what it has, and says so.
+      this.bar?.stage(EXPORT_SHARE.subjects);
+      const eta = new Eta();
+      const label = (p: number | null) => {
+        const detail = `Finding subjects… ${eta.text(p) ?? "can take a few minutes"}, then exporting`;
+        this.setExp(p === null ? { detail } : { detail, progress: p });
+      };
+      label(null);
+      const v = this.video;
+      const live = await this.seg.start(file, v?.duration || this.snap.duration, trim);
+      if (signal.aborted) throw new DOMException("Export cancelled", "AbortError");
+      if (live && !this.seg.autos) await this.seedAutosCanonical();
+      if (live) await this.seg.settle({ signal, stallMs: 60_000, onProgress: label });
+      this.stageDone();
+      complete = this.seg.ready(file, trim) && !this.seg.working;
+    }
+    const waitS = complete || waitAi ? 0 : exportWaitS(this.seg.etaS());
     if (waitS > 0) {
       this.bar?.stage(EXPORT_SHARE.subjectsWait);
       this.setExp({ detail: "Finishing AI subjects…" });
@@ -1107,6 +1128,18 @@ export class Studio {
     if (this.segExportNote) this.setExp({ note: this.segExportNote });
     const live = this.seg.live;
     console.info(`[export] AI subjects: ${complete ? "pass complete" : this.segAvailable ? `pass unfinished (${live ? Math.round(live.coverage * 100) : 0}% of its frames filled${waitS ? `, after waiting ${waitS} s` : ""}): exporting now with what it has` : "not available: engine masks"}`);
+  }
+
+  /**
+   * The export sheet's choice while the AI pass is unfinished (export-use.ts exportChoice): how much of the clip
+   * the pass has, and its time left. Null: nothing to choose (no Subject pop with AI on this clip, the AI not
+   * available, or the pass through).
+   */
+  segExportChoice(): { coverage: number; etaS: number | null } | null {
+    const file = this.file;
+    if (!file || this.snap.kind !== "video" || !this.tools.colour.enabled || !this.tools.colour.subjectPop || !this.seg.on) return null;
+    if (this.seg.ready(file, this.trim) && !this.seg.working) return null;
+    return { coverage: this.seg.live?.coverage ?? 0, etaS: this.seg.etaS() };
   }
 
   /** After an export: a pass that was shut down for it (a phone) starts again, and a session without its first
@@ -2822,7 +2855,7 @@ export class Studio {
       this.segUse = null;
       this.exportResumed = false;
       // (the AI toggle as the user set it: an AI that turned out unavailable still gets its note)
-      if (colourOn && this.tools.colour.subjectPop && this.seg.status.on && this.snap.kind === "video") await this.segBeginExport(file, trim, ctrl.signal);
+      if (colourOn && this.tools.colour.subjectPop && this.seg.status.on && this.snap.kind === "video") await this.segBeginExport(file, trim, ctrl.signal, !!req.waitAi);
       const motion = this.tools.stabilise.enabled && (!this.path || !!this.stabAbort);
       if (motion) this.bar?.stage(EXPORT_SHARE.motion);
       await this.waitForPath();

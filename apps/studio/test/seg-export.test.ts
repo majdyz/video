@@ -3,7 +3,7 @@
 // chip in follow mode; a failure after the page was in the background.
 //   node --experimental-strip-types apps/studio/test/seg-export.test.ts
 import assert from "node:assert/strict";
-import { exportWaitS, followFrame, headWait, passComplete, SEG_EXPORT, SEG_EXPORT_UNAVAILABLE, segCoverageNote, segExportKey, SegExportUse } from "../src/pipeline/seg/export-use.ts";
+import { exportChoice, exportWaitS, followFrame, headWait, passComplete, SEG_EXPORT, SEG_EXPORT_UNAVAILABLE, segCoverageNote, segExportKey, SegExportUse } from "../src/pipeline/seg/export-use.ts";
 import { backgroundFailure, SEG_HAND, SegLive, segStatusText, subjectChip, type SegStatus } from "../src/pipeline/seg/studio-seg.ts";
 import { rleEncode } from "../src/pipeline/seg/mask.ts";
 import type { SessionFrameOut } from "../src/pipeline/seg/session.ts";
@@ -143,7 +143,7 @@ import type { SessionFrameOut } from "../src/pipeline/seg/session.ts";
   assert.equal(headWait({ ...base, frontT: null }), false, "the pass has finished no frame yet");
   assert.equal(headWait({ ...base, t: 1.7 + SEG_EXPORT.headReachS + 0.5 }), false, "the pass is not about to get there");
   assert.equal(headWait({ ...base, t: 1.0 }), false, "a frame the pass left behind unfilled is not waited for");
-  assert.ok(SEG_EXPORT.headWaitS <= 120, "the wait in all is bounded");
+  assert.ok(SEG_EXPORT.headWaitS <= 10, "\"Export now\" waits for the pass a few seconds at most");
 
   // A render next to a pass, as studio.ts runs them: the pass has the first 2 s when the export starts and makes
   // half a second of frames per tick it is given; the render takes a frame at a time, waits where headWait says
@@ -188,4 +188,19 @@ import type { SessionFrameOut } from "../src/pipeline/seg/session.ts";
   assert.ok(slow.use.ai > some.use.ai && slow.use.ai < n, `a slower pass: more than the wait alone, not all (${slow.use.ai} of 300)`);
   assert.match(segCoverageNote(slow.use, { complete: false, available: true })!, /^AI subjects on \d+% of frames/);
   console.log(`export: masks made while the render runs are used and counted (none ${none.use.ai}, waited ${some.use.ai}, slower pass ${slow.use.ai}, pass ahead ${fast.use.ai} of 300): ok`);
+}
+
+// ---------------------------------------------------------------- the sheet's two buttons
+{
+  const c = exportChoice({ coverage: 0.06, etaS: 290 });
+  assert.equal(c.now, "Export now");
+  assert.match(c.note, /about 6% of the clip.*standard subject detection on the rest/);
+  assert.equal(c.wait, "Wait for AI, then export (~5 min)");
+  assert.equal(exportChoice({ coverage: 0.5, etaS: 30 }).wait, "Wait for AI, then export (under a minute)");
+  assert.equal(exportChoice({ coverage: 0.5, etaS: 70 }).wait, "Wait for AI, then export (~1 min)");
+  assert.equal(exportChoice({ coverage: 0.5, etaS: null }).wait, "Wait for AI, then export", "no estimate yet: no number");
+  assert.match(exportChoice({ coverage: 0, etaS: null }).note, /haven't reached this clip yet.*standard subject detection/);
+  assert.match(exportChoice({ coverage: 0.999, etaS: 5 }).note, /about 99%/, "never 100% while the pass is unfinished");
+  assert.doesNotMatch(exportChoice({ coverage: NaN, etaS: NaN }).wait, /NaN/);
+  console.log("export sheet: \"Export now\" with how much the AI has, \"Wait for AI, then export (~5 min)\": ok");
 }

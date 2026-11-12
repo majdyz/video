@@ -7,6 +7,7 @@ import { formatTime } from "./timeline";
 import { formatTimecode, selectionLabel } from "../pipeline/trim.ts";
 import { visibleSegments } from "../pipeline/segments.ts";
 import { BRAND, donateUrl } from "../brand.ts";
+import { exportChoice } from "../pipeline/seg/export-use.ts";
 import { isNativeShell } from "../native/registry.ts";
 
 const loadNative = () => import("../native/bridge.ts");
@@ -98,6 +99,10 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
     void studio.exportVideo();
   };
   const err = exp.state === "error" ? friendlyExportError(exp.message) : null;
+  // Subject pop with AI and the pass unfinished: export now with what it has, or wait for it (snap.seg moves with
+  // the pass, so the numbers follow it while the sheet is open).
+  const segChoice = !photo && open && exp.state === "idle" ? studio.segExportChoice() : null;
+  const choice = segChoice ? exportChoice(segChoice) : null;
   const bigSource = !!info && Math.min(info.displayW, info.displayH) > 1080;
 
   // In the app the output lives (or is copied) in the sandbox and goes to
@@ -180,6 +185,14 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
                   <IconExport size={18} /> Resume ({Math.round(resumable.progress * 100)}%)
                 </button>
                 <button type="button" className="btn btn--quiet btn--block" onClick={() => void startOver()}>Start over</button>
+              </>
+            ) : choice ? (
+              <>
+                <button type="button" className="btn btn--primary btn--block" data-export-now onClick={() => void studio.exportVideo()}>
+                  <IconExport size={18} /> {choice.now}
+                </button>
+                <p className="export__note" role="status">{choice.note}</p>
+                <button type="button" className="btn btn--secondary btn--block" data-export-wait onClick={() => void studio.exportVideo({ waitAi: true })}>{choice.wait}</button>
               </>
             ) : (
               <button type="button" className="btn btn--primary btn--block" onClick={() => void studio.exportVideo()}>

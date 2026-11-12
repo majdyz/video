@@ -18,8 +18,10 @@ export const SEG_EXPORT = {
   /** An export waits at most this long (s) for a pass that says it is about to finish; never for any other. */
   waitS: 15,
   /** While it renders, an export that has caught up with the pass waits for the pass's next frames, this long (s)
-   * in all (headWait); after that it goes on with the engine's detection where the pass has not been. */
-  headWaitS: 60,
+   * in all (headWait); after that it goes on with the engine's detection where the pass has not been. Short on
+   * purpose: 60 s bought a tenth of the owner's ray clip on a desktop's WASM. Who wants the AI everywhere takes
+   * "Wait for AI, then export" (exportChoice). */
+  headWaitS: 10,
   /** ...and only for a frame at most this far (s of clip) past the pass's newest finished frame: the pass is about
    * to get there. A frame further on (or one the pass left behind unfilled) is not waited for. */
   headReachS: 1,
@@ -127,4 +129,20 @@ export function passComplete(o: { seeded: boolean; filled: number; n: number }):
 export function headWait(o: { t: number; settled: boolean; running: boolean; frontT: number | null; leftMs: number }, reachS = SEG_EXPORT.headReachS): boolean {
   if (o.settled || !o.running || o.leftMs <= 0 || o.frontT === null) return false;
   return o.t > o.frontT - 1e-6 && o.t <= o.frontT + reachS + 1e-6;
+}
+
+/**
+ * The export sheet's two buttons while the AI pass is unfinished (Subject pop with AI on): the primary exports now
+ * with what the pass has, and says how much that is; the secondary waits for the pass and exports when it is
+ * through (studio.ts exportVideo({ waitAi: true })), with the pass's own estimate when it has one.
+ * `coverage`: the share of the pass's frames that have their answer (0..1); `etaS`: the pass's time left (null:
+ * no estimate yet).
+ */
+export function exportChoice(o: { coverage: number; etaS: number | null }): { now: string; note: string; wait: string } {
+  const pc = Math.min(99, Math.max(0, Math.round(100 * (Number.isFinite(o.coverage) ? o.coverage : 0))));
+  const note = pc > 0
+    ? `AI subjects have reached about ${pc}% of the clip. Exporting now uses them there and standard subject detection on the rest.`
+    : "AI subjects haven't reached this clip yet. Exporting now uses standard subject detection.";
+  const eta = o.etaS !== null && Number.isFinite(o.etaS) && o.etaS >= 0 ? (o.etaS < 45 ? "under a minute" : `~${Math.max(1, Math.round(o.etaS / 60))} min`) : null;
+  return { now: "Export now", note, wait: eta ? `Wait for AI, then export (${eta})` : "Wait for AI, then export" };
 }
