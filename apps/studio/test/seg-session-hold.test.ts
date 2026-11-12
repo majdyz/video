@@ -52,10 +52,13 @@ type Fake = {
   half: [number, number] | null;
   /** ...or nothing at all (though it scores it as there), and a fresh prompt gives a patch of plain water. */
   blank: [number, number] | null;
+  /** In this stretch the tracker (and any prompt) gives a fifth of the frame, over the water. */
+  blow: [number, number] | null;
 };
 
-function fake(o: Partial<Pick<Fake, "from" | "half" | "blank">> & { lite?: boolean } = {}): Fake {
-  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, stepped: [], probes: [], from: o.from ?? -Infinity, half: o.half ?? null, blank: o.blank ?? null };
+function fake(o: Partial<Pick<Fake, "from" | "half" | "blank" | "blow">> & { lite?: boolean } = {}): Fake {
+  const f: Fake = { model: null as unknown as EdgeTam, frames: null as unknown as SessionFrames, stepped: [], probes: [], from: o.from ?? -Infinity, half: o.half ?? null, blank: o.blank ?? null, blow: o.blow ?? null };
+  const big = () => out((u, v) => Math.abs(u - 0.65) < 0.3 && Math.abs(v - 0.5) < 0.2, 5);
   let encT = 0;
   const lw = 64, lh = 36;
   const within = (r: [number, number] | null, t: number) => !!r && t > r[0] - 1e-6 && t < r[1] + 1e-6;
@@ -72,6 +75,7 @@ function fake(o: Partial<Pick<Fake, "from" | "half" | "blank">> & { lite?: boole
     async step(key: string, _frame: number, points: [number, number][] | null, labels: number[] | null) {
       const boxed = !!labels && labels.includes(2);
       f.stepped.push({ key, t: encT, prompted: !!points, boxed });
+      if (within(f.blow, encT)) return big();
       if (!points && within(f.half, encT)) return out((u, v) => inSubject(u, v, encT) && u < subjectX(encT), 5);
       if (within(f.blank, encT)) return boxed ? out((u, v) => Math.abs(u - 0.85) < 0.1 && Math.abs(v - 0.5) < 0.2, 5) : out(() => false, 5);
       return whole(encT);
@@ -84,6 +88,7 @@ function fake(o: Partial<Pick<Fake, "from" | "half" | "blank">> & { lite?: boole
         return encT >= f.from - 1e-6 && inSubject(u, v, encT) ? whole(encT) : out((uu, vv) => !inSubject(uu, vv, encT), 5);
       }
       // A re-check's prompt (box and points).
+      if (within(f.blow, encT)) return big();
       if (within(f.blank, encT)) return out((u, v) => Math.abs(u - 0.85) < 0.1 && Math.abs(v - 0.5) < 0.2, 5);
       return whole(encT);
     },
@@ -221,6 +226,25 @@ for (const lite of [true, false]) {
   assert.equal(f.stepped.filter((x) => x.boxed).length, 0, "nothing written into the track's memory");
   assert.ok(areaAt(r, 4.5) > 0.75 * FULL, "followed again when the tracker has it back");
   console.log(`session: a re-check that lands on plain water is refused (${p.rechecks} re-checks, 0 taken): ok`);
+}
+
+// The subject leaves; half a second later the tracker draws a fifth of the frame over the water (the lite model
+// on the owner's ray clip at 19.2 s, as the ray was panned out of the frame). The flow has nothing to carry by then,
+// so the old test (against the flow-carried mask) let it through: nothing may grow into the water.
+for (const lite of [true, false]) {
+  const f = fake({ lite, blank: [2.1, 2.6], blow: [2.6, 3.4] });
+  const r = open(f, { start: 0, end: 6 }, (t) => [subject(t)]);
+  const end = r.settled();
+  r.s.seeds(0, [subject(0)]);
+  await end;
+  assert.deepEqual(r.errors, []);
+  let maxA = 0, maxStep = 0, prev = areaAt(r, 1.5);
+  for (let i = 46; i <= 150; i++) { const a = areaAt(r, i / 30); maxA = Math.max(maxA, a); maxStep = Math.max(maxStep, a - prev); prev = a; }
+  assert.ok(maxA < 1.2 * FULL, `${lite ? "lite" : "full"} model: no mask ever outgrows the subject (max ${maxA} px, the subject ${FULL}; the tracker drew ${0.6 * 0.4 * MW * MH})`);
+  assert.equal(areaAt(r, 3), 0, "the water stays unmasked");
+  assert.ok(areaAt(r, 4.5) > 0.75 * FULL, "the subject is followed again when the tracker has it back");
+  assert.equal(r.s.profile().recovered, 0);
+  console.log(`session: ${lite ? "lite" : "full"} model, the tracker runs away over the water after losing the subject → dropped (largest mask ${maxA} of ${FULL} px): ok`);
 }
 
 console.log("seg session hold tests passed");

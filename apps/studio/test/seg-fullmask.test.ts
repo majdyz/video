@@ -91,6 +91,8 @@ const blob = (w: number, h: number, cx: number, cy: number, rx = 9, ry = 3) => {
   for (let i = 0; i < two.length; i++) two[i] = Math.max(two[i], blob(w, h, 80, 45)[i]);
   assert.equal(bigParts(two, w, h), 2);
   assert.equal(straightCarry(two, shiftMap(two, w, h, 20, 0), two, two, 1, 0, w, h), null);
+  // A mask several times the other's size is not the same subject: nothing is moved onto it.
+  assert.equal(straightCarry(a.inc, blob(w, h, 70, 30, 40, 20), a.inc, a.inc, 1, 0, w, h), null);
   // A subject leaving the frame shrinks between its keyframes: the smaller mask the flow carried is no failure.
   const leaving = blob(w, h, 112, 30), gone = shiftMap(leaving, w, h, 12, 0);
   assert.equal(straightCarry(leaving, gone, gone, leaving, 1, 0, w, h), null);

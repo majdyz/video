@@ -120,6 +120,8 @@ export const SEG = {
    * of), is moved along the straight line between its two keyframe positions instead. */
   fillMovePx: 1.5,
   fillCarried: 0.65,
+  /** ...and only between two masks of about one size (the smaller at least this share of the larger). */
+  fillSameSize: 0.4,
 };
 
 /**
@@ -503,6 +505,8 @@ export function straightCarry(a: Float32Array, b: Float32Array, fLast: Float32Ar
   if (!ca || !cb) return null;
   const dx = cb.x - ca.x, dy = cb.y - ca.y, D = Math.hypot(dx, dy);
   if (D < SEG.fillMovePx || bigParts(a, w, h) !== 1 || bigParts(b, w, h) !== 1) return null;
+  // Not the same subject at both ends (one mask several times the other): nothing is moved onto it.
+  if (Math.min(ca.n, cb.n) < SEG.fillSameSize * Math.max(ca.n, cb.n)) return null;
   // How far along the line (as a share of it) a chain's subject got, from its own keyframe.
   // (Its area against what it should be there: a subject leaving the frame shrinks between its keyframes.)
   const failed = (m: Float32Array, from: { x: number; y: number; n: number }, to: { n: number }, sign: number, share: number): boolean => {

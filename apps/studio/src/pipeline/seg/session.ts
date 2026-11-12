@@ -1173,10 +1173,24 @@ export class SegSession {
     }
     // A runaway mask (the tracker slid onto the reef or the water: a big warm patch over the background): over
     // SEG.runawayArea of the frame, or SEG.runawayGrow × what the flow carried, is no subject: the frame shows none.
+    // The same against the subject's size at its last keyframe and, for a locked track, its locked size (track.ts
+    // HOLD), whatever the flow carried: a ray panned out of the frame leaves the flow nothing to carry, and the lite
+    // tracker then drew 14–22% of the frame over open water at its next keyframe (owner's clip, 19.2 s; the fill
+    // faded that in over half a second). And a mask that comes back from nothing in mid-track must stand off the
+    // water around it (mask.ts waterContrast), like a re-check's.
     let ranAway = false;
     {
-      const N = this.mw * this.mh, a = area(m), ca = carriedArea;
-      if (a > SEG.runawayArea * N || (ca > SEG.guardMinArea * N && a > SEG.runawayGrow * ca && a > 0.05 * N)) {
+      const N = this.mw * this.mh, a = area(m), ca = carriedArea, pa = prev && !first ? area(prev.m) : 0;
+      const lk = s.o.kind === "include" ? (goFwd ? s.lockF : s.lockB) : null;
+      const grew = (ref: number, floor: number) => ref > SEG.guardMinArea * N && a > SEG.runawayGrow * ref && a > floor;
+      let why = a > SEG.runawayArea * N ? "over the frame" : grew(ca, 0.05 * N) ? "outgrew the flow-carried mask" : grew(pa, 0.05 * N) ? "outgrew its last keyframe" : lk?.locked && grew(lk.area, SEG.guardMinArea * N) ? "outgrew its locked size" : "";
+      if (!why && s.o.kind === "include" && prev && !first && pa === 0 && a > 0) {
+        const cells = this.cellCache.get(frameKey(t));
+        const dE = cells ? waterContrast(m, cells, this.mw, this.mh) : null;
+        if (dE !== null && dE < RECHECK.contrast) why = "back from nothing on plain water";
+      }
+      if (why) {
+        console.info(`[seg] runaway at ${t.toFixed(2)} s: object ${s.o.id} ${a} px (${(100 * a / N).toFixed(1)}% of the frame) ${why}: dropped`);
         m = new Float32Array(N);
         agree = 0;
         ranAway = true;
