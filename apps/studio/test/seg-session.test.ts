@@ -569,7 +569,11 @@ const restarts = (reads: number[]) => reads.filter((t, i) => i > 0 && (t < reads
   assert.match(tr[0], /^tap 9000 include 4\.00s: 17 fwd, 17 back$/);
   assert.equal(tr.filter((x) => x.startsWith("encode ")).length, 3);
   assert.ok(tr.some((x) => /^back 3\.00-4\.00s \(4 keys\)$/.test(x)), tr.join(" | "));
-  assert.equal(tr[tr.length - 1], "tap 9000 followed");
+  // One breadcrumb when the tap's job starts and one when it ends, numbered (a crash log shows what was alive).
+  const jobs = tr.filter((x) => x.startsWith("job "));
+  assert.match(jobs[0], /^job \d+ tap 9000 start$/);
+  assert.match(tr[tr.length - 1], /^job \d+ tap 9000 end: followed, \d+ steps, /);
+  assert.equal(jobs.length, 2, jobs.join(" | "));
   console.log(`session: a tap → forward to the end, then backward in chunks (${n} decoder restarts): ok`);
 }
 
@@ -683,4 +687,195 @@ const restarts = (reads: number[]) => reads.filter((t, i) => i > 0 && (t < reads
   assert.ok(ex);
   assert.equal((await ex).action, "exclude");
   console.log(`session: playhead first → the paused frame popped after ${shownAt} encodes; the finished pass unchanged: ok`);
+}
+
+// ---------------------------------------------------------------- one model job at a time (iPhone crash, 12 Nov)
+//
+// The crash: mid-pass the session asked for the seeds of its next segment; the user tapped; the main thread, which
+// had found no subject of its own on the seed frame, asked for the model's search of that frame, and the session ran
+// it between two of the tap's steps (queued requests went ahead of everything). Now: a tap's track, the search, the
+// peek and the pass are jobs that take turns; a search waits for the taps, and one under way gives way to a tap.
+
+/** Everything the session did, in order: its breadcrumbs and every model call; and the most model calls at once. */
+type Timeline = { log: string[]; peak: number };
+function watch(f: Fake, r: Run, onCall?: (what: string) => void): Timeline {
+  const tl: Timeline = { log: [], peak: 0 };
+  const m = f.model as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+  let active = 0;
+  for (const k of ["encode", "step", "probe"]) {
+    const fn = m[k].bind(m);
+    m[k] = async (...a: unknown[]) => {
+      active++;
+      tl.peak = Math.max(tl.peak, active);
+      tl.log.push(`model ${k}${k === "step" ? ` ${a[0]}` : ""}`);
+      onCall?.(k);
+      // (A real graph run takes a while: whatever could run next to it gets the chance to.)
+      await new Promise((res) => setTimeout(res, 0));
+      try { return await fn(...a); } finally { active--; }
+    };
+  }
+  const push = r.traces.push.bind(r.traces);
+  r.traces.push = (...x: string[]) => { tl.log.push(...x); return push(...x); };
+  return tl;
+}
+
+type Job = { id: number; name: string; how: string; inside: string[] };
+
+/** The jobs of a timeline, checked: they start and end in turn (never two alive), numbered upward, and every model
+ * call is inside one. Returns them in order with what happened inside each. */
+function jobsOf(tl: Timeline): Job[] {
+  const out: Job[] = [];
+  let cur: Job | null = null;
+  for (const x of tl.log) {
+    const st = /^job (\d+) (.+) start$/.exec(x), en = /^job (\d+) (.+) end: ([^,]+),/.exec(x);
+    if (st) {
+      assert.equal(cur, null, `job ${st[1]} starts while job ${cur?.id} is alive`);
+      assert.ok(+st[1] > (out[out.length - 1]?.id ?? 0), "numbered upward");
+      cur = { id: +st[1], name: st[2], how: "", inside: [] };
+    } else if (en) {
+      assert.ok(cur && cur.id === +en[1] && cur.name === en[2], `job ${en[1]} ends, alive: ${cur?.id}`);
+      cur.how = en[3];
+      out.push(cur);
+      cur = null;
+    } else if (x.startsWith("model ")) {
+      assert.ok(cur, `${x} outside any job`);
+      cur.inside.push(x);
+    } else cur?.inside.push(x);
+  }
+  assert.equal(cur, null, "every job ended");
+  assert.equal(tl.peak, 1, "one model call at a time");
+  return out;
+}
+
+{
+  const tap = { ...subject(4.65), id: 9200 };
+  // A clip whose segments after the first get no subject from the "engine": the main thread then asks for the
+  // model's own search of the seed frame and seeds the segment with what it finds (studio.ts seedSegmentCanonical).
+  type Opts = { tapAt: "asked" | "probe" | "front"; delayMs?: number };
+  const run = async (o: Opts) => {
+    const f = fake({ lite: true });
+    let searchIds = 5000, tapped = false;
+    const found: { t: number; n: number }[] = [];
+    const r = open(f, { start: 0, end: 12 }, (t) => (t < 1 ? [subject(t)] : null));
+    const tl = watch(f, r, (k) => {
+      // The tap lands while the search is on its probes.
+      if (o.tapAt === "probe" && k === "probe" && !tapped) { tapped = true; r.s.add(tap); }
+    });
+    const asked = r.asked.push.bind(r.asked);
+    r.asked.push = (...a) => {
+      for (const { t } of a) {
+        if (t < 1) continue;
+        // The tap lands as the session asks for the next segment's seeds; the main thread's own look at the seed
+        // frame takes a moment, then it asks for the model's search: while the tap is being followed.
+        if (o.tapAt === "asked" && !tapped) { tapped = true; r.s.add(tap); }
+        setTimeout(() => {
+          void r.s.autoSeeds(t).then((objs) => {
+            found.push({ t, n: objs.length });
+            r.s.seeds(t, objs.map((x) => ({ ...x, id: searchIds++ })));
+          });
+        }, o.delayMs ?? 0);
+      }
+      return asked(...a);
+    };
+    const end = r.settled();
+    if (o.tapAt === "front") r.s.add(tap);
+    r.s.seeds(0, [subject(0)]);
+    await end;
+    assert.equal(r.errors.length, 0, r.errors.join());
+    assert.equal(r.frames.size, r.s.grid.n);
+    return { f, r, tl, jobs: jobsOf(tl), found };
+  };
+  const line = (jobs: Job[]) => jobs.map((j) => `${j.name}: ${j.how}`).join(" | ");
+
+  // The reference: the tap first, the searches undisturbed.
+  const ref = await run({ tapAt: "front" });
+  assert.deepEqual(ref.found, [{ t: 8, n: 1 }], "the search finds the subject on the seed frame");
+  assert.deepEqual(ref.jobs.map((j) => j.name.split(" ")[0]), ["tap", "pass", "search", "pass"], line(ref.jobs));
+
+  // 1. The crash's order of events: the search is asked for while the tap is followed.
+  for (const delayMs of [0, 3, 10]) {
+    const a = await run({ tapAt: "asked", delayMs });
+    const ti = a.jobs.findIndex((j) => j.name === "tap 9200"), si = a.jobs.findIndex((j) => j.name === "search 8.00s");
+    assert.ok(ti >= 0 && si > ti, `the search starts after the tap's job has ended (${line(a.jobs)})`);
+    assert.equal(a.jobs[ti].how, "followed");
+    assert.ok(a.jobs[ti].inside.every((x) => x !== "model probe" && !x.startsWith("auto:")), "nothing of the search inside the tap's job");
+    assert.ok(a.jobs[ti].inside.filter((x) => x.startsWith("model step")).every((x) => x.startsWith("model step 9200")), "and no step of the pass");
+    assert.equal(a.jobs.filter((j) => j.name === "tap 9200").length, 1, "the tap is followed in one go");
+    assert.equal(a.jobs.filter((j) => j.name.startsWith("search")).length, 1, "the search runs once");
+    assert.deepEqual(a.found, ref.found);
+    sameFrames(ref.r.frames, a.r.frames, `a search asked for during a tap (${delayMs} ms later)`);
+  }
+
+  // 2. The tap comes while the search is on its probes: the search stops there, the tap is followed, the search
+  //    starts over and gives the same seeds.
+  const b = await run({ tapAt: "probe" });
+  const s1 = b.jobs.findIndex((j) => j.name === "search 8.00s");
+  assert.equal(b.jobs[s1].how, "pre-empted", line(b.jobs));
+  assert.equal(b.jobs[s1].inside.filter((x) => x === "model probe").length, 1, "it stops at the probe after the tap");
+  assert.equal(b.jobs[s1 + 1].name, "tap 9200");
+  assert.equal(b.jobs[s1 + 1].how, "followed");
+  assert.equal(b.jobs[s1 + 2].name, "search 8.00s");
+  assert.equal(b.jobs[s1 + 2].how, "1 found");
+  assert.equal(b.jobs[s1 + 2].inside.filter((x) => x === "model probe").length, 12, "the whole search again");
+  assert.deepEqual(b.found, ref.found, "answered once, with the same seeds");
+  sameFrames(ref.r.frames, b.r.frames, "a tap during a search");
+  console.log("session: tap during the pass + the model's search → one job at a time, the tap first, same masks: ok");
+}
+
+// An exclude tap that takes a subject out ends without a tracker step after it: the session still says that no tap
+// is left (a progress event), also when it then waits for seeds (the main thread holds the seed frame back for it).
+{
+  const f = fake();
+  const r = open(f, { start: 0, end: 12 }, (t) => (t < 1 ? [subject(t)] : null));
+  const tl = watch(f, r);
+  r.s.seeds(0, [subject(0)]);
+  const nap = () => new Promise((res) => setTimeout(res, 5));
+  for (let i = 0; i < 4000 && !r.asked.some((a) => a.t === 8); i++) await nap();
+  await nap();
+  assert.equal(r.s.busy, true, "waiting for the seeds of 8 s");
+  const taps: number[] = [];
+  r.onProgress = (_d, _t, n) => taps.push(n);
+  const x = await r.s.excludeAt(9300, 1, subjectX(1), 0.5);
+  assert.equal(x.action, "removed");
+  for (let i = 0; i < 4000 && !taps.length; i++) await nap();
+  assert.equal(taps[taps.length - 1], 0, "no tap left, said after the tap's own step");
+  assert.equal(r.idles, 0, "still waiting for seeds");
+  const jobs = jobsOf(tl);
+  assert.equal(jobs[jobs.length - 1].name, "exclude 9300");
+  r.s.close();
+  console.log("session: an exclude tap that removes a subject → progress without a tap left: ok");
+}
+
+// A phone short of memory keeps fewer decoded frames; the masks are the same.
+{
+  const mk = async (weak: boolean) => {
+    const f = fake({ lite: true });
+    const r = open(f, { start: 0, end: 6 }, (t) => [subject(t)], { weak });
+    const end = r.settled();
+    r.s.add({ ...subject(3), id: 9400 });
+    r.s.seeds(0, [subject(0)]);
+    await end;
+    assert.equal(r.errors.length, 0);
+    const held = (r.s as unknown as { lumaCache: Map<number, Uint8Array> }).lumaCache.size;
+    return { r, held };
+  };
+  const strong = await mk(false), weak = await mk(true);
+  assert.ok(weak.held <= 96 && strong.held > 96, `frames kept: ${weak.held} (weak) / ${strong.held}`);
+  sameFrames(strong.r.frames, weak.r.frames, "weak device");
+  console.log(`session: a weak phone keeps ${weak.held} decoded frames (not ${strong.held}); same masks: ok`);
+}
+
+// The session's memory banks leave the model when it stops (they stayed for the worker's life).
+{
+  const f = fake();
+  let resets = 0;
+  (f.model as unknown as { reset: () => Promise<void> }).reset = async () => { resets++; };
+  const r = open(f, { start: 0, end: 2 }, () => []);
+  r.s.seeds(0, [subject(0)]);
+  await new Promise((res) => setTimeout(res, 5));
+  await r.s.stop();
+  assert.equal(resets, 1);
+  assert.equal(f.disposed, true);
+  await assert.rejects(r.s.autoSeeds(0.5), /session closed/);
+  console.log("session: stop → the model is reset: ok");
 }

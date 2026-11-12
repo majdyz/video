@@ -129,6 +129,33 @@ export class EdgeTam {
     this.banks.delete(key);
   }
 
+  /** Memory banks alive (one per object and direction still tracked), for the breadcrumbs. */
+  get bankCount(): number {
+    return this.banks.size;
+  }
+
+  /**
+   * A session has ended (closed, replaced by another range or clip): every memory bank it left and the encoded
+   * frame's features go, once the graph run under way has ended. A bank was only dropped when its object's track
+   * ended inside the pass, so one closed mid-pass (a trim, a new clip) left its banks in the model for the worker's
+   * life (~1.3 MB each), next to the new session's.
+   */
+  reset(): Promise<void> {
+    return this.exclusive(async () => {
+      this.banks.clear();
+      this.dispose();
+    });
+  }
+
+  /** Frees the four graphs (their weights and, on WebGPU, their buffers): before the worker loads a model again. */
+  release(): Promise<void> {
+    return this.exclusive(async () => {
+      this.banks.clear();
+      this.dispose();
+      for (const g of GRAPHS) await this.s[g].release().catch(() => undefined);
+    });
+  }
+
   /**
    * One step of session `key` at frame index `frame` on the encoded frame. Points in 1024² space. The first
    * prompted step of an empty session is its conditioning frame; later prompts (the flow guard) are

@@ -820,8 +820,10 @@ export class Studio {
         // Not while the user scrubs: two <video>s seeking at once (plus the analysis) is what phones fall over on.
         await this.scrubIdle();
         if (stale()) return;
+        // One heavy AI job at a time (seg/turns.ts): not while a tap is being followed (the pass stands still for it
+        // anyway), and a tap that comes meanwhile waits for this frame's analysis.
         // No frame of the preview's may reach the engine between upload and analysis; one in flight lands first.
-        objs = await this.workFrame(t + 1e-3, async (sv) => {
+        objs = await this.seg.seedJob(t, () => stale() ? Promise.resolve([]) : this.workFrame(t + 1e-3, async (sv) => {
           e.resetTracking();
           e.setTime(t);
           this.uploadToEngine(sv, t, false);
@@ -833,7 +835,7 @@ export class Studio {
           // The engine analysed the frame after the geometry pass; the session tracks on the frame as recorded.
           const toSource = this.segToSource(t);
           return toSource ? found.map((o) => ({ ...o, prompt: mapPrompt(o.prompt, toSource) })) : found;
-        }, true);
+        }, true));
       } catch (err) {
         console.warn(`[seg] segment ${k} seed frame failed`, err);
       }

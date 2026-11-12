@@ -178,8 +178,9 @@ export class WorkerSegModel implements SegModel {
 
   /** fps: keyframes a second, fixed (`?segfps=N`); without it the session picks by the model (session.ts). */
   /** autoCap: the engine's own subjects followed at a time (a phone: SEG.liteAutos whatever the model). */
-  async sessionOpen(file: File, start: number, end: number, fps?: number, autoCap?: number): Promise<SessionInfo> {
-    return (await this.call({ type: "session-open", file, start, end, fps, autoCap })) as unknown as SessionInfo;
+  /** weak: a phone short of memory (device.ts isWeakDevice): the session keeps less (session.ts SessionOptions.weak). */
+  async sessionOpen(file: File, start: number, end: number, fps?: number, autoCap?: number, weak?: boolean): Promise<SessionInfo> {
+    return (await this.call({ type: "session-open", file, start, end, fps, autoCap, weak })) as unknown as SessionInfo;
   }
 
   /** Playhead first (session.ts focus): the subjects of the paused frame at t, followed ahead of the pass. */

@@ -3,7 +3,8 @@
 // the next load shows what an unmarked one was doing (About).
 const KEY = "studio.crumbs";
 const DONE = "· page closed";
-const MAX = 40;
+// (60: the AI session writes a line per job start and end on top of its stage lines; 40 held under a minute of a pass.)
+const MAX = 60;
 
 let previous: string[] | null = null;
 

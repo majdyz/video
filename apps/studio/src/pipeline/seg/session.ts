@@ -28,6 +28,13 @@
 //   small). Keyframe masks are kept run-length coded too.
 // - An exclude tap on an ML subject removes the subject when the tap's own mask is most of it (cleanly, restorable
 //   for undo), else it is followed as an exclude object (only the tapped part comes out).
+// - One model job at a time, in one loop (work): an exclude tap's own step, a tap's track, the model's own search for
+//   a segment's seeds (autoSeeds), the playhead's peek, the auto pass, in that order of precedence. A tap pre-empts:
+//   the pass stands still until it is followed through, a search under way stops at its next probe and starts over
+//   after the tap, and one asked for meanwhile waits (it used to run between two of the tap's steps: the decoder
+//   jumped to the segment's frame and back, two restarts, with the main thread analysing that frame next to it; an
+//   iPhone's page died there, 12 Nov). Every job leaves a breadcrumb when it starts and when it ends, with its
+//   number, so a crash log shows what was alive.
 import type { EdgeTam } from "./edgetam.ts";
 import { cellLab, nearMap, departFromCells, framePop, sdfFeather, area, bbox, guidedFilter, iou, promptFromMask, rleDecode, rleEncode } from "./mask.ts";
 import { denseFlow, warp, type Gray } from "./flow.ts";
@@ -129,7 +136,15 @@ type ObjState = {
 
 /** fps: keyframes a second, fixed (no adaptive extra ones unless `adapt` says so). Default: by the model (see header). */
 /** autoCap: at most this many of the engine's own subjects are followed at a time (a phone, whatever the model). */
-export type SessionOptions = { fps?: number; adapt?: boolean; autoCap?: number };
+/** weak: a phone short of memory (device.ts isWeakDevice): fewer decoded frames kept (SEG.weakFrameCache), half the
+ * flow-carried masks, one subject for the playhead's peek. The masks are the same (what is not kept is read again). */
+export type SessionOptions = { fps?: number; adapt?: boolean; autoCap?: number; weak?: boolean };
+
+/** A model job of the session (work): the breadcrumbs name them. */
+export type JobKind = "exclude" | "tap" | "search" | "peek" | "pass";
+
+/** Thrown inside a search a tap pre-empted (autoSeedsNow): it is started over after the tap. */
+const PREEMPT = Symbol("pre-empted");
 
 /** The memory bank's frame index of an object's n-th step in a direction (bank.ts: 5 apart, as the tracker was
  * measured; the offset keeps a backward track's indices positive). */
@@ -194,6 +209,40 @@ export class SegSession {
   private frames: SessionFrames;
   private ev: SessionEvents;
   private traced = 0;
+  /** Decoded frames kept (luma + colour cells), flow-carried masks kept, subjects a peek follows (SessionOptions.weak). */
+  private frameCap: number;
+  private carriedCap: number;
+  private peekCap: number;
+
+  // ------------------------------------------------------------------ jobs
+
+  /** The model job under way (null: none). One slot: a job starts only once the one before has ended. */
+  private job: { id: number; kind: JobKind; what: string; steps: number; t0: number } | null = null;
+  private jobSeq = 0;
+
+  /** The loop takes up model work of this kind (what: the tap's id, the search's frame): a breadcrumb when it is
+   * not what it was doing (the job before ends there, "paused": a tap or a search got in ahead of it). */
+  private enter(kind: JobKind, what: string): void {
+    const j = this.job;
+    if (j && j.kind === kind && j.what === what) return;
+    if (j) this.leave("paused");
+    this.job = { id: ++this.jobSeq, kind, what, steps: this.stepsDone, t0: performance.now() };
+    this.ev.trace?.(`job ${this.job.id} ${kind}${what ? ` ${what}` : ""} start`);
+  }
+
+  /** The job under way has ended (how: done, followed, paused, pre-empted, waiting for seeds, failed, closed). */
+  private leave(how = "done"): void {
+    const j = this.job;
+    if (!j) return;
+    this.job = null;
+    const banks = (this.model as { bankCount?: number }).bankCount;
+    this.ev.trace?.(`job ${j.id} ${j.kind}${j.what ? ` ${j.what}` : ""} end: ${how}, ${this.stepsDone - j.steps} steps, ${((performance.now() - j.t0) / 1000).toFixed(1)}s${banks !== undefined ? `, ${banks} banks` : ""}`);
+  }
+
+  /** A tap is waiting (an exclude tap's own step, a tapped object with steps left): the model is the tap's next. */
+  private tapWaiting(): boolean {
+    return this.ops.length > 0 || this.tapsLeft() > 0;
+  }
 
   constructor(model: EdgeTam, frames: SessionFrames, span: { start: number; end: number }, ev: SessionEvents, opts: SessionOptions = {}) {
     this.model = model;
@@ -206,6 +255,9 @@ export class SegSession {
     this.fps = fixed ? opts.fps! : model.lite ? SEG.liteFps : SEG.fps;
     this.adapt = opts.adapt ?? (!fixed && !!model.lite);
     this.autoCap = opts.autoCap && opts.autoCap > 0 ? opts.autoCap : model.lite ? SEG.liteAutos : Infinity;
+    this.frameCap = opts.weak ? SEG.weakFrameCache : SEG.frameCache;
+    this.carriedCap = opts.weak ? 4 : 8;
+    this.peekCap = opts.weak ? 1 : AUTO.peekMax;
     this.fine = keyTimes(span.start, span.end, [], this.adapt ? 2 * this.fps : this.fps);
     const base = keyTimes(span.start, span.end, [], this.fps), last = this.fine[this.fine.length - 1];
     this.base = last !== undefined && base[base.length - 1] !== last ? [...base, last] : base;
@@ -319,10 +371,19 @@ export class SegSession {
     if (!(r.k0 > this.front() + SEG.peekSkipS)) return;
     this.dropPeek();
     this.peekKey = r.k0;
-    this.ev.trace?.(`peek ${r.k0.toFixed(2)}s`);
+    this.enter("peek", `${r.k0.toFixed(2)}s`);
     let objs = r.objs;
     if (!objs.length && r.search) {
-      objs = await this.autoSeedsNow(r.k0);
+      try {
+        objs = await this.autoSeedsNow(r.k0);
+      } catch (e) {
+        if (e !== PREEMPT) throw e;
+        // A tap came in during the search: the look is taken up again after it (unless another place was asked for).
+        this.peekReq ??= r;
+        this.peekKey = NaN;
+        this.leave("pre-empted");
+        return;
+      }
       // The model holds that frame's features: the peek's first step runs on them.
       this.lastEncoded = r.k0;
     }
@@ -331,13 +392,14 @@ export class SegSession {
     // The keyframe is after the playhead: the one before it too, first, so the playhead's interval has both ends.
     const back = r.k0 > r.t + 1e-6 && i > 0;
     this.peekFrom = back ? this.base[i - 1] : r.k0;
-    for (const o of objs.slice(0, Math.min(this.autoCap, AUTO.peekMax))) {
+    for (const o of objs.slice(0, Math.min(this.autoCap, this.peekCap))) {
       if (o.kind !== "include") continue;
       const s = this.newObj({ ...o, t: r.k0, id: this.peekIds-- }, false, -1, false, fwd.slice(), back ? [r.k0, this.base[i - 1]] : []);
       s.peek = true;
       s.backFirst = back;
       this.objs.set(s.o.id, s);
     }
+    if (![...this.objs.values()].some((s) => s.peek)) this.leave("nothing to follow");
   }
 
   /** Drops the peek objects; the intervals they were in are filled again without them (by the pass as it comes). */
@@ -494,16 +556,20 @@ export class SegSession {
    */
   excludeAt(id: number, t: number, u: number, v: number): Promise<{ action: "removed"; removed: number } | { action: "part" | "exclude" }> {
     // Runs between two tracker steps (the model is not re-entrant).
-    return this.queue(() => this.excludeNow(id, t, u, v));
+    return this.queue(`${id}`, () => this.excludeNow(id, t, u, v));
   }
 
-  private ops: { run: () => Promise<void>; fail: (e: Error) => void }[] = [];
+  /** Exclude taps' own steps, in order: ahead of everything else (a tap). */
+  private ops: { what: string; run: () => Promise<void>; fail: (e: Error) => void }[] = [];
+  /** The model's own searches asked for (autoSeeds), in order: they wait for the taps. run resolves to how it ended,
+   * null when a tap pre-empted it (it stays first in line and starts over). */
+  private searches: { what: string; run: () => Promise<string | null>; fail: (e: Error) => void }[] = [];
 
   /** Runs fn between two tracker steps (the model is not re-entrant). Its failure fails the session (run's catch). */
-  private queue<T>(fn: () => Promise<T>): Promise<T> {
+  private queue<T>(what: string, fn: () => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(new Error(this.failed ?? "session closed"));
     return new Promise<T>((resolve, reject) => {
-      this.ops.push({ run: async () => { try { resolve(await fn()); } catch (e) { reject(e); throw e; } }, fail: reject });
+      this.ops.push({ what, run: async () => { try { resolve(await fn()); } catch (e) { reject(e); throw e; } }, fail: reject });
       void this.run();
     });
   }
@@ -541,7 +607,7 @@ export class SegSession {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    for (const op of this.ops.splice(0)) op.fail(new Error("session closed"));
+    for (const op of [...this.ops.splice(0), ...this.searches.splice(0)]) op.fail(new Error("session closed"));
     this.frames.dispose();
   }
 
@@ -576,7 +642,7 @@ export class SegSession {
     this.cellCache.delete(i);
     this.cellCache.set(i, cellLab(s, this.mw, this.mh));
     // A bounded cache (~70 KB a frame): the oldest frames go first, a refill decodes them again.
-    while (this.lumaCache.size > SEG.frameCache) { const first = this.lumaCache.keys().next().value!; this.lumaCache.delete(first); this.cellCache.delete(first); }
+    while (this.lumaCache.size > this.frameCap) { const first = this.lumaCache.keys().next().value!; this.lumaCache.delete(first); this.cellCache.delete(first); }
     const big = need1024 ? draw(this.big) : undefined;
     this.prof.decodeMs += performance.now() - t0;
     this.prof.decodes++;
@@ -615,14 +681,37 @@ export class SegSession {
    * Deterministic for the frame (same seeds whenever and wherever the clip is seeded).
    */
   autoSeeds(t: number): Promise<SegObject[]> {
-    return this.queue(() => this.autoSeedsNow(t));
+    if (this.closed) return Promise.reject(new Error(this.failed ?? "session closed"));
+    // Not between two steps of a tap, as it used to (see the header): after the taps, and a tap that comes while it
+    // runs stops it (it starts over after the tap; the same frame gives the same seeds).
+    return new Promise<SegObject[]>((resolve, reject) => {
+      this.searches.push({
+        what: `${this.snap(t).toFixed(2)}s`,
+        run: async () => {
+          try {
+            const out = await this.autoSeedsNow(t);
+            resolve(out);
+            return `${out.length} found`;
+          } catch (e) {
+            if (e === PREEMPT) return null;
+            reject(e);
+            throw e;
+          }
+        },
+        fail: reject,
+      });
+      void this.run();
+    });
   }
 
+  /** Throws PREEMPT when a tap is waiting (checked before the frame is encoded and before every probe). */
   private async autoSeedsNow(t0: number): Promise<SegObject[]> {
     const t = this.snap(t0), A = AUTO, { mw: w, mh: h } = this;
+    if (this.tapWaiting()) throw PREEMPT;
     this.ev.trace?.("auto: decode");
     const { rgba1024 } = await this.pixels(t, true);
     const cells = this.cellCache.get(frameKey(t));
+    if (this.tapWaiting()) throw PREEMPT;
     this.ev.trace?.("auto: encode");
     await this.model.encode(rgba1024!);
     this.ev.trace?.("auto: encoded; probing");
@@ -634,6 +723,7 @@ export class SegSession {
     let probes = 0;
     for (let gy = 0; gy < rows; gy++) for (let gx = 0; gx < cols; gx++) {
       const u = (gx + 0.5) / cols, v = (gy + 0.5) / rows;
+      if (this.tapWaiting()) throw PREEMPT;
       if (probes < 2) this.ev.trace?.(`auto: probe ${probes + 1}/${cols * rows}`);
       const r = await this.model.probe([[u * 1024, v * 1024]], [1]);
       if (probes++ < 2) this.ev.trace?.("auto: probed");
@@ -729,6 +819,8 @@ export class SegSession {
   async stop(): Promise<void> {
     this.close();
     await this.loop.catch(() => undefined);
+    // Its memory banks and the encoded frame leave the model with it (EdgeTam.reset).
+    try { await this.model.reset?.(); } catch { /* the runtime is gone */ }
   }
 
   private async work(): Promise<void> {
@@ -737,16 +829,33 @@ export class SegSession {
     try {
       while (!this.closed) {
         const op = this.ops.shift();
-        if (op) { await op.run(); await yieldNow(); continue; }
+        if (op) {
+          this.enter("exclude", op.what);
+          await op.run();
+          this.leave();
+          await yieldNow();
+          continue;
+        }
         const uk = this.urgent.shift();
         if (uk !== undefined) { await this.fill(uk); await yieldNow(); continue; }
         // Taps first, newest first (the autos stand still until every tap is followed through); then the playhead's
         // peek objects, in lockstep (they share each keyframe's encode).
         const manual = [...this.objs.values()].filter((s) => !s.auto && this.nextOf(s) !== null);
         let tap = manual.filter((s) => !s.peek).sort((a, b) => b.o.id - a.o.id)[0];
+        // The model's own search for a segment's seeds: once no tap is left, ahead of the peek and the pass.
+        const search = tap ? undefined : this.searches[0];
+        if (search) {
+          this.enter("search", search.what);
+          const how = await search.run();
+          if (how !== null) this.searches.shift();
+          this.leave(how ?? "pre-empted");
+          await yieldNow();
+          continue;
+        }
         if (!tap && this.peekReq) { await this.startPeek(); await yieldNow(); continue; }
         tap ??= manual.sort((a, b) => a.fi + a.bi - (b.fi + b.bi) || b.o.id - a.o.id)[0];
         if (tap) {
+          this.enter(tap.peek ? "peek" : "tap", tap.peek ? `${this.peekKey.toFixed(2)}s` : `${tap.o.id}`);
           const st = await this.stepObject(tap);
           // The interval ahead of the step waits when the object steps there next (that step fills it, with both
           // its ends): filled now it was drawn twice, and going backward it read frames behind the decoder.
@@ -756,7 +865,7 @@ export class SegSession {
           this.postKeys();
           this.postProgress();
           if (this.dirOf(tap) !== "b") this.backRgba.clear();
-          if (st && !tap.peek && this.nextOf(tap) === null) this.ev.trace?.(`tap ${tap.o.id} followed`);
+          if (!tap.peek && (!st || this.nextOf(tap) === null)) this.leave(st ? "followed" : "dropped (the water)");
           await yieldNow();
           continue;
         }
@@ -780,6 +889,7 @@ export class SegSession {
           continue;
         }
         if (autos.length) {
+          this.enter("pass", "");
           // Newer first: at a segment start the new seeds step before the autos they may replace.
           const batch = autos.filter((s) => Math.abs(this.nextOf(s)! - t) < 1e-6).sort((a, b) => b.o.id - a.o.id);
           for (const s of batch) await this.stepObject(s);
@@ -805,11 +915,16 @@ export class SegSession {
     } catch (e) {
       // Nothing is left to trust after a throw in here (an allocation that failed leaves the runtime dead): the
       // session stops and says so, instead of looking like a finished pass.
+      this.leave("failed");
       if (!this.closed) this.fail(e);
     } finally {
       this.running = false;
+      this.leave(this.closed ? "closed" : this.waiting ? "waiting for seeds" : "done");
       // The loop's own time (it stops while it waits for seeds: waitSeedsMs, or for the user).
       this.prof.runMs += performance.now() - began;
+      // No tap is left when the loop stops: said once more, for a tap that ended without a tracker step after it (an
+      // exclude tap that took a subject out). The main thread holds the seed frames' analysis back until it hears.
+      if (!this.closed) this.postProgress();
       if (!this.closed && !this.waiting) this.ev.idle(this.profile());
     }
   }
@@ -819,7 +934,7 @@ export class SegSession {
     this.failed = msg;
     this.closed = true;
     const err = new Error(msg);
-    for (const op of this.ops.splice(0)) op.fail(err);
+    for (const op of [...this.ops.splice(0), ...this.searches.splice(0)]) op.fail(err);
     try { this.frames.dispose(); } catch { /* already gone */ }
     this.ev.error?.(msg);
   }
@@ -1154,7 +1269,7 @@ export class SegSession {
     this.prof.fillMs += performance.now() - t0;
     this.prof.carried++;
     // Each is asked for twice (the intervals either side of t); a handful are kept (230 KB each at 320 × 180).
-    if (this.carriedCache.size >= 8) this.carriedCache.delete(this.carriedCache.keys().next().value!);
+    if (this.carriedCache.size >= this.carriedCap) this.carriedCache.delete(this.carriedCache.keys().next().value!);
     this.carriedCache.set(id, out);
     return out;
   }
