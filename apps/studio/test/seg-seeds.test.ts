@@ -11,6 +11,7 @@ import { assignSlots, blobCandidates, blobRank, edgeShare, overlap, SEEDS, topUp
 import { AUTO, SegSession, type SessionEvents, type SessionFrames, type SessionOptions } from "../src/pipeline/seg/session.ts";
 import { seedObjects, seedRegions } from "../src/pipeline/seg/studio-seg.ts";
 import { SEG, type SegObject } from "../src/pipeline/seg/track.ts";
+import { rleDecode } from "../src/pipeline/seg/mask.ts";
 
 // ---------------------------------------------------------------- the proposal: synthetic regions
 
@@ -159,24 +160,28 @@ const blob = (o: Partial<SubjectBlob> & { u: number; v: number; area: number }):
 {
   const every = SEG.topUpS, margin = SEG.reacquireS / 2;
   assert.equal(SEG.topUpS, 4);
-  assert.equal(topUpAt(0, 1, 8, every, margin), 4, "something is followed: the next look comes topUpS later");
-  assert.equal(topUpAt(4, 2, 8, every, margin), null, "not on top of the next regular start");
-  assert.equal(topUpAt(8, 2, 16, every, margin), 12);
-  assert.equal(topUpAt(0, 4, 8, every, margin), 4, "however many are followed (a look is where a slot is given up)");
-  assert.equal(topUpAt(0, 0, 8, every, margin), null, "nothing followed: the session's own re-acquire schedule, not this one");
-  assert.equal(topUpAt(46, 1, 50, every, margin), null, "nor within a second of the range's end");
-  assert.equal(topUpAt(40, 1, 50, every, margin), 44);
-  assert.equal(topUpAt(0, 1, 8, 0, margin), null);
-  console.log("seeds: the look for new subjects every 4 s while something is followed: ok");
+  assert.equal(topUpAt(0, 1, 3, 8, every, margin), 4, "room left: the next look comes topUpS later");
+  assert.equal(topUpAt(4, 2, 3, 8, every, margin), null, "not on top of the next regular start");
+  assert.equal(topUpAt(8, 2, 3, 16, every, margin), 12);
+  assert.equal(topUpAt(0, 3, 3, 8, every, margin), null, "every slot taken: a look could only add tracker steps");
+  assert.equal(topUpAt(0, 4, 3, 8, every, margin), null);
+  assert.equal(topUpAt(0, 0, 3, 8, every, margin), null, "nothing followed: the session's own re-acquire schedule, not this one");
+  assert.equal(topUpAt(46, 1, 3, 50, every, margin), null, "nor within a second of the range's end");
+  assert.equal(topUpAt(40, 1, 3, 50, every, margin), 44);
+  assert.equal(topUpAt(0, 1, 3, 8, 0, margin), null);
+  console.log("seeds: the look for new subjects every 4 s while there is room: ok");
 }
 
 // ---------------------------------------------------------------- the session on a fake school
 
 /** A subject of the fake clip: a bright box (u, v centre; half sizes), on screen between two clip times. */
-type Sub = { name: string; u: number; v: number; hu: number; hv: number; from: number; to: number; ghost?: boolean };
+/** jump: from that clip time on it is `du` further right (no flow follows it). fat: from that clip time on the
+ * model's mask of it is that many times as wide as it is (the water beside it). hide: the model sees nothing of it
+ * between those two clip times. */
+type Sub = { name: string; u: number; v: number; hu: number; hv: number; from: number; to: number; ghost?: boolean; jump?: [number, number]; fat?: [number, number]; hide?: [number, number] };
 let school: Sub[] = [];
 const on = (s: Sub, t: number) => t >= s.from - 1e-6 && t <= s.to + 1e-6;
-const inside = (s: Sub, u: number, v: number) => Math.abs(u - s.u) < s.hu && Math.abs(v - s.v) < s.hv;
+const inside = (s: Sub, u: number, v: number, t = 0, wide = 1) => Math.abs(u - s.u - (s.jump && t >= s.jump[0] ? s.jump[1] : 0)) < s.hu * wide && Math.abs(v - s.v) < s.hv;
 
 class FakeCanvas {
   width: number;
@@ -194,7 +199,7 @@ class FakeCanvas {
           const u = (x + 0.5) / W, v = (y + 0.5) / H, k = (y * W + x) * 4;
           // Water with a faint texture; a subject is pale against it, a "ghost" is the water's own colour.
           let s = 70 + 3 * Math.sin(u * 40) * Math.cos(v * 30);
-          for (const sub of school) if (!sub.ghost && on(sub, t) && inside(sub, u, v)) s = 190;
+          for (const sub of school) if (!sub.ghost && on(sub, t) && inside(sub, u, v, t)) s = 190;
           data[k] = s * 0.3; data[k + 1] = s * 0.8; data[k + 2] = s; data[k + 3] = 255;
         }
         data[0] = Math.round(t * 100) % 256; data[1] = Math.floor(Math.round(t * 100) / 256);
@@ -215,11 +220,12 @@ function fake(iou = 0.5): Fake {
   const lw = 160, lh = 20;
   const mask = (sub: Sub | null | undefined, t: number) => {
     const logits = new Float32Array(lw * lh);
-    const shown = sub === undefined || (sub !== null && on(sub, t));
-    for (let y = 0; y < lh; y++) for (let x = 0; x < lw; x++) logits[y * lw + x] = sub === undefined || (shown && inside(sub!, (x + 0.5) / lw, (y + 0.5) / lh)) ? 10 : -10;
+    const shown = sub === undefined || (sub !== null && on(sub, t) && !(sub.hide && t >= sub.hide[0] && t < sub.hide[1]));
+    const wide = sub?.fat && t >= sub.fat[0] ? sub.fat[1] : 1;
+    for (let y = 0; y < lh; y++) for (let x = 0; x < lw; x++) logits[y * lw + x] = sub === undefined || (shown && inside(sub!, (x + 0.5) / lw, (y + 0.5) / lh, t, wide)) ? 10 : -10;
     return { logits, lw, lh, score: shown ? 20 : -5, iou: sub === undefined ? 0.98 : iou };
   };
-  const at = (pts: [number, number][], t: number) => school.find((s) => on(s, t) && inside(s, pts[0][0] / 1024, pts[0][1] / 1024));
+  const at = (pts: [number, number][], t: number) => school.find((s) => on(s, t) && inside(s, pts[0][0] / 1024, pts[0][1] / 1024, t));
   f.model = {
     lite: false,
     timing: { encode: 0, encodes: 0, attend: 0, decoder: 0, memEnc: 0, steps: 0 },
@@ -296,6 +302,9 @@ await quiet(async () => {
   assert.equal(f.probes.length, 5, "one probe per region, and no grid when regions are subjects");
   assert.deepEqual(found.map((o) => o.prompt.points), [[[A.u, A.v]], [[B.u, B.v]], [[C.u, C.v]]], "the three sharks, largest first; the water-coloured region and the patch of plain water are refused");
   for (const o of found) { assert.deepEqual(o.prompt.labels, [1]); assert.equal(o.prompt.box, undefined, "followed from the region's own points, no box"); assert.equal(o.kind, "include"); }
+  // A mask several times the size of what the engine saw there (the subject and the water around it) is refused.
+  assert.equal((await s.autoSeeds(0, [{ ...region(A), area: region(A).area / 3 }], false)).length, 0, "3 × the region: over AUTO.blobGrow");
+  assert.equal((await s.autoSeeds(0, [{ ...region(A), area: region(A).area / 2 }], false)).length, 1, "2 × the region: the engine sees the bright flank, the model the animal");
   // Twice the same region: one subject.
   assert.equal((await s.autoSeeds(0, [region(A), { ...region(A), points: [[A.u + 0.02, A.v]] }], false)).length, 1);
   // No region is a subject and no grid asked for: nothing, at the cost of the regions' probes alone.
@@ -325,18 +334,20 @@ await quiet(async () => {
   const r = run(f, 20, { autoCap: 2 });
   await r.done;
   assert.deepEqual(r.errors, []);
-  // A look every 4 s (0 s, the regular starts at 8 and 16 s, the extra ones in between).
-  assert.deepEqual(r.looks.map((x) => x.t), [0, 4, 8, 12, 16]);
-  assert.deepEqual(r.looks.map((x) => x.found), [2, 0, 0, 1, 0], "0 s: the two largest; 4 and 8 s: all three are regions again, two followed already and no room for the third; 12 s: B has left, C comes in");
-  // A is followed by one track from the first keyframe to the last; so is B until the look after it left; C from 12 s.
+  // Every slot is taken: the regular starts only (0, 8, 16 s), and one look a second after a slot is given up.
+  assert.deepEqual(r.looks.map((x) => x.t), [0, 8, 12.5, 16]);
+  assert.deepEqual(r.looks.map((x) => x.search), [true, true, false, true]);
+  assert.deepEqual(r.looks.map((x) => x.found), [2, 0, 1, 0], "0 s: the two largest; 8 s: all three are regions again, two followed already and no room for the third; 12.5 s: B has left, C comes in");
+  // A is followed by one track from the first keyframe to the last; B until it has shown nothing for SEG.goneS; C
+  // from the look a second after that.
   assert.deepEqual(tracks(f, "A"), [{ key: "1f", from: 0, to: 20 }], "one id, one memory, all through");
   assert.deepEqual(tracks(f, "B").map((x) => x.key), ["2f"]);
-  assert.equal(Math.max(...f.stepped.filter((x) => x.key === "2f").map((x) => x.t)), 12, "B's track gives its slot up at the first look after B left (9.9 s), not at the next regular start");
-  assert.deepEqual(tracks(f, "C"), [{ key: "3f", from: 12, to: 20 }]);
+  assert.equal(Math.max(...f.stepped.filter((x) => x.key === "2f").map((x) => x.t)), 11.5, "B left at 9.9 s (last seen 9.5 s): its track is let go after 2 s of nothing, not stepped on to the next start");
+  assert.deepEqual(tracks(f, "C"), [{ key: "3f", from: 12.5, to: 20 }]);
   // No seed was started only to be let go (the search leaves out what is followed and what there is no room for)...
   assert.deepEqual([...new Set(f.stepped.map((x) => x.key))].sort(), ["1f", "2f", "3f"]);
   // ...and never more than two subjects are followed on from a look.
-  for (const t of [0.5, 4.5, 8.5, 12.5, 16.5]) assert.ok(f.stepped.filter((x) => x.t === t && x.key.endsWith("f")).length <= 2, `at most the cap (${t} s)`);
+  for (const t of [0.5, 8.5, 13, 16.5]) assert.ok(f.stepped.filter((x) => x.t === t && x.key.endsWith("f")).length <= 2, `at most the cap (${t} s)`);
 });
 console.log("session: a school with room for two → the same two tracks all through, the third when one leaves: ok");
 
@@ -347,9 +358,9 @@ await quiet(async () => {
   const r = run(f, 20, { autoCap: 3 });
   await r.done;
   assert.deepEqual(r.errors, []);
-  assert.deepEqual(r.looks.map((x) => x.t), [0, 4, 8, 12, 16], "a look every 4 s");
-  assert.deepEqual(r.looks.map((x) => x.search), [true, false, true, false, true], "the extra looks ask about the engine's regions only (no grid)");
-  assert.deepEqual(r.looks.map((x) => x.found), [2, 1, 0, 0, 0]);
+  assert.deepEqual(r.looks.map((x) => x.t), [0, 4, 8, 16], "room for a third: a look at 4 s; full from there: the regular starts only");
+  assert.deepEqual(r.looks.map((x) => x.search), [true, false, true, true], "the extra look asks about the engine's regions only (no grid)");
+  assert.deepEqual(r.looks.map((x) => x.found), [2, 1, 0, 0]);
   assert.deepEqual(tracks(f, "A"), [{ key: "1f", from: 0, to: 20 }]);
   assert.deepEqual(tracks(f, "B"), [{ key: "2f", from: 0, to: 20 }]);
   assert.deepEqual(tracks(f, "C"), [{ key: "3f", from: 4, to: 20 }], "C came in at 1.5 s: followed from the look at 4 s, not from the next regular start at 8 s");
@@ -365,7 +376,7 @@ await quiet(async () => {
   assert.equal(f1.encodes, 41, "41 keyframes (2 a second over 20 s), each encoded once");
   assert.equal(f1.probes.length, 5, "one probe per look");
 });
-console.log("session: a look every 4 s while something is followed, on the pass's own encode: ok");
+console.log("session: a look every 4 s while there is room, on the pass's own encode: ok");
 
 // Seeds handed over without the search (the engine's own animals) on a subject that is followed already.
 await quiet(async () => {
@@ -381,5 +392,47 @@ await quiet(async () => {
   assert.deepEqual(dup.map((x) => x.t), [4], "the second seed on A has its first mask and is let go: the shark is not followed twice");
 });
 console.log("session: a seed on a subject followed already is let go at its first mask: ok");
+
+// A mask that grows onto the water around its subject, each step under the runaway limits, is not kept.
+await quiet(async () => {
+  const areas = (r: Run, id: number) => {
+    const o = (r.s as unknown as { objs: Map<number, { keys: Map<number, Uint8Array> }> }).objs.get(id)!;
+    return [...o.keys].sort((a, b) => a[0] - b[0]).map(([t, k]) => ({ t, a: rleDecode(k, 320 * 40).reduce((n, x) => n + (x > 127 ? 1 : 0), 0) }));
+  };
+  assert.ok(2.4 > SEG.bloat && 2.4 < SEG.runawayGrow, "under the old limit (2.5 × the flow-carried mask), over the new one");
+  school = [A, { ...B, fat: [3, 2.4] }];
+  const f = fake(0.5);
+  const r = run(f, 8, { autoCap: 3 });
+  await r.done;
+  assert.deepEqual(r.errors, []);
+  const b = areas(r, 2), seed = b[0].a;
+  assert.ok(seed > 0 && b.filter((x) => x.t < 3).every((x) => x.a === seed), "B's own size until 3 s");
+  assert.ok(b.filter((x) => x.t >= 3).length > 0 && b.every((x) => x.a <= SEG.bloat * seed), `no mask of B over ${SEG.bloat} × its size (${b.map((x) => (x.a / seed).toFixed(1)).join(" ")})`);
+  const a = areas(r, 1);
+  assert.ok(a.length === 17 && a.every((x) => x.a === a[0].a), "A beside it is followed as ever");
+  // Back after keyframes without a mask, three times the size it was last seen at: not kept either (a far shark's
+  // track that came back as a diver's face).
+  const D: Sub = { name: "D", u: 0.6, v: 0.5, hu: 0.02, hv: 0.2, from: 0, to: 99, hide: [2, 4], fat: [4, 3] };
+  school = [D];
+  const f2 = fake(0.5);
+  const r2 = run(f2, 8, { autoCap: 3 });
+  await r2.done;
+  const d = areas(r2, 1);
+  assert.ok(d.some((x) => x.t < 2 && x.a > 0) && d.filter((x) => x.t >= 2).every((x) => x.a <= d[0].a), `nothing larger than D after it was lost (${d.map((x) => (x.a / d[0].a).toFixed(1)).join(" ")})`);
+});
+console.log("session: a mask grown onto the water around its subject, or back far larger than it was, is not kept: ok");
+
+// Adaptive keyframes, each subject for itself: the one with a hard step goes on the fine grid, the others do not.
+await quiet(async () => {
+  school = [A, { ...B, jump: [2.1, 0.25] }];
+  const f = fake(0.5);
+  const r = run(f, 6, { autoCap: 3, adapt: true });
+  await r.done;
+  assert.deepEqual(r.errors, []);
+  const off = (key: string) => f.stepped.filter((x) => x.key === key && Math.abs(x.t * 2 - Math.round(x.t * 2)) > 1e-6).map((x) => x.t);
+  assert.ok(off("2f").length >= 2 && Math.min(...off("2f")) > 2.5, `B, which jumped at 2.1 s, is on the fine grid after its hard step at 2.5 s (${off("2f").join(" ")})`);
+  assert.deepEqual(off("1f"), [], "A beside it keeps to 2 keyframes a second");
+});
+console.log("session: extra keyframes for the subject with a hard step only: ok");
 
 console.log("seg-seeds tests passed");

@@ -155,15 +155,15 @@ export function assignSlots<O extends SlotItem, N extends SlotItem>(olds: readon
 
 /**
  * When to look for subjects again after the look at `t` (seconds of clip; null: at the next regular start).
- * `followed`: subjects followed from t on; `next`: the next regular start (or the range's end); `every`: the
- * cadence (track.ts SEG.topUpS); `margin`: no look this close before `next`.
- * While something is followed, subjects that swim into the picture are picked up at the next look rather than at the
- * next regular start (SEG.segmentS later). Also with every slot taken: a look is where a track whose subject has
- * left the picture gives its slot up, and where a big subject swimming in takes a far one's (assignSlots). With
- * nothing followed at all the session's own re-acquire schedule applies (session.ts reacquire), not this one.
+ * `followed`: subjects followed from t on; `cap`: how many can be; `next`: the next regular start (or the range's
+ * end); `every`: the cadence (track.ts SEG.topUpS); `margin`: no look this close before `next`.
+ * With room left, subjects that swim into the picture are picked up at the next look rather than at the next regular
+ * start (SEG.segmentS later). With every slot taken a look could only add tracker steps, so none is made (the
+ * session looks again when a slot is given up: SEG.goneS). With nothing followed at all the session's own
+ * re-acquire schedule applies (session.ts reacquire), not this one.
  */
-export function topUpAt(t: number, followed: number, next: number, every: number, margin: number): number | null {
-  if (followed <= 0 || !(every > 0)) return null;
+export function topUpAt(t: number, followed: number, cap: number, next: number, every: number, margin: number): number | null {
+  if (followed <= 0 || followed >= cap || !(every > 0)) return null;
   const r = t + every;
   return r < next - margin ? r : null;
 }

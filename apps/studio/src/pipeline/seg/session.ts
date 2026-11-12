@@ -10,8 +10,9 @@
 //   first, then the start's seeds are asked for: an auto goes on under its id (its memory bank and all) unless a
 //   seed took its place (the track had shrunk to a part of its subject, or run past it) or there is no room for it
 //   (autoCap), and a seed on a subject that is followed already is let go (carryOver, seeds.ts assignSlots): the
-//   same shark of a school is not followed twice, nor started over at every look. While something is followed the
-//   next look comes SEG.topUpS later (an extra start), so a subject that swims in is picked up soon. The seeds are
+//   same shark of a school is not followed twice, nor started over at every look. While there is room for more the
+//   next look comes SEG.topUpS later (an extra start), and one comes a second after a subject that left is let go
+//   (SEG.goneS), so a subject that swims in is picked up soon. Each auto is on the fine grid for itself. The seeds are
 //   the engine's animals plus what the model finds on the engine's other regions (autoSeeds: small subjects of a
 //   school, which the engine does not tone and the model's blind grid passes between). A subject
 //   first found after a stretch nothing was followed in (the start of the clip, a gap) is also followed backward
@@ -79,11 +80,12 @@ export type SessionFrames = {
  * and the lite model rates its masks of pale, far sharks 0.4–0.75 however good they are (owner's hammerhead clip:
  * every shark the grid did land on was refused at 0.8). What keeps the water out there is the size test, the region
  * (blobGrow) and the water test (smallContrast / RECHECK.contrast), not the estimate.
- * blobGrow: such a mask may be at most this many times its region's box (else it is something else's: the water). */
+ * blobGrow: such a mask may be at most this many times its region's size (the model's masks of the regions that
+ * are sharks measure 0.2–1.6 × the region, two 2.1; a round blob of water around a faint shark 6.6). */
 /** edge: a find whose mask lies along more than this share of one side of the frame is not started on: a subject
  * the frame cuts through (a diver's head and hair in a selfie shot, with the water above it in the mask), the
  * surface, the seabed. Its next look finds it once it is in the picture. */
-export const AUTO = { cols: 4, rows: 6, liteCols: 3, liteRows: 4, iou: 0.8, blobIou: 0.35, blobGrow: 8, edge: 0.25, areaLo: 0.004, areaSmall: 0.0015, smallContrast: 2.5, areaHi: 0.3, span: 0.9, contrast: 0.05, max: 4, peekMax: 2 };
+export const AUTO = { cols: 4, rows: 6, liteCols: 3, liteRows: 4, iou: 0.8, blobIou: 0.35, blobGrow: 2.5, edge: 0.25, areaLo: 0.004, areaSmall: 0.0015, smallContrast: 2.5, areaHi: 0.3, span: 0.9, contrast: 0.05, max: 4, peekMax: 2 };
 
 /** How far a mask's colour stands out from a ring around it (mean cell-colour distance; cells: cellLab, 3 per px). */
 function ringContrast(m: Float32Array, cells: Float32Array, w: number, h: number): number {
@@ -188,6 +190,11 @@ type ObjState = {
   ranB: number;
   keptF: boolean;
   keptB: boolean;
+  /** The size (mask px) of its last mask that was kept, forward / backward (0: none yet). */
+  lastF: number;
+  lastB: number;
+  /** One of the engine's own subjects: the size (mask px) its masks are held against (SEG.bloat; 0: no mask yet). */
+  anchor: number;
 };
 
 /** fps: keyframes a second, fixed (no adaptive extra ones unless `adapt` says so). Default: by the model (see header). */
@@ -235,8 +242,6 @@ export class SegSession {
   private urgent: number[] = [];
   /** Intervals filled at least once (activate: one split by a new keyframe is filled again as two). */
   private filledIv = new Set<number>();
-  /** Adaptive keyframes: lockstep steps the autos still take on the fine grid. */
-  private autoFine = 0;
   private carriedCache = new Map<string, { inc: Float32Array; exc: Float32Array | null }>();
   private small: OffscreenCanvas;
   private big: OffscreenCanvas;
@@ -362,7 +367,7 @@ export class SegSession {
   }
 
   private newObj(o: SegObject & { id: number }, auto: boolean, seg: number, hidden: boolean, fwd: number[], bwd: number[]): ObjState {
-    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0, ranF: 0, ranB: 0, keptF: false, keptB: false };
+    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0, ranF: 0, ranB: 0, keptF: false, keptB: false, lastF: 0, lastB: 0, anchor: 0 };
   }
 
   /** Canonical frame of segment k (k = 0: the first seeds' frame; then every SEG.segmentS, snapped). */
@@ -539,8 +544,7 @@ export class SegSession {
     // No seeds: decided now.
     else if (this.endedAt(t0).length) {
       this.carryOver(t0);
-      this.refineAutos(t0, this.dueHard);
-      this.dueHard = false;
+      this.refineAt(t0);
     }
     // Nothing seeded and nothing tracked into this segment: look again a little later (re-acquire).
     else if (![...this.objs.values()].some((s) => s.auto && this.nextOf(s) !== null)) { this.emptyRun++; this.reacquire(k); }
@@ -565,8 +569,24 @@ export class SegSession {
 
   /** The segment start whose seeds have still to take their first step before its carry-over is decided (NaN: none). */
   private settling = NaN;
-  /** A step of the subjects followed up to a segment start, on its frame, was a hard one (refineAutos, once the start is settled). */
-  private dueHard = false;
+  /** One of the engine's own subjects was let go in the step just taken (gone, a runaway for good): a slot is free. */
+  private freed = false;
+
+  /**
+   * A slot was given up at keyframe t in mid-segment: the next look comes SEG.lookSoonS later (an extra start, the
+   * engine's regions only), and what is followed is followed up to it. Without it a full house looks again only at
+   * the next regular start (SEG.segmentS): the sharks that swam in meanwhile had no mask for seconds.
+   */
+  private lookSoon(t: number): void {
+    const alive = [...this.objs.values()].filter((s) => s.auto && s.fi < s.fwd.length);
+    if (!alive.length) return;
+    let k = -1;
+    for (let i = 0; i < this.segStarts.length; i++) if (this.segStarts[i] <= t + 1e-6) k = i;
+    if (k < 0 || !this.seeded.has(this.segStarts[k])) return;
+    const r = this.addStart(k, t + SEG.lookSoonS, false);
+    if (r === null) return;
+    for (const s of alive) if (s.fwd[s.fwd.length - 1] > r + 1e-6) s.fwd = s.fwd.filter((x) => x <= r + 1e-6);
+  }
   /** Segment starts whose carry-over is decided (carryOver: once each). */
   private carriedAt = new Set<number>();
 
@@ -885,8 +905,8 @@ export class SegSession {
         if (a < A.areaSmall || a > A.areaHi) continue;
         const b = bbox(m, w, h);
         if (!b || b.x1 - b.x0 > A.span * w || b.y1 - b.y0 > A.span * h) continue;
-        // Something else's mask (the water's, a neighbour's): far larger than what the engine saw there.
-        if (a > A.blobGrow * Math.max(c.area, (c.box.x1 - c.box.x0) * (c.box.y1 - c.box.y0))) continue;
+        // Something else's mask, or the subject with the water around it: larger than what the engine saw there.
+        if (a > A.blobGrow * Math.max(c.area, SEEDS.minArea)) continue;
         if (edgeShare(m, w, h) > A.edge) continue;
         // The water test, whatever the size: a region of haze or of plain water is not a subject.
         if (dE === null || dE < (a < A.areaLo ? A.smallContrast : RECHECK.contrast)) continue;
@@ -948,6 +968,8 @@ export class SegSession {
     // Not what is followed already, and no more than there is room for (the subjects followed so far have stepped on
     // this frame when the look is a segment start's: followedAt).
     const olds = quick ? [] : this.followedAt(t);
+    // A followed subject the model has just masked afresh: that is its size from here on (SEG.bloat).
+    for (const o of olds) for (const c of found) if (overlap(o.m, c.m).iou >= SEEDS.sameIoU) o.s.anchor = area(c.m);
     const items = found.map((c, i) => ({ id: i, area: area(c.m), m: c.m }));
     const slots = assignSlots(olds, items, (o, n) => overlap(o.m, n.m), (a, b) => overlap(a.m, b.m), this.autoCap);
     const keep = slots.take.slice(0, quick ? A.peekMax : A.max).map((i) => found[i]);
@@ -1117,7 +1139,8 @@ export class SegSession {
             this.enter("pass", "");
             for (const s of due) await this.stepObject(s);
             // (Its intervals are filled, and the fine grid decided, once the start's seeds have stepped too: carryOver.)
-            this.dueHard = due.some((s) => s.hard);
+            // (A slot given up on this frame: the look is here.)
+            this.freed = false;
             this.postProgress();
             await yieldNow();
             continue;
@@ -1138,10 +1161,11 @@ export class SegSession {
           const ahead: ObjState[] = [];
           for (const s of batch) { const d = this.dirOf(s); await this.stepObject(s); if (d === "f") ahead.push(s); }
           if (ahead.length) {
-            const start = this.carryOver(t);
-            this.refineAutos(t, ahead.some((s) => s.hard) || (start && this.dueHard));
-            if (start) this.dueHard = false;
+            this.carryOver(t);
+            this.refineAt(t);
+            if (this.freed) this.lookSoon(t);
           }
+          this.freed = false;
           if (!autos.some((s) => this.dirOf(s) === "b")) this.backRgba.clear();
           await this.fillReady();
           this.postKeys();
@@ -1208,9 +1232,8 @@ export class SegSession {
    *   seed's mask holds much of it without being the same extent: the track had shrunk to a part of the subject, or
    *   run past it) or there is no room for it (autoCap: the largest stay, a followed one counting double).
    * - A seed on a subject that is followed already (the same extent) is let go: the same shark is not followed twice.
-   * - While something is followed, the next look comes SEG.topUpS later rather than at the next regular start: a
-   *   subject that swims into the picture (a school passing) is picked up then, and a track whose subject has left
-   *   gives up its slot.
+   * - With room left, the next look comes SEG.topUpS later rather than at the next regular start: a subject that
+   *   swims into the picture (a school passing) is picked up then.
    */
   private carryOver(t: number): boolean {
     const k = this.segStarts.findIndex((s) => Math.abs(s - t) < 1e-6);
@@ -1248,9 +1271,9 @@ export class SegSession {
     }
     const t1 = this.segStarts[k + 1] ?? this.base[this.base.length - 1];
     const going = slots.keep.length + slots.take.length;
-    // Something is followed: the next look comes soon (the engine's regions only, no grid search), and everything
-    // is followed up to it.
-    const r = topUpAt(t, going, t1, SEG.topUpS, SEG.reacquireS / 2);
+    // Room left: the next look comes soon (the engine's regions only, no grid search), and everything is followed
+    // up to it.
+    const r = topUpAt(t, going, this.autoCap, t1, SEG.topUpS, SEG.reacquireS / 2);
     const to = (r !== null ? this.addStart(k, r, false) : null) ?? t1;
     const steps = this.stepsBetween(t, to, [to]).filter((x) => x > t + 1e-6);
     for (const o of olds) if (slots.keep.includes(o.id)) { o.s.fwd = [...o.s.fwd, ...steps]; o.s.seg = k; }
@@ -1349,6 +1372,19 @@ export class SegSession {
         agree = iou(m, carried);
       }
     }
+    // Grown onto the water around its subject (SEG.bloat): asked afresh from where the flow carried the last mask
+    // (points inside it, negatives on a ring around it), as the guard does for a mask that shrank.
+    const bloated = (x: Float32Array) => s.auto && s.o.kind === "include" && !first && s.anchor > 0 && area(x) > SEG.bloat * s.anchor && area(x) > SEG.bloatMinArea * this.mw * this.mh;
+    if (bloated(m) && carried && !reprompts) {
+      const pr = promptFromMask(carried, this.mw, this.mh, this.mw / 640);
+      if (pr) {
+        const P: [number, number][] = [...pr.pos, ...pr.neg].map(([x, y]) => [((x + 0.5) / this.mw) * 1024, ((y + 0.5) / this.mh) * 1024]);
+        r = await this.model.step(key, frame, P, [...pr.pos.map(() => 1), ...pr.neg.map(() => 0)], reverse);
+        m = sigmoidResize(r.logits, r.lw, r.lh, this.mw, this.mh);
+        reprompts = 1;
+        agree = iou(m, carried);
+      }
+    }
     // A runaway mask (the tracker slid onto the reef or the water: a big warm patch over the background): over
     // SEG.runawayArea of the frame, or SEG.runawayGrow × what the flow carried, is no subject: the frame shows none.
     // The same against the subject's size at its last keyframe and, for a locked track, its locked size (track.ts
@@ -1363,6 +1399,12 @@ export class SegSession {
       const grew = (ref: number, floor: number) => ref > SEG.guardMinArea * N && a > SEG.runawayGrow * ref && a > floor;
       const ranBefore = goFwd ? s.ranF : s.ranB, kept = goFwd ? s.keptF : s.keptB;
       let why = a > SEG.runawayArea * N ? "over the frame" : grew(ca, 0.05 * N) ? "outgrew the flow-carried mask" : grew(pa, 0.05 * N) ? "outgrew its last keyframe" : lk?.locked && grew(lk.area, SEG.guardMinArea * N) ? "outgrew its locked size" : "";
+      // One of the engine's own subjects back after keyframes without a mask, far larger than it was last seen (a
+      // far shark's track, dropped as a runaway, came back as a fifth of the frame on a diver's face), or still
+      // grown past its subject after the fresh prompt above.
+      const last = goFwd ? s.lastF : s.lastB;
+      if (!why && s.auto && s.o.kind === "include" && !first && pa === 0 && last > 0 && a > SEG.runawayGrow * last && a > 0.02 * N) why = "came back far larger than it was last seen";
+      if (!why && bloated(m)) why = "grew past its subject's size";
       if (!why && s.o.kind === "include" && prev && !first && pa === 0 && a > 0) {
         const cells = this.cellCache.get(frameKey(t));
         const dE = cells ? waterContrast(m, cells, this.mw, this.mh) : null;
@@ -1381,8 +1423,13 @@ export class SegSession {
       }
       if (goFwd) { s.ranF = ranAway ? s.ranF + 1 : 0; if (!ranAway && a > 0) s.keptF = true; }
       else { s.ranB = ranAway ? s.ranB + 1 : 0; if (!ranAway && a > 0) s.keptB = true; }
+      if (!ranAway && a > 0) {
+        if (goFwd) s.lastF = a; else s.lastB = a;
+        // (The anchor follows a subject that comes nearer, slowly: doubling takes it seconds, a bloat a few keyframes.)
+        s.anchor = s.anchor > 0 ? (a > s.anchor ? s.anchor + 0.02 * (a - s.anchor) : s.anchor) : a;
+      }
     }
-    s.hard = !first && (reprompts > 0 || ranAway || agree < SEG.adaptAgree);
+    s.hard = !first && (reprompts > 0 || ranAway || (agree < SEG.adaptAgree && (!s.auto || area(m) >= SEG.fineMinArea * this.mw * this.mh)));
     // Hysteresis (track.ts HOLD): a locked subject the model still sees at about its size keeps its weight through a
     // keyframe whose raw confidence dips, and a keyframe that is not sure (or whose mask shrank) is re-checked.
     let conf = reprompts ? 0.5 : (r.score > 0 ? Math.min(1, Math.max(0, (r.score + 1) / 3)) : 0) * (agree < 1 ? Math.min(1, Math.max(0, (agree - 0.3) / 0.4)) : 1);
@@ -1428,6 +1475,7 @@ export class SegSession {
       if (!goFwd || first) s.bwd.length = s.bi;
       this.model.drop(key);
       if (first) { this.model.drop(`${s.o.id}f`); this.model.drop(`${s.o.id}b`); }
+      if (s.auto && goFwd && !first) this.freed = true;
       this.ev.trace?.(`released ${s.o.id}${dir} at ${t.toFixed(2)}s (runaway)`);
       console.info(`[seg] released at ${t.toFixed(2)} s: object ${s.o.id}${dir} ${first ? "was a runaway from its first mask" : `ran away for ${goFwd ? s.ranF : s.ranB} keyframes in a row`}: no longer followed (${left} step(s) saved)`);
     }
@@ -1436,6 +1484,18 @@ export class SegSession {
       // there): it stops.
       s.emptyB = area(m) > 0 ? 0 : s.emptyB + 1;
       if (s.emptyB >= Math.max(2, Math.round(this.fps))) s.bwd.length = s.bi;
+    }
+    if (s.auto && goFwd && !first && s.o.kind === "include" && s.fi < s.fwd.length) {
+      // Nothing shown for SEG.goneS while another subject is in the picture: it has left (a shark of a school
+      // swimming out). Let go, and the pass looks soon for what came in meanwhile (lookSoon). A lone subject is
+      // followed on: its tracker knows it again when it is back.
+      const seen = (o: ObjState) => Math.max(-Infinity, ...o.shown);
+      if (t - seen(s) >= SEG.goneS - 1e-6 && [...this.objs.values()].some((o) => o !== s && o.auto && !o.peek && o.o.kind === "include" && o.fi < o.fwd.length && t - seen(o) < SEG.goneS - 1e-6)) {
+        s.fwd.length = s.fi;
+        this.model.drop(key);
+        this.freed = true;
+        console.info(`[seg] gone at ${t.toFixed(2)} s: object ${s.o.id} has shown nothing for ${SEG.goneS} s: no longer followed`);
+      }
     }
     if ((!s.auto || !goFwd) && (goFwd ? s.fi >= s.fwd.length : s.bi >= s.bwd.length)) this.model.drop(key);
     // Taps: the intervals the step changed are filled right away (the caller); autos: once both ends are final.
@@ -1558,22 +1618,16 @@ export class SegSession {
     this.prof.extraKeys++;
   }
 
-  /** The same for the autos, which step in lockstep: one hard step among them puts them all on the fine grid. */
-  private refineAutos(t: number, hard: boolean): void {
+  /**
+   * The same for the autos that have just stepped forward at keyframe t, each for itself: the one whose step was
+   * hard goes on the fine grid, the others keep to the regular one and are carried to its extra keyframes along
+   * the flow (union), as a tap's are. They used to go together, one hard step putting them all on the fine grid:
+   * with three sharks of a school followed, one of them had a hard step nearly always, and every extra keyframe was
+   * three tracker steps (owner's hammerhead clip: 86 extra keyframes on 102, 661 steps).
+   */
+  private refineAt(t: number): void {
     if (!this.adapt) return;
-    if (hard) this.autoFine = SEG.adaptHold;
-    if (this.autoFine <= 0) return;
-    this.autoFine--;
-    const f = this.extraKey(t, 1);
-    if (f === null) return;
-    let any = false;
-    for (const s of this.objs.values()) {
-      const next = s.auto ? s.fwd[s.fi] : undefined;
-      if (next === undefined || next <= f + 1e-6) continue;
-      s.fwd.splice(s.fi, 0, f);
-      any = true;
-    }
-    if (any) { this.activate(f); this.prof.extraKeys++; }
+    for (const s of this.objs.values()) if (s.auto && s.fi > 0 && s.fi < s.fwd.length && Math.abs(s.fwd[s.fi - 1] - t) < 1e-6) this.refine(s, true, t);
   }
 
   /** Fills the intervals the last step changed right away (the rest wait in `dirty`, and so does `hold`), in time
