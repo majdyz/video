@@ -8,6 +8,7 @@
 import { analyzeThumbnail } from "./analyze.ts";
 import { claheTexture, fieldsTexture, guideTexture, type GradeParams, type Vec3 } from "./params.ts";
 import type { AnimalMap } from "./animals.ts";
+import type { SubjectBlob } from "./backdrop.ts";
 import { shotBalance, type ShotCurve } from "./follow.ts";
 
 export type AnalysisRequest = { kind?: "analyse"; id: number; rgba: ArrayBuffer; width: number; height: number; /** Subject pop: points (upright uv) to start a subject from (a user's tap). */ seeds?: { u: number; v: number }[] };
@@ -26,6 +27,8 @@ export type AnalysisPacket = {
   clahe: { tilesX: number; tilesY: number; bins: number; data: Float32Array };
   /** Open water: the subject map's animals (animals.ts). */
   animals?: AnimalMap;
+  /** Open water: every region that departs from the water, toned or not (backdrop.ts SubjectBlob). */
+  blobs?: SubjectBlob[];
   /** Milliseconds spent in analyzeThumbnail. */
   ms: number;
 };
@@ -59,6 +62,7 @@ self.onmessage = (e: MessageEvent<AnalysisRequest | BalanceRequest>) => {
     guide: { width: a.depth.width, height: a.depth.height, data: guide },
     clahe: { tilesX: a.clahe.tilesX, tilesY: a.clahe.tilesY, bins: a.clahe.bins, data: clahe },
     animals: a.depth.animals,
+    blobs: a.depth.blobs,
     ms: performance.now() - t0,
   };
   const transfer: Transferable[] = [fields.buffer, guide.buffer, clahe.buffer];

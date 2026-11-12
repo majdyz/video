@@ -56,8 +56,25 @@ export const SEG = {
    * the next look (session.ts carryOver): the tracker knows it again when it comes back, a look may not. */
   lostS: 3,
   /** The lite model, and any model on a phone (SessionOptions.autoCap), follows at most this many of the engine's
-   * own subjects at a time (every one is a tracker step per keyframe); taps are always followed. */
-  liteAutos: 2,
+   * own subjects at a time (every one is a tracker step per keyframe); taps are always followed. Three: a school
+   * shows more than two animals at once, and a slot costs time only while a subject is in it (a clip with one or
+   * two subjects takes as long as before). Measured on a desktop's WASM with the lite model (owner's hammerhead
+   * clip, 50 s, 135 keyframes): 0.7 s a keyframe's encode, ~1.1 s its decode, fill and maps, and 2.6 s per subject
+   * step (memory attention 1.65, decoder 0.28, memory encoder 0.68). With every slot taken all through: 2 → about
+   * 16 min, 3 → 22 min, 4 → 28 min for the 50 s (20 / 27 / 34 s per clip second). */
+  liteAutos: 3,
+  /** ...and a phone short of memory (device.ts isWeakDevice) this many. */
+  weakAutos: 2,
+  /** The full model on a desktop: this many (it had no limit while a look added at most its own four; the engine's
+   * regions now add finds at every look, and a school would grow without end). */
+  fullAutos: 6,
+  /** While fewer subjects are followed than there is room for, the engine's regions are looked at again every this
+   * long (s), not only at the regular starts (segmentS): a subject that swims into the picture (a school passing)
+   * is picked up within this long (session.ts carryOver, seeds.ts topUpAt). A look is a seek and an analysis on the
+   * main thread and a decoder run per region (at most seeds.ts SEEDS.probes), on the frame the pass has encoded
+   * anyway: 2.4 s each on a desktop's WASM (owner's hammerhead clip: 13 looks, 31 s). With every slot taken no
+   * extra look is made (one comes when a slot is given up: goneS). */
+  topUpS: 4,
   /** A tap's backward steps are read a chunk this long (s) at a time, in one sequential decode (session.ts readBack). */
   backChunkS: 1,
   /** Playhead first (session.ts focus): the playhead's subjects are followed this far ahead of it (s)... */
@@ -85,6 +102,30 @@ export const SEG = {
   /** A tracked mask over this share of the frame, or growing past runawayGrow × the flow-carried one, is dropped. */
   runawayArea: 0.3,
   runawayGrow: 2.5,
+  /** One of the engine's own subjects whose mask is more than `bloat` × its anchor and over bloatMinArea of the
+   * frame has grown onto the water around its subject (the lite tracker rounds a faint, far shark into an oval
+   * several times its size within a couple of seconds, each step under runawayGrow: 0.9% → 4.5% of the frame on the
+   * owner's hammerhead clip): it is prompted afresh from the flow-carried mask, and dropped when that is no better.
+   * The anchor is the track's size once it has settled: its first mask's, or what its masks of the first
+   * bloatSettleS seconds reach, up to bloatSettle × that (the tracker's mask of a subject is often twice the prompted
+   * one: against the first mask alone, two in three small sharks were dropped at their second keyframe, let go and
+   * found again under a new id, each time a back-fill and its decoder restarts); set anew to the model's fresh mask
+   * at every look that finds the subject again, and creeping up slowly with the track. Small masks are left alone
+   * (bloatMinArea): an oval on a far shark is a faint pop, a dropped one is a look, a new track and a back-fill. */
+  bloat: 2.2,
+  bloatMinArea: 0.015,
+  bloatSettle: 1.5,
+  bloatSettleS: 1,
+  /** Adaptive keyframes: one of the engine's own subjects under this share of the frame stays on the regular grid
+   * whatever its steps are like (a mask a few px thick never overlaps its flow-carried self by adaptAgree, and is
+   * re-prompted often: a school of far sharks was on the fine grid all through, 86 extra keyframes of 100
+   * possible; its pop is faint, and its masks between keyframes come from the flow either way). */
+  fineMinArea: 0.01,
+  /** One of the engine's own subjects that has shown nothing for this long (s) while another is being followed
+   * has left the picture: it is let go (its tracker steps are a third of the pass each)... */
+  goneS: 2,
+  /** ...and the next look comes this long (s) after a subject was let go, for whatever swam in meanwhile. */
+  lookSoonS: 1,
   /** Probability remap before the guided filter: drop sub-threshold haze, keep the 0.5 contour. */
   remapLo: 0.15,
   remapSpan: 0.7,

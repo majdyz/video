@@ -6,6 +6,7 @@
 import type { SegOverlay } from "../../../../aqua-fix/src/engine/seg-overlay.ts";
 import { animalTarget, type AnimalMap, type SubjectOverride, type SubjectSelection } from "../../../../aqua-fix/src/engine/animals.ts";
 import type { PersonBox } from "../../../../aqua-fix/src/engine/person-gate.ts";
+import type { SubjectBlob } from "../../../../aqua-fix/src/engine/backdrop.ts";
 import { aiCrashedOn, aiProfile, aiWorking, crumb } from "../crumbs.ts";
 import { deviceFacts, isMobile, isWeakDevice, segRuntime } from "../device.ts";
 import { segFps, segLog, WorkerSegModel, type SessionEvent } from "./model.ts";
@@ -13,6 +14,7 @@ import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
 import { confWeight, mapPrompt, maskSize, SEG, type SegObject } from "./track.ts";
 import { spanCovers, type TrimRange } from "../trim.ts";
 import { SegTurns } from "./turns.ts";
+import { blobCandidates, SEEDS, type SeedCandidate } from "./seeds.ts";
 import { buildId } from "../export-key.ts";
 import type { SessionFrameOut } from "./session.ts";
 
@@ -152,6 +154,10 @@ export function seedObjects(am: AnimalMap | null, t: number, boxes: readonly Per
     let n = 0;
     for (let k = 0; k < m.length; k++) if (am.labels[k] === i + 1) { m[k] = 1; n++; }
     if (n < 4) continue;
+    // A region across the whole frame is no animal (a dark line along the frame's top edge got labelled as one on
+    // the owner's hammerhead clip, 42 s: its seed ran over half the frame at its first mask).
+    const bb = bbox(m, w, h);
+    if (!bb || bb.x1 - bb.x0 + 1 > SEEDS.span * w || bb.y1 - bb.y0 + 1 > SEEDS.span * h) continue;
     const pr = promptFromMask(m, w, h, w / 640, 4, 0);
     if (!pr) continue;
     const uv = ([x, y]: [number, number]): [number, number] => [(x + 0.5) / w, (y + 0.5) / h];
@@ -163,6 +169,18 @@ export function seedObjects(am: AnimalMap | null, t: number, boxes: readonly Per
     out.push({ kind: "include", t, prompt });
   }
   return out;
+}
+
+/**
+ * Where the model is asked to look on the seed frame besides the animals seedObjects follows: the engine's regions
+ * that depart from the water, whatever their size (engine subjectBlobs; seeds.ts blobCandidates), without those
+ * that are (part of) an animal seedObjects took. A school of small sharks is all regions and no animal.
+ */
+export function seedRegions(blobs: readonly SubjectBlob[] | null, am: AnimalMap | null, validity = 1): SeedCandidate[] {
+  const taken = new Set<number>();
+  if (am) am.list.map((a, i) => ({ a, i })).filter(({ a }) => animalTarget(a) >= SEED.minTarget).sort((x, y) => y.a.area - x.a.area).slice(0, SEED.maxObjects).forEach(({ i }) => taken.add(i + 1));
+  const at = (u: number, v: number) => !!am && taken.has(am.labels[Math.min(am.height - 1, Math.max(0, Math.floor(v * am.height))) * am.width + Math.min(am.width - 1, Math.max(0, Math.floor(u * am.width)))]);
+  return blobCandidates(blobs, at, SEEDS.probes, validity);
 }
 
 /** Outline id of the ML subject in outlineSelection. */
@@ -665,7 +683,7 @@ function autoCap(): number | undefined {
     const n = Number(new URLSearchParams(location.search).get("segautos"));
     if (n >= 1 && n <= 8) return Math.round(n);
   } catch { /* no location (a worker, a test) */ }
-  return isMobile(deviceFacts()) ? SEG.liteAutos : undefined;
+  return isMobile(deviceFacts()) ? (isWeakDevice() ? SEG.weakAutos : SEG.liteAutos) : undefined;
 }
 
 /** A finished pass's worker (the model's ~800 MB of WASM heap) is shut down after this long idle (ms). */
@@ -1217,8 +1235,12 @@ export class SubjectSeg {
     return r.action;
   }
 
-  /** Subjects the model finds by itself on frame t (for a segment the engine found none in); [] without a session. */
-  async autoSeeds(t: number): Promise<SegObject[]> {
+  /**
+   * Subjects the model finds on frame t; [] without a session. regions: the engine's own regions of that frame
+   * (seeds.ts blobCandidates), asked first; grid: the model's blind point grid when no region is a subject (a
+   * segment the engine found nothing in).
+   */
+  async autoSeeds(t: number, regions: readonly SeedCandidate[] = [], grid = true): Promise<SegObject[]> {
     if (!this.live || !(await this.wake()) || !this.model) return [];
     // Not next to a tap (the session holds it back too, session.ts autoSeeds: this keeps the breadcrumb honest).
     await this.turns.tapIdle();
@@ -1226,7 +1248,7 @@ export class SubjectSeg {
     crumb(`ai: auto seeds ${t.toFixed(2)}s`);
     aiWorking(true);
     this.lastActivity = performance.now();
-    const objs = await this.model.sessionAutoSeeds(t).catch((e) => { segLog("auto seeds failed", e); return [] as SegObject[]; });
+    const objs = await this.model.sessionAutoSeeds(t, regions, grid).catch((e) => { segLog("auto seeds failed", e); return [] as SegObject[]; });
     crumb(`ai: auto seeds -> ${objs.length}`);
     this.lastActivity = performance.now();
     return objs;

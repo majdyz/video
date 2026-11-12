@@ -16,7 +16,7 @@
 //   6. CLAHE tile LUTs on the encoded luminance for local contrast
 
 import { labelAnimals, type AnimalMap } from "./animals.ts";
-import { BACKDROP, backdropObjectness, growSubjects } from "./backdrop.ts";
+import { BACKDROP, backdropObjectness, growSubjects, type SubjectBlob } from "./backdrop.ts";
 import { calmEvidence, calmScores } from "./calm.ts";
 import { RED, greenCastOf, greenLitOf } from "./red.ts";
 import { SRGB_TO_LINEAR_LUT, linearToOklab, linearToSrgb, luminance, oklabHueDeg } from "./color.ts";
@@ -659,17 +659,19 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
   let confMap = conf;
   let subjectTone = 0;
   let animals: AnimalMap | undefined;
+  let blobs: SubjectBlob[] | undefined;
   if (backdropValidity > 0) {
     const subj = temp("subjMap", n);
     const notAnimal = temp("notAnimal", n);
     notAnimal.fill(0, 0, n);
-    subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit, bdWater, opts.seeds, okA, okB, notAnimal);
+    subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit, bdWater, opts.seeds, okA, okB, notAnimal, (blobs = []));
     confMap = temp("confMap", n);
     for (let i = 0; i < n; i++) confMap[i] = conf[i] + (subj[i] - conf[i]) * backdropValidity;
     animals = labelAnimals(subj, bdDev, w, h, MAP_W, MAP_H, notAnimal);
   }
   const depth = buildMaps(z, confMap, ds, veilScale, lin, w, h);
   if (animals) depth.animals = animals;
+  if (blobs) depth.blobs = blobs;
   const haze = clamp01(black / HAZE_BLACK_REF);
   const evidence = calmEvidence(lin, n);
   const { calm, calmTone } = calmScores(evidence, haze);

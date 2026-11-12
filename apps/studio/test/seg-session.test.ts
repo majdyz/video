@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import type { EdgeTam } from "../src/pipeline/seg/edgetam.ts";
 import { frameKey, SegSession, type SessionEvents, type SessionFrameOut, type SessionFrames, type SessionOptions } from "../src/pipeline/seg/session.ts";
-import type { SegObject } from "../src/pipeline/seg/track.ts";
+import { SEG, type SegObject } from "../src/pipeline/seg/track.ts";
 import { rleDecode } from "../src/pipeline/seg/mask.ts";
 
 /** Frames whose alpha pops something (the fake clip's mask grid is 320×40). */
@@ -437,7 +437,7 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
   console.log("session: empty clip → the looks back off (2, 4, 4 s): ok");
 }
 
-// ---------------------------------------------------------------- the lite model follows two automatic subjects
+// ---------------------------------------------------------------- seeds on one subject: one track; the lite model's cap
 
 {
   const four = () => [subject(0), subject(0), subject(0), subject(0)];
@@ -455,9 +455,13 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
     assert.equal(r.errors.length, 0);
     return { autos, tap: f.steps - autos };
   };
-  assert.deepEqual(await run(false), { autos: 20, tap: 6 });
-  assert.deepEqual(await run(true), { autos: 10, tap: 6 }, "the first two seeds only; the tap as ever");
-  console.log("session: lite model → at most two automatic subjects, taps kept: ok");
+  // The four seeds are on the one subject of the fake clip (the same mask): the first is followed over the 5
+  // keyframes, the others are let go at their first mask (session.ts carryOver: no subject is followed twice). They
+  // used to be followed side by side, four tracker steps a keyframe on one animal (20).
+  assert.deepEqual(await run(false), { autos: 5 + 3, tap: 6 });
+  assert.equal(SEG.liteAutos, 3);
+  assert.deepEqual(await run(true), { autos: 5 + 2, tap: 6 }, "the lite model starts on the first three seeds only; the tap as ever");
+  console.log("session: seeds on one subject → one track; lite model → at most three automatic subjects, taps kept: ok");
 }
 
 // ---------------------------------------------------------------- the pass profile line (breadcrumbs, About)
@@ -509,7 +513,7 @@ for (const [gone, sees, from, lite] of [
   const on = (t: number) => rleDecode(r.frames.get(Math.round(t * 30))!.alpha, 320 * 40).some((a) => a > 127);
   assert.ok(on(5) && !on(6.5) && !on(7.5), "popped while there, empty while gone");
   assert.ok(on(from) && on(13.9), `back at ${gone[1]} s: followed again from ${from} s`);
-  assert.equal(r.asked[0].t, 8, "the regular start at 8 s");
+  assert.deepEqual(r.asked.slice(0, 2).map((x) => x.t), [4, 8], "the look while the subject is followed (SEG.topUpS), then the regular start at 8 s");
 }
 console.log("session: a subject that leaves and comes back → every frame filled, followed again when back: ok");
 
@@ -804,19 +808,21 @@ function jobsOf(tl: Timeline): Job[] {
 
   // The reference: the tap first, the searches undisturbed.
   const ref = await run({ tapAt: "front" });
-  assert.deepEqual(ref.found, [{ t: 8, n: 1 }], "the search finds the subject on the seed frame");
-  assert.deepEqual(ref.jobs.map((j) => j.name.split(" ")[0]), ["tap", "pass", "search", "pass"], line(ref.jobs));
+  // (A look every SEG.topUpS while the subject is followed: 4 s, then the regular start at 8 s. The search finds the
+  // subject on the seed frame both times, and it is the one followed already: nothing new to seed.)
+  assert.deepEqual(ref.found, [{ t: 4, n: 0 }, { t: 8, n: 0 }], "the search finds the subject on the seed frame: followed already");
+  assert.deepEqual(ref.jobs.map((j) => j.name.split(" ")[0]), ["tap", "pass", "search", "pass", "search", "pass"], line(ref.jobs));
 
   // 1. The crash's order of events: the search is asked for while the tap is followed.
   for (const delayMs of [0, 3, 10]) {
     const a = await run({ tapAt: "asked", delayMs });
-    const ti = a.jobs.findIndex((j) => j.name === "tap 9200"), si = a.jobs.findIndex((j) => j.name === "search 8.00s");
+    const ti = a.jobs.findIndex((j) => j.name === "tap 9200"), si = a.jobs.findIndex((j) => j.name === "search 4.00s");
     assert.ok(ti >= 0 && si > ti, `the search starts after the tap's job has ended (${line(a.jobs)})`);
     assert.equal(a.jobs[ti].how, "followed");
     assert.ok(a.jobs[ti].inside.every((x) => x !== "model probe" && !x.startsWith("auto:")), "nothing of the search inside the tap's job");
     assert.ok(a.jobs[ti].inside.filter((x) => x.startsWith("model step")).every((x) => x.startsWith("model step 9200")), "and no step of the pass");
     assert.equal(a.jobs.filter((j) => j.name === "tap 9200").length, 1, "the tap is followed in one go");
-    assert.equal(a.jobs.filter((j) => j.name.startsWith("search")).length, 1, "the search runs once");
+    assert.deepEqual(a.jobs.filter((j) => j.name.startsWith("search")).map((j) => j.name), ["search 4.00s", "search 8.00s"], "each search runs once");
     assert.deepEqual(a.found, ref.found);
     sameFrames(ref.r.frames, a.r.frames, `a search asked for during a tap (${delayMs} ms later)`);
   }
@@ -824,13 +830,13 @@ function jobsOf(tl: Timeline): Job[] {
   // 2. The tap comes while the search is on its probes: the search stops there, the tap is followed, the search
   //    starts over and gives the same seeds.
   const b = await run({ tapAt: "probe" });
-  const s1 = b.jobs.findIndex((j) => j.name === "search 8.00s");
+  const s1 = b.jobs.findIndex((j) => j.name === "search 4.00s");
   assert.equal(b.jobs[s1].how, "pre-empted", line(b.jobs));
   assert.equal(b.jobs[s1].inside.filter((x) => x === "model probe").length, 1, "it stops at the probe after the tap");
   assert.equal(b.jobs[s1 + 1].name, "tap 9200");
   assert.equal(b.jobs[s1 + 1].how, "followed");
-  assert.equal(b.jobs[s1 + 2].name, "search 8.00s");
-  assert.equal(b.jobs[s1 + 2].how, "1 found");
+  assert.equal(b.jobs[s1 + 2].name, "search 4.00s");
+  assert.equal(b.jobs[s1 + 2].how, "0 found");
   assert.equal(b.jobs[s1 + 2].inside.filter((x) => x === "model probe").length, 12, "the whole search again");
   assert.deepEqual(b.found, ref.found, "answered once, with the same seeds");
   sameFrames(ref.r.frames, b.r.frames, "a tap during a search");
@@ -845,9 +851,9 @@ function jobsOf(tl: Timeline): Job[] {
   const tl = watch(f, r);
   r.s.seeds(0, [subject(0)]);
   const nap = () => new Promise((res) => setTimeout(res, 5));
-  for (let i = 0; i < 4000 && !r.asked.some((a) => a.t === 8); i++) await nap();
+  for (let i = 0; i < 4000 && !r.asked.some((a) => a.t === 4); i++) await nap();
   await nap();
-  assert.equal(r.s.busy, true, "waiting for the seeds of 8 s");
+  assert.equal(r.s.busy, true, "waiting for the seeds of 4 s (the look while the subject is followed)");
   const taps: number[] = [];
   r.onProgress = (_d, _t, n) => taps.push(n);
   const x = await r.s.excludeAt(9300, 1, subjectX(1), 0.5);

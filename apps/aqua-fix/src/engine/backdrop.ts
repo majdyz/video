@@ -312,6 +312,75 @@ export function backdropDev(L: number, a: number, b: number, u: number, v: numbe
 }
 
 /**
+ * A region of the frame that departs from the fitted water (one flood region of growSubjects), whatever its size:
+ * what the engine sees as "something in the water" before it decides what to tone. The AI subjects take these as
+ * prompt candidates (studio seg/seeds.ts): a far shark of a school is too small to be toned as an animal here
+ * (BACKDROP.minArea) but is exactly what the model should be asked about. Positions are upright uv (0..1).
+ */
+export type SubjectBlob = {
+  /** A point inside the region (its pixel nearest its centroid: a curved animal's centroid can be water). */
+  u: number;
+  v: number;
+  /** Points inside it: that one, then (a region of BLOB.splitPx pixels or more) one in each half along its longer side. */
+  pts: [number, number][];
+  /** Bounding box. */
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  /** Share of the frame. */
+  area: number;
+  /** Mean veto-ramped departure from the water over the region (0..1): its contrast. */
+  dev: number;
+  /** The engine's own acceptance (0..1: a confident seed or an outline, not the seabed, not a colourful fish). */
+  accept: number;
+  /** A confident subject seed (objectness) lies in it. */
+  seeded: boolean;
+  /** How much it looks like a column of bubbles (0..1). */
+  bubble: number;
+};
+
+/** SubjectBlob: the smallest region reported (thumbnail pixels: a far fish is a dozen), the largest (share of the
+ * frame), and the size from which a region gets a point in each half as well as its centre's. */
+export const BLOB = { minPx: 10, maxArea: 0.5, splitPx: 60 };
+
+function blobOf(members: Int32Array, cnt: number, w: number, h: number, dev: Float32Array, accept: number, seeded: boolean, bubble: number): SubjectBlob {
+  let sx = 0, sy = 0, sd = 0, x0 = w, x1 = 0, y0 = h, y1 = 0;
+  for (let m = 0; m < cnt; m++) {
+    const i = members[m], x = i % w, y = (i - x) / w;
+    sx += x; sy += y; sd += dev[i];
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+  }
+  // The region's pixel nearest (cx, cy) among those `side` of the centroid along the longer side (0: all of them).
+  const cx = sx / cnt, cy = sy / cnt, wide = x1 - x0 >= y1 - y0;
+  const inside = (side: number): [number, number] | null => {
+    let tx = 0, ty = 0, tn = 0;
+    for (let m = 0; m < cnt; m++) {
+      const i = members[m], x = i % w, y = (i - x) / w;
+      if (side && Math.sign((wide ? x - cx : y - cy)) !== side) continue;
+      tx += x; ty += y; tn++;
+    }
+    if (!tn) return null;
+    tx /= tn; ty /= tn;
+    let bx = 0, by = 0, bd = Infinity;
+    for (let m = 0; m < cnt; m++) {
+      const i = members[m], x = i % w, y = (i - x) / w;
+      if (side && Math.sign((wide ? x - cx : y - cy)) !== side) continue;
+      const d = (x - tx) ** 2 + (y - ty) ** 2;
+      if (d < bd) { bd = d; bx = x; by = y; }
+    }
+    return [(bx + 0.5) / w, (by + 0.5) / h];
+  };
+  const c = inside(0)!;
+  const pts = [c];
+  if (cnt >= BLOB.splitPx) for (const side of [-1, 1]) { const p = inside(side); if (p) pts.push(p); }
+  return { u: c[0], v: c[1], pts, x0: x0 / w, y0: y0 / h, x1: (x1 + 1) / w, y1: (y1 + 1) / h, area: cnt / (w * h), dev: sd / cnt, accept, seeded, bubble };
+}
+
+/**
  * Whole-animal subject map: from confident subject seeds (objectness ≥
  * seedFrac of the frame's validity) a flood fills every connected pixel that
  * departs from the water surface at all (dev ≥ growDev, the veto ramp), so a
@@ -319,8 +388,9 @@ export function backdropDev(L: number, a: number, b: number, u: number, v: numbe
  * connected subject is weighted by its size (minArea..2·minArea of the
  * frame): small fish keep the normal grade and their own colour. `dev` is the
  * veto-ramped departure (backdropObjectness devOut). Output 0..1 in `out`.
+ * `blobs` (out): every flood region, toned or not (SubjectBlob).
  */
-export function growSubjects(objectness: Float32Array, dev: Float32Array, validity: number, w: number, h: number, out: Float32Array, L?: Float32Array, fit?: ArrayLike<number>, waterW?: Float32Array, seeds?: readonly { u: number; v: number }[], A?: Float32Array, B?: Float32Array, notAnimal?: Float32Array): number {
+export function growSubjects(objectness: Float32Array, dev: Float32Array, validity: number, w: number, h: number, out: Float32Array, L?: Float32Array, fit?: ArrayLike<number>, waterW?: Float32Array, seeds?: readonly { u: number; v: number }[], A?: Float32Array, B?: Float32Array, notAnimal?: Float32Array, blobs?: SubjectBlob[]): number {
   const n = w * h;
   out.fill(0, 0, n);
   if (validity <= 0) return 0;
@@ -403,6 +473,9 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     const lit = L && fit ? smoothstep(BACKDROP.lightShareLo, BACKDROP.lightShareHi, light / cnt) : 1;
     litAny = Math.max(litAny, lit * accept * smoothstep(BACKDROP.minArea, 2 * BACKDROP.minArea, cnt / n));
     if (GROW_DEBUG && cnt / n > 0.004 && st) GROW_DEBUG.push({ ...st, area: cnt / n, seeded: seeded ? 1 : 0, edge, accept, lit });
+    // Every region that departs from the water, whatever its size and whether or not it is toned: the AI subjects'
+    // prompt candidates (SubjectBlob). A hammerhead of a school is under the size a subject is toned from.
+    if (blobs && cnt >= BLOB.minPx && cnt / n <= BLOB.maxArea) blobs.push(blobOf(members, cnt, w, h, dev, accept, seeded, st ? bubbleLike(st) : 0));
     // Steep size ramp: a subject is toned whole or not at all (the engine eases the change over time).
     const sizeW = user ? (cnt / n >= 0.25 * BACKDROP.minArea ? 1 : 0) : accept * smoothstep(1.5 * BACKDROP.minArea, 2 * BACKDROP.minArea, cnt / n);
     if (sizeW <= 0) continue;
