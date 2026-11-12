@@ -3129,6 +3129,20 @@ a {
   line-height: 1.25;
   pointer-events: none;
 }
+.pill__action {
+  pointer-events: auto;
+  margin: -2px -6px -2px 4px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--fs-sm);
+  line-height: 1.2;
+  opacity: 0.85;
+  cursor: pointer;
+}
 .pill__lines {
   display: flex;
   flex-direction: column;

@@ -4,7 +4,7 @@
 import { wasmHeapMB } from "./wasm-heap.ts";
 import type * as OrtNS from "onnxruntime-web";
 import { EdgeTam, type BankParams, type GraphName } from "./edgetam.ts";
-import { SegSession, type SessionFrames } from "./session.ts";
+import { frameTransfers, SegSession, type SessionFrames } from "./session.ts";
 import { openSessionFrames } from "./frames.ts";
 import type { SegObject } from "./track.ts";
 import type { SeedCandidate } from "./seeds.ts";
@@ -15,7 +15,7 @@ type Req =
   | { id: number; type: "step"; key: string; frame: number; points: [number, number][] | null; labels: number[] | null; reverse: boolean }
   | { id: number; type: "drop"; key: string }
   // The background session (session.ts): the clip's own decoder, objects, per-frame masks posted as events.
-  | { id: number; type: "session-open"; file: File; start: number; end: number; fps?: number; autoCap?: number; weak?: boolean }
+  | { id: number; type: "session-open"; file: File; start: number; end: number; fps?: number; autoCap?: number; weak?: boolean; stride?: boolean; gridAlways?: boolean }
   | { id: number; type: "session-focus"; t: number; objects: SegObject[]; search: boolean }
   | { id: number; type: "session-add"; object: SegObject & { id: number } }
   | { id: number; type: "session-remove"; object: number }
@@ -92,7 +92,7 @@ async function openSession(model: EdgeTam, r: Extract<Req, { type: "session-open
   // frames would land on the new session's grid.
   const mine = () => session === s;
   const s: SegSession = new SegSession(model, frames, { start: r.start, end: r.end }, {
-    frames: (items) => { if (mine()) emit({ ev: "frames", items }, items.flatMap((x) => [x.alpha.buffer, x.nearQ.buffer, x.depQ.buffer, ...(x.excQ ? [x.excQ.buffer] : [])])); },
+    frames: (items) => { if (mine()) emit({ ev: "frames", items }, frameTransfers(items)); },
     keys: (conf) => { if (mine()) emit({ ev: "keys", conf }); },
     progress: (done, total, taps) => { if (mine()) emit({ ev: "progress", done, total, taps, heapMB: wasmHeapMB() }); },
     idle: (profile) => { if (mine()) emit({ ev: "idle", profile: { ...profile, heapMB: wasmHeapMB() } }); },
@@ -103,7 +103,7 @@ async function openSession(model: EdgeTam, r: Extract<Req, { type: "session-open
     error: (msg) => { if (session === s) session = null; emit({ ev: "error", msg, heapMB: wasmHeapMB() }); },
     // Each breadcrumb carries the WASM heap (it only grows: the step that took it past the phone's limit shows).
     trace: (msg) => emit({ ev: "trace", msg: `${msg} · heap ${wasmHeapMB()} MB` }),
-  }, { fps: r.fps, autoCap: r.autoCap, weak: r.weak });
+  }, { fps: r.fps, autoCap: r.autoCap, weak: r.weak, stride: r.stride, gridAlways: r.gridAlways });
   session = s;
   stages = 0;
   return { s, frames };

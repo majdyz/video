@@ -164,7 +164,36 @@ export function waterContrast(m: ArrayLike<number>, cells: Float32Array, w: numb
 export function nearMap(inc: Float32Array, w: number, h: number, r: number): Float32Array {
   const bin = new Float32Array(w * h);
   for (let i = 0; i < bin.length; i++) bin[i] = inc[i] > 0.5 ? 1 : 0;
-  return boxMean(dilate(bin, w, h, r), w, h, r);
+  return boxMean(dilateBin(bin, w, h, r), w, h, r);
+}
+
+/**
+ * dilate for a map of 0s and 1s: a texel is 1 when its (2r+1)² window holds a 1, counted with running sums (the
+ * max filter above looks at every texel of the window: 2r+1 reads a texel and pass, and the near map's radius grows
+ * with the subject, 27 px for a school across the frame). The same map.
+ */
+export function dilateBin(bin: Float32Array, w: number, h: number, r: number): Float32Array {
+  const tmp = new Uint8Array(w * h), o = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    let c = 0;
+    for (let k = 0; k <= Math.min(w - 1, r); k++) c += bin[row + k] > 0 ? 1 : 0;
+    for (let x = 0; x < w; x++) {
+      tmp[row + x] = c > 0 ? 1 : 0;
+      if (x + r + 1 < w) c += bin[row + x + r + 1] > 0 ? 1 : 0;
+      if (x - r >= 0) c -= bin[row + x - r] > 0 ? 1 : 0;
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let c = 0;
+    for (let k = 0; k <= Math.min(h - 1, r); k++) c += tmp[k * w + x];
+    for (let y = 0; y < h; y++) {
+      o[y * w + x] = c > 0 ? 1 : 0;
+      if (y + r + 1 < h) c += tmp[(y + r + 1) * w + x];
+      if (y - r >= 0) c -= tmp[(y - r) * w + x];
+    }
+  }
+  return o;
 }
 
 /** sRGB code value (0..255) → linear light. */
@@ -392,6 +421,90 @@ export function departFromCells(cells: Float32Array, inc: Uint8Array, w: number,
   const closed = dilate(inv, qw, qh, CLOSE_R);
   for (let q = 0; q < n; q++) if (wt[q] === 0 && (1 - closed[q]) * 255 > out[q]) out[q] = Math.round((1 - closed[q]) * 255);
   return { width: qw, height: qh, data: out };
+}
+
+/**
+ * The parts of the grid a map of the mask `m` can differ from zero in: the bounds of each connected part of its
+ * texels over `thr`, grown by `margin` px inside the frame, with windows that touch merged into one (so no window
+ * holds, or is within `margin` of, a part of the mask that is not its own). A school of three far sharks is three
+ * small windows, not the frame between them. Empty: nothing over `thr`.
+ */
+export function maskWindows(m: ArrayLike<number>, w: number, h: number, margin: number, thr: number): Box[] {
+  const n = w * h, seen = new Uint8Array(n), stack: number[] = [], boxes: Box[] = [];
+  for (let s0 = 0; s0 < n; s0++) {
+    if (seen[s0] || !(m[s0] > thr)) continue;
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    seen[s0] = 1; stack.push(s0);
+    while (stack.length) {
+      const i = stack.pop()!, x = i % w, y = (i - x) / w;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      if (x > 0 && !seen[i - 1] && m[i - 1] > thr) { seen[i - 1] = 1; stack.push(i - 1); }
+      if (x < w - 1 && !seen[i + 1] && m[i + 1] > thr) { seen[i + 1] = 1; stack.push(i + 1); }
+      if (y > 0 && !seen[i - w] && m[i - w] > thr) { seen[i - w] = 1; stack.push(i - w); }
+      if (y < h - 1 && !seen[i + w] && m[i + w] > thr) { seen[i + w] = 1; stack.push(i + w); }
+    }
+    const g = Math.ceil(margin);
+    boxes.push({ x0: x0 - g, y0: y0 - g, x1: x1 + g, y1: y1 + g });
+  }
+  // Grown windows that overlap (or touch) become one, until none do.
+  for (let merged = true; merged;) {
+    merged = false;
+    for (let i = 0; i < boxes.length && !merged; i++) for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j];
+      if (a.x0 > b.x1 + 1 || b.x0 > a.x1 + 1 || a.y0 > b.y1 + 1 || b.y0 > a.y1 + 1) continue;
+      boxes[i] = { x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) };
+      boxes.splice(j, 1);
+      merged = true;
+      break;
+    }
+  }
+  return boxes.map((b) => ({ x0: Math.max(0, b.x0), y0: Math.max(0, b.y0), x1: Math.min(w - 1, b.x1), y1: Math.min(h - 1, b.y1) }));
+}
+
+function cropTo(src: Float32Array, w: number, b: Box): Float32Array {
+  const cw = b.x1 - b.x0 + 1, ch = b.y1 - b.y0 + 1, out = new Float32Array(cw * ch);
+  for (let y = 0; y < ch; y++) out.set(src.subarray((b.y0 + y) * w + b.x0, (b.y0 + y) * w + b.x0 + cw), y * cw);
+  return out;
+}
+
+/** Windows over this share of the frame are not worth the copies: the map is made on the whole frame. */
+const WINDOW_MAX = 0.6;
+
+/**
+ * A map of the mask made on the mask's own windows only (maskWindows) and put back on a frame of zeros. The session
+ * makes every filled frame's maps (session.ts product: 58 ms a frame on the whole 320 × 180 grid, 88 s of the
+ * owner's 50 s hammerhead clip, most of it the signed distance on a grid twice as fine), and a far subject is a
+ * hundredth of the frame. The maps below are zero wherever the mask is further away than their reach, so with a
+ * margin of that reach the result is the whole frame's.
+ */
+function windowed(m: Float32Array, w: number, h: number, margin: number, thr: number, others: Float32Array[], fn: (m: Float32Array, cw: number, ch: number, others: Float32Array[]) => Float32Array, full: () => Float32Array): Float32Array {
+  const boxes = maskWindows(m, w, h, margin, thr);
+  if (!boxes.length) return new Float32Array(w * h);
+  let total = 0;
+  for (const b of boxes) total += (b.x1 - b.x0 + 1) * (b.y1 - b.y0 + 1);
+  if (total > WINDOW_MAX * w * h) return full();
+  const out = new Float32Array(w * h);
+  for (const b of boxes) {
+    const cw = b.x1 - b.x0 + 1, ch = b.y1 - b.y0 + 1;
+    const part = fn(cropTo(m, w, b), cw, ch, others.map((o) => cropTo(o, w, b)));
+    for (let y = 0; y < ch; y++) out.set(part.subarray(y * cw, y * cw + cw), (b.y0 + y) * w + b.x0);
+  }
+  return out;
+}
+
+/** sdfFeather on the mask's window: the ramp is 0 from r px outside the 0.5 contour on. */
+export function sdfFeatherNear(m: Float32Array, w: number, h: number, r: number, ss = SDF_SS): Float32Array {
+  return windowed(m, w, h, r + 3, 0.5, [], (c, cw, ch) => sdfFeather(c, cw, ch, r, ss), () => sdfFeather(m, w, h, r, ss));
+}
+
+/** nearMap on the mask's window: the map is 0 from 2r px outside the mask on. */
+export function nearMapNear(inc: Float32Array, w: number, h: number, r: number): Float32Array {
+  return windowed(inc, w, h, 2 * r + 2, 0.5, [], (c, cw, ch) => nearMap(c, cw, ch, r), () => nearMap(inc, w, h, r));
+}
+
+/** guidedFilter on the window of p's non-zero texels: the output is 0 where p is 0 within 2r px all round. */
+export function guidedFilterNear(I: Float32Array, p: Float32Array, w: number, h: number, r: number, eps: number): Float32Array {
+  return windowed(p, w, h, 2 * r + 2, 0, [I], (c, cw, ch, [ic]) => guidedFilter(ic, c, cw, ch, r, eps), () => guidedFilter(I, p, w, h, r, eps));
 }
 
 /**

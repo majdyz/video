@@ -149,6 +149,10 @@ export const SEG = {
   confHi: 0.3,
   /** Beyond the first / last keyframe the ML weight fades out over this long (s). */
   edgeFadeS: 0.25,
+  /** A look's new subjects are shown on their own frame and this long (s) after it as soon as they have a first
+   * mask (session.ts early), ahead of the interval's fill: the overlay's hand-over (studio-seg.ts frameWeight,
+   * 0.3 s) and a frame. */
+  earlyS: 0.34,
   /** Filled frames per clip second (the mask grid in time). */
   sampleHz: 30,
   /** The fill's per-frame flow runs at this share of the mask grid. */

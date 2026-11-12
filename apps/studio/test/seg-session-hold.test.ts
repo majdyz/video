@@ -8,6 +8,7 @@ import type { EdgeTam } from "../src/pipeline/seg/edgetam.ts";
 import { AUTO, SegSession, type SessionEvents, type SessionFrameOut, type SessionFrames, type SessionOptions } from "../src/pipeline/seg/session.ts";
 import type { SegObject } from "../src/pipeline/seg/track.ts";
 import { rleDecode } from "../src/pipeline/seg/mask.ts";
+import { postFrames } from "./seg-post.ts";
 
 const MW = 320, MH = 40;
 const subjectX = (t: number) => 0.3 + 0.02 * t;
@@ -112,7 +113,7 @@ function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: numbe
   const done = () => { const w = wake; wake = null; w?.(); };
   const r: Run = { s: null as unknown as SegSession, frames: new Map(), asked: [], errors: [], settled: () => new Promise<void>((res) => { wake = res; }) };
   const ev: SessionEvents = {
-    frames: (items) => { for (const x of items) r.frames.set(x.i, x); },
+    frames: (items) => { for (const x of postFrames(items)) r.frames.set(x.i, x); },
     keys: () => undefined, progress: () => undefined, rejected: () => undefined,
     idle: () => done(),
     needSeeds: (_k, t) => { r.asked.push(t); const objs = seedsFor(t); setTimeout(() => r.s.seeds(t, objs), 0); },

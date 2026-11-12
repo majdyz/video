@@ -5,7 +5,8 @@
 // of what is left of the bar, and the bar never goes backwards. Pure (tested in test/export-policy.test.ts).
 
 /** Shares of what is left of the bar when the stage begins (the render takes the rest). */
-export const EXPORT_SHARE = { water: 0.05, subjects: 0.3, motion: 0.05 };
+/** subjectsWait: an AI pass that is about to finish when the export starts is given a few seconds (seg/export-use.ts). */
+export const EXPORT_SHARE = { water: 0.05, subjects: 0.3, subjectsWait: 0.05, motion: 0.05 };
 
 const clamp = (x: number) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0);
 

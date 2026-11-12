@@ -17,6 +17,9 @@ import { SegTurns } from "./turns.ts";
 import { blobCandidates, SEEDS, type SeedCandidate } from "./seeds.ts";
 import { buildId } from "../export-key.ts";
 import type { SessionFrameOut } from "./session.ts";
+import { followFrame, passComplete, SEG_EXPORT, segExportKey } from "./export-use.ts";
+import { loadAttempts, loadWithRetry } from "./load-retry.ts";
+import { etaSeconds } from "../eta.ts";
 
 const PREF_KEY = "deepfix.subjectPop.ai";
 /** looking: the model is loaded and the clip's session is opening or finding its first subjects (the seed frame's
@@ -98,8 +101,9 @@ export function segStatusText(s: SegStatus): string | null {
   switch (s.phase) {
     case "download": return `Downloading the model…${pc}`;
     case "starting": return "Starting the model…";
-    case "looking": return "Looking for subjects…";
-    case "tracking": return `Finding subjects${pc}`;
+    // (How far the pass is stands on the preview's chip, once: this line under the toggle used to repeat it.)
+    case "looking":
+    case "tracking": return "On: working in the background. You can keep editing, or export any time";
     case "unavailable": return s.note ?? "Not available here; using standard detection";
     default: return "On: tap a subject to follow it with AI";
   }
@@ -246,11 +250,13 @@ export type SubjectChip = { tone: "ai" | "busy" | "basic"; line: string; sub: st
  * `eta` is the pass's time left in short form (eta.ts Eta.short), or null. Each line is short enough for one row at
  * 390 px (the chip never wraps).
  */
-export function subjectChip(frame: SegFrameState, s: SegStatus, eta: string | null, peek: SegPeekState = null): SubjectChip {
+export function subjectChip(frame: SegFrameState, s: SegStatus, eta: string | null, peek: SegPeekState = null, follow = false): SubjectChip {
   const pc = s.progress !== null ? ` ${Math.round(s.progress * 100)}%` : "";
   const tracking = s.on && s.phase === "tracking";
-  if (s.on && frame === "mask") return { tone: "ai", line: "AI subject ✓", sub: tracking ? `Rest of clip${pc || "…"}` : null };
-  if (s.on && frame === "none") return { tone: "ai", line: "AI: no subject here", sub: tracking ? `Rest of clip${pc || "…"}` : null };
+  // Follow mode (studio.ts followStep): the frame on screen is the one the pass has just finished.
+  const rest = follow ? `Following the AI${pc || "…"}` : `Rest of clip${pc || "…"}`;
+  if (s.on && frame === "mask") return { tone: "ai", line: "AI subject ✓", sub: tracking ? rest : null };
+  if (s.on && frame === "none") return { tone: "ai", line: "AI: no subject here", sub: tracking ? rest : null };
   // The playhead's look is on this frame: say so (the pass's percentage alone read as "nothing is happening here").
   if (tracking && peek === "looking") return { tone: "busy", line: "Looking at this frame…", sub: `Rest of clip${pc || "…"}` };
   // A mask still easing in while the pass runs is the search, not an answer.
@@ -543,16 +549,36 @@ export class SegLive {
     return this.conf.length ? confWeight(this.conf, t) : 0;
   }
 
-  /** The ML weight of filled frame i (clip time t): the eased confidence × the hand-over toward unfilled frames. */
-  private frameWeight(i: number, t: number): number {
-    // Hand-over: the weight eases out over HAND frames toward unfilled frames.
-    const HAND = Math.round(0.3 * SEG.sampleHz);
+  /** The hand-over of filled frame i toward unfilled frames (0..1): the weight eases out over SEG_HAND frames. */
+  hand(i: number): number {
+    const HAND = SEG_HAND;
     let gap = HAND;
     for (let d = 1; d <= HAND; d++) {
       const a = i - d, b = i + d;
       if ((a >= 0 && !this.frames[a]) || (b < this.n && !this.frames[b])) { gap = d - 1; break; }
     }
-    return this.weightAt(t) * smoothstep(0, HAND, gap);
+    return smoothstep(0, HAND, gap);
+  }
+
+  /** The ML weight of filled frame i (clip time t): the eased confidence × the hand-over toward unfilled frames. */
+  private frameWeight(i: number, t: number): number {
+    return this.weightAt(t) * this.hand(i);
+  }
+
+  /**
+   * The frame at clip time t is graded with what the AI has for it (its mask, or its answer that no subject is
+   * there), not with the engine's detection: it is filled and at least half way into the hand-over
+   * (SEG_EXPORT.minHand). What an export counts for its "AI subjects on N% of frames" (export-use.ts).
+   */
+  covered(t: number): boolean {
+    const i = Math.round(t * SEG.sampleHz) - this.i0;
+    return i >= 0 && i < this.n && !!this.frames[i] && this.hand(i) >= SEG_EXPORT.minHand;
+  }
+
+  /** The clip time of the newest frame that has its masks at full weight (export-use.ts followFrame); null: none. */
+  followT(): number | null {
+    const i = followFrame(this.n, (k) => !!this.frames[k], SEG_HAND);
+    return i < 0 ? null : (this.i0 + i) / SEG.sampleHz;
   }
 
   /**
@@ -597,6 +623,9 @@ export class SegLive {
     return this.n ? this.filled / this.n : 0;
   }
 }
+
+/** The overlay's hand-over toward unfilled frames, in grid frames (0.3 s). */
+export const SEG_HAND = Math.round(0.3 * SEG.sampleHz);
 
 type UndoOp = { kind: "added"; id: number } | { kind: "removed"; id: number };
 
@@ -669,7 +698,9 @@ export function profileLine(p: Record<string, number>, ep = ""): string {
     `attn ${per("attendMs", "steps")} dec ${per("decoderMs", "steps")} mem ${per("memEncMs", "steps")}ms×${n("steps")} steps`,
     `keys ${n("keyframes")} (${n("fps")}/s +${n("extraKeys")} extra) objs ${n("objects")}`,
     `decode ${s("decodeMs")}s×${n("decodes")} (${n("restarts")} restarts)`,
-    `guard ${s("guardMs")}s fill ${s("fillMs")}s×${n("filledFrames")} maps ${s("productMs")}s seeds ${s("waitSeedsMs")}s`,
+    `guard ${s("guardMs")}s fill ${s("fillMs")}s×${n("filledFrames")} maps ${s("productMs")}s seeds ${s("waitSeedsMs")}s${n("gridsSkipped") ? ` (${n("gridsSkipped")} grids skipped)` : ""}${n("flowPxS") ? ` flow ${n("flowPxS").toFixed(1)}px/s` : ""}`,
+    // The stride: steps carried of the keyframes a subject could have been carried over, and what kept the rest.
+    ...(n("strideOdd") ? [`stride ${n("strided")}/${n("strideOdd")} (large ${n("strideBig")}, re-prompted ${n("stridePrompt")}, new ${n("strideFirst")}, other ${n("strideOther")})`] : []),
     `total ${s("runMs")}s for ${n("clipS").toFixed(1)}s${n("heapMB") ? ` · heap ${n("heapMB")} MB` : ""}`,
   ].join(" · ");
 }
@@ -760,8 +791,27 @@ export class SubjectSeg {
   /** The toggle. Turning it on starts the model download (progress in status). */
   setOn(on: boolean): void {
     writePref(on);
+    // Off: the worker goes (its memory, and whatever state its runtime was in: turning AI off and on again is a
+    // user's way out of a model that misbehaves, and must give a fresh worker). The masks made so far stay, as
+    // after a hibernation; turned on again, an unfinished pass starts again from its inputs (wake).
+    if (!on && this.model) {
+      clearTimeout(this.hibTimer);
+      crumb("ai: off, worker shut down");
+      aiWorking(false);
+      this.model.dispose();
+      this.model = null;
+      this.busy = false;
+      this.passSince = 0;
+      this.tapBusy = false;
+      this.turns.tapEnded();
+      this.peek = null;
+      if (this.live) { this.hibernated = true; this.onHibernate?.(); }
+    }
     this.set({ on, phase: on ? (this.model ? "ready" : "download") : "off", progress: null, note: null, crashed: false });
-    if (on && !this.hibernated) void this.ensureModel();
+    if (!on) return;
+    if (!this.hibernated) void this.ensureModel();
+    else if (!this.passDone && this.live && !this.heldForExport) void this.wake();
+    else if (this.live) this.set({ phase: "ready" });
   }
 
   ensureModel(): Promise<WorkerSegModel | null> {
@@ -785,9 +835,22 @@ export class SubjectSeg {
     // WASM when it was on WebGPU, else with AI off.
     aiWorking(true, rt.wasm ? "wasm" : "webgpu");
     this.loading = (async () => {
-      const m = new WorkerSegModel(rt.wasm);
       try {
-        await m.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: rt.wasm ? "wasm" : "auto", lite });
+        // A start that fails is tried once more in a fresh worker, on plain WASM with one thread (load-retry.ts:
+        // the runtime keeps a failed start for the life of its worker, "previous call to 'initWasm()' failed").
+        const { model: m, tries } = await loadWithRetry({
+          attempts: loadAttempts({ wasm: rt.wasm }),
+          make: (a) => new WorkerSegModel(a.wasm),
+          load: (w, a) => w.load((p) => this.set({ phase: p < 1 ? "download" : "starting", progress: p }), { prefer: a.wasm ? "wasm" : "auto", lite, threads: a.threads }),
+          dispose: (w) => w.dispose(),
+          onFailed: (e, a, retrying) => {
+            // The first failure's own words: the one worth having on a phone (About, the crash crumbs).
+            crumb(`ai: model start failed (${a.wasm ? "wasm" : "webgpu"}${a.threads ? `, ${a.threads} thr` : ""}): ${errText(e)}${retrying ? "; once more in a fresh worker (wasm, 1 thread)" : ""}`);
+            segLog(`model failed to start${retrying ? "; trying a fresh worker on WASM with one thread" : ""}`, e);
+            if (retrying) { aiWorking(true, "wasm"); this.set({ phase: "starting", progress: null }); }
+          },
+        });
+        if (tries > 1) crumb("ai: model started at the second try");
         m.onEvent = (e) => this.onEvent(e);
         this.model = m;
         // What it got (WebGPU falls back to WASM in the worker when no adapter comes).
@@ -796,7 +859,6 @@ export class SubjectSeg {
         this.set({ phase: "ready", progress: null });
         return m;
       } catch (e) {
-        m.dispose();
         segLog("model failed to load; using the engine's masks", e);
         crumb(`ai: model failed: ${errText(e)}`);
         // The reason rides along (shown in Subjects): a phone can't be debugged from here otherwise.
@@ -809,6 +871,20 @@ export class SubjectSeg {
       }
     })();
     return this.loading;
+  }
+
+  /** When the pass under way showed its first progress (performance.now(); 0: none running): its estimate's clock. */
+  private passSince = 0;
+
+  /**
+   * The pass's own estimate of its time left (s), from its progress since it began; null while it has shown too
+   * little (eta.ts etaSeconds), or when no pass is running. An export uses it to decide whether a pass is about to
+   * finish (export-use.ts exportWaitS).
+   */
+  etaS(): number | null {
+    const p = this.status.progress;
+    if (!this.passSince || !this.busy || p === null || this.status.phase !== "tracking") return null;
+    return etaSeconds(this.passSince, p, performance.now());
   }
 
   /** The session before this one died with the model on WebGPU (the model was moved to WASM at start-up). */
@@ -836,6 +912,9 @@ export class SubjectSeg {
     if (e.ev === "frames") {
       live.put(e.items);
       this.cache = null;
+      const fw = this.frameWaiters;
+      this.frameWaiters = [];
+      for (const r of fw) r();
       this.onFrames?.();
     } else if (e.ev === "keys") {
       live.setConf(e.conf);
@@ -847,7 +926,10 @@ export class SubjectSeg {
       if (tens !== this.crumbTens) { this.crumbTens = tens; crumb(`ai: pass ${tens * 10}% (${e.done}/${e.total}) · heap ${e.heapMB ?? "?"} MB`); }
       // (Before the clip's first seeds there is no pass yet: the session's word after the model's own search is
       // not one. The model is still looking.)
-      if (this.autos !== null || (e.taps ?? 0) > 0) this.set({ phase: "tracking", progress: e.total ? e.done / e.total : null });
+      if (this.autos !== null || (e.taps ?? 0) > 0) {
+        if (!this.passSince) this.passSince = performance.now();
+        this.set({ phase: "tracking", progress: e.total ? e.done / e.total : null });
+      }
     } else if (e.ev === "seeds") {
       segLog(`segment ${e.k} seeds asked for (${e.t.toFixed(2)} s${e.search === false ? ", engine only" : ""})`);
       this.onNeedSeeds?.(e.k, e.t, e.search !== false);
@@ -858,8 +940,11 @@ export class SubjectSeg {
       this.onRejected?.();
     } else if (e.ev === "idle") {
       this.busy = false;
+      this.passSince = 0;
       this.tapDone();
-      this.passDone = this.autos !== null;
+      // (Through only with every frame answered: export-use.ts passComplete. An idle from before the seeds reached
+      // the session can arrive after they were noted here.)
+      this.passDone = passComplete({ seeded: this.autos !== null, filled: live.filled, n: live.n });
       segLog(`session idle: ${live.filled}/${live.n} frames filled, ${(live.bytes / 1e6).toFixed(1)} MB`);
       this.lastProfile = e.profile;
       segLog(`pass profile ${JSON.stringify(Object.fromEntries(Object.entries(e.profile).map(([k, v]) => [k, Math.round(v)])))}`);
@@ -953,6 +1038,18 @@ export class SubjectSeg {
     return t >= this.span.start - 1e-6 && t <= this.span.end + 1e-6 && !this.live.has(t);
   }
 
+  /** When the page last went to the background / came back (performance.now(); 0: never), and the pass's restarts
+   * after a failure that followed (fail). */
+  private hiddenAt = 0;
+  private shownAt = 0;
+  private recoveries = 0;
+
+  /** The page was hidden or shown (studio.ts listens to visibilitychange). */
+  visibility(hidden: boolean): void {
+    if (hidden) this.hiddenAt = performance.now(); else this.shownAt = performance.now();
+    if (!hidden) this.lastActivity = performance.now();
+  }
+
   /** Called when the pass failed in the worker (fail): the studio tells the user and drops its seed-frame video. */
   onFailed: ((msg: string) => void) | null = null;
   /** "unavailable" because of this clip (its pass failed, or it can't be decoded): the next clip tries again. */
@@ -969,6 +1066,27 @@ export class SubjectSeg {
     if (!this.model) return;
     aiWorking(false);
     crumb(`ai: pass failed: ${errText(msg)}${heapMB !== undefined ? ` · heap ${heapMB} MB` : ""}`);
+    // The page was in the background (iOS Safari suspends it, and may take the worker's GPU device or its video
+    // decoder while it is): the failure is the suspension's, not the clip's. The worker is replaced and the
+    // session's inputs replayed, as after a hibernation (wake): the masks made so far stay on screen and the pass
+    // goes on to the end, instead of "AI detection stopped on this clip". Once per clip.
+    if (this.live && this.file && !this.heldForExport && this.recoveries < 1 && backgroundFailure(this.hiddenAt, this.shownAt, performance.now(), typeof document !== "undefined" && document.hidden)) {
+      this.recoveries++;
+      crumb("ai: failed after the page was in the background; starting the pass again");
+      segLog("pass failed after a suspension: a fresh worker, inputs replayed", msg);
+      clearTimeout(this.hibTimer);
+      this.model.dispose();
+      this.model = null;
+      this.busy = false;
+      this.passSince = 0;
+      this.tapBusy = false;
+      this.turns.tapEnded();
+      this.peek = null;
+      this.hibernated = true;
+      this.set({ phase: "looking", progress: null });
+      void this.wake();
+      return;
+    }
     segLog("pass failed; using the engine's masks", msg);
     clearTimeout(this.hibTimer);
     this.model.dispose();
@@ -1024,15 +1142,47 @@ export class SubjectSeg {
    */
   releaseForExport(): void {
     if (!isMobile(deviceFacts())) return;
-    if (this.busy || !this.model || !this.live || this.waking || this.inflight) return;
+    // The model or the clip's session is still starting: it is shut down as soon as it is open (start).
+    if ((!this.model || !this.live) && (this.loading || this.opening)) { this.heldForExport = true; return; }
+    if (!this.model || !this.live || this.waking || this.inflight) return;
+    // A pass still running goes too, on a phone: the export no longer waits for it, and the worker's heap next to a
+    // 4K export's frames is what got the tab reloaded. The masks made so far stay and are what the export uses;
+    // the pass starts again after the export (resumeAfterExport: its inputs replayed, the masks the same).
+    const running = this.busy || !this.passDone;
     clearTimeout(this.hibTimer);
-    crumb("ai: hibernate (export)");
+    crumb(running ? "ai: released for the export (pass unfinished)" : "ai: hibernate (export)");
     aiWorking(false);
-    segLog("export starting: shutting the model down (masks kept)");
+    segLog(`export starting: shutting the model down (masks kept${running ? "; the pass goes on after the export" : ""})`);
     this.model.dispose();
     this.model = null;
     this.hibernated = true;
+    this.heldForExport = running;
+    this.busy = false;
+    this.passSince = 0;
+    this.tapBusy = false;
+    this.turns.tapEnded();
+    this.peek = null;
+    if (running) this.set({ phase: "ready", progress: null });
     this.onHibernate?.();
+  }
+
+  /** The worker was shut down for an export with the pass unfinished (releaseForExport): nothing wakes it meanwhile. */
+  private heldForExport = false;
+
+  /**
+   * The export is over (or the user has left its result): a pass that was cut short for it (releaseForExport on a
+   * phone) starts again, with the session's inputs replayed. The masks it made before are still shown meanwhile and
+   * come out the same.
+   */
+  resumeAfterExport(): void {
+    if (!this.heldForExport) return;
+    this.heldForExport = false;
+    if (this.hibernated && !this.passDone && this.live && this.on) {
+      crumb("ai: pass starts again after the export");
+      // (A session released before its first seeds has nothing to replay: the studio seeds it, studio.ts resumeSeg.)
+      this.set({ phase: "looking", progress: null });
+      void this.wake();
+    }
   }
 
   /** After a hibernation: a fresh worker, the clip's session again and every input replayed (it re-tracks; the masks
@@ -1040,6 +1190,7 @@ export class SubjectSeg {
   private wake(): Promise<boolean> {
     clearTimeout(this.hibTimer);
     if (!this.hibernated) return Promise.resolve(!!this.model);
+    if (this.heldForExport) return Promise.resolve(false);
     if (this.waking) return this.waking;
     const file = this.file;
     this.waking = (async () => {
@@ -1101,6 +1252,8 @@ export class SubjectSeg {
       this.seededSegs = new Set();
       this.busy = false;
       this.passDone = false;
+      this.passSince = 0;
+      this.heldForExport = false;
       this.peek = null;
       // A hibernated session's worker is gone: the new session starts a fresh one (ensureModel).
       this.hibernated = false;
@@ -1134,6 +1287,17 @@ export class SubjectSeg {
         // sign of a lost subject there, and dimming the pop for it made the subject blink.
         this.live.lenient = !!model.info?.ep.endsWith("lite");
         segLog(`session open: ${info.width}×${info.height}, masks ${info.mw}×${info.mh}, ${info.n} frames (${span.start.toFixed(2)}–${span.end.toFixed(2)} s)`);
+        if (this.heldForExport && this.model) {
+          // An export began on a phone while this was opening (releaseForExport): the worker goes until it is over.
+          crumb("ai: released for the export (session just opened)");
+          aiWorking(false);
+          this.model.dispose();
+          this.model = null;
+          this.hibernated = true;
+          this.set({ phase: "ready", progress: null });
+          this.onHibernate?.();
+          return this.live;
+        }
         // A worker that fails meanwhile says so itself (fail).
         for (const l of replay) {
           if (l.op === "add") await model.sessionAdd(l.object).catch(() => undefined);
@@ -1290,6 +1454,9 @@ export class SubjectSeg {
     this.log = [];
     this.hibernated = false;
     this.passDone = false;
+    this.passSince = 0;
+    this.heldForExport = false;
+    this.recoveries = 0;
     this.peek = null;
     this.scope = null;
     this.generation++;
@@ -1315,7 +1482,7 @@ export class SubjectSeg {
    * unavailable, the pass makes no progress for stallMs, or there is nothing for it to follow. Rejects on abort.
    */
   async settle(o: { signal: AbortSignal; stallMs: number; onProgress: (p: number | null) => void }): Promise<"ai" | "engine"> {
-    // A hibernated session finished its pass: its masks are complete.
+    // A hibernated session finished its pass: its masks are complete (one cut short for an export: what it made).
     if (this.hibernated && this.live) return this.live.filled > 0 ? "ai" : "engine";
     if (!this.live || !this.model) return "engine";
     let last = -1, lastAt = performance.now();
@@ -1340,7 +1507,7 @@ export class SubjectSeg {
 
   /** The pass for this clip and trim has run to its end: an export has nothing to wait for (no share of its bar). */
   ready(file: File, trim: TrimRange | null): boolean {
-    return this.file === file && !!this.live && !this.opening && this.passDone && scopeServes(this.scope, trim, true);
+    return this.file === file && !!this.live && !this.opening && this.passDone && passComplete({ seeded: this.autos !== null, filled: this.live.filled, n: this.live.n }) && scopeServes(this.scope, trim, true);
   }
 
   /** Resolves when the session has nothing left to do (an export waits for it: the same masks as the preview). */
@@ -1363,12 +1530,58 @@ export class SubjectSeg {
     return o;
   }
 
-  /** Part of the export key: the ML masks change the output. */
+  /** Part of the export key: the ML masks change the output. The taps only (export-use.ts segExportKey): the key
+   * of an export that starts while the pass runs must not move with the pass, or it could never be resumed. */
   exportKey(): string {
-    return this.on && this.live ? `seg:${this.nextId}:${this.undoOps.length}:${this.live.filled}` : "";
+    return this.on && this.live ? segExportKey(this.log.filter((l) => l.op !== "seeds")) : "";
+  }
+
+  private frameWaiters: (() => void)[] = [];
+  /** Resolves when the session posts frames, or after ms. */
+  framesSoon(ms: number): Promise<void> {
+    return new Promise<void>((r) => { this.frameWaiters.push(r); setTimeout(r, ms); });
+  }
+
+  /** The frame at clip time t has its masks at full weight (filled, and past the hand-over toward unfilled frames). */
+  settledAt(t: number): boolean {
+    const live = this.live;
+    if (!this.on || !live) return false;
+    const i = Math.round(t * SEG.sampleHz) - live.i0;
+    return i >= 0 && i < live.n && live.has(t) && live.hand(i) >= 1;
+  }
+
+  /** The newest frame the pass has finished, whatever the pass's state (SegLive.followT). */
+  frontT(): number | null {
+    return this.on && this.live ? this.live.followT() : null;
+  }
+
+  /** An export's frame at clip time t is graded with what the AI has for it (SegLive.covered). */
+  coveredAt(t: number): boolean {
+    return this.on && !!this.live && this.live.covered(t);
+  }
+
+  /** Follow mode: the newest frame with its masks at full weight, while a pass is at work (null: nothing to follow). */
+  followT(): number | null {
+    if (!this.on || !this.live || this.hibernated || this.passDone || this.autos === null) return null;
+    return this.live.followT();
+  }
+
+  /** A pass is at work on the clip (or about to be: its first subjects are being looked for). */
+  get passRunning(): boolean {
+    return this.on && !!this.live && !this.hibernated && !this.passDone;
   }
 
   maskSize(width: number, height: number): [number, number] {
     return maskSize(width, height);
   }
+}
+
+/**
+ * A pass that failed did so because the page was suspended: it failed while the page was hidden, or within
+ * `graceMs` of its coming back (the first steps after a suspension are the ones that find the GPU device or the
+ * decoder gone). hiddenAt / shownAt / now: performance.now() stamps (0: never). Pure.
+ */
+export function backgroundFailure(hiddenAt: number, shownAt: number, now: number, hiddenNow: boolean, graceMs = 20_000): boolean {
+  if (hiddenNow) return true;
+  return hiddenAt > 0 && shownAt >= hiddenAt && now - shownAt <= graceMs;
 }

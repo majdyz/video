@@ -2,7 +2,10 @@
 //   MODE=immediate  Export right after the clip is ready (the pass has not started or is running);
 //   MODE=playing    playback started, then Export right away (export must pause it and let the pass reach idle);
 //   MODE=after      the pass left to finish in the preview first, then Export.
-// Every mode must give the same frames (window.exportFrameHashes). Saves <out>/<MODE>.json: the hashes, the export
+// (12 Nov: the export no longer waits for the pass, seg/export-use.ts. MODE=after still gives the frames of a
+// finished pass, twice the same; MODE=immediate / playing now export at once with the masks made so far, so their
+// frames differ from MODE=after's wherever the pass had not been, and the sheet's note says how many had them.)
+// Every mode used to give the same frames (window.exportFrameHashes). Saves <out>/<MODE>.json: the hashes, the export
 // sheet's progress lines ("Finding subjects… then exporting"; the pass moves the bar) and the [export] log.
 // Usage: MODE=immediate node apps/studio/eval/seg/export-wait.mjs <base url> <outdir> <clip.mp4>   (env EXTRA)
 import fs from "node:fs";

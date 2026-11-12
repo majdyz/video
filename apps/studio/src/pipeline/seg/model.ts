@@ -51,6 +51,23 @@ export function segFps(): number | undefined {
     return undefined;
   }
 }
+/** `?seggrid=1`: the model's blind grid also while a subject is followed surely (session.ts gridAlways). */
+export function segGridAlways(): boolean {
+  try {
+    return new URLSearchParams(location.search).get("seggrid") === "1";
+  } catch {
+    return false;
+  }
+}
+/** `?segstride=0 | 1`: the stride for small subjects (session.ts strideAt) off / on; without it, by the model. */
+export function segStride(): boolean | undefined {
+  try {
+    const v = new URLSearchParams(location.search).get("segstride");
+    return v === "0" ? false : v === "1" ? true : undefined;
+  } catch {
+    return undefined;
+  }
+}
 export function segLog(...a: unknown[]): void {
   if (segDebug()) console.info("[seg]", ...a);
 }
@@ -133,7 +150,8 @@ export class WorkerSegModel implements SegModel {
   }
 
   /** Downloads (or reads from the cache) and starts the model. `onProgress` gets 0..1 of the download. */
-  async load(onProgress?: (p: number) => void, opts: { prefer?: "auto" | "wasm"; base?: string; lite?: boolean } = {}): Promise<SegLoadInfo> {
+  /** opts.threads: that many WASM threads whatever the device (the retry after a failed start: load-retry.ts). */
+  async load(onProgress?: (p: number) => void, opts: { prefer?: "auto" | "wasm"; base?: string; lite?: boolean; threads?: number } = {}): Promise<SegLoadInfo> {
     const t0 = performance.now();
     const base = opts.base ?? segBase();
     const man = await (await fetch(`${base}manifest.json`, { cache: "no-cache" })).json() as SegManifest;
@@ -155,7 +173,7 @@ export class WorkerSegModel implements SegModel {
     void pruneCache(keys);
     const bank = await (await fetch(`${base}bank.json?v=${man.files["bank.json"]?.sha256.slice(0, 16) ?? "0"}`)).json();
     // One thread on iOS, up to four elsewhere when isolated (device.ts segThreads; `?segthreads=N` to measure).
-    const threads = segThreads(deviceFacts(), Number(new URLSearchParams(location.search).get("segthreads")) || null);
+    const threads = opts.threads && opts.threads > 0 ? opts.threads : segThreads(deviceFacts(), Number(new URLSearchParams(location.search).get("segthreads")) || null);
     const r = await this.call({ type: "init", models, bank, threads, prefer: opts.prefer ?? "auto", lite, debug: segDebug() }, Object.values(models));
     this.info = { ep: String(r.ep) + (lite ? " lite" : ""), f16: !!r.f16, threads: Number(r.threads), loadMs: performance.now() - t0, bytes: total, heapMB: Number(r.heapMB ?? 0) };
     segLog(`model ready on ${this.info.ep} (tried ${(r.tried as string[]).join(", ")}; WebGPU adapter ${r.webgpu ? "yes" : "no"}, shader-f16 ${r.f16 ? "yes" : "no"}; WASM threads ${this.info.threads}, cross-origin isolated ${r.coi ? "yes" : "no"})`, this.info);
@@ -182,8 +200,10 @@ export class WorkerSegModel implements SegModel {
   /** fps: keyframes a second, fixed (`?segfps=N`); without it the session picks by the model (session.ts). */
   /** autoCap: the engine's own subjects followed at a time (a phone: SEG.liteAutos whatever the model). */
   /** weak: a phone short of memory (device.ts isWeakDevice): the session keeps less (session.ts SessionOptions.weak). */
+  /** (`?segstride=0 | 1`: small subjects at every regular keyframe / at every other one, whatever the model;
+   * `?seggrid=1`: the blind grid at every regular look, as before.) */
   async sessionOpen(file: File, start: number, end: number, fps?: number, autoCap?: number, weak?: boolean): Promise<SessionInfo> {
-    return (await this.call({ type: "session-open", file, start, end, fps, autoCap, weak })) as unknown as SessionInfo;
+    return (await this.call({ type: "session-open", file, start, end, fps, autoCap, weak, stride: segStride(), gridAlways: segGridAlways() })) as unknown as SessionInfo;
   }
 
   /** Playhead first (session.ts focus): the subjects of the paused frame at t, followed ahead of the pass. */

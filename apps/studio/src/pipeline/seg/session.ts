@@ -49,10 +49,10 @@
 //   iPhone's page died there, 12 Nov). Every job leaves a breadcrumb when it starts and when it ends, with its
 //   number, so a crash log shows what was alive.
 import type { EdgeTam } from "./edgetam.ts";
-import { cellLab, nearMap, departFromCells, framePop, sdfFeather, area, bbox, centroid, guidedFilter, iou, promptFromMask, rleDecode, rleEncode, shiftMap, waterContrast } from "./mask.ts";
+import { cellLab, nearMapNear, departFromCells, framePop, sdfFeatherNear, area, bbox, centroid, guidedFilterNear, iou, promptFromMask, rleDecode, rleEncode, shiftMap, waterContrast } from "./mask.ts";
 import { denseFlow, warp, type Gray } from "./flow.ts";
 import { fillInterval, HOLD, keyTimes, lockStep, maskSize, newLock, remap, SEG, sigmoidResize, toU8, type Keyframe, type Lock, type SegObject } from "./track.ts";
-import { assignSlots, edgeShare, inCorner, overlap, SEEDS, topUpAt, type SeedCandidate } from "./seeds.ts";
+import { assignSlots, edgeShare, gridWanted, inCorner, overlap, SEEDS, STRIDE, strideDue, topUpAt, type SeedCandidate } from "./seeds.ts";
 
 /** Reads one frame (as a VideoFrame-like source) at clip time t; the session draws it on its own canvases. */
 export type SessionFrames = {
@@ -132,6 +132,16 @@ export type SessionObjectInfo = { id: number; kind: "include" | "exclude"; t: nu
  * Subject pop direction (studio-seg.ts SegLive.pop). */
 export type SessionFrameOut = { i: number; alpha: Uint8Array; nearQ: Uint8Array; excQ: Uint8Array | null; depQ: Uint8Array; pop?: number | null };
 export type SessionProfile = Record<string, number>;
+
+/**
+ * The buffers of posted frames, for the worker's transfer list (seg-serve.ts). Every map of every frame must have a
+ * buffer of its own: a buffer named twice makes postMessage throw ("ArrayBuffer at index 3 is a duplicate of an
+ * earlier ArrayBuffer"), and that throw ends the pass. The tests post their frames through structuredClone with
+ * this list (test/seg-post.ts), as the worker does.
+ */
+export function frameTransfers(items: readonly SessionFrameOut[]): ArrayBuffer[] {
+  return items.flatMap((x) => [x.alpha.buffer, x.nearQ.buffer, x.depQ.buffer, ...(x.excQ ? [x.excQ.buffer] : [])]) as ArrayBuffer[];
+}
 export type SessionEvents = {
   frames(items: SessionFrameOut[]): void;
   keys(conf: { t: number; conf: number }[]): void;
@@ -205,13 +215,26 @@ type ObjState = {
   anchor: number;
   anchor0: number;
   anchorT: number;
+  /** The stride (SEG.strideArea): the mask the flow carried to the regular keyframe this object did not step at
+   * (carryStep), with that frame's luma. It is only the half-way point of the flow guard's next carry: the guard,
+   * the runaway checks, the lock and the anchor read prevF, the last keyframe the tracker itself answered at. Null
+   * when the last keyframe was a real step. */
+  viaF: { m: Float32Array; luma: Float32Array } | null;
+  /** Forward keyframes carried, not stepped at (the memory bank's clock counts real steps only). */
+  skipF: number;
+  /** The last real forward step was an easy one: a mask, no fresh prompt, no runaway, not a hard step. */
+  calmF: boolean;
+  /** Why it was not ("" when it was): first, prompt, runaway, hard, empty (the profile counts them: strideAt). */
+  uncalm: string;
 };
 
 /** fps: keyframes a second, fixed (no adaptive extra ones unless `adapt` says so). Default: by the model (see header). */
 /** autoCap: at most this many of the engine's own subjects are followed at a time (a phone, whatever the model). */
 /** weak: a phone short of memory (device.ts isWeakDevice): fewer decoded frames kept (SEG.weakFrameCache), half the
  * flow-carried masks, one subject for the playhead's peek. The masks are the same (what is not kept is read again). */
-export type SessionOptions = { fps?: number; adapt?: boolean; autoCap?: number; weak?: boolean };
+/** stride: small subjects step at every other regular keyframe (SEG.strideArea; default: on the lite model). */
+/** gridAlways: the model's blind grid also while a subject is followed surely (as it was; seeds.ts gridWanted). */
+export type SessionOptions = { fps?: number; adapt?: boolean; autoCap?: number; weak?: boolean; stride?: boolean; gridAlways?: boolean };
 
 /** A model job of the session (work): the breadcrumbs name them. */
 export type JobKind = "exclude" | "tap" | "search" | "peek" | "pass";
@@ -273,7 +296,7 @@ export class SegSession {
   private asked = NaN;
   /** Steps done (for the progress). */
   private stepsDone = 0;
-  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0, extraKeys: 0, carried: 0, runMs: 0, held: 0, rechecks: 0, recovered: 0 };
+  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0, extraKeys: 0, carried: 0, runMs: 0, held: 0, rechecks: 0, recovered: 0, strided: 0, strideOdd: 0, strideBig: 0, stridePrompt: 0, strideFirst: 0, strideOther: 0, gridsSkipped: 0, flowPx: 0, flows: 0 };
   private waitSince = 0;
 
   private model: EdgeTam;
@@ -284,6 +307,9 @@ export class SegSession {
   private frameCap: number;
   private carriedCap: number;
   private peekCap: number;
+  /** Small subjects step at every other regular keyframe and are carried along the flow at the one between (carryStep). */
+  readonly stride: boolean;
+  private gridAlways: boolean;
 
   // ------------------------------------------------------------------ jobs
 
@@ -329,6 +355,8 @@ export class SegSession {
     this.frameCap = opts.weak ? SEG.weakFrameCache : SEG.frameCache;
     this.carriedCap = opts.weak ? 4 : 8;
     this.peekCap = opts.weak ? 1 : AUTO.peekMax;
+    this.stride = opts.stride ?? !!model.lite;
+    this.gridAlways = !!opts.gridAlways;
     this.fine = keyTimes(span.start, span.end, [], this.adapt ? 2 * this.fps : this.fps);
     const base = keyTimes(span.start, span.end, [], this.fps), last = this.fine[this.fine.length - 1];
     this.base = last !== undefined && base[base.length - 1] !== last ? [...base, last] : base;
@@ -377,7 +405,7 @@ export class SegSession {
   }
 
   private newObj(o: SegObject & { id: number }, auto: boolean, seg: number, hidden: boolean, fwd: number[], bwd: number[]): ObjState {
-    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0, ranF: 0, ranB: 0, keptF: false, keptB: false, lastF: 0, lastB: 0, anchor: 0, anchor0: 0, anchorT: 0 };
+    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0, ranF: 0, ranB: 0, keptF: false, keptB: false, lastF: 0, lastB: 0, anchor: 0, anchor0: 0, anchorT: 0, viaF: null, skipF: 0, calmF: false, uncalm: "first" };
   }
 
   /** Canonical frame of segment k (k = 0: the first seeds' frame; then every SEG.segmentS, snapped). */
@@ -931,7 +959,15 @@ export class SegSession {
       console.info(`[seg] engine regions at ${t.toFixed(2)} s${regions.some((c) => c.strict) ? " (not surely open water: the strict bar)" : ""}: ${cands.length} subject(s) of ${total} region(s) (score/iou/area/dE: ${stats.join(" ")})`);
     }
     const fromRegions = cands.length > 0;
-    if (!fromRegions && (grid || quick)) {
+    // The blind grid (12, then 24 decoder runs on the lite model: 10 s on a desktop's WASM) only where it can find
+    // what nothing else does (seeds.ts gridWanted): not while a subject is followed surely on this frame.
+    const sure = quick || this.gridAlways ? 0 : this.followedAt(t).filter((o) => o.s.lockF.locked).length;
+    const useGrid = quick || gridWanted({ search: grid, engineAnimals: 0, regionFinds: cands.length, followed: sure });
+    if (grid && !quick && !fromRegions && !useGrid) {
+      this.prof.gridsSkipped++;
+      console.info(`[seg] auto seeds at ${t.toFixed(2)} s: no grid search (${sure} subject(s) followed surely here)`);
+    }
+    if (!fromRegions && useGrid) {
     stats = [];
     probes = 0;
     total = 0;
@@ -1179,7 +1215,16 @@ export class SegSession {
           const batch = autos.filter((s) => Math.abs(this.nextOf(s)! - t) < 1e-6).sort((a, b) => b.o.id - a.o.id);
           // (Forward steps only decide the carry-over and the fine grid: a back-fill step is its object's alone.)
           const ahead: ObjState[] = [];
-          for (const s of batch) { const d = this.dirOf(s); await this.stepObject(s); if (d === "f") ahead.push(s); }
+          let seeded = false;
+          for (const s of batch) {
+            const d = this.dirOf(s);
+            if (d === "f" && s.fi === 0) seeded = true;
+            // (A small, calm subject at every other regular keyframe: carried there along the flow, not stepped.)
+            if (d === "f" && this.strideAt(s, t)) await this.carryStep(s, t); else await this.stepObject(s);
+            if (d === "f") ahead.push(s);
+          }
+          // New subjects' first masks: on their frame right away (early), ahead of the interval's fill.
+          if (seeded) this.early(t);
           if (ahead.length) {
             this.carryOver(t);
             this.refineAt(t);
@@ -1356,7 +1401,8 @@ export class SegSession {
     }
     // The bank's clock is the object's own step count (bank.ts frameIndex: the keyframe's ordinal), so the keyframe
     // before is its spatial memory whether it is a regular step back or an extra keyframe's half step.
-    const frame = bankFrame(idx, reverse);
+    // (Real steps only: a keyframe the stride carried the object over is no step of its tracker.)
+    const frame = bankFrame(goFwd ? idx - s.skipF : idx, reverse);
     let r = await this.model.step(key, frame, pts, labels, reverse);
     let m = sigmoidResize(r.logits, r.lw, r.lh, this.mw, this.mh);
     this.stepsDone++;
@@ -1373,8 +1419,14 @@ export class SegSession {
     let carried: Float32Array | null = null;
     if (prev && !first) {
       const tg = performance.now();
-      const fl = denseFlow(gray(luma, this.mw, this.mh), gray(prev.luma, this.mw, this.mh));
-      carried = warp(prev.m, fl);
+      // After a keyframe the stride carried this object over (carryStep), the last real mask comes here in two hops
+      // (it was carried to that keyframe along the flow; from there to this one now): each hop is one regular
+      // keyframe interval, as the flow is measured everywhere else. What is carried is still the tracker's own last
+      // mask (prev.m, moved), never a mask the model was not asked for.
+      const via = goFwd ? s.viaF : null;
+      const fl = denseFlow(gray(luma, this.mw, this.mh), gray((via ?? prev).luma, this.mw, this.mh));
+      carried = warp((via ?? prev).m, fl);
+      this.noteFlow(fl, via ? 1 / this.fps : Math.abs(t - list[idx - 1]));
       this.prof.guardMs += performance.now() - tg;
       const ca = area(carried);
       carriedArea = ca;
@@ -1456,7 +1508,11 @@ export class SegSession {
       // or the last one kept when this one was dropped.)
       const size = Math.max(area(m), goFwd ? s.lastF : s.lastB);
       // (Nor is a dropped mask of theirs a reason for one: a keyframe a quarter of a second on is dropped as well.)
-      s.hard = !first && (s.auto ? !ranAway && (reprompts > 0 || agree < SEG.adaptAgree) && size >= SEG.fineMinArea * this.mw * this.mh : reprompts > 0 || ranAway || agree < SEG.adaptAgree);
+      // (After a keyframe the stride carried the object over, the flow-carried mask came in two hops and overlaps a
+      // good mask less than a one-hop one does: its agreement alone puts no object on the fine grid. On the owner's
+      // hammerhead clip it did, for subjects around 1% of the frame: a carried keyframe bought extra ones.)
+      const twoHop = goFwd && !!s.viaF;
+      s.hard = !first && (s.auto ? !ranAway && (reprompts > 0 || (!twoHop && agree < SEG.adaptAgree)) && size >= SEG.fineMinArea * this.mw * this.mh : reprompts > 0 || ranAway || agree < SEG.adaptAgree);
       if (s.hard && s.auto) console.info(`[seg] hard step at ${t.toFixed(2)} s: object ${s.o.id}${dir} (${reprompts ? "re-prompted" : `agrees ${agree.toFixed(2)} with the flow`}; ${(100 * size / (this.mw * this.mh)).toFixed(2)}% of the frame)`);
     }
     // Hysteresis (track.ts HOLD): a locked subject the model still sees at about its size keeps its weight through a
@@ -1488,7 +1544,13 @@ export class SegSession {
         }
       }
     }
-    if (goFwd) { s.prevF = { m, luma }; s.fi++; } else { s.prevB = { m, luma }; s.bi++; }
+    if (goFwd) {
+      s.prevF = { m, luma };
+      s.viaF = null;
+      s.uncalm = first ? "first" : reprompts ? "prompt" : ranAway ? "runaway" : s.hard ? "hard" : area(m) > 0 ? "" : "empty";
+      s.calmF = s.uncalm === "";
+      s.fi++;
+    } else { s.prevB = { m, luma }; s.bi++; }
     const mu = toU8(m);
     s.keys.set(t, rleEncode(mu));
     if (area(mu, 127) > 0) s.shown.add(t); else s.shown.delete(t);
@@ -1620,6 +1682,104 @@ export class SegSession {
       if (want.has(k)) this.backRgba.set(k, (await this.pixels(x, true)).rgba1024!);
       else if (!this.lumaCache.has(k)) await this.pixels(x, false);
     }
+  }
+
+  /** The flow guard's flow, for the profile: its mean length in mask px a clip second (how fast the picture moves). */
+  private noteFlow(fl: { data: Float32Array }, dt: number): void {
+    if (!(dt > 1e-6)) return;
+    let sum = 0, n = 0;
+    for (let i = 0; i + 1 < fl.data.length; i += 34) { sum += Math.hypot(fl.data[i], fl.data[i + 1]); n++; }
+    if (n) { this.prof.flowPx += sum / n / dt; this.prof.flows++; }
+  }
+
+  /**
+   * The stride (SEG.strideArea; seeds.ts strideDue): one of the engine's own subjects that is small and calm does not
+   * step at regular keyframe t. Every other regular keyframe at most (the odd ones of the grid, so the small
+   * subjects of a school skip the same keyframes and such a keyframe is not encoded at all), never a segment start
+   * (the looks compare masks there) nor the object's last keyframe, and only right after a real, easy step.
+   */
+  private strideAt(s: ObjState, t: number): boolean {
+    if (!this.stride || !s.auto || s.peek || s.o.kind !== "include" || !s.prevF) return false;
+    const o = {
+      index: this.base.indexOf(t),
+      start: this.segStarts.some((x) => Math.abs(x - t) < 1e-6),
+      last: s.fi >= s.fwd.length - 1,
+      real: !s.viaF && s.fi > 0,
+      calm: s.calmF && s.ranF === 0 && s.fineF <= 0,
+      area: area(s.prevF.m) / (this.mw * this.mh),
+    };
+    const due = strideDue(o);
+    // For the profile: of the keyframes a subject could have been carried over (its place on the grid), how many
+    // were, and what stood in the way of the rest (too large, a fresh prompt at the step before, a new track's
+    // second keyframe, anything else: no mask, a runaway, the fine grid).
+    if (o.index > 0 && o.index % 2 === 1 && !o.start && !o.last && o.real) {
+      this.prof.strideOdd++;
+      if (!due) {
+        if (o.area >= STRIDE.area) this.prof.strideBig++;
+        else if (s.uncalm === "prompt") this.prof.stridePrompt++;
+        else if (s.uncalm === "first") this.prof.strideFirst++;
+        else this.prof.strideOther++;
+      }
+    }
+    return due;
+  }
+
+  /**
+   * The object's keyframe t without a tracker step (strideAt): its last real mask carried here along the flow, as
+   * the fill would draw it on this frame. It is the object's mask at t for the fills and the looks, with the
+   * confidence of the step before; the tracker's state (its memory, prevF, the lock, the anchor, the runaway
+   * counts) is untouched, so the next real step is checked against the tracker's own last mask (stepObject).
+   */
+  private async carryStep(s: ObjState, t: number): Promise<void> {
+    const from = s.fwd[s.fi - 1], prev = s.prevF!;
+    this.lastTouched = [];
+    await this.readAhead(from, t);
+    const { luma } = await this.pixels(t, false);
+    const tg = performance.now();
+    const fl = denseFlow(gray(luma, this.mw, this.mh), gray(prev.luma, this.mw, this.mh));
+    const m = warp(prev.m, fl);
+    this.noteFlow(fl, Math.abs(t - from));
+    this.prof.guardMs += performance.now() - tg;
+    s.viaF = { m, luma };
+    s.skipF++;
+    s.fi++;
+    this.prof.strided++;
+    const mu = toU8(m);
+    s.keys.set(t, rleEncode(mu));
+    if (area(mu, 127) > 0) s.shown.add(t); else s.shown.delete(t);
+    s.conf.set(t, s.conf.get(from) ?? 0.5);
+    this.lastTouched = this.touch(t, from);
+  }
+
+  /** Grid frames posted early (early). */
+  private earlyDone = new Set<number>();
+
+  /**
+   * New subjects have their first mask on keyframe t (a look's seeds): the frame at t and the SEG.earlyS after it
+   * are posted with that mask now, as it is. An interval is filled once both its keyframes are final (a keyframe
+   * later: seconds on a phone, tens of seconds on WASM), and until then the frame the user is looking at (the start
+   * of the clip) had no AI outline at all. The fill replaces these frames with the real ones as it gets there.
+   * Only frames nothing was posted for, once per keyframe.
+   */
+  private early(t: number): void {
+    const hz = SEG.sampleHz, i0 = Math.round(t * hz) - this.grid.i0;
+    if (i0 < 0 || i0 >= this.grid.n || this.earlyDone.has(i0) || this.posted?.[i0]) return;
+    this.earlyDone.add(i0);
+    const u = this.own([...this.objs.values()].filter((s) => !s.peek), t);
+    const hit = this.lumaCache.get(frameKey(t));
+    if (!hit || !u.inc.some((x) => x > 0.5)) return;
+    const luma = Float32Array.from(hit, (x) => x / 255);
+    const gr = Math.max(1, Math.round(SEG.guidedR * this.mw / 640));
+    const inc = guidedFilterNear(luma, remap(u.inc), this.mw, this.mh, gr, SEG.guidedEps);
+    const exc = u.exc ? guidedFilterNear(luma, remap(u.exc), this.mw, this.mh, gr, SEG.guidedEps) : null;
+    const first = this.product(i0, inc, exc, luma), out: SessionFrameOut[] = [];
+    // (Each frame its own copies: the frames are handed to the main thread by their buffers, frameTransfers, and
+    // one buffer cannot go twice. The first version posted the same four arrays under eleven frame numbers: the
+    // worker's postMessage threw and the pass ended at its first seed.)
+    for (let i = i0; i < this.grid.n && i <= i0 + Math.round(SEG.earlyS * hz); i++) {
+      if (!this.posted?.[i]) out.push({ i, alpha: first.alpha.slice(), nearQ: first.nearQ.slice(), excQ: first.excQ ? first.excQ.slice() : null, depQ: first.depQ.slice(), pop: null });
+    }
+    if (out.length && !this.closed) this.ev.frames(out);
   }
 
   /** The keyframe time next to t on the fine grid (dir: +1 later, −1 earlier), when extra keyframes are on. */
@@ -1809,8 +1969,8 @@ export class SegSession {
     const t1 = performance.now();
     const out: SessionFrameOut[] = [];
     idx.forEach((i, j) => {
-      const inc = guidedFilter(lumas[j], remap(filled[j].inc), this.mw, this.mh, gr, SEG.guidedEps);
-      const e = filled[j].exc ? guidedFilter(lumas[j], remap(filled[j].exc!), this.mw, this.mh, gr, SEG.guidedEps) : null;
+      const inc = guidedFilterNear(lumas[j], remap(filled[j].inc), this.mw, this.mh, gr, SEG.guidedEps);
+      const e = filled[j].exc ? guidedFilterNear(lumas[j], remap(filled[j].exc!), this.mw, this.mh, gr, SEG.guidedEps) : null;
       out.push(this.product(i, inc, e, lumas[j]));
     });
     this.prof.fillMs += t1 - t0;
@@ -1830,11 +1990,12 @@ export class SegSession {
     }
     const diag = bb ? Math.hypot(bb.x1 - bb.x0 + 1, bb.y1 - bb.y0 + 1) : 0;
     const r = Math.max(SEG.featherMinPx, SEG.featherShare * diag);
-    const inc = sdfFeather(incRaw, w, h, SEG.alphaR), exc = excRaw ? sdfFeather(excRaw, w, h, SEG.alphaR) : null;
+    // (On the masks' own windows: mask.ts windowed. The same maps, a fraction of the time for a far subject.)
+    const inc = sdfFeatherNear(incRaw, w, h, SEG.alphaR), exc = excRaw ? sdfFeatherNear(excRaw, w, h, SEG.alphaR) : null;
     const alpha = new Uint8Array(w * h);
     for (let k = 0; k < alpha.length; k++) alpha[k] = Math.round(255 * Math.min(1, Math.max(0, inc[k] * (exc ? 1 - exc[k] : 1))));
     const nr = Math.max(2, Math.round(SEG.nearK * r));
-    const near = nearMap(incRaw, w, h, nr);
+    const near = nearMapNear(incRaw, w, h, nr);
     const cells = this.cellCache.get(frameKey((this.grid.i0 + i) / SEG.sampleHz));
     const depQ = cells ? departFromCells(cells, toU8(incRaw), w, h).data : new Uint8Array(qsize(w) * qsize(h)).fill(255);
     // The subject against the water around it on this frame: the main thread averages it over the clip for the pop's
@@ -1866,7 +2027,7 @@ export class SegSession {
     const m = this.model.timing;
     let objects = 0;
     for (const s of [...this.objs.values(), ...this.trash.values()]) if (s.keys.size) objects++;
-    return { ...this.prof, objects, clipS: this.grid.n / SEG.sampleHz, encodeMs: m.encode, encodes: m.encodes, attendMs: m.attend, decoderMs: m.decoder, memEncMs: m.memEnc, steps: m.steps, keyframes: this.keys.length, fps: this.fps, restarts: this.frames.restarts?.() ?? 0 };
+    return { ...this.prof, objects, clipS: this.grid.n / SEG.sampleHz, encodeMs: m.encode, encodes: m.encodes, attendMs: m.attend, decoderMs: m.decoder, memEncMs: m.memEnc, steps: m.steps, keyframes: this.keys.length, fps: this.fps, restarts: this.frames.restarts?.() ?? 0, flowPxS: this.prof.flows ? this.prof.flowPx / this.prof.flows : 0 };
   }
 }
 

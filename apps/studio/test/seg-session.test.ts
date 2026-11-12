@@ -1,6 +1,7 @@
 // AI subject detection, the background session (seg/session.ts) on a fake model and fake frames: what it does when
 // the model throws, and that its masks are a function of its inputs alone.
 //   node --experimental-strip-types apps/studio/test/seg-session.test.ts
+import { postFrames } from "./seg-post.ts";
 import assert from "node:assert/strict";
 import type { EdgeTam } from "../src/pipeline/seg/edgetam.ts";
 import { frameKey, SegSession, type SessionEvents, type SessionFrameOut, type SessionFrames, type SessionOptions } from "../src/pipeline/seg/session.ts";
@@ -122,7 +123,7 @@ function open(f: Fake, span: { start: number; end: number }, seedsFor: (t: numbe
     settled: () => new Promise<void>((res) => { wake = res; }),
   };
   const ev: SessionEvents = {
-    frames: (items) => { for (const x of items) r.frames.set(x.i, x); },
+    frames: (items) => { for (const x of postFrames(items)) r.frames.set(x.i, x); },
     keys: () => undefined,
     progress: (d, t, taps) => r.onProgress?.(d, t, taps),
     trace: (msg) => { r.traces.push(msg); },
@@ -775,7 +776,9 @@ function jobsOf(tl: Timeline): Job[] {
     const f = fake({ lite: true });
     let searchIds = 5000, tapped = false;
     const found: { t: number; n: number }[] = [];
-    const r = open(f, { start: 0, end: 12 }, (t) => (t < 1 ? [subject(t)] : null));
+    // (gridAlways: the searches here are the blind grid's, made while the first subject is followed; the session
+    // leaves that grid out by default now, seeds.ts gridWanted. What is tested is how a search and a tap take turns.)
+    const r = open(f, { start: 0, end: 12 }, (t) => (t < 1 ? [subject(t)] : null), { gridAlways: true });
     const tl = watch(f, r, (k) => {
       // The tap lands while the search is on its probes.
       if (o.tapAt === "probe" && k === "probe" && !tapped) { tapped = true; r.s.add(tap); }
