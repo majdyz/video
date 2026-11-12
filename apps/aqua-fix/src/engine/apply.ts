@@ -8,6 +8,7 @@ import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToL
 import { nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, tapParams, waterTintOf, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { SEG_TONE } from "./grade-shader.ts";
+import { unpackSegR } from "./seg-overlay.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
 import { RED, chromaRebuild, greenNeutral, greenWeight, guideSmooth, greenSettings, redGainStrength, redGuard, waterRedGain, warmMaterial, murkHold } from "./red.ts";
@@ -326,11 +327,13 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // Green water (red.ts): the cast the balance could not remove goes to a muted blue-grey.
   [a, b] = greenNeutral(L, a, b, greenWeight(p) * (1 - RED.gnObjKeep * conf));
   // Engine-mask weight, softened where the subject's colour fades into the water's (grade-shader toneWeight).
-  const tN = objectNeutral(L, a, b, r0, g0, b0, onFar, toneW, popS) * smoothstep(SUBJECT_POP.keepDarkLo, SUBJECT_POP.keepDarkHi, L);
+  // Under an AI mask the subject's cast is the AI restore's alone (SEG_RESTORE: a set share of it goes, never all):
+  // the pop's own cast clearing, its warm pop and its stronger warm clamp are for the engine's masks.
+  const tN = objectNeutral(L, a, b, r0, g0, b0, onFar, an ? 0 : toneW, popS) * smoothstep(SUBJECT_POP.keepDarkLo, SUBJECT_POP.keepDarkHi, L);
   // In open blue water the person detector also fires on sharks and big
   // fish: skin colour only where the source has red left to be skin.
   const personS = person * (1 - objectNeutralOf(p) * redDeficit(r0, g0, b0));
-  scale *= warmClamp(a, b, r0, g0, b0, onFar, personS, popS);
+  scale *= warmClamp(a, b, r0, g0, b0, onFar, personS, an ? objectNeutralOf(p) : popS);
   const [na, nb] = clearCast(a * scale, b * scale, vla / vln, vlb / vln, tN / OBJECT_NEUTRAL.mix);
   // The cast left on the graded colour, before the subject's clearing: what the warm pull is for (WARM_POP.castLo..Hi).
   const castW = smoothstep(WARM_POP.castLo, WARM_POP.castHi, Math.hypot(a, b) * scale);
@@ -346,16 +349,18 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // The subject keeps Vivid's colour but is spared part of its water darkening, and is lifted a little
   // (SUBJECT_POP).
   const vv = vividLook(looked[0], guarded[0], guarded[1], s.vivid ?? 0, greenWeight(p));
-  const Lv = popP > 0 ? vividLook(looked[0], guarded[0], guarded[1], (s.vivid ?? 0) * (1 - SUBJECT_POP.vividKeep * Math.min(1, popP)), greenWeight(p))[0] : vv[0];
+  const Lv = popP > 0 && !an ? vividLook(looked[0], guarded[0], guarded[1], (s.vivid ?? 0) * (1 - SUBJECT_POP.vividKeep * Math.min(1, popP)), greenWeight(p))[0] : vv[0];
   const popDir = an ? ctx.seg!.popDir ?? 1 : 1;
-  const Lp = Lv + SUBJECT_POP.lift * popP * popDir * 4 * Lv * Math.max(0, 1 - Lv);
+  // Under an AI mask the pop's own lift (or its deepening of a subject darker than the water) is left out: the AI
+  // restore's small lift is all the subject gets (SEG_RESTORE.lift), and its chroma is not scaled along.
+  const Lp = an ? Lv : Lv + SUBJECT_POP.lift * popP * popDir * 4 * Lv * Math.max(0, 1 - Lv);
   // The chroma follows part of the lift: a lifted blue-grey stays blue-grey.
   const cf = SUBJECT_POP.chromaFollowDark + (SUBJECT_POP.chromaFollow - SUBJECT_POP.chromaFollowDark) * smoothstep(SUBJECT_POP.keepDarkLo, SUBJECT_POP.keepDarkHi, Lv);
   const kc = 1 + cf * (Lp / Math.max(1e-4, Lv) - 1);
   vv[0] = Lp; vv[1] *= kc; vv[2] *= kc;
   const hn0 = highlightPink(vv[0], vv[1], vv[2]);
   const hn1 = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * popS, 0, 1));
-  const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * (an ? 1 : smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) * (s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0) * castW;
+  const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * (an ? 0 : smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) * (s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0) * castW;
   const hn = warmPop(vv[0], hn1[0], hn1[1], wk);
   // Blue water style (opt-in): cobalt water, orange warm subjects, neutral silver, deeper shadows.
   const bl = blueLook(vv[0], hn[0], hn[1], s.blue ?? 0, greenWeight(p));
@@ -374,11 +379,11 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // AI subject restore (SEG_RESTORE; grade-shader segRestore): after every look, so none of them amplifies it.
   if (segS > 0) {
     const lr = (lumI + DETAIL_GUARD.eps) / (guideLum(ctx.depth, u, v) + DETAIL_GUARD.eps);
-    [bl[0], bl[1], bl[2]] = segRestore(bl[0], bl[1], bl[2], segS, s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0, lr, SUBJECT_POP.lift * popP * popDir);
+    [bl[0], bl[1], bl[2]] = segRestore(bl[0], bl[1], bl[2], segS, s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0, lr, 0, segColourK(an!));
   }
   // Tone target (analyze.ts TONE): one gamma on the graded lightness, the same for every pixel of the frame.
   if ((p.toneGamma ?? 1) > 1) bl[0] = Math.pow(Math.max(0, bl[0]), p.toneGamma!);
-  const capped = capChroma(bl[0], bl[1], bl[2], Math.max(cSrc, wk * WARM_POP.cMin * 1.5, bl[3], segS > 0 ? SEG_RESTORE.warmMax : 0));
+  const capped = capChroma(bl[0], bl[1], bl[2], Math.max(cSrc, wk * WARM_POP.cMin * 1.5, bl[3]));
   const [r1, g1, b1] = oklabToLinear(bl[0], capped[0], capped[1]);
   void C;
 
@@ -424,13 +429,19 @@ function popHue(a: number, b: number, as: number, bs: number, w: number): [numbe
 }
 
 /** The AI overlay texture (composeSegStrength) at upright (u, v), bilinear (grade-shader animalStrength). */
-function segSample(t: { width: number; height: number; data: Float32Array }, u: number, v: number): [number, number, number, number] {
+function segSample(t: { width: number; height: number; data: Float32Array }, u: number, v: number): [number, number, number, number, number] {
   const fx = Math.min(Math.max(u * t.width - 0.5, 0), t.width - 1), fy = Math.min(Math.max(v * t.height - 0.5, 0), t.height - 1);
   const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(x0 + 1, t.width - 1), y1 = Math.min(y0 + 1, t.height - 1), tx = fx - x0, ty = fy - y0;
-  const out: [number, number, number, number] = [0, 0, 0, 0];
+  const out: [number, number, number, number, number] = [0, 0, 0, 0, 0];
+  const mix = (a: number, b: number, d: number, e: number) => (a + (b - a) * tx) * (1 - ty) + (d + (e - d) * tx) * ty;
   for (let c = 0; c < 4; c++) {
     const a = t.data[(y0 * t.width + x0) * 4 + c], b = t.data[(y0 * t.width + x1) * 4 + c], d = t.data[(y1 * t.width + x0) * 4 + c], e = t.data[(y1 * t.width + x1) * 4 + c];
-    out[c] = (a + (b - a) * tx) * (1 - ty) + (d + (e - d) * tx) * ty;
+    if (c === 0) {
+      // R carries the subject's closeness too (seg-overlay.ts packSegR): unpacked per texel, then interpolated.
+      const ua = unpackSegR(a), ub = unpackSegR(b), ud = unpackSegR(d), ue = unpackSegR(e);
+      out[0] = mix(ua[0], ub[0], ud[0], ue[0]);
+      out[4] = mix(ua[1], ub[1], ud[1], ue[1]);
+    } else out[c] = mix(a, b, d, e);
   }
   return out;
 }
@@ -446,7 +457,7 @@ function segPop(a: number): number {
  * source pixel (Oklab lab0) departs from the local water (an[0]; its hue (vhx, vhy)); × the ML weight, the regional
  * trust and the Pop gate (SEG_RESTORE.popGate × the Pop multiplier `popK`: nothing at Pop 0). `tone` = p22.z.
  */
-export function segToneWeight(an: readonly [number, number, number, number], lab0: readonly [number, number, number], vhx: number, vhy: number, tone: number, popK: number): number {
+export function segToneWeight(an: readonly number[], lab0: readonly [number, number, number], vhx: number, vhy: number, tone: number, popK: number): number {
   if (an[3] <= 0) return 0;
   const d = (an[2] - 0.5) * 2 * SEG_TONE.alphaR;
   const ev = an[0] < 0 || an[0] > 2 ? 1 : smoothstep(SEG_TONE.evLo, SEG_TONE.evHi, Math.hypot(lab0[0] - an[0], lab0[1] * vhy - lab0[2] * vhx));
@@ -463,22 +474,35 @@ function guideLum(d: DepthMap, u: number, v: number): number {
 }
 
 /**
+ * The colour share K of the AI subject restore (SEG_RESTORE edge / farKeep; grade-shader segColourK): the edge
+ * feather over the mask's read-back distance (an[2], the B channel: 0 on the contour, whole `edge` mask px inside)
+ * × the subject's closeness (an[4], seg-overlay.ts subjectCloseness; 1 when absent): farKeep for a far subject, 1 for
+ * a close one.
+ */
+export function segColourK(an: readonly number[]): number {
+  const d = (an[2] - 0.5) * 2 * SEG_TONE.alphaR, close = clamp(an[4] ?? 1, 0, 1);
+  return smoothstep(0, SEG_RESTORE.edge, d) * (SEG_RESTORE.farKeep + (1 - SEG_RESTORE.farKeep) * close);
+}
+
+/**
  * AI subject restore (SEG_RESTORE; mirrors grade-shader segRestore) on the finished Oklab colour: `s` = the AI tone
  * weight × the Pop multiplier (0..2), `warmth` = the Warmth slider (0..1), `lr` =
  * the source pixel's luminance over its neighbourhood's (the analysis guide), `lifted` = the lift Subject pop has
- * already applied (SUBJECT_POP.lift × P × the clip's direction; negative = deepened).
+ * already applied (SUBJECT_POP.lift × P × the clip's direction; negative = deepened), `ck` = the colour share
+ * (segColourK). The colour stays on the water's side of neutral: a share of the cast goes, never all of it.
  */
-export function segRestore(L: number, a: number, b: number, s: number, warmth: number, lr: number, lifted = 0): [number, number, number] {
+export function segRestore(L: number, a: number, b: number, s: number, warmth: number, lr: number, lifted = 0, ck = 1): [number, number, number] {
   if (s <= 0) return [L, a, b];
   const R = SEG_RESTORE, wx = Math.cos(R.hue), wy = Math.sin(R.hue);
-  // De-blue: a cool pixel loses chroma (hue kept); warm, green and magenta pixels keep theirs.
+  // De-blue: a cool pixel loses a share of its chroma (hue kept); warm, green and magenta pixels keep theirs.
   const C = Math.hypot(a, b);
   const cool = C > 1e-5 ? smoothstep(0, 0.5, -(a * wx + b * wy) / C) : 0;
-  const k = 1 - Math.min(R.castMax, R.cast * s) * cool;
+  const k = 1 - Math.min(R.castMax, R.cast * s) * cool * ck;
   a *= k; b *= k;
-  // Warm-up: chroma along the warm hue, never past warmMax along it; lit parts only, highlights stay white.
+  // Warm-up: a little chroma along the warm hue, never more than warmShare of what is left on the cool side of it
+  // (the colour never reaches neutral); lit parts only, highlights stay white.
   const lit = smoothstep(R.litLo, R.litHi, L) * (1 - smoothstep(R.hiLo, R.hiHi, L));
-  const add = clamp(R.warmMax * lit - (a * wx + b * wy), 0, R.warm * s * Math.min(1, 2 * warmth) * lit);
+  const add = Math.min(R.warm * s * Math.min(1, 2 * warmth) * lit * ck, R.warmShare * Math.max(0, -(a * wx + b * wy)));
   a += wx * add; b += wy * add;
   // Local contrast against the neighbourhood, then the midtone lift: up to lift × S in all, whatever the pop's own
   // lift did (its dark fade, or its deepening of a subject darker than the water, is made up for).

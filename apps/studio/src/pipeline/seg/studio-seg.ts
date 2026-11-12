@@ -13,10 +13,13 @@ import { bbox, promptFromMask, resize, rleDecode, smoothstep } from "./mask.ts";
 import { confWeight, mapPrompt, maskSize, SEG, type SegObject } from "./track.ts";
 import { spanCovers, type TrimRange } from "../trim.ts";
 import { SegTurns } from "./turns.ts";
+import { buildId } from "../export-key.ts";
 import type { SessionFrameOut } from "./session.ts";
 
 const PREF_KEY = "deepfix.subjectPop.ai";
-export type SegPhase = "off" | "download" | "starting" | "ready" | "tracking" | "unavailable";
+/** looking: the model is loaded and the clip's session is opening or finding its first subjects (the seed frame's
+ * analysis, the model's own search: half a minute on WASM), before the pass's first step. */
+export type SegPhase = "off" | "download" | "starting" | "ready" | "looking" | "tracking" | "unavailable";
 /** weak: a phone the model is a poor fit for (device.ts); AI is off there with a line saying why. crashed: the last
  * session died while the model worked (crumbs.ts aiCrashedLast), so AI was turned off for this one (until turned on). */
 export type SegStatus = { on: boolean; phase: SegPhase; progress: number | null; note: string | null; weak?: boolean; crashed?: boolean };
@@ -39,13 +42,29 @@ function writePref(on: boolean): void {
   } catch { /* private mode: this session only */ }
 }
 
-/** Per device: the page died with the model on WebGPU, so the model runs on WASM here (device.ts segRuntime). */
+/**
+ * Per device: the page died with the model on WebGPU, so the model runs on WASM here (device.ts segRuntime). The
+ * value is the build it happened on (export-key.ts buildId): the flag holds for that build only, so a user who
+ * crashed on WebGPU gets the GPU back with the next build (a fix; a build that still crashes there sets it again,
+ * once). It used to be "1" for good: after the tap crash fix those users stayed on WASM (minutes a pass) for ever.
+ */
 const FORCE_WASM_KEY = "deepfix.subjectPop.segForceWasm";
 let forceWasmNow = false;
 
+/** The stored flag (FORCE_WASM_KEY) holds on the running build: it was set on this very build. Another build's, and
+ * the "1" of the builds before the flag carried one, has expired. Pure. */
+export function forceWasmHolds(stored: string | null, build: string): boolean {
+  return !!stored && stored === build;
+}
+
 function readForceWasm(): boolean {
   try {
-    return forceWasmNow || localStorage.getItem(FORCE_WASM_KEY) === "1";
+    if (forceWasmNow) return true;
+    const stored = localStorage.getItem(FORCE_WASM_KEY);
+    if (forceWasmHolds(stored, buildId())) return true;
+    // Another build's flag goes, so a later look never takes it for this build's.
+    if (stored !== null) localStorage.removeItem(FORCE_WASM_KEY);
+    return false;
   } catch {
     return forceWasmNow;
   }
@@ -54,7 +73,7 @@ function readForceWasm(): boolean {
 function writeForceWasm(on: boolean): void {
   forceWasmNow = on;
   try {
-    if (on) localStorage.setItem(FORCE_WASM_KEY, "1");
+    if (on) localStorage.setItem(FORCE_WASM_KEY, buildId());
     else localStorage.removeItem(FORCE_WASM_KEY);
   } catch { /* private mode: this session only */ }
 }
@@ -77,6 +96,7 @@ export function segStatusText(s: SegStatus): string | null {
   switch (s.phase) {
     case "download": return `Downloading the model…${pc}`;
     case "starting": return "Starting the model…";
+    case "looking": return "Looking for subjects…";
     case "tracking": return `Finding subjects${pc}`;
     case "unavailable": return s.note ?? "Not available here; using standard detection";
     default: return "On: tap a subject to follow it with AI";
@@ -180,6 +200,12 @@ export function outlineSelection(o: SegOverlay | null, engine: SubjectSelection 
  */
 export type SegFrameState = "mask" | "weak" | "none" | null;
 
+/**
+ * The playhead's look at the paused frame (session.ts focus), for the chip: "looking" while the session is on it
+ * (its search, its first steps) and the frame has no mask yet, "none" when it found nothing there, null otherwise.
+ */
+export type SegPeekState = "looking" | "none" | null;
+
 /** The status chip on the preview (subjectChip): `tone` styles it, `line` is what is applied now, `sub` the small second line. */
 export type SubjectChip = { tone: "ai" | "busy" | "basic"; line: string; sub: string | null };
 
@@ -190,18 +216,30 @@ export type SubjectChip = { tone: "ai" | "busy" | "basic"; line: string; sub: st
  *                                     when it has a mask it does not trust enough to pop);
  *   "Finding subjects 73%"            the pass is running and has not reached this frame (second line: time left),
  *                                     the picture shows the basic detection meanwhile;
- *   "Basic detection, AI not ready"   the fallback, with the reason below it (model loading, AI off, unavailable).
+ *   "Looking at this frame…"          paused ahead of the pass: the AI is on this very frame now (`peek`, the
+ *                                     playhead's look: session.ts focus); when that found nothing, the pass's line
+ *                                     again with "Nothing found here yet" under it;
+ *   "Looking for subjects…"           the model is loaded and is finding the clip's first subjects (no step of the
+ *                                     pass yet: the seed frame, the model's own search). It read "AI not ready"
+ *                                     for the ~40 s that takes on WASM;
+ *   "Basic detection, AI not ready"   the fallback while the model loads or the AI is off / unavailable, with the
+ *                                     reason below it; with the model loaded and idle and nothing for this frame
+ *                                     (outside the range it tracked), "Basic detection" / "No AI mask for this frame".
  * `eta` is the pass's time left in short form (eta.ts Eta.short), or null. Each line is short enough for one row at
  * 390 px (the chip never wraps).
  */
-export function subjectChip(frame: SegFrameState, s: SegStatus, eta: string | null): SubjectChip {
+export function subjectChip(frame: SegFrameState, s: SegStatus, eta: string | null, peek: SegPeekState = null): SubjectChip {
   const pc = s.progress !== null ? ` ${Math.round(s.progress * 100)}%` : "";
   const tracking = s.on && s.phase === "tracking";
   if (s.on && frame === "mask") return { tone: "ai", line: "AI subject ✓", sub: tracking ? `Rest of clip${pc || "…"}` : null };
   if (s.on && frame === "none") return { tone: "ai", line: "AI: no subject here", sub: tracking ? `Rest of clip${pc || "…"}` : null };
+  // The playhead's look is on this frame: say so (the pass's percentage alone read as "nothing is happening here").
+  if (tracking && peek === "looking") return { tone: "busy", line: "Looking at this frame…", sub: `Rest of clip${pc || "…"}` };
   // A mask still easing in while the pass runs is the search, not an answer.
-  if (tracking) return { tone: "busy", line: `Finding subjects${pc || "…"}`, sub: eta };
+  if (tracking) return { tone: "busy", line: `Finding subjects${pc || "…"}`, sub: peek === "none" ? "Nothing found here yet" : eta };
+  if (s.on && s.phase === "looking") return { tone: "busy", line: "Looking for subjects…", sub: null };
   if (s.on && frame === "weak") return { tone: "basic", line: "AI unsure, not applied", sub: null };
+  if (s.on && s.phase === "ready") return { tone: "basic", line: "Basic detection", sub: "No AI mask for this frame" };
   const why = !s.on ? (s.crashed ? "AI is off (it crashed here)" : "AI detection is off")
     : s.phase === "download" ? `Loading AI model${pc || "…"}`
     : s.phase === "starting" ? "Starting AI model…"
@@ -709,6 +747,11 @@ export class SubjectSeg {
     if (e.ev === "error") { this.fail(e.msg, e.heapMB); return; }
     const live = this.live;
     if (!live) return;
+    if (e.ev === "peek") {
+      // The look at the paused frame was taken up, has subjects to follow, or found none (the chip says which).
+      if (this.peek && Math.abs(this.peek.k0 - e.k0) < 1e-6) { this.peek.state = e.state === "none" ? "none" : "looking"; this.onPeek?.(); }
+      return;
+    }
     if (e.ev === "frames") {
       live.put(e.items);
       this.cache = null;
@@ -721,7 +764,9 @@ export class SubjectSeg {
       if (!e.taps) this.tapDone();
       const tens = e.total ? Math.floor((10 * e.done) / e.total) : 0;
       if (tens !== this.crumbTens) { this.crumbTens = tens; crumb(`ai: pass ${tens * 10}% (${e.done}/${e.total}) · heap ${e.heapMB ?? "?"} MB`); }
-      this.set({ phase: "tracking", progress: e.total ? e.done / e.total : null });
+      // (Before the clip's first seeds there is no pass yet: the session's word after the model's own search is
+      // not one. The model is still looking.)
+      if (this.autos !== null || (e.taps ?? 0) > 0) this.set({ phase: "tracking", progress: e.total ? e.done / e.total : null });
     } else if (e.ev === "seeds") {
       segLog(`segment ${e.k} seeds asked for (${e.t.toFixed(2)} s${e.search === false ? ", engine only" : ""})`);
       this.onNeedSeeds?.(e.k, e.t, e.search !== false);
@@ -745,7 +790,10 @@ export class SubjectSeg {
         aiProfile(line);
         console.info(`[seg] ${line}`);
       }
-      this.set({ phase: "ready", progress: null });
+      // Idle before the clip's first seeds (the model's own search just ended; the seeds are on their way): still
+      // looking, not "ready" (the chip fell back to "AI not ready" there).
+      this.set({ phase: this.autos === null ? "looking" : "ready", progress: null });
+      this.peek = null;
       this.scheduleHibernate();
       const w = this.idleWaiters;
       this.idleWaiters = [];
@@ -793,10 +841,28 @@ export class SubjectSeg {
   async focus(t: number, objs: SegObject[]): Promise<void> {
     const live = this.live, model = this.model;
     if (!this.wantsFocus(t) || !live || !model) return;
-    const taken = await model.sessionFocus(t, objs, true).catch(() => false);
+    const taken = await model.sessionFocus(t, objs, true).catch(() => null);
     if (!taken) return;
     crumb(`ai: peek ${t.toFixed(2)}s`);
     this.lastActivity = performance.now();
+    this.peek = { t, k0: taken.k0, state: "looking" };
+    this.onPeek?.();
+  }
+
+  /** The look at the playhead under way (focus): where it was asked for, its keyframe, how it stands. */
+  private peek: { t: number; k0: number; state: "looking" | "none" } | null = null;
+  /** Called when the look's state changes (the studio refreshes the chip of a paused frame). */
+  onPeek: (() => void) | null = null;
+
+  /**
+   * The chip's word on the look at the paused frame at t (SegPeekState): only for the place it was asked at (within
+   * the peek's own reach), and "looking" only while that frame has no mask yet.
+   */
+  peekFor(t: number): SegPeekState {
+    const p = this.peek;
+    if (!p || !this.live || Math.abs(p.t - t) > 0.26) return null;
+    if (p.state === "none") return "none";
+    return this.live.stateAt(t) === "mask" || this.live.stateAt(t) === "none" ? null : "looking";
   }
 
   /** focus(t) would do something: a pass under way that has not filled the frame at t, and no tap in its way. */
@@ -840,6 +906,7 @@ export class SubjectSeg {
     this.log = [];
     this.undoOps = [];
     this.passDone = false;
+    this.peek = null;
     this.generation++;
     this.clipFailed = true;
     this.set({ phase: "unavailable", progress: null, note: `AI detection stopped on this clip; using standard detection (${errText(msg)})` });
@@ -953,6 +1020,7 @@ export class SubjectSeg {
       this.seededSegs = new Set();
       this.busy = false;
       this.passDone = false;
+      this.peek = null;
       // A hibernated session's worker is gone: the new session starts a fresh one (ensureModel).
       this.hibernated = false;
       this.crumbTens = -1;
@@ -973,6 +1041,8 @@ export class SubjectSeg {
       const model = await this.ensureModel();
       if (!model || this.file !== file || this.span !== span) return null;
       try {
+        // The model is loaded: from here to the pass's first step it is finding the clip's first subjects.
+        if (this.status.on && this.status.phase === "ready") this.set({ phase: "looking", progress: null });
         crumb("ai: session open");
         aiWorking(true);
         const info = await model.sessionOpen(file, span.start, span.end, segFps(), autoCap(), isWeakDevice());
@@ -1135,9 +1205,12 @@ export class SubjectSeg {
     this.log = [];
     this.hibernated = false;
     this.passDone = false;
+    this.peek = null;
     this.scope = null;
     this.generation++;
     clearTimeout(this.hibTimer);
+    // (A clip that closes while its first subjects were looked for: the next one says so itself.)
+    if (this.status.phase === "looking") this.set({ phase: this.status.on ? (this.model ? "ready" : "download") : "off", progress: null });
     // The session closes with the clip (a model still loading keeps its mark until it is loaded).
     if (!this.loading) aiWorking(false);
     if (this.clipFailed) {

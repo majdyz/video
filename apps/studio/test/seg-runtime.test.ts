@@ -125,6 +125,26 @@ console.log("device: Safari version from the user agent's Version token: ok");
   assert.deepEqual(crashOutcome(true, "webgpu", true), { on: false, crashed: true, forceWasm: true });
   assert.deepEqual(crashOutcome(true, null, true), { on: true, crashed: false, forceWasm: true });
   assert.deepEqual(crashOutcome(false, "wasm", false), { on: false, crashed: false, forceWasm: false });
+
+  // "WASM from now on" holds for the build it was set on only: the next build (a fix) gets the GPU back.
+  const { forceWasmHolds, SubjectSeg } = await import("../src/pipeline/seg/studio-seg.ts");
+  const KEY = "deepfix.subjectPop.segForceWasm";
+  assert.equal(forceWasmHolds(null, "/assets/index-b.js"), false);
+  assert.equal(forceWasmHolds("/assets/index-b.js", "/assets/index-b.js"), true, "set on this build: holds");
+  assert.equal(forceWasmHolds("/assets/index-a.js", "/assets/index-b.js"), false, "set on another build: expired");
+  assert.equal(forceWasmHolds("1", "/assets/index-b.js"), false, "the flag of the builds before it carried a build: expired");
+  assert.equal(forceWasmHolds("", "dev"), false);
+  // In the app: a stale flag is dropped at start-up (no crash since), and a crash on WebGPU stores this build.
+  startCrumbs("test");
+  store.set(KEY, "1");
+  new SubjectSeg(() => undefined);
+  assert.equal(store.has(KEY), false, "an older build's flag is gone: the model is back on WebGPU");
+  store.set(KEY, "/assets/index-old.js");
+  aiWorking(true, "webgpu");
+  startCrumbs("test");
+  new SubjectSeg(() => undefined);
+  assert.equal(store.get(KEY), "dev", "a crash on WebGPU on this build: WASM for this build (node: build 'dev')");
+  aiWorking(false);
   console.warn = warn;
   console.log("crumbs: the AI flag keeps the provider; a crash on WebGPU → WASM, on WASM → off: ok");
 }

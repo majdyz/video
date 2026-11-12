@@ -369,13 +369,26 @@ export function enabledTools(t: ToolsState): ToolId[] {
   return TOOL_ORDER.filter((id) => t[id].enabled);
 }
 
-/** Order the processing runs in (matches the render graph): geometry first, colour last. */
-export function processingChain(t: ToolsState, colourSegments = 1): string {
+/**
+ * Order the processing runs in (matches the render graph): geometry first, colour last. `ai`: AI subject detection
+ * is on for this clip (the studio's toggle, the model available): with Subject pop on, the export waits for the AI's
+ * masks and grades with them, so the chain says so ("Colour + AI subjects").
+ */
+export function processingChain(t: ToolsState, colourSegments = 1, ai = false): string {
   const parts: string[] = [];
   if (t.dewarp.enabled) parts.push("Dewarp");
   if (t.stabilise.enabled) parts.push("Stabilise");
-  if (t.colour.enabled) parts.push(colourSegments > 1 ? `Colour (${colourSegments} segments)` : "Colour");
+  if (t.colour.enabled) parts.push(`${colourSegments > 1 ? `Colour (${colourSegments} segments)` : "Colour"}${ai && t.colour.subjectPop ? " + AI subjects" : ""}`);
   return parts.length ? parts.join(" → ") : "Original";
+}
+
+/**
+ * Developer statistics in the UI (the export sheet's per-stage timing line: "render 94% · decode 46% · encode 11% ·
+ * …") show with `?debug=1` only. Any `debug` in the address used to do (`?debug`, `?debug=0`, `?debug=true`), so a
+ * shared link with one put the numbers in front of a user.
+ */
+export function debugStats(search: string): boolean {
+  return new URLSearchParams(search).get("debug") === "1";
 }
 
 /** Output file suffix for the enabled tools. */

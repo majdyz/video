@@ -25,7 +25,7 @@ import { touchFile, validateUploadedFile } from "@dive-tools/shared/file-validat
 import type { Rotation } from "../../../aqua-fix/src/engine/backend.ts";
 import { pickAnimal, type SubjectOverride, type SubjectPathPoint, type SubjectSelection } from "../../../aqua-fix/src/engine/animals.ts";
 import { toggleOverride } from "./subjects.ts";
-import { outlineSelection, seedObjects, segPopsAt, SubjectSeg, type SegFrameState, type SegStatus } from "./seg/studio-seg.ts";
+import { outlineSelection, seedObjects, segPopsAt, SubjectSeg, type SegFrameState, type SegPeekState, type SegStatus } from "./seg/studio-seg.ts";
 import type { SegOverlay } from "../../../aqua-fix/src/engine/seg-overlay.ts";
 import type { WarpUniforms } from "../../../dewarp/src/fisheye.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
@@ -220,7 +220,7 @@ export type Snapshot = {
    * is there ("none"), or nothing, the engine's basic detection is what shows (null). With `seg` it makes the
    * status chip on the preview (studio-seg.ts subjectChip).
    */
-  subjectFrame: { ai: SegFrameState } | null;
+  subjectFrame: { ai: SegFrameState; peek?: SegPeekState } | null;
   /** Subject taps that can be undone (newest last). */
   subjectUndo: number;
 };
@@ -429,6 +429,24 @@ export class Studio {
     for (const l of this.frameListeners) l(bmp);
     bmp.close();
   }
+  /**
+   * An export's poster: the frame on screen, as graded, goes to the export frame listeners (the sheet's thumbnail,
+   * the stage's live view) before the first encoded frame does. Until the render starts nothing was sent, and the
+   * sheet's thumbnail stayed black through "Reading the water…", the AI pass ("Finding subjects…", minutes on a
+   * phone) and the motion analysis. Drawn again first: a canvas that has been presented has no picture to copy, and
+   * the bitmap is taken in this same task.
+   */
+  private emitPoster(): void {
+    const v = this.video;
+    if (!this.frameListeners.size || this.snap.kind !== "video" || !v || v.readyState < 2) return;
+    try {
+      this.draw(this.still ?? v, v.currentTime, false);
+      const canvas = this.tools.colour.enabled && this.engine ? this.engine.backend.canvas : this.geo?.canvas;
+      if (canvas) void this.emitFrame(canvas as HTMLCanvasElement).catch(() => undefined);
+    } catch {
+      // No poster: the placeholder stays until the first frame.
+    }
+  }
 
   // ------------------------------------------------------------ lifecycle
 
@@ -584,8 +602,10 @@ export class Studio {
     // The same condition as segOverlay: what the frame was drawn with.
     const on = t !== null && this.tools.colour.enabled && !!this.tools.colour.subjectPop && this.snap.kind === "video";
     const ai = on && !(this.exporting && this.segExportEngine) ? this.seg.frameState(t) : null;
+    // The look at the paused frame (playhead first): the chip says the AI is on this frame, or found nothing on it.
+    const peek = on && !this.exporting && this.paused() ? this.seg.peekFor(t) : null;
     const cur = this.snap.subjectFrame;
-    if ((cur !== null) !== on || (cur !== null && cur.ai !== ai)) this.set({ subjectFrame: on ? { ai } : null });
+    if ((cur !== null) !== on || (cur !== null && (cur.ai !== ai || (cur.peek ?? null) !== peek))) this.set({ subjectFrame: on ? { ai, peek } : null });
   }
 
   /**
@@ -845,6 +865,10 @@ export class Studio {
       if (!objs.length && search) objs = await this.seg.autoSeeds(t);
       if (stale()) return;
       await this.seg.seedSegment(k, t, objs);
+      // Paused: the frame on screen is analysed again (the engine's maps are the seed frame's now) and looked at
+      // ahead of the pass (focusSeg). A pause during the seeding had its look refused (no pass to be ahead of, or
+      // the seed frame in the engine) and nothing asked again: the paused frame waited for the pass to get there.
+      if (this.seg.hasSegment(k, t) && this.paused() && !this.exporting && this.snap.kind === "video") this.schedulePausedAnalysis();
       console.info(`[seg] seeded segment ${k} on the canonical frame ${t.toFixed(2)} s: ${objs.length} subject(s)`);
       console.info(`[seg] seed prompts ${k}: ${JSON.stringify(objs.map((o) => ({ p: o.prompt.points.map(([x, y]) => [+x.toFixed(3), +y.toFixed(3)]), l: o.prompt.labels, b: o.prompt.box ? [o.prompt.box.x0, o.prompt.box.y0, o.prompt.box.x1, o.prompt.box.y1].map((v) => +v.toFixed(3)) : null })))}`);
     });
@@ -1093,6 +1117,8 @@ export class Studio {
       if (now - last > 250) { last = now; this.repaint(); }
       else if (!trail) trail = window.setTimeout(() => { trail = 0; if (this.paused() && !this.exporting) { last = performance.now(); this.repaint(); } }, 250);
     };
+    // The look at the paused frame was taken up / found nothing: the chip says so.
+    s.onPeek = () => { if (this.paused() && !this.exporting) this.noteSubjectFrame(this.shownT); };
     // A tap has been followed through: the paused frame's analysis that was held back for it.
     s.onTapDone = () => { if (this.paused() && this.snap.kind === "video") this.schedulePausedAnalysis(); };
     // The pass is done and its worker shut down: the seed-frame <video> (a decoder of its own) goes too.
@@ -2553,6 +2579,8 @@ export class Studio {
     // A trim change still settling: its re-analysis starts now, and the export waits for it below.
     if (this.trimTimer) this.applyTrim();
     const ctrl = this.beginExport();
+    // The sheet's thumbnail from the start (the stages before the render send no frames).
+    this.emitPoster();
     const colourOn = this.tools.colour.enabled && !!e;
     const trim = this.trim;
     let failure: unknown = null;

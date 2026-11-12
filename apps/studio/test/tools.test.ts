@@ -13,6 +13,7 @@ import {
   enabledTools,
   exportSuffix,
   processingChain,
+  debugStats,
   profileAspectMismatch,
   profileDefaults,
   stabiliseParams,
@@ -147,8 +148,25 @@ assert.equal(profileAspectMismatch("generic-fisheye", 1440, 1080), false);
 const all = { colour: { ...DEFAULT_TOOLS.colour, enabled: true }, stabilise: { ...DEFAULT_TOOLS.stabilise, enabled: true }, dewarp: { ...DEFAULT_TOOLS.dewarp, enabled: true } };
 assert.equal(processingChain(all), "Dewarp → Stabilise → Colour");
 assert.equal(exportSuffix(all), "dewarped-stabilised-colour");
+// Subject pop with AI detection on: the export grades with the AI's masks, and the sheet says so.
+{
+  const pop = { ...all, colour: { ...all.colour, subjectPop: true } };
+  assert.equal(processingChain(pop, 1, true), "Dewarp → Stabilise → Colour + AI subjects");
+  assert.equal(processingChain(pop, 3, true), "Dewarp → Stabilise → Colour (3 segments) + AI subjects");
+  assert.equal(processingChain(pop, 1, false), "Dewarp → Stabilise → Colour", "AI off (or unavailable): the plain chain");
+  assert.equal(processingChain(all, 1, true), "Dewarp → Stabilise → Colour", "Subject pop off: the AI has nothing to do");
+  assert.equal(processingChain({ ...pop, colour: { ...pop.colour, enabled: false } }, 1, true), "Dewarp → Stabilise", "Colour off: no AI subjects either");
+}
 assert.deepEqual(enabledTools(DEFAULT_TOOLS), ["colour"]);
 assert.equal(processingChain({ ...all, colour: { ...all.colour, enabled: false }, stabilise: { ...all.stabilise, enabled: false }, dewarp: { ...all.dewarp, enabled: false } }), "Original");
+
+// Developer statistics (the export sheet's timing line) show with ?debug=1 only.
+assert.equal(debugStats("?debug=1"), true);
+assert.equal(debugStats("?v=3&debug=1"), true);
+assert.equal(debugStats(""), false);
+assert.equal(debugStats("?debug"), false);
+assert.equal(debugStats("?debug=0"), false);
+assert.equal(debugStats("?debug=true"), false);
 
 // Clip profile seam (aqua-fix/src/engine/profile.ts): sample times and cut segmentation.
 assert.deepEqual(profileTimes(0.2), []);

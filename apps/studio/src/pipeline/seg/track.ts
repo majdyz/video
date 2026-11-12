@@ -62,6 +62,9 @@ export const SEG = {
   backChunkS: 1,
   /** Playhead first (session.ts focus): the playhead's subjects are followed this far ahead of it (s)... */
   peekS: 1,
+  /** ...and this far behind it (s): the hand-over of the overlay's weight toward unfilled frames (studio-seg.ts
+   * frameWeight, 0.3 s) must lie behind the playhead's frame, not on it... */
+  peekBackS: 0.3,
   /** ...unless the pass is within this long (s) of getting there itself. */
   peekSkipS: 2,
   /** At a segment start, an earlier subject carries on unless the new seeds cover this share of it. */

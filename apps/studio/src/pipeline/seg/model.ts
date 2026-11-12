@@ -14,6 +14,8 @@ export type SessionEvent =
   | { ev: "idle"; profile: Record<string, number> }
   | { ev: "seeds"; k: number; t: number; search?: boolean }
   | { ev: "rejected"; id: number }
+  /** The playhead's look (session.ts focus) at keyframe k0: taken up, following subjects, or found none. */
+  | { ev: "peek"; k0: number; state: "looking" | "following" | "none" }
   /** The pass threw in the worker and stopped for good (session.ts fail). */
   | { ev: "error"; msg: string; heapMB?: number }
   | { ev: "trace"; msg: string };
@@ -184,8 +186,10 @@ export class WorkerSegModel implements SegModel {
   }
 
   /** Playhead first (session.ts focus): the subjects of the paused frame at t, followed ahead of the pass. */
-  async sessionFocus(t: number, objects: SegObject[], search: boolean): Promise<boolean> {
-    return !!(await this.call({ type: "session-focus", t, objects, search })).taken;
+  /** Null: not taken (the pass is there, or that keyframe was looked at); else the keyframe the look is made at. */
+  async sessionFocus(t: number, objects: SegObject[], search: boolean): Promise<{ k0: number } | null> {
+    const r = await this.call({ type: "session-focus", t, objects, search });
+    return r.taken ? { k0: Number(r.k0) } : null;
   }
 
   async sessionAdd(object: SegObject & { id: number }): Promise<number> {

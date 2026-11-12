@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Snapshot, Studio } from "../pipeline/studio.ts";
-import { processingChain, type ToolsState } from "../pipeline/tools.ts";
+import { debugStats, processingChain, type ToolsState } from "../pipeline/tools.ts";
 import { Sheet } from "./sheet";
 import { IconDownload, IconExport, IconShare, IconWarning } from "./icons";
 import { formatTime } from "./timeline";
@@ -29,8 +29,8 @@ export function friendlyExportError(message: string | null): { text: string; sug
   return { text: m ? `The export stopped: ${m}` : "The export stopped.", suggestSmaller: false };
 }
 
-/** `?debug=1`: the export sheet shows the per-stage timing line (export-profile.ts). */
-const DEBUG = typeof location !== "undefined" && new URLSearchParams(location.search).has("debug");
+/** `?debug=1`: the export sheet shows the per-stage timing line (export-profile.ts; tools.ts debugStats). */
+const DEBUG = typeof location !== "undefined" && debugStats(location.search);
 
 function fmtBytes(n: number): string {
   return n > 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(1)} MB`;
@@ -166,7 +166,7 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
         {exp.state === "idle" && (
           <>
             <dl className="export__facts">
-              <div><dt>Processing</dt><dd>{processingChain(chainTools, photo ? 1 : visibleSegments(snap.segments.cuts, snap.trim, duration).length)}</dd></div>
+              <div><dt>Processing</dt><dd>{processingChain(chainTools, photo ? 1 : visibleSegments(snap.segments.cuts, snap.trim, duration).length, !photo && snap.seg.on && snap.seg.phase !== "unavailable")}</dd></div>
               <div><dt>Output</dt><dd>{photo ? `${outSize} · JPEG` : `${outSize}${info?.fps ? ` · ${Math.round(info.fps)} fps` : ""} · MP4${info?.hasAudio ? " · original audio" : ""}`}</dd></div>
               {!photo && <div><dt>Length</dt><dd>{snap.trim ? `${selectionLabel(snap.trim, duration)} · ${formatTimecode(snap.trim.start)}–${formatTimecode(snap.trim.end)}` : formatTime(duration)}</dd></div>}
               {photo && snap.photoLimited && <div><dt>Note</dt><dd>Original is {snap.photoLimited.w}×{snap.photoLimited.h}; this browser renders at most {outSize}</dd></div>}

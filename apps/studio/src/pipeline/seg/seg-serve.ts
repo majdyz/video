@@ -97,6 +97,7 @@ async function openSession(model: EdgeTam, r: Extract<Req, { type: "session-open
     idle: (profile) => { if (mine()) emit({ ev: "idle", profile: { ...profile, heapMB: wasmHeapMB() } }); },
     needSeeds: (k, t, search) => { if (mine()) emit({ ev: "seeds", k, t, search }); },
     rejected: (id) => { if (mine()) emit({ ev: "rejected", id }); },
+    peek: (k0, state) => { if (mine()) emit({ ev: "peek", k0, state }); },
     // The pass threw (session.ts run): the main thread shows it and shuts this worker down.
     error: (msg) => { if (session === s) session = null; emit({ ev: "error", msg, heapMB: wasmHeapMB() }); },
     // Each breadcrumb carries the WASM heap (it only grows: the step that took it past the phone's limit shows).
@@ -162,7 +163,7 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
       session.seeds(r.t, r.objects);
       post({ ok: true });
     } else if (r.type === "session-focus") {
-      post({ ok: true, taken: session.focus(r.t, r.objects, r.search) });
+      post({ ok: true, taken: session.focus(r.t, r.objects, r.search), k0: session.peekKeyOf(r.t) });
     } else if (r.type === "session-add") {
       stages = 0;
       session.add(r.object);

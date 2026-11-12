@@ -22,7 +22,7 @@ import { FULL_RECT, type GpuBackend, type Rect, type Rotation, type SourceInput 
 import { linearToOklab, oklabToLinear } from "./color.ts";
 import { calmToneOf } from "./calm.ts";
 import { AnimalTracker, type AnimalMap, type SubjectOverride, type SubjectSelection } from "./animals.ts";
-import { clipPopDirection, composeSegStrength, popContrast, type SegOverlay } from "./seg-overlay.ts";
+import { clipPopDirection, composeSegStrength, engineSubjectMaps, popContrast, type SegOverlay } from "./seg-overlay.ts";
 import {
   CLAHE_BINS,
   CLAHE_TILES_X,
@@ -802,6 +802,7 @@ export class GradeEngine {
     this.target = this.current;
     this.fields = packet.fields;
     this.guide = packet.guide;
+    this.guideFast = null;
     this.clahe = packet.clahe;
     this.fieldsTarget = null;
     this.guideTarget = null;
@@ -822,8 +823,9 @@ export class GradeEngine {
       if (sbT < sb0) this.current = { ...this.current, seabedNeed: sb0 + (sbT - sb0) * (1 - Math.exp(-dt / SEABED_HOLD_S)) };
       // Subject pop: the water surface the subject test measures against follows the frame as fast as the subject
       // map does; a lagging surface makes the water beside a moving animal "depart" and tone as a grey patch.
+      // (Only while the engine's own masks tone the picture: engineSubjectMaps.)
       const ft = this.target.backdropFit;
-      if (this.settings.subjectPop && fit0 && ft && fit0.length === ft.length) {
+      if (engineSubjectMaps(!!this.settings.subjectPop, !!this.seg) && fit0 && ft && fit0.length === ft.length) {
         const af = 1 - Math.exp(-dt / TAU_CONF_OPEN_S);
         this.current = { ...this.current, backdropFit: fit0.map((x, i) => x + (ft[i] - x) * af) };
       }
@@ -849,7 +851,18 @@ export class GradeEngine {
     const f = ease(this.fields, this.fieldsTarget, am, aConf);
     // Subject pop: the guide that steers the subject map's joint-bilateral upsampling follows as fast as the map
     // itself, or a lagging guide steers the map onto the water where the animal (a fast tail) just was.
-    const g = ease(this.guide, this.guideTarget, this.settings.subjectPop ? aConf : am);
+    // With an AI overlay on the frame the engine's own subject map tones nothing, and the guide the grade reads
+    // follows at the plain rate: it also rebuilds every pixel's chroma, so its rate moved the whole picture a
+    // little (an AI export differed from the plain one by ~0.4% in green all over the frame, off the subject too).
+    // The AI's own water test still wants the guide of the frame on screen: it gets a copy that follows fast
+    // (guideFast; composeSegStrength in pushData).
+    const fastMaps = engineSubjectMaps(!!this.settings.subjectPop, !!this.seg);
+    if (this.settings.subjectPop && this.guide && this.guideTarget && this.guideTarget.data.length === this.guide.data.length) {
+      const cur = this.guideFast && this.guideFast.data.length === this.guide.data.length ? this.guideFast : { ...this.guide, data: new Float32Array(this.guide.data) };
+      lerpInto(cur.data, this.guideTarget.data, aConf);
+      this.guideFast = cur;
+    } else this.guideFast = null;
+    const g = ease(this.guide, this.guideTarget, fastMaps ? aConf : am);
     const c = ease(this.clahe, this.claheTarget, ac);
     if (f !== this.fields || g !== this.guide || c !== this.clahe) this.dirtyData = true;
     if (this.person && this.personTarget && this.personTarget.length === this.person.length) {
@@ -862,6 +875,9 @@ export class GradeEngine {
   }
   private lastEased = new WeakMap<Packed, Packed>();
   private guideMerged: Float32Array | null = null;
+  /** Subject pop: the guide eased at the subject map's fast rate, for the AI overlay's water test (smooth); null
+   * when the guide itself is the frame's (snapped, or no target). */
+  private guideFast: Packed | null = null;
 
   private pushData(): void {
     if (!this.fields || !this.guide || !this.clahe) return;
@@ -882,12 +898,14 @@ export class GradeEngine {
     }
     // Per-animal Subject pop strength (data texture 3); none without Subject pop.
     if (this.settings.subjectPop) {
-      this.backend.setData(3, this.seg ? composeSegStrength(this.seg, g) : this.animals.strength(this.lastTickSec));
+      // (The AI's water test reads the guide that follows the picture fast: smooth.)
+      const sg = this.guideFast ?? g;
+      this.backend.setData(3, this.seg ? composeSegStrength(this.seg, sg) : this.animals.strength(this.lastTickSec));
       // The overlay's own clip-wide measure decides the direction when it has one (SegOverlay.pop): a constant, the
       // same in the preview and the export. Only an overlay without it falls back to the mean over the frames
       // drawn since the last reset (which depends on what was played, scrubbed or trimmed before).
       if (this.seg && this.seg.pop === undefined) {
-        const c = popContrast(g, this.seg);
+        const c = popContrast(sg, this.seg);
         if (c !== null) { this.popC.sum += c; this.popC.n++; }
       }
       this.popDir = clipPopDirection(this.seg, this.popC.n ? this.popC.sum / this.popC.n : null);
@@ -914,7 +932,9 @@ export class GradeEngine {
       const at = (o: number) => fit[o] + fit[o + 1] * u + fit[o + 2] * v + fit[o + 3] * u * u + fit[o + 4] * u * v + fit[o + 5] * v * v;
       return oklabToLinear(at(0), at(6), at(12));
     };
-    const led = this.animals.lead(base.fields.data, base.guide.data, this.lastTickSec, water);
+    // Not under an AI overlay: the led map tones nothing there, and leading it changed the grade around the
+    // engine's animals (the plain grade does not lead: an AI export must match it off the AI's mask).
+    const led = engineSubjectMaps(!!this.settings.subjectPop, !!this.seg) ? this.animals.lead(base.fields.data, base.guide.data, this.lastTickSec, water) : null;
     this.fieldsTarget = led ? { ...base.fields, data: led.fields } : base.fields;
     this.guideTarget = led ? { ...base.guide, data: led.guide } : base.guide;
     // The strength map follows the animals every frame.
