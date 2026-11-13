@@ -235,6 +235,10 @@ const float SR_DETAIL = ${SEG_RESTORE.detail.toFixed(4)};
 const float SR_R_MIN = ${SEG_RESTORE.rMin.toFixed(4)};
 const float SR_R_MAX = ${SEG_RESTORE.rMax.toFixed(4)};
 const float SR_LIFT = ${SEG_RESTORE.lift.toFixed(4)};
+const float SR_X_WARM = ${SEG_RESTORE.boostWarm.toFixed(4)};
+const float SR_X_WARM_SHARE = ${SEG_RESTORE.boostWarmShare.toFixed(4)};
+const float SR_X_DETAIL = ${SEG_RESTORE.boostDetail.toFixed(4)};
+const float SR_X_LIFT = ${SEG_RESTORE.boostLift.toFixed(4)};
 const float ON_WARM_COS = ${Math.cos(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_SIN = ${Math.sin(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_LO = ${OBJECT_NEUTRAL.warmLo.toFixed(4)};
@@ -753,9 +757,10 @@ float segColourK(vec4 an) {
 }
 // AI subject restore (SEG_RESTORE in params.ts; mirrors apply.ts segRestore) on the finished Oklab colour: s = the AI
 // tone weight x the Pop multiplier (0..2), lr = the source pixel's luminance over its neighbourhood's, lifted = the
-// lift Subject pop has already applied, ck = the colour share (segColourK). Only with a real AI mask on the frame
+// lift Subject pop has already applied, ck = the colour share (segColourK), x = the boost of the slider's upper half
+// (the AI weight x (the Pop multiplier - 1): 0 up to Pop 50; SEG_RESTORE boost*). Only with a real AI mask on the frame
 // (s = 0 otherwise). The colour stays on the water's side of neutral.
-vec3 segRestore(vec3 lk, float s, float lr, float lifted, float ck) {
+vec3 segRestore(vec3 lk, float s, float lr, float lifted, float ck, float x) {
   if (s <= 0.0) return lk;
   vec2 wh = vec2(SR_COS, SR_SIN);
   vec2 ab = lk.yz;
@@ -766,10 +771,10 @@ vec3 segRestore(vec3 lk, float s, float lr, float lifted, float ck) {
   // Warm-up: a little chroma along the warm hue, never more than SR_WARM_SHARE of what is left on the cool side of
   // it; lit parts only, highlights stay white.
   float lit = smoothstepf(SR_LIT_LO, SR_LIT_HI, lk.x) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
-  ab += wh * min(SR_WARM * s * min(1.0, 2.0 * p[24].z) * lit * ck, SR_WARM_SHARE * max(0.0, -dot(ab, wh)));
+  ab += wh * min((SR_WARM * s + SR_X_WARM * x) * min(1.0, 2.0 * p[24].z) * lit * ck, (SR_WARM_SHARE + SR_X_WARM_SHARE * x) * max(0.0, -dot(ab, wh)));
   // Local contrast against the neighbourhood, then the midtone lift (up to SR_LIFT x s in all).
-  float L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * s);
-  L += max(0.0, SR_LIFT * s - lifted) * 4.0 * L * max(0.0, 1.0 - L);
+  float L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * s + SR_X_DETAIL * x);
+  L += max(0.0, SR_LIFT * s + SR_X_LIFT * x - lifted) * 4.0 * L * max(0.0, 1.0 - L);
   return vec3(L, ab);
 }
 float warmClamp(vec2 ab, vec3 lin, float srcFar, float person, float strength) {
@@ -990,7 +995,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
   // AI subject restore: after every look, so none of them amplifies it.
-  if (segS > 0.0) lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an));
+  if (segS > 0.0) lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0)));
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
   if (p[24].w > 1.0) lk.x = pow(max(lk.x, 0.0), p[24].w);
   // The warm chroma may exceed the source-relative cap (a cyan shark has little to start from).
@@ -1450,7 +1455,7 @@ fn segColourK(an: vec4<f32>) -> f32 {
   return smoothstepf(0.0, SR_EDGE, d) * mix(SR_FAR_KEEP, 1.0, clamp(g_segClose, 0.0, 1.0));
 }
 // AI subject restore (SEG_RESTORE; see the GLSL segRestore).
-fn segRestore(lk: vec3<f32>, s: f32, lr: f32, lifted: f32, ck: f32) -> vec3<f32> {
+fn segRestore(lk: vec3<f32>, s: f32, lr: f32, lifted: f32, ck: f32, x: f32) -> vec3<f32> {
   if (s <= 0.0) { return lk; }
   let wh = vec2<f32>(SR_COS, SR_SIN);
   var ab = lk.yz;
@@ -1459,9 +1464,9 @@ fn segRestore(lk: vec3<f32>, s: f32, lr: f32, lifted: f32, ck: f32) -> vec3<f32>
   if (C > 1e-5) { cool = smoothstepf(0.0, 0.5, -dot(ab, wh) / C); }
   ab = ab * (1.0 - min(SR_CAST_MAX, SR_CAST * s) * cool * ck);
   let lit = smoothstepf(SR_LIT_LO, SR_LIT_HI, lk.x) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
-  ab = ab + wh * min(SR_WARM * s * min(1.0, 2.0 * params.p[24].z) * lit * ck, SR_WARM_SHARE * max(0.0, -dot(ab, wh)));
-  var L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * s);
-  L = L + max(0.0, SR_LIFT * s - lifted) * 4.0 * L * max(0.0, 1.0 - L);
+  ab = ab + wh * min((SR_WARM * s + SR_X_WARM * x) * min(1.0, 2.0 * params.p[24].z) * lit * ck, (SR_WARM_SHARE + SR_X_WARM_SHARE * x) * max(0.0, -dot(ab, wh)));
+  var L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * s + SR_X_DETAIL * x);
+  L = L + max(0.0, SR_LIFT * s + SR_X_LIFT * x - lifted) * 4.0 * L * max(0.0, 1.0 - L);
   return vec3<f32>(L, ab);
 }
 fn warmClamp(ab: vec2<f32>, lin: vec3<f32>, srcFar: f32, person: f32, strength: f32) -> f32 {
@@ -1638,7 +1643,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2<f32>(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
   // AI subject restore: after every look, so none of them amplifies it.
-  if (segS > 0.0) { lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an)); }
+  if (segS > 0.0) { lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0))); }
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
   if (params.p[24].w > 1.0) { lk = vec3(pow(max(lk.x, 0.0), params.p[24].w), lk.yz); }
   let o1 = oklabToLinear(capChroma(lk, max(max(cSrc, wk * WP_CMIN * 1.5), bl.w)));

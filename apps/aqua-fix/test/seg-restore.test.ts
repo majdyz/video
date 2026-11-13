@@ -83,6 +83,20 @@ const along = (a: number, b: number) => a * wx + b * wy;
   assert.equal(segRestore(0.4, 0, 0, 1, 0, 1, R.lift)[0], 0.4, "already lifted: no more");
   assert.ok(segRestore(0.4, 0, 0, 1, 0, 1, -0.05)[0] > segRestore(0.4, 0, 0, 1, 0, 1, 0)[0], "a deepened subject is brought back up");
   for (const L of [0, 0.2, 0.5, 0.8, 1]) { const l = segRestore(L, 0, 0, 2, 1, R.rMax, -0.2)[0]; assert.ok(l >= L - 1e-9 && l <= 1.25, `L ${L} -> ${l.toFixed(3)}`); }
+  // The upper half of the Pop slider (x = the AI weight × (multiplier − 1): 0 up to Pop 50, 1 at Pop 100) bites:
+  // mostly more local contrast (the base terms alone stop growing: castMax is reached at Pop 75), a little more of
+  // the cast off and a little more lift. Still the animal in the scene's light: on the water's side of neutral, at
+  // least a quarter of its cast kept, no big lift.
+  assert.deepEqual(segRestore(0.4, -0.05, -0.04, 1, 0.5, 1.2, 0, 1, 0), segRestore(0.4, -0.05, -0.04, 1, 0.5, 1.2), "Pop 50 and below: the tuned look, untouched");
+  const x0 = segRestore(0.4, -0.05, -0.04, 2, 0.5, 1.3, 0, 1, 0), x1 = segRestore(0.4, -0.05, -0.04, 2, 0.5, 1.3, 0, 1, 1), bd = segRestore(0.4, -0.05, -0.04, 2, 0.5, 0.8, 0, 1, 1), bd0 = segRestore(0.4, -0.05, -0.04, 2, 0.5, 0.8, 0, 1, 0);
+  assert.ok(x1[0] > x0[0] + 0.04 && bd[0] < bd0[0] - 0.03, `Pop 100: spots clearly lighter (${x0[0].toFixed(3)} -> ${x1[0].toFixed(3)}), the back around them darker (${bd0[0].toFixed(3)} -> ${bd[0].toFixed(3)})`);
+  for (const warmth of [0, 0.5, 1]) {
+    const [L, a, b] = segRestore(0.4, -0.05, -0.04, 2, warmth, 1, 0, 1, 1);
+    assert.ok(along(a, b) < -0.004, `boosted: never neutral, never warm (Warmth ${warmth}: ${along(a, b).toFixed(4)})`);
+    assert.ok(Math.hypot(a, b) >= 0.25 * C0, `boosted: a quarter of the cast stays (Warmth ${warmth}: ${((Math.hypot(a, b) / C0) * 100).toFixed(0)}%)`);
+    assert.ok(L > 0.4 && L < 0.4 + 0.07, `boosted: still a small lift on a flat patch (${L.toFixed(3)})`);
+  }
+  for (const L of [0, 0.2, 0.5, 0.8, 1]) { const l = segRestore(L, 0, 0, 2, 1, R.rMax, 0, 1, 1)[0]; assert.ok(l >= L - 1e-9 && l <= 1.6 * L + 0.05, `boosted L ${L} -> ${l.toFixed(3)}`); }
 }
 
 // 2. The AI tone weight: nothing at Pop 0, full from a low Pop; nothing on or outside the contour.
@@ -239,10 +253,12 @@ const along = (a: number, b: number) => a * wx + b * wy;
 
 // 4. WebGL2 and WebGPU carry the same stage and constants as this reference.
 for (const [name, code] of [["GLSL", GRADE_GLSL], ["WGSL", GRADE_WGSL]] as const) {
-  for (const fn of ["segRestore(", "segColourK(an)", "guideLum(", "SR_POP_GATE * ", "SR_WARM_SHARE * max(0.0, -dot(ab, wh))", "* cool * ck"]) assert.ok(code.includes(fn), `${name} has ${fn}`);
+  for (const fn of ["segRestore(", "segColourK(an)", "guideLum(", "SR_POP_GATE * ", "SR_WARM_SHARE + SR_X_WARM_SHARE * x) * max(0.0, -dot(ab, wh))", "* cool * ck"]) assert.ok(code.includes(fn), `${name} has ${fn}`);
   assert.ok(!code.includes("SR_WARM_MAX"), `${name}: no warm chroma floor any more`);
   const c = (k: string, v: number, d = 4) => assert.ok(new RegExp(`${k}(: f32)? = ${v.toFixed(d).replace(".", "\\.")};`).test(code), `${name} ${k} = ${v.toFixed(d)}`);
   c("SR_CAST", R.cast); c("SR_CAST_MAX", R.castMax); c("SR_WARM", R.warm); c("SR_WARM_SHARE", R.warmShare); c("SR_FAR_KEEP", R.farKeep); c("SR_DETAIL", R.detail); c("SR_LIFT", R.lift);
+  c("SR_X_WARM", R.boostWarm); c("SR_X_WARM_SHARE", R.boostWarmShare); c("SR_X_DETAIL", R.boostDetail); c("SR_X_LIFT", R.boostLift);
+  assert.ok(code.includes("segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0))"), `${name}: the boost is the AI weight × (Pop multiplier − 1), 0 up to Pop 50`);
   c("SR_DARK_LO", R.darkLo); c("SR_DARK_HI", R.darkHi); c("SR_POP_GATE", R.popGate); c("SR_COS", wx, 6); c("SR_SIN", wy, 6);
 }
 
