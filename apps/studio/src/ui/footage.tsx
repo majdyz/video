@@ -6,20 +6,20 @@ const ORDER: FootageProfile[] = ["standard", "dlogm", "gplog", "hlg", "pq", "app
 export const FOOTAGE_SHORT: Record<FootageProfile, string> = {
   standard: "Standard",
   dlogm: "D-Log M",
-  hlg: "HDR HLG",
-  pq: "HDR PQ",
+  hlg: "HDR (iPhone, GoPro)",
+  pq: "HDR10",
   applelog: "Apple Log",
   gplog: "GP-Log",
-  wide: "BT.2020",
+  wide: "Wide colour",
 };
 const HINT: Record<FootageProfile, string> = {
   standard: "Rec.709 as shot (Normal, Natural, GoPro Flat): no conversion",
   dlogm: "DJI Osmo / drone log, 10-bit",
-  hlg: "HDR from iPhone, GoPro HDR, Osmo HLG",
-  pq: "HDR10 / Dolby Vision base layer",
+  hlg: "HLG: HDR from iPhone, GoPro HDR, Osmo HLG",
+  pq: "PQ: HDR10 / Dolby Vision base layer",
   applelog: "iPhone 15 Pro and later, log mode",
   gplog: "GoPro HERO11–13 Log (GP-Log), 10-bit",
-  wide: "Wide-gamut SDR",
+  wide: "Wide-gamut SDR (BT.2020)",
 };
 
 /**

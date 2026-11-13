@@ -58,6 +58,7 @@ if (!BASE) throw new Error(`--style: ${STYLE}`);
 /** Real neutrals: a point (upright uv at --at seconds) that should be white or grey. */
 const REAL: { id: string; u: number; v: number; what: string }[] = [
   { id: "sand_eagleray", u: 0.15, v: 0.75, what: "white sand under a blue cast" },
+  { id: "sand_eagleray", u: 0.3, v: 0.45, what: "bluish sand further off (the owner's tap, 13 Nov: refused before the pull-down fallback)" },
   { id: "divers_sharks_sand", u: 0.1, v: 0.85, what: "white sand" },
   { id: "divers_sharks_sand", u: 0.42, v: 0.1, what: "bubbles" },
   { id: "blue_greyreef_shark", u: 0.3, v: 0.9, what: "sand, deep" },

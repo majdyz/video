@@ -18,6 +18,8 @@ import {
   NOISE_CHOICES,
   NOISE_HINT,
   waterHueLabel,
+  SHOT_IN_HINT,
+  SHOT_IN_LABEL,
   type NeutralPick,
   type ToolId,
   type ToolsState,
@@ -109,8 +111,6 @@ export function ToolPanel({ tool, tools, setTools, stab, info, colourProfiled, p
       <div className="panel__body" aria-disabled={!enabled}>
         {tool === "colour" && (
           <>
-            <Chips label="Scene" items={COLOUR_PRESETS} value={tools.colour.preset} disabled={disabled}
-              onChange={(id) => setTools((t) => ({ ...t, colour: { ...t.colour, preset: id, enabled: true } }))} />
             <div className="stylepick">
               <Segmented label="Style" items={COLOUR_STYLES} value={styleOf(tools.colour)} disabled={disabled}
                 onChange={(id) => { saveStyle(id); setTools((t) => ({ ...t, colour: { ...t.colour, ...styleFlags(id), enabled: true } })); }} />
@@ -256,10 +256,10 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, neu
             </div>
           </div>
         )}
-        <Slider label="Water colour" value={c.waterHue ?? 0} min={-100} max={100} defaultValue={0} format={waterHueLabel} onChange={(v) => up({ waterHue: Math.abs(v) < 4 ? 0 : v })} />
+        <Chips label={SHOT_IN_LABEL} items={COLOUR_PRESETS} value={c.preset} onChange={(id) => up({ preset: id })} />
+        <p className="adv__hint">{SHOT_IN_HINT}.</p>
+        <Slider label="Water tint" value={c.waterHue ?? 0} min={-100} max={100} defaultValue={0} format={waterHueLabel} onChange={(v) => up({ waterHue: Math.abs(v) < 4 ? 0 : v })} />
         <p className="adv__hint">Turns the water toward teal or a deeper blue. Fish, skin and sand keep their colour.</p>
-        <Slider label="Deep-blue look" value={c.look * 100} min={0} max={100} defaultValue={0} onChange={(v) => up({ look: v / 100 })} />
-        <p className="adv__hint">A creative grade on top of the correction: darker, water tinted toward deep blue, subjects keep their colour.</p>
         <Slider label="Saturation" value={c.saturation * 100} min={0} max={200} defaultValue={100} format={(v) => `${Math.round(v)}%`} onChange={(v) => up({ saturation: v / 100 })} />
         <Slider label="Clarity" value={c.clarity * 100} min={0} max={100} defaultValue={DEFAULT_COLOUR.clarity * 100} onChange={(v) => up({ clarity: v / 100 })} />
         <Slider label="Haze removal" value={c.veil * 100} min={0} max={120} defaultValue={DEFAULT_COLOUR.veil * 100} onChange={(v) => up({ veil: v / 100 })} />

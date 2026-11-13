@@ -12,7 +12,7 @@ import { lastAiProfile, lastCrash, sessionCrumbs } from "./pipeline/crumbs.ts";
 import { deviceFacts, isWeakDevice } from "./pipeline/device.ts";
 import type { FeedbackContext } from "./pipeline/feedback.ts";
 import { SubjectOutlines } from "./ui/subjects";
-import { NeutralMark } from "./ui/neutral";
+import { NeutralMark, TapRing } from "./ui/neutral";
 import { ExportSheet } from "./ui/export-sheet";
 import { analyticsOptedOut, setAnalyticsOptOut } from "./pipeline/analytics.ts";
 import { BatchSheet, BatchStrip, makeThumb, type BatchItem } from "./ui/batch";
@@ -98,6 +98,25 @@ export default function App() {
   const [tapPulse, setTapPulse] = useState<{ u: number; v: number; t: number } | null>(null);
   /** Tap-to-neutral: the picture is waiting for a tap on something white or grey (Colour → White point). */
   const [picking, setPicking] = useState(false);
+  // A tap on the picture (White point, Subjects) answers at once (owner, 13 Nov: both felt dead): a ring where the
+  // finger lands and "Reading…" / "Finding…" in the banner, before the tap is confirmed (the double-tap wait) and
+  // its work (the solve, the AI) is done.
+  const [tapRing, setTapRing] = useState<{ u: number; v: number; t: number } | null>(null);
+  const [tapBusy, setTapBusy] = useState(false);
+  const tapWork = useRef(0);
+  const tapTimer = useRef<number | undefined>(undefined);
+  const tapDown = useCallback((u: number, v: number) => {
+    setTapRing({ u, v, t: performance.now() });
+    setTapBusy(true);
+    // A drag or pinch never becomes a tap: the banner goes back by itself.
+    clearTimeout(tapTimer.current);
+    tapTimer.current = window.setTimeout(() => { if (!tapWork.current) setTapBusy(false); }, 750);
+  }, []);
+  const tapRun = useCallback((work: Promise<unknown>) => {
+    tapWork.current++;
+    setTapBusy(true);
+    void work.catch(() => {}).finally(() => { if (--tapWork.current === 0) setTapBusy(false); });
+  }, []);
   const [exportOpen, setExportOpen] = useState(false);
   const [analyticsOff, setAnalyticsOff] = useState(analyticsOptedOut);
   /** Several photos opened at once (ui/batch.tsx): the strip under the picture, Export all. Null for one clip / photo. */
@@ -452,7 +471,7 @@ export default function App() {
   const pickActive = picking && pane === "colour" && paneOpen && ready && !exporting && tools.colour.enabled;
   useEffect(() => {
     if (picking && !pickActive) setPicking(false);
-    if (!pickActive) studio.clearNeutralNote();
+    if (!pickActive) { studio.clearNeutralNote(); setTapRing(null); }
   }, [studio, picking, pickActive]);
   // A change to the colour look made in the studio (a tap, the debug API) goes through the panels' state.
   const patchColourRef = useRef<(patch: Partial<ColourState>) => void>(() => undefined);
@@ -624,9 +643,10 @@ export default function App() {
             onSplit={moveSplit}
             onHold={ready && !exporting ? setHolding : undefined}
             onTap={selectActive || pickActive || photo ? undefined : () => studio.togglePlay()}
-            onTapAt={pickActive ? (u, v) => void studio.tapNeutral(u, v) : selectActive ? (u, v) => { void studio.toggleSubjectAt(u, v); setTapPulse({ u, v, t: performance.now() }); } : undefined}
+            onTapDown={pickActive || selectActive ? tapDown : undefined}
+            onTapAt={pickActive ? (u, v) => tapRun(studio.tapNeutral(u, v)) : selectActive ? (u, v) => { tapRun(studio.toggleSubjectAt(u, v)); setTapPulse({ u, v, t: performance.now() }); } : undefined}
             tapHint={pickActive ? "tap something that should be white or grey to balance the colour to it" : undefined}
-            overlay={pickActive ? <NeutralMark pick={neutralMark} /> : selectActive ? <SubjectOutlines getSelection={getSelection} pulse={tapPulse} /> : undefined}
+            overlay={pickActive ? <><NeutralMark pick={neutralMark} /><TapRing at={tapRing} /></> : selectActive ? <><SubjectOutlines getSelection={getSelection} pulse={tapPulse} /><TapRing at={tapRing} /></> : undefined}
             onZoom={onZoom}
             interactive={ready && !exporting}
             onFrameSize={onFrameSize}
@@ -653,7 +673,7 @@ export default function App() {
             {rail}
             {pickActive && (
               <div className="select-bar" role="status" onClick={(e) => e.stopPropagation()}>
-                <span>{s.neutralNote ?? NEUTRAL_HINT}</span>
+                <span>{tapBusy ? "Reading…" : s.neutralNote ?? NEUTRAL_HINT}</span>
                 {neutralPick && <button type="button" className="link-btn" onClick={() => studio.clearNeutral()}>Reset</button>}
                 <button type="button" className="link-btn" onClick={() => setPicking(false)}>Done</button>
               </div>
@@ -662,7 +682,7 @@ export default function App() {
               // Its buttons are never a click "outside" (Undo can re-render away under the click before it bubbles).
               <div className="select-bar" role="status" onClick={(e) => e.stopPropagation()}>
                 {/* AI progress is in the dock's status line: here only what a tap does. */}
-                <span>{s.subjectTracking !== null ? `Following ${Math.round(s.subjectTracking * 100)}%` : s.subjectNote ?? basicNone?.short ?? "Tap to add or remove"}</span>
+                <span>{tapBusy && s.subjectTracking === null ? "Finding…" : s.subjectTracking !== null ? `Following ${Math.round(s.subjectTracking * 100)}%` : s.subjectNote ?? basicNone?.short ?? "Tap to add or remove"}</span>
                 {basicNone?.ai && s.subjectTracking === null && <button type="button" className="link-btn" data-basic-ai onClick={() => studio.setSegEnabled(true)}>Use AI</button>}
                 {s.subjectUndo > 0 && <button type="button" className="link-btn" onClick={() => void studio.undoSubjectTap()}>Undo</button>}
                 <button type="button" className="link-btn" onClick={() => (wide ? setPane("colour") : closeSheet())}>Done</button>

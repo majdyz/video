@@ -8,3 +8,9 @@ export function NeutralMark({ pick }: { pick: Pick<NeutralPick, "u" | "v" | "lim
   if (!pick) return null;
   return <span className={`neutral-mark${pick.limited ? " is-limited" : ""}`} style={{ left: `${pick.u * 100}%`, top: `${pick.v * 100}%` }} aria-hidden="true" />;
 }
+
+/** The instant answer to a finger landing in White point mode: a ring that opens and fades at the touch point (`t` restarts it). */
+export function TapRing({ at }: { at: { u: number; v: number; t: number } | null }) {
+  if (!at) return null;
+  return <span key={at.t} className="tap-ring" style={{ left: `${at.u * 100}%`, top: `${at.v * 100}%` }} aria-hidden="true" />;
+}

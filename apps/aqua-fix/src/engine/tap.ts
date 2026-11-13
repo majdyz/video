@@ -19,8 +19,14 @@ import { TAP, type UserSettings } from "./params.ts";
  * no balance brings it back), the tap changes nothing at all rather than recolour the frame for a point it cannot fix.
  * The same share is asked of the picture as shown (with its style), and a tap still short of neutral at gains
  * beyond `limitedMax` is refused outright (see the end of solveTap).
+ * A refused tap is not the end (owner, 13 Nov: sand in deep blue water, its red gone, answered "No red left" and
+ * did nothing): the fallback pulls the cast down instead of boosting the dead channel — blue down by at most
+ * `fallBlue`, red up by at most `fallRed` (the grade's own red guard still holds), the pair that leaves the point
+ * with the least chroma on a small grid (`fallSteps` per side), never one that turns it green (`greenLo..greenHi`
+ * degrees of Oklab hue above `limited` chroma), and only when it sheds at least `fallGain` of the chroma. Small,
+ * bounded gains: a tap on open water then mutes its blue a little rather than re-balancing the frame for it.
  */
-export const TAP_SOLVE = { patch: 9, darkY: 0.004, bright: 0.985, done: 0.003, limited: 0.012, iters: 16, step: 0.7, probe: 0.04, keep: 0.15, useless: 0.7, limitedMax: 2.5 };
+export const TAP_SOLVE = { patch: 9, darkY: 0.004, bright: 0.985, done: 0.003, limited: 0.012, iters: 16, step: 0.7, probe: 0.04, keep: 0.15, useless: 0.7, limitedMax: 2.5, fallBlue: 1.6, fallRed: 1.5, fallSteps: 5, fallGain: 0.08, greenLo: 110, greenHi: 185 };
 
 export type TapSolve =
   | {
@@ -96,6 +102,20 @@ export function solveTap(ctx: ApplyContext, rgb: readonly [number, number, numbe
   };
   let x = 0, y = 0, f = at(0, 0);
   const before = f.c;
+  // The pull-down fallback for a tap the solution cannot honour (TAP_SOLVE.fall*).
+  const fallback = (): TapSolve => {
+    const green = (q: F) => { const h = ((Math.atan2(q.b, q.a) * 180) / Math.PI + 360) % 360; return q.c > S.limited && h > S.greenLo && h < S.greenHi; };
+    let best: { x: number; y: number; f: F } | null = null;
+    for (let i = 0; i <= S.fallSteps; i++) for (let j = 0; j <= S.fallSteps; j++) {
+      if (!i && !j) continue;
+      const gx = (i / S.fallSteps) * Math.log(S.fallRed), gy = -(j / S.fallSteps) * Math.log(S.fallBlue);
+      const q = at(gx, gy);
+      if (green(q) || q.c >= (best ? best.f.c : before) - 1e-6) continue;
+      best = { x: gx, y: gy, f: q };
+    }
+    if (!best || best.f.c > (1 - S.fallGain) * before) return { ok: true, gains: [1, 1], before, after: before, limited: true };
+    return { ok: true, gains: [Math.exp(best.x), Math.exp(best.y)], before, after: best.f.c, limited: true };
+  };
   for (let it = 0; it < S.iters && f.c > S.done; it++) {
     // Forward differences (backward at the upper bound).
     const hx = x + S.probe > bound ? -S.probe : S.probe, hy = y + S.probe > bound ? -S.probe : S.probe;
@@ -122,7 +142,7 @@ export function solveTap(ctx: ApplyContext, rgb: readonly [number, number, numbe
   let limited = f.c > S.limited;
   if (limited) {
     // Nothing to gain: leave the picture alone.
-    if (f.c > S.useless * before) return { ok: true, gains: [1, 1], before, after: before, limited: true };
+    if (f.c > S.useless * before) return fallback();
     // The smallest share of the solution that buys (almost) all it can.
     const goal = f.c + S.keep * (before - f.c);
     for (let t = 0.1; t < 0.999; t += 0.1) {
@@ -144,7 +164,7 @@ export function solveTap(ctx: ApplyContext, rgb: readonly [number, number, numbe
       // cast: it is water (or another coloured thing) asked to be grey. Re-balancing the frame that hard for it is
       // never what the tap meant, however much of the patch's own chroma it sheds.
       const big = Math.exp(Math.max(Math.abs(x), Math.abs(y))) > S.limitedMax;
-      if (big || shown([Math.exp(x), Math.exp(y)]) > S.useless * shown(undefined)) return { ok: true, gains: [1, 1], before, after: before, limited: true };
+      if (big || shown([Math.exp(x), Math.exp(y)]) > S.useless * shown(undefined)) return fallback();
     }
   }
   return { ok: true, gains: [Math.exp(x), Math.exp(y)], before, after: f.c, limited };
