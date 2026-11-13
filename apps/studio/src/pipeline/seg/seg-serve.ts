@@ -10,7 +10,7 @@ import type { SegObject } from "./track.ts";
 import type { SeedCandidate } from "./seeds.ts";
 
 type Req =
-  | { id: number; type: "init"; models: Record<GraphName, ArrayBuffer>; bank: BankParams; threads: number; prefer: "auto" | "wasm"; lite?: boolean; debug?: boolean }
+  | { id: number; type: "init"; models: Record<GraphName, ArrayBuffer>; bank: BankParams; threads: number; prefer: "auto" | "wasm"; lite?: boolean; split?: GraphName[]; debug?: boolean }
   | { id: number; type: "encode"; rgba: ArrayBuffer }
   | { id: number; type: "step"; key: string; frame: number; points: [number, number][] | null; labels: number[] | null; reverse: boolean }
   | { id: number; type: "drop"; key: string }
@@ -126,7 +126,7 @@ async function handle(ort: typeof OrtNS, webgpu: boolean, r: Req): Promise<void>
       await session?.stop();
       session = null;
       await before?.release();
-      model = await EdgeTam.create(ort, m, r.bank, eps, failed, !!r.lite);
+      model = await EdgeTam.create(ort, m, r.bank, eps, failed, !!r.lite, r.split ?? []);
       model.onStage = stageTracer(!!r.debug);
       post({ ok: true, heapMB: wasmHeapMB(), ep: model.ep, tried: eps, failed, webgpu: gpu.ok, f16: gpu.f16, threads: ort.env.wasm.numThreads, coi: typeof crossOriginIsolated !== "undefined" && crossOriginIsolated });
     } else if (!model) {

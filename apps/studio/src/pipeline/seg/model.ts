@@ -5,7 +5,7 @@ import type { GraphName } from "./edgetam.ts";
 import type { SegModel, SegObject, StepResult } from "./track.ts";
 import type { SessionFrameOut } from "./session.ts";
 import type { SeedCandidate } from "./seeds.ts";
-import { deviceFacts, segThreads } from "../device.ts";
+import { deviceFacts, isWebKitUA, segThreads } from "../device.ts";
 
 /** Background-session events from the worker (session.ts). */
 export type SessionEvent =
@@ -174,7 +174,7 @@ export class WorkerSegModel implements SegModel {
     const bank = await (await fetch(`${base}bank.json?v=${man.files["bank.json"]?.sha256.slice(0, 16) ?? "0"}`)).json();
     // One thread on iOS, up to four elsewhere when isolated (device.ts segThreads; `?segthreads=N` to measure).
     const threads = opts.threads && opts.threads > 0 ? opts.threads : segThreads(deviceFacts(), Number(new URLSearchParams(location.search).get("segthreads")) || null);
-    const r = await this.call({ type: "init", models, bank, threads, prefer: opts.prefer ?? "auto", lite, debug: segDebug() }, Object.values(models));
+    const r = await this.call({ type: "init", models, bank, threads, prefer: opts.prefer ?? "auto", lite, split: cpuSplit(), debug: segDebug() }, Object.values(models));
     this.info = { ep: String(r.ep) + (lite ? " lite" : ""), f16: !!r.f16, threads: Number(r.threads), loadMs: performance.now() - t0, bytes: total, heapMB: Number(r.heapMB ?? 0) };
     segLog(`model ready on ${this.info.ep} (tried ${(r.tried as string[]).join(", ")}; WebGPU adapter ${r.webgpu ? "yes" : "no"}, shader-f16 ${r.f16 ? "yes" : "no"}; WASM threads ${this.info.threads}, cross-origin isolated ${r.coi ? "yes" : "no"})`, this.info);
     for (const f of r.failed as string[]) segLog("execution provider skipped:", f);
@@ -253,4 +253,19 @@ export class WorkerSegModel implements SegModel {
     for (const p of this.waiting.values()) p.rej(new Error("disposed"));
     this.waiting.clear();
   }
+}
+
+/**
+ * The graphs that run on WASM next to a WebGPU encoder (seg-serve.ts init, EdgeTam.create). On iPhone WebKit the
+ * tab was killed after ~14 s of a clip's pass on WebGPU, at the same point every run (owner's iPhone, 13 Nov: about
+ * 40 decoder runs and 30 memory-attention runs in): the two graphs whose input shapes change from run to run (the
+ * decoder's point count, the attention's memory length) are the ones a GPU runtime keeps buffers for per shape. They
+ * are the cheap ones (a few ms on the CPU); the encoder, fixed-shape and the costly one, stays on the GPU.
+ * `?seghybrid=0`: every graph on WebGPU, as before; `?seghybrid=1`: split on any browser (to compare).
+ */
+export function cpuSplit(): GraphName[] {
+  let q: string | null = null;
+  try { q = new URLSearchParams(location.search).get("seghybrid"); } catch { /* no location */ }
+  if (q === "0") return [];
+  return q === "1" || isWebKitUA(navigator.userAgent) ? ["mask_decoder", "memory_attention"] : [];
 }

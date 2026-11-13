@@ -47,15 +47,18 @@ export class EdgeTam {
   }
 
   /** Tries the execution providers in order (WebGPU first when the device has it); `failed` records why one was skipped. */
-  static async create(ort: Ort, models: Record<GraphName, Uint8Array>, bank: BankParams, eps: string[], failed: string[] = [], lite = false): Promise<EdgeTam> {
+  static async create(ort: Ort, models: Record<GraphName, Uint8Array>, bank: BankParams, eps: string[], failed: string[] = [], lite = false, split: readonly GraphName[] = []): Promise<EdgeTam> {
     let lastErr: unknown = null;
     for (const ep of eps) {
       try {
         const s = {} as Record<GraphName, Sess>;
         // No CPU arena / memory pattern: both keep each graph's peak activations reserved for good (the encoder's at
         // 1024² are hundreds of MB), and a phone tab that holds four graphs' peaks next to the video decoders is killed.
-        for (const g of GRAPHS) s[g] = await ort.InferenceSession.create(models[g], { executionProviders: [ep], graphOptimizationLevel: "disabled", enableCpuMemArena: false, enableMemPattern: false });
-        const m = new EdgeTam(ort, s, bank, ep);
+        // `split` (model.ts cpuSplit): those graphs on WASM next to a WebGPU encoder. Their inputs and outputs are CPU
+        // tensors either way (no output is kept on the GPU), so nothing else changes.
+        const cpu = ep === "webgpu" ? split : [];
+        for (const g of GRAPHS) s[g] = await ort.InferenceSession.create(models[g], { executionProviders: [cpu.includes(g) ? "wasm" : ep], graphOptimizationLevel: "disabled", enableCpuMemArena: false, enableMemPattern: false });
+        const m = new EdgeTam(ort, s, bank, cpu.length ? `${ep}+wasm` : ep);
         m.lite = lite;
         return m;
       } catch (e) {
