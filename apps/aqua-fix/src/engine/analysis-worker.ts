@@ -29,6 +29,8 @@ export type AnalysisPacket = {
   animals?: AnimalMap;
   /** Open water: every region that departs from the water, toned or not (backdrop.ts SubjectBlob). */
   blobs?: SubjectBlob[];
+  /** Subject pop's conf channel where it differs from the fields' (params.ts DepthMap.popConf). */
+  popConf?: Float32Array;
   /** Milliseconds spent in analyzeThumbnail. */
   ms: number;
 };
@@ -63,9 +65,11 @@ self.onmessage = (e: MessageEvent<AnalysisRequest | BalanceRequest>) => {
     clahe: { tilesX: a.clahe.tilesX, tilesY: a.clahe.tilesY, bins: a.clahe.bins, data: clahe },
     animals: a.depth.animals,
     blobs: a.depth.blobs,
+    ...(a.depth.popConf ? { popConf: a.depth.popConf } : {}),
     ms: performance.now() - t0,
   };
   const transfer: Transferable[] = [fields.buffer, guide.buffer, clahe.buffer];
   if (a.depth.animals) transfer.push(a.depth.animals.labels.buffer);
+  if (a.depth.popConf) transfer.push(a.depth.popConf.buffer);
   (self as unknown as Worker).postMessage(packet, transfer);
 };

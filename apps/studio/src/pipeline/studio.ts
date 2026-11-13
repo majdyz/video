@@ -95,6 +95,8 @@ const FILMSTRIP_COUNT = 10;
 const FILMSTRIP_PX = 80;
 /** A committed trim change waits this long before analysis re-runs (another drag may follow). */
 const TRIM_SETTLE_MS = 500;
+/** Basic detection, playing: this long (ms) without a subject before the panel says it found none (no blinking between animals). */
+const BASIC_NONE_MS = 1500;
 /** Subject pop track pass: one analysis every this many clip seconds, at most this far either side of the tap. */
 const SUBJECT_STEP_S = 0.25;
 const SUBJECT_REACH_S = 20;
@@ -231,6 +233,13 @@ export type Snapshot = {
    * status chip on the preview (studio-seg.ts subjectChip).
    */
   subjectFrame: { ai: SegFrameState; peek?: SegPeekState } | null;
+  /**
+   * Basic detection (the engine's own, AI off) on the frame on screen: "found" when it pops at least one animal,
+   * "none" when it found nothing there (said in the Subjects panel with a one-tap switch to AI: an untouched picture
+   * with no word read as "Subject pop is broken"), null when it does not apply (Subject pop or Colour off, the AI on,
+   * an export) or is not known yet. In play "none" waits for BASIC_NONE_MS without a subject, so it does not blink.
+   */
+  subjectBasic: "found" | "none" | null;
   /** Follow mode ("watch it work"): while the AI pass runs, the preview shows the frame it has just finished
    * (followStep). On for every new pass; playing, scrubbing or a tap turns it off, the chip's action on again. */
   segFollow: boolean;
@@ -315,6 +324,7 @@ export class Studio {
     neutralNote: null,
     seg: { on: false, phase: "off", progress: null, note: null },
     subjectFrame: null,
+    subjectBasic: null,
     segFollow: followDefault(),
     subjectUndo: 0,
   };
@@ -614,14 +624,51 @@ export class Studio {
   /**
    * What the tap outlines draw (studio-seg.ts outlineSelection): the AI mask of exactly the frame on screen, solid;
    * else the engine's own selection, only when it was analysed from that same frame (paused), and dashed and dim
-   * while the AI is on (the fallback). Never a mask made from another frame: in play the engine's map lags the
-   * picture (the outline that trailed the animal).
+   * while the AI is on (the fallback). With the AI on, never a mask made from another frame (in play the engine's
+   * map lags the picture: the outline that trailed the animal). Basic (AI off) in play: the tracker's animals, each
+   * moved along its own motion to the frame on screen (animals.ts), so the outlines follow the playing clip instead
+   * of showing on a paused frame only (owner, 13 Nov); only the popped ones (the candidates a tap could add come and
+   * go between analyses: dashed outlines blinking over a playing clip).
    */
   outlineSelection(): SubjectSelection | null {
     const video = this.snap.kind === "video";
     const t = video ? this.shownT ?? this.video?.currentTime ?? 0 : 0;
-    const fresh = !video || (this.paused() && this.subjectsAt !== null && Math.abs(this.subjectsAt - t) < 1e-3);
-    return outlineSelection(this.segOverlay(t), this.subjectSelection(), { ai: video && this.seg.on, fresh });
+    const playing = video && !this.paused();
+    const fresh = !video || (playing ? !this.seg.on : this.subjectsAt !== null && Math.abs(this.subjectsAt - t) < 1e-3);
+    const sel = outlineSelection(this.segOverlay(t), this.subjectSelection(), { ai: video && this.seg.on, fresh });
+    if (!sel || !playing || this.seg.on) return sel;
+    return { ...sel, animals: sel.animals.filter((a) => a.override === "include" || (a.override !== "exclude" && a.strength > 0.5)) };
+  }
+
+  /** Since when (performance.now()) the playing clip has had no Basic subject; null: it has one, or does not apply. */
+  private basicNoneSince: number | null = null;
+
+  /** Basic detection's verdict on the frame just drawn (Snapshot.subjectBasic), set when it changes. */
+  private noteBasic(): void {
+    const e = this.engine;
+    const on = !!e && this.tools.colour.enabled && !!this.tools.colour.subjectPop && !this.exporting && this.snap.phase === "ready" && (this.snap.kind !== "video" || !this.seg.on);
+    // (While the clip is profiled the subject tone is not locked yet and paused frames are not analysed: not known.)
+    if (!e || !on || this.profiling) {
+      this.basicNoneSince = null;
+      if (this.snap.subjectBasic !== null) this.set({ subjectBasic: null });
+      return;
+    }
+    if (e.subjectsPopped() > 0) {
+      this.basicNoneSince = null;
+      if (this.snap.subjectBasic !== "found") this.set({ subjectBasic: "found" });
+      return;
+    }
+    // Paused: the frame's own analysis is the answer (once it is in); in play, only a steady while without one.
+    let sure: boolean;
+    if (this.paused()) {
+      this.basicNoneSince = null;
+      sure = this.snap.kind !== "video" || (this.subjectsAt !== null && this.shownT !== null && Math.abs(this.subjectsAt - this.shownT) < 1e-3);
+    } else {
+      const now = performance.now();
+      this.basicNoneSince ??= now;
+      sure = now - this.basicNoneSince >= BASIC_NONE_MS;
+    }
+    if (sure && this.snap.subjectBasic !== "none") this.set({ subjectBasic: "none" });
   }
 
   /** The status chip's input: what the AI has for the frame just drawn (Snapshot.subjectFrame), set when it changes. */
@@ -2190,8 +2237,10 @@ export class Studio {
       this.engine.setSegOverlay(this.segOverlay(t));
       this.engine.render();
       this.noteSubjectFrame(t);
+      this.noteBasic();
     } else if (this.geo) {
       this.noteSubjectFrame(null);
+      this.noteBasic();
       const [w, h] = this.previewSize();
       this.geo.resize(w, h);
       this.geo.render(src, this.geoParams(t, info.rot), this.uprightOpts(this.split));

@@ -1217,6 +1217,12 @@ export type DepthMap = {
   person?: Float32Array;
   /** Open water: the animals of the subject map (animals.ts), labelled on this grid. */
   animals?: AnimalMap;
+  /**
+   * Subject pop's conf channel (one value per texel), when it differs from the fields': the same map with the small,
+   * separate animals of a school in it (backdrop.ts BACKDROP.smallLo). Read in place of fields' conf when Subject
+   * pop is on (popFields); the plain grade never sees it (small fish keep the normal grade).
+   */
+  popConf?: Float32Array;
   /** Open water: every region that departs from the water, toned or not (backdrop.ts SubjectBlob). */
   blobs?: SubjectBlob[];
   /** Per-animal strength texture (animals.ts AnimalTracker.strength, RGBA at the animals' grid) in place of the still targets (harness / CPU reference). */
@@ -1356,6 +1362,12 @@ export function fieldsTexture(d: DepthMap): Float32Array {
   return new Float32Array(d.fields);
 }
 
+/** Writes Subject pop's conf channel (DepthMap.popConf) into fields texel data, in place. */
+export function popFields(fields: Float32Array, popConf: ArrayLike<number>): Float32Array {
+  for (let i = 0; i < popConf.length; i++) fields[i * 4 + 1] = popConf[i];
+  return fields;
+}
+
 /** RGBA32F texel data for the guide map (linear RGB). */
 export function guideTexture(d: DepthMap): Float32Array {
   const out = new Float32Array(d.width * d.height * 4);
@@ -1376,6 +1388,9 @@ export function claheTexture(c: ClaheLuts): Float32Array {
   return out;
 }
 
+/** Share of a clip's profile samples that must hold a lit open-water animal for its subjects to be toned (medianParams). */
+export const SUBJECT_TONE_SHARE = 0.15;
+
 /**
  * Component-wise median of several frames' parameters: the clip-wide
  * estimate the engine locks so a passing subject (an orange fish filling
@@ -1389,6 +1404,13 @@ export function medianParams(list: GradeParams[]): GradeParams {
     const v0 = list[0][key];
     if (typeof v0 === "number") out[key] = med(list.map((p) => p[key] as number));
     else if (Array.isArray(v0)) out[key] = (v0 as number[]).map((_, i) => med(list.map((p) => (p[key] as number[])[i])));
+  }
+  // The subject tone asks "does the clip hold a lit animal", not "do most of its frames": a school that swims
+  // through a third of the clip had a median of 0, and Subject pop did nothing on any frame (owner's hammerhead
+  // clip). The upper quantile: lit in at least SUBJECT_TONE_SHARE of the samples.
+  if (typeof list[0].subjectTone === "number") {
+    const s = list.map((p) => p.subjectTone ?? 0).sort((a, b) => a - b);
+    out.subjectTone = s[Math.min(s.length - 1, Math.floor((1 - SUBJECT_TONE_SHARE) * s.length))];
   }
   return out as unknown as GradeParams;
 }

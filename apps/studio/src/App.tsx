@@ -1,7 +1,7 @@
 import { Eta } from "./pipeline/eta.ts";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Studio } from "./pipeline/studio.ts";
-import { segStatusText, subjectChip } from "./pipeline/seg/studio-seg.ts";
+import { basicNoneNote, segStatusText, subjectChip } from "./pipeline/seg/studio-seg.ts";
 import { DEFAULT_TOOLS, NEUTRAL_HINT, TOOL_LABEL, TOOL_ORDER, detectedProfile, enabledTools, initialStyle, lookOf, neutralFor, profileDefaults, savedVivid, styleFlags, styleOf, subjectPopVisible, type ColourState, type ToolId, type ToolsState } from "./pipeline/tools.ts";
 import { BRAND, SAMPLE, donateUrl } from "./brand.ts";
 import { Stage } from "./ui/stage";
@@ -551,7 +551,9 @@ export default function App() {
       </button>
     </div>
   );
-  const subjectControls = { corrections: s.subjectOverrides.length, onReset: () => studio.setSubjectOverrides([]), ai: s.kind === "video" ? { on: s.seg.on, status: segStatusText(s.seg), onToggle: (on: boolean) => studio.setSegEnabled(on) } : undefined };
+  // Basic detection found no animal on this frame: said in the panel and the pill, with a one-tap switch to AI.
+  const basicNone = s.subjectBasic === "none" && !s.subjectOverrides.length ? basicNoneNote(s.kind === "video" ? s.seg : null) : null;
+  const subjectControls = { corrections: s.subjectOverrides.length, onReset: () => studio.setSubjectOverrides([]), none: basicNone?.line ?? null, ai: s.kind === "video" ? { on: s.seg.on, status: segStatusText(s.seg), onToggle: (on: boolean) => studio.setSegEnabled(on) } : undefined };
   const paneBody = pane === "subjects" ? (
     <SubjectsPanel tools={panelTools} setTools={setPanelTools} colourOn={tools.colour.enabled} disabled={exporting || !ready} photo={photo} subjects={subjectControls} />
   ) : (
@@ -644,7 +646,8 @@ export default function App() {
               // Its buttons are never a click "outside" (Undo can re-render away under the click before it bubbles).
               <div className="select-bar" role="status" onClick={(e) => e.stopPropagation()}>
                 {/* AI progress is in the dock's status line: here only what a tap does. */}
-                <span>{s.subjectTracking !== null ? `Following ${Math.round(s.subjectTracking * 100)}%` : s.subjectNote ?? "Tap to add or remove"}</span>
+                <span>{s.subjectTracking !== null ? `Following ${Math.round(s.subjectTracking * 100)}%` : s.subjectNote ?? basicNone?.short ?? "Tap to add or remove"}</span>
+                {basicNone?.ai && s.subjectTracking === null && <button type="button" className="link-btn" data-basic-ai onClick={() => studio.setSegEnabled(true)}>Use AI</button>}
                 {s.subjectUndo > 0 && <button type="button" className="link-btn" onClick={() => void studio.undoSubjectTap()}>Undo</button>}
                 <button type="button" className="link-btn" onClick={() => (wide ? setPane("colour") : closeSheet())}>Done</button>
               </div>
@@ -665,7 +668,7 @@ export default function App() {
                 styleThumbs={ready && !exporting ? styleThumbs : null}
                 // On its side the open tool's row takes the timeline's place: play / pause moves into the row.
                 playback={landscape && !photo ? { playing: s.playing, toggle: () => studio.togglePlay() } : null}
-                status={pane === "subjects" ? (s.kind === "video" && (s.seg.on || s.seg.phase === "unavailable" || s.seg.weak || s.seg.crashed) ? segStatusText(s.seg) : null) : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
+                status={pane === "subjects" ? basicNone?.line ?? (s.kind === "video" && (s.seg.on || s.seg.phase === "unavailable" || s.seg.weak || s.seg.crashed) ? segStatusText(s.seg) : null) : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
             ) : null}
             {/* The timeline (play / pause, scrub) stays while a tool is open: a change is checked across the clip.
                 (Not on a phone on its side: there is no height for both, the row has its own play button.) */}

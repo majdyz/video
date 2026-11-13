@@ -15,6 +15,12 @@ import { fitToGamut, compressToGamut, GAMUT_SCALE_MIN } from "../src/engine/colo
   // Even median count averages the two middle values.
   const med2 = medianParams([base, outlier]);
   assert.ok(Math.abs(med2.wb[0] - 1.5) < 1e-9);
+  // The subject tone is "the clip holds a lit animal": lit in a sixth of the samples is enough (a school that
+  // swims through part of the clip), one odd sample in a long clip is not.
+  const lit = { ...base, subjectTone: 1 }, dark = { ...base, subjectTone: 0 };
+  assert.equal(medianParams([dark, dark, lit, lit, dark, dark, dark, dark, dark, dark]).subjectTone, 1);
+  assert.equal(medianParams([dark, dark, lit, dark, dark, dark, dark, dark, dark, dark]).subjectTone, 0);
+  assert.equal(medianParams([dark, dark, dark]).subjectTone, 0);
   console.log("ok  medianParams ignores a passing subject");
 }
 

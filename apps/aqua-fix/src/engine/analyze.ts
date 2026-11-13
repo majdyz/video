@@ -663,16 +663,27 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
   let subjectTone = 0;
   let animals: AnimalMap | undefined;
   let blobs: SubjectBlob[] | undefined;
+  let popConf: Float32Array | undefined;
   if (backdropValidity > 0) {
     const subj = temp("subjMap", n);
     const notAnimal = temp("notAnimal", n);
     notAnimal.fill(0, 0, n);
-    subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit, bdWater, opts.seeds, okA, okB, notAnimal, (blobs = []));
+    const small = temp("subjSmall", n);
+    subjectTone = growSubjects(backdrop, bdDev, backdropValidity, w, h, subj, okL, backdropFit, bdWater, opts.seeds, okA, okB, notAnimal, (blobs = []), small);
     confMap = temp("confMap", n);
     for (let i = 0; i < n; i++) confMap[i] = conf[i] + (subj[i] - conf[i]) * backdropValidity;
-    animals = labelAnimals(subj, bdDev, w, h, MAP_W, MAP_H, notAnimal);
+    // Subject pop's own map: the small, separate animals of a school as well (backdrop.ts BACKDROP.smallLo). The
+    // base grade keeps the map above (small fish keep the normal grade); the animals are labelled on the larger one.
+    let all = subj;
+    for (let i = 0; i < n; i++) if (small[i] > subj[i]) { all = temp("subjAll", n); break; }
+    if (all !== subj) {
+      popConf = temp("confPop", n);
+      for (let i = 0; i < n; i++) { all[i] = Math.max(subj[i], small[i]); popConf[i] = conf[i] + (all[i] - conf[i]) * backdropValidity; }
+    }
+    animals = labelAnimals(all, bdDev, w, h, MAP_W, MAP_H, notAnimal);
   }
   const depth = buildMaps(z, confMap, ds, veilScale, lin, w, h);
+  if (popConf) depth.popConf = confTexels(popConf, w, h);
   if (animals) depth.animals = animals;
   if (blobs) depth.blobs = blobs;
   const haze = clamp01(black / HAZE_BLACK_REF);
@@ -1137,6 +1148,24 @@ function buildMaps(z: Float32Array, conf: Float32Array, ds: Float32Array, veilSc
     }
   }
   return { width: MAP_W, height: MAP_H, fields, guide };
+}
+
+/** One conf map on the fields' grid, blurred and averaged exactly as buildMaps does its conf channel (DepthMap.popConf). */
+function confTexels(conf: Float32Array, w: number, h: number): Float32Array {
+  const cb = boxBlur(boxBlur(conf, w, h, 1), w, h, 1);
+  const out = new Float32Array(MAP_W * MAP_H);
+  for (let ty = 0; ty < MAP_H; ty++) {
+    const y0 = Math.floor((ty * h) / MAP_H);
+    const y1 = Math.max(y0 + 1, Math.floor(((ty + 1) * h) / MAP_H));
+    for (let tx = 0; tx < MAP_W; tx++) {
+      const x0 = Math.floor((tx * w) / MAP_W);
+      const x1 = Math.max(x0 + 1, Math.floor(((tx + 1) * w) / MAP_W));
+      let sc = 0, cnt = 0;
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { sc += cb[y * w + x]; cnt++; }
+      out[ty * MAP_W + tx] = sc / cnt;
+    }
+  }
+  return out;
 }
 
 /** Contrast-limited tile histograms → per-tile equalisation LUTs. */

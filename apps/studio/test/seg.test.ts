@@ -10,7 +10,7 @@ import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
 import { SUBJECT_CLEAR } from "../../aqua-fix/src/engine/params.ts";
 import { confWeight, fillInterval, keyTimes, mapPrompt, sampleRange, SEG, SegTrack, type Keyframe } from "../src/pipeline/seg/track.ts";
 import { linearToOklab } from "../../aqua-fix/src/engine/color.ts";
-import { autoObjects, maskStats, ML_OUTLINE_ID, seedObjects, outlineSelection, popComponentBox, promptFor, SegLive, segPopsAt, subjectChip, type SegStatus } from "../src/pipeline/seg/studio-seg.ts";
+import { autoObjects, basicNoneNote, maskStats, ML_OUTLINE_ID, seedObjects, outlineSelection, popComponentBox, promptFor, SegLive, segPopsAt, subjectChip, type SegStatus } from "../src/pipeline/seg/studio-seg.ts";
 
 const entry = (v: number): MemEntry => ({ mem: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), pos: new Float32Array(MEM_TOKENS * MEM_DIM).fill(v), ptr: new Float32Array(256).fill(v), score: 1 });
 const tpos = Float32Array.from({ length: 7 * 64 }, (_, i) => Math.floor(i / 64) * 100);
@@ -197,6 +197,12 @@ const img = (dx: number, dy: number): Gray => {
   assert.equal(outlineSelection(null, eng, { ai: false, fresh: false }), null, "nor with the AI off");
   assert.equal(outlineSelection(null, eng, { ai: false, fresh: true }), eng, "AI off: the engine's selection, as it is");
   assert.equal(outlineSelection(null, null, { ai: true, fresh: true }), null);
+  // Basic found no animal on the frame: the panel says so, and offers the AI where there is one to turn on.
+  const off: SegStatus = { on: false, phase: "off", progress: null, note: null };
+  assert.equal(basicNoneNote(off).line, "Basic found no animals here. AI finds far or small ones.");
+  assert.ok(basicNoneNote(off).ai && basicNoneNote({ ...off, weak: true }).ai && basicNoneNote({ ...off, crashed: true }).ai, "one tap to the AI, also where it is off by default");
+  assert.ok(!basicNoneNote(null).ai && !basicNoneNote({ ...off, phase: "unavailable" }).ai, "a photo, or no AI on this device: a tap on the animal instead");
+  for (const n of [basicNoneNote(off), basicNoneNote(null)]) assert.ok(n.short.length <= 26 && n.line.length <= 60, "short enough for the pill and one status row at 390 px");
   // Taking out a popped subject: the exclude gets the popped region's box.
   const ba = new Float32Array(100), bn = new Float32Array(100).fill(1);
   for (let y = 2; y < 6; y++) for (let x = 3; x < 9; x++) ba[y * 10 + x] = 1;

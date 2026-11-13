@@ -32,6 +32,7 @@ import {
   IDENTITY_PARAMS,
   lerpParams,
   packUniforms,
+  popFields,
   type ClaheLuts,
   type DepthMap,
   type GradeParams,
@@ -90,7 +91,10 @@ const PERSON_RECTS: Rect[] = [
 type Packed = { width: number; height: number; data: Float32Array };
 /** Analysis packet with the CLAHE LUTs re-shaped to a (bins × tiles) texture. */
 type GpuPacket = Omit<AnalysisPacket, "clahe"> & { clahe: Packed };
-function toGpuPacket(raw: AnalysisPacket): GpuPacket {
+function toGpuPacket(raw: AnalysisPacket, pop = false): GpuPacket {
+  // Subject pop on: the fields' conf is its own map, with the small animals of a school in it (in place; the same
+  // values whenever it is done again).
+  if (pop && raw.popConf) popFields(raw.fields.data, raw.popConf);
   return { ...raw, clahe: { width: raw.clahe.bins, height: raw.clahe.tilesX * raw.clahe.tilesY, data: raw.clahe.data } };
 }
 
@@ -634,7 +638,7 @@ export class GradeEngine {
       await withTimeout(this.waitPerson()).catch(() => undefined);
       if (this.personTarget) { this.person = this.personTarget; this.personTarget = null; }
     }
-    if (snap && packet.id === this.reqId) this.snapTo(toGpuPacket(packet));
+    if (snap && packet.id === this.reqId) this.snapTo(toGpuPacket(packet, !!this.settings.subjectPop));
     // A snap (clip load, export start) covers the current slot: the next tick doesn't analyse it again.
     if (snap) this.lastSlot = analysisSlot(this.lastTickSec, this.slotSec());
   }
@@ -744,7 +748,7 @@ export class GradeEngine {
   private onPacket(raw: AnalysisPacket): void {
     this.inflight = false;
     if (raw.id !== this.reqId) return; // stale (file changed)
-    const packet = toGpuPacket(raw);
+    const packet = toGpuPacket(raw, !!this.settings.subjectPop);
     this.stats.analyses++;
     this.stats.analysisMs = packet.ms;
     this.workerMs.analysis += packet.ms;
@@ -1082,6 +1086,16 @@ export class GradeEngine {
 
   subjectSelection(): SubjectSelection | null {
     return this.settings.subjectPop ? this.animals.selection(this.lastTickSec) : null;
+  }
+
+  /**
+   * How many animals the engine's own (Basic) detection pops on the frame on screen, or is easing in: 0 on a frame
+   * where it found none (the UI says so instead of showing an untouched picture), outside open water, and in a clip
+   * whose subjects are not toned at all (the clip-locked subject tone: nothing lit to pop).
+   */
+  subjectsPopped(): number {
+    const p = this.target ?? this.current;
+    return this.settings.subjectPop && (p?.backdrop ?? 0) > 0 && (p?.subjectTone ?? 0) > 0.05 ? this.animals.popped : 0;
   }
 
   /** Reset temporal state for a new file. */

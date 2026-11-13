@@ -12,8 +12,8 @@
 export const ANIMALS = {
   /** Subject-map value (0..1) that makes an analysis pixel part of an animal. */
   thr: 0.25,
-  /** Smallest animal kept as a label (share of the frame). */
-  minArea: 0.004,
+  /** Smallest animal kept as a label (share of the frame): under the small, separate animals of a school (backdrop.ts BACKDROP.smallLo). */
+  minArea: 0.0012,
   /** Whole or nothing: predicted share of the animal the shaders tone (lo..hi) for the full tone. */
   covLo: 0.6,
   covHi: 0.75,
@@ -34,6 +34,23 @@ export const ANIMALS = {
   matchIoU: 0.2,
   /** Containment (share of the smaller mask inside the larger) counts as this much overlap (see update). */
   containK: 0.75,
+  /**
+   * A small animal (both masks up to smallCells map texels: a far shark is 30 × 3 of them) is the same animal when
+   * its centre lies near the track's predicted one, whatever the overlap (a thin mask one texel up has none): within
+   * nearK × its linear size (at least nearMin texels), sizes within nearRatio of each other; it counts as nearIoU of
+   * overlap at no distance, falling to none at that reach.
+   */
+  smallCells: 160,
+  nearK: 0.75,
+  nearMin: 2.5,
+  nearRatio: 2.5,
+  nearIoU: 0.7,
+  /**
+   * An animal the latest analyses did not find keeps its tone (and its place in the map, see lead) this long (s)
+   * before it starts to fade: a far shark at the edge of what the analysis accepts drops out of one analysis in
+   * three, and popped / plain / popped at 10 Hz is a flicker. Found again within it, it is the same animal.
+   */
+  graceS: 0.35,
   /** Shape stability (IoU with the predicted previous mask, lo..hi) for the full tone. */
   stabLo: 0.4,
   stabHi: 0.6,
@@ -451,6 +468,13 @@ export class AnimalTracker {
     return this.tracks.length;
   }
 
+  /** How many animals are popped or on their way in (strength or target over half): what "found a subject" means to the UI. */
+  get popped(): number {
+    let n = 0;
+    for (const tr of this.tracks) if (tr.s > 0.5 || tr.target > 0.5) n++;
+    return n;
+  }
+
   private offset(tr: Track, t: number): [number, number] {
     const dt = Math.min(ANIMALS.leadMaxS, Math.max(0, t - tr.t));
     let dx = tr.vx * dt, dy = tr.vy * dt;
@@ -487,10 +511,18 @@ export class AnimalTracker {
       for (let k = 0; k < this.tracks.length; k++) {
         let inter = 0;
         for (const c of cellsOf[i]) if (pred[k].has(c)) inter++;
-        if (!inter) continue;
+        // A small animal: near the track's predicted centre is the same animal (ANIMALS.smallCells).
+        const ni = cellsOf[i].length, nk = pred[k].size;
+        let near = 0;
+        if (ni <= ANIMALS.smallCells && nk > 0 && nk <= ANIMALS.smallCells && ni <= ANIMALS.nearRatio * nk && nk <= ANIMALS.nearRatio * ni) {
+          const tr = this.tracks[k], [dx, dy] = this.offset(tr, t);
+          const reach = Math.max(ANIMALS.nearMin, ANIMALS.nearK * Math.sqrt(Math.max(ni, nk)));
+          near = ANIMALS.nearIoU * Math.max(0, 1 - Math.hypot(am.list[i].cx - tr.cx - dx, am.list[i].cy - tr.cy - dy) / reach);
+        }
+        if (!inter && near <= 0) continue;
         // Overlap: IoU, or for an animal growing / shrinking fast (swimming at the camera) the share of the smaller
         // mask inside the larger, discounted: the same animal, not a new one that must earn its tone again.
-        const iou = Math.max(inter / (cellsOf[i].length + pred[k].size - inter), ANIMALS.containK * inter / Math.min(cellsOf[i].length, pred[k].size));
+        const iou = Math.max(inter / (ni + nk - inter), ANIMALS.containK * inter / Math.min(ni, nk), near);
         if (iou >= ANIMALS.matchIoU) pairs.push({ i, k, iou });
       }
     }
@@ -528,12 +560,14 @@ export class AnimalTracker {
       const a = am.list[i];
       next.push({ id: this.nextId++, cells: Int32Array.from(cellsOf[i]), t, cx: a.cx, cy: a.cy, vx: 0, vy: 0, target: 0, auto: 0, base: animalTarget(a), conf: 0, moved: false, s: 0 });
     }
-    // Animals not found again fade out where they are heading.
+    // Animals not found again fade out where they are heading, after a short grace (ANIMALS.graceS) in which they
+    // keep their tone and can be found again as the same animal.
     for (let k = 0; k < this.tracks.length; k++) {
       if (takenK.has(k)) continue;
       const tr = this.tracks[k];
-      tr.target = 0;
-      if (tr.s > 0.005) next.push(tr);
+      const grace = !tr.lostWater && t >= tr.t && t - tr.t <= ANIMALS.graceS;
+      if (!grace) tr.target = 0;
+      if (grace || tr.s > 0.005) next.push(tr);
     }
     this.tracks = next;
     if (fields && guide) {
@@ -571,8 +605,9 @@ export class AnimalTracker {
       const tau = tr.target < tr.s ? ANIMALS.tauDown : ANIMALS.tauUp;
       tr.s += (tr.target - tr.s) * (1 - Math.exp(-dt / tau));
     }
-    // Animals of the latest analysis stay (a first sighting waits for its confirmation); the rest go once faded.
-    this.tracks = this.tracks.filter((tr) => tr.t === this.lastT || tr.target > 0 || tr.s > 0.005);
+    // Animals of the latest analysis stay (a first sighting waits for its confirmation), and those missed for less
+    // than the grace; the rest go once faded.
+    this.tracks = this.tracks.filter((tr) => tr.t === this.lastT || tr.target > 0 || tr.s > 0.005 || (!tr.lostWater && this.lastT >= tr.t && this.lastT - tr.t <= ANIMALS.graceS));
   }
 
   /** Strength texture at clip time `t` (each animal at its predicted place). */
@@ -597,7 +632,10 @@ export class AnimalTracker {
     const moving = this.tracks.filter((tr) => { if (tr.t !== this.lastT) return false; const [dx, dy] = this.offset(tr, t); return dx !== 0 || dy !== 0; });
     // Every animal still toned once the frame stopped being open water (the map no longer holds them): painted from
     // its own last map, so each fades out whole instead of losing parts of itself first.
-    const fading = this.tracks.filter((tr) => tr.lostWater && tr.s > 0.005 && tr.map);
+    // And every animal within its grace (not found by the latest analysis, still toned): the map of that analysis
+    // does not hold it, so it is painted from its own last map where it is heading. (Past the grace an animal not
+    // found again is elsewhere, a fast turn: painting its old shape would draw a ghost trail.)
+    const fading = this.tracks.filter((tr) => tr.map && tr.s > 0.005 && (tr.lostWater || (tr.t !== this.lastT && tr.target > 0)));
     if (!moving.length && !fading.length) return null;
     const f = new Float32Array(fields), g = new Float32Array(guide);
     for (const tr of moving) {

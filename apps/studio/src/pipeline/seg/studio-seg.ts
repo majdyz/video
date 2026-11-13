@@ -32,6 +32,20 @@ export type SegStatus = { on: boolean; phase: SegPhase; progress: number | null;
 export const WEAK_DEVICE_NOTE = "Basic is on. AI follows each subject precisely: a 33 MB download once, then a few minutes per clip on this phone";
 export const CRASHED_NOTE = "AI tracking crashed last time on this phone, so it's off; turn on to retry";
 
+/**
+ * Basic detection found no animal on the frame on screen (studio Snapshot.subjectBasic "none"): what the Subjects
+ * panel says instead of showing an untouched picture with no word (owner's hammerhead clip, 13 Nov: "nothing
+ * happens"). `line`: the status line under the controls; `short`: the hint in the pill on the picture (one or two
+ * rows at 390 px, beside its buttons); `ai`: offer the one-tap switch to AI (a clip, the AI not known to be
+ * unavailable here). Without it the way on is a tap on the animal (a tap seeds the basic detection too).
+ */
+export function basicNoneNote(s: SegStatus | null): { line: string; short: string; ai: boolean } {
+  const ai = !!s && !s.on && s.phase !== "unavailable";
+  return ai
+    ? { line: "Basic found no animals here. AI finds far or small ones.", short: "No animals found here", ai }
+    : { line: "Basic found no animals here. Tap one to add it.", short: "No animals found: tap one", ai };
+}
+
 function readPref(): boolean {
   try {
     if (new URLSearchParams(location.search).get("seg") === "ml") return true; // dev override
@@ -141,7 +155,9 @@ export function autoObjects(sel: SubjectSelection | null, t: number, boxes: read
 }
 
 /** seedObjects: an animal of the seed frame's own map is followed when its verdict is at least this (animalTarget). */
-export const SEED = { minTarget: 0.5, maxObjects: 4 };
+/** minArea: the engine also labels the small animals of a school now (aqua-fix BACKDROP.smallLo, for Basic); the AI still takes
+ * those through the region candidates (seeds.ts blobCandidates: points inside, the model's own test), as before. */
+export const SEED = { minTarget: 0.5, maxObjects: 4, minArea: 0.008 };
 
 /**
  * The subjects to follow, from one analysis of the seed frame (engine animalMap: deterministic for the frame), as ML
@@ -152,7 +168,7 @@ export const SEED = { minTarget: 0.5, maxObjects: 4 };
 export function seedObjects(am: AnimalMap | null, t: number, boxes: readonly PersonBox[]): SegObject[] {
   if (!am) return [];
   const { width: w, height: h } = am, out: SegObject[] = [];
-  const order = am.list.map((a, i) => ({ a, i })).filter(({ a }) => animalTarget(a) >= SEED.minTarget).sort((x, y) => y.a.area - x.a.area).slice(0, SEED.maxObjects);
+  const order = am.list.map((a, i) => ({ a, i })).filter(({ a }) => animalTarget(a) >= SEED.minTarget && a.area >= SEED.minArea).sort((x, y) => y.a.area - x.a.area).slice(0, SEED.maxObjects);
   for (const { i } of order) {
     const m = new Float32Array(w * h);
     let n = 0;
@@ -182,7 +198,7 @@ export function seedObjects(am: AnimalMap | null, t: number, boxes: readonly Per
  */
 export function seedRegions(blobs: readonly SubjectBlob[] | null, am: AnimalMap | null, validity = 1): SeedCandidate[] {
   const taken = new Set<number>();
-  if (am) am.list.map((a, i) => ({ a, i })).filter(({ a }) => animalTarget(a) >= SEED.minTarget).sort((x, y) => y.a.area - x.a.area).slice(0, SEED.maxObjects).forEach(({ i }) => taken.add(i + 1));
+  if (am) am.list.map((a, i) => ({ a, i })).filter(({ a }) => animalTarget(a) >= SEED.minTarget && a.area >= SEED.minArea).sort((x, y) => y.a.area - x.a.area).slice(0, SEED.maxObjects).forEach(({ i }) => taken.add(i + 1));
   const at = (u: number, v: number) => !!am && taken.has(am.labels[Math.min(am.height - 1, Math.max(0, Math.floor(v * am.height))) * am.width + Math.min(am.width - 1, Math.max(0, Math.floor(u * am.width)))]);
   return blobCandidates(blobs, at, SEEDS.probes, validity);
 }
