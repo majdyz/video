@@ -126,6 +126,17 @@ export const SEG = {
   goneS: 2,
   /** ...and the next look comes this long (s) after a subject was let go, for whatever swam in meanwhile. */
   lookSoonS: 1,
+  /** Find once, then follow: a look (segment start or top-up) is skipped while every subject followed into it is
+   * followed surely there (shown, confidence at least HOLD.lockConf, not running away): the tracker carries it, and
+   * a look would only find it again. Each look is a seek and an engine analysis on the main thread plus decoder runs
+   * (owner's iPhone: the tab died at the 16 s look every run). With every slot taken no look is made; with room
+   * for more, a phone short of memory (weakAutos) still looks this long (s) after its last look, for one that
+   * swims in, and other devices keep the topUpS cadence. */
+  followLookS: 16,
+  /** A followed subject that has shown nothing for this long (s) is dormant... */
+  dormantS: 1,
+  /** ...and is stepped by the tracker only once per this long (s) until it shows again (session.ts strideAt). */
+  dormantStepS: 1,
   /** Probability remap before the guided filter: drop sub-threshold haze, keep the 0.5 contour. */
   remapLo: 0.15,
   remapSpan: 0.7,

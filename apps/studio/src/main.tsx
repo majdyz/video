@@ -11,10 +11,12 @@ import "@fontsource-variable/fraunces/wght.css";
 import "./theme/tokens.css";
 import "./styles/app.css";
 import App from "./App.tsx";
+import { catchGlobalErrors, ErrorBoundary } from "./ui/error-boundary.tsx";
 
 // No StrictMode: the GPU contexts and the <video> element are owned by one
 // long-lived Studio session; a double mount would tear them down mid-init.
-createRoot(document.getElementById("root")!).render(<App />);
+catchGlobalErrors();
+createRoot(document.getElementById("root")!).render(<ErrorBoundary><App /></ErrorBoundary>);
 
 // No service worker inside the native app (apps/mobile): the bundle ships in
 // the binary and a SW cache would outlive app updates.

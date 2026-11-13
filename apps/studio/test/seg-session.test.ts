@@ -493,12 +493,13 @@ const sameFrames = (a: Map<number, SessionFrameOut>, b: Map<number, SessionFrame
 // to follow), and the subject is followed again as soon as it is back:
 //  - back at 8 s, the look at the 8 s start sees it: followed from 8 s;
 //  - back at 8.2 s and no look ever sees it (the engine is blind there): the object that lost it is followed on past
-//    the start (SEG.lostS) and knows it again at its next keyframe. At 2 keyframes a second it was dropped at 8 s;
+//    the start (SEG.lostS) and knows it again at its next real step. At 2 keyframes a second it was dropped at 8 s;
+//    gone for over SEG.dormantS it is dormant, stepped once a second (8.0, then 9.0 s; 8.5 s carried): back from 9 s;
 //  - back at 11.3 s (too long gone to follow on), seen by the look at 12 s: the stretch 8.5–11.5 s, which no step
 //    touched, was never filled at all (90 frames; the engine's masks, but "not done" to everything that counts).
 for (const [gone, sees, from, lite] of [
   [[5.5, 8], true, 8.1, true], [[5.5, 8], true, 8.1, false],
-  [[5.5, 8.2], false, 8.6, true],
+  [[5.5, 8.2], false, 9.1, true],
   [[5.5, 11.3], true, 12.1, true],
 ] as [[number, number], boolean, number, boolean][]) {
   const there = (t: number) => !(t > gone[0] + 1e-6 && t < gone[1] - 1e-6);

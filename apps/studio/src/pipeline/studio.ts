@@ -267,6 +267,8 @@ export function codecHelp(codecString: string | null | undefined): string | null
   return null;
 }
 
+/** This device's last export speed, megapixel-frames a second (Studio.exportEstimate). */
+const EXPORT_SPEED_KEY = "deepfix.exportMpxPerSec";
 const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null, note: null, paused: false, profile: null };
 const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null, refine: "idle", refineProgress: 0, bobbing: null, motionLog: null };
 
@@ -2810,6 +2812,33 @@ export class Studio {
    */
   exportCrashedLastTime = exportCrashed(lastCrash());
 
+  /**
+   * Before an export starts (the sheet): about how big the file will be (the bitrate the export picks, over the
+   * output length) and, once this device has exported before, about how long it takes (its last export's speed in
+   * megapixel-frames a second, EXPORT_SPEED_KEY). Null before a clip is open.
+   */
+  exportEstimate(): { mb: number; sec: number | null } | null {
+    const file = this.file, info = this.snap.info;
+    if (!file || !info || this.snap.kind !== "video") return null;
+    const clipLen = this.snap.duration || info.duration;
+    if (!(clipLen > 0)) return null;
+    const bitrate = bitrateFromSource(file.size, clipLen) ?? pickBitrate(info.displayW, info.displayH, info.fps);
+    const len = outputLength(this.trim, clipLen);
+    const mb = (bitrate * len) / 8 / 1e6 + (info.hasAudio ? (192_000 * len) / 8 / 1e6 : 0);
+    let sec: number | null = null;
+    try {
+      const mpxs = Number(localStorage.getItem(EXPORT_SPEED_KEY));
+      if (mpxs > 0) sec = (len * (info.fps || 30) * info.displayW * info.displayH) / 1e6 / mpxs;
+    } catch { /* storage blocked */ }
+    return { mb, sec };
+  }
+
+  /** After an export: this device's speed for the next estimate (exportEstimate). */
+  private noteExportSpeed(frames: number, elapsedMs: number, w: number, h: number): void {
+    if (!(frames > 0 && elapsedMs > 0)) return;
+    try { localStorage.setItem(EXPORT_SPEED_KEY, String((frames * w * h) / 1e6 / (elapsedMs / 1000))); } catch { /* storage blocked */ }
+  }
+
   /** The open clip (the export sheet looks up a resumable export of it). */
   get clipFile(): File | null {
     return this.file;
@@ -2882,6 +2911,7 @@ export class Studio {
       if (mode === "native") {
         const res = await this.runNative(media, file, info, bitrate, total, colourOn, ctrl, trim);
         console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (native), audio ${res.audioIncluded ? "kept" : "dropped"}`);
+        this.noteExportSpeed(res.frames, res.elapsedMs, info.displayW, info.displayH);
         this.setExp({ state: "done", progress: 1, etaSec: 0, frames: res.frames, detail: "", result: res });
         this.segDoneNote();
       } else {
@@ -2919,6 +2949,7 @@ export class Studio {
           if (!res) throw new Error("Export failed");
         }
         console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (${used}), ${res.blob.type}, audio ${res.audioIncluded ? "kept" : "dropped"}`);
+        this.noteExportSpeed(res.frames, res.elapsedMs, "width" in res ? (res.width as number) : info.displayW, "height" in res ? (res.height as number) : info.displayH);
         this.setExp({
           state: "done",
           progress: 1,

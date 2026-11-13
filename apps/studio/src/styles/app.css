@@ -119,8 +119,8 @@ a {
 
 .icon-btn {
   position: relative;
-  width: 40px;
-  height: 40px;
+  width: var(--touch, 44px);
+  height: var(--touch, 44px);
   flex: none;
   display: inline-grid;
   place-items: center;
@@ -349,8 +349,8 @@ a {
 }
 .timeline__play {
   grid-area: play;
-  width: 40px;
-  height: 40px;
+  width: var(--touch, 44px);
+  height: var(--touch, 44px);
   flex: none;
   display: grid;
   place-items: center;
@@ -480,7 +480,7 @@ a {
   font-variant-numeric: tabular-nums;
 }
 .trim__menu button {
-  height: 32px;
+  height: var(--touch, 44px);
   padding: 0 10px;
   border-radius: var(--r-xs);
   color: var(--text-1);
@@ -514,6 +514,16 @@ a {
   margin: -7px 0 0 -1px;
   border-radius: 1px;
   background: var(--trim-grip);
+}
+/* An invisible 44 px hit area around the 12 px handle (Fable review: the hardest target in the app). */
+.trim__handle::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  bottom: -5px;
+  left: 50%;
+  width: var(--touch, 44px);
+  transform: translateX(-50%);
 }
 .trim__handle--in {
   transform: translateX(-100%);
@@ -1153,7 +1163,7 @@ a {
 }
 .segmented button {
   flex: 1;
-  height: 38px;
+  height: var(--touch, 44px);
   padding: 0 var(--s-3);
   border-radius: calc(var(--r-md) - 3px);
   color: var(--tab-ink);
@@ -1416,8 +1426,8 @@ a {
 }
 /* The close icon lines up with the switch's right edge above. */
 .adv-drawer__close {
-  width: 36px;
-  height: 32px;
+  width: var(--touch, 44px);
+  height: var(--touch, 44px);
   margin-right: -9px;
 }
 .adv-toggle__chev {
@@ -2184,7 +2194,7 @@ a {
   text-overflow: ellipsis;
 }
 .select-bar .link-btn {
-  min-height: 32px;
+  min-height: var(--touch, 44px);
   padding: 0 var(--s-2);
 }
 /* Tap-to-neutral: a cross-hair cursor while the picture waits for the tap, a small ring where it landed. */
@@ -2238,7 +2248,7 @@ a {
 }
 .adv__actions .link-btn {
   padding: 0;
-  min-height: 32px;
+  min-height: var(--touch, 44px);
 }
 
 /* ------------------------------------------------------------ on the picture: rail, full screen */
@@ -2262,7 +2272,7 @@ a {
   gap: 3px;
   min-width: 56px;
   color: #fff;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1.15;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
@@ -2395,7 +2405,7 @@ a {
 }
 .is-narrow .topbar .export-btn {
   margin-left: auto;
-  height: 38px;
+  height: var(--touch, 44px);
   padding: 0 var(--s-4);
   border-radius: 999px;
   gap: var(--s-2);
@@ -2518,7 +2528,7 @@ a {
   color: var(--text-1);
 }
 .tool-sheet__done {
-  height: 38px;
+  height: var(--touch, 44px);
   padding: 0 var(--s-5);
   border-radius: 999px;
 }
@@ -2560,7 +2570,7 @@ a {
 .is-narrow .timeline__sel {
   position: absolute;
   top: -2px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 16px;
 }
 .is-narrow .timeline__clock {
@@ -2577,7 +2587,7 @@ a {
   left: 50%;
   transform: translateX(-50%);
   height: 20px;
-  font-size: 11px;
+  font-size: 12px;
 }
 .is-narrow .trim {
   margin: 0;
@@ -2727,7 +2737,7 @@ a {
 }
 .tool-dock__enable {
   align-self: center;
-  height: 40px;
+  height: var(--touch, 44px);
   padding: 0 var(--s-5);
   border-radius: 999px;
   background: #fff;
@@ -2796,7 +2806,7 @@ a {
   gap: 4px;
 }
 .bubble__value {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   opacity: 0.72;
   font-variant-numeric: tabular-nums;
@@ -2856,7 +2866,7 @@ a {
 }
 .is-narrow .rail-btn {
   min-width: 52px;
-  font-size: 10px;
+  font-size: 12px;
 }
 .is-narrow .rail-btn > svg {
   padding: 9px;
@@ -2875,18 +2885,18 @@ a {
    its right edge (a followed subject swam under it). The rail folds to a slim column of small, more see-through
    discs: no labels (still read to assistive tech), the open tool's disc stays solid white. */
 .is-narrow.sheet-open .canvas-rail {
-  gap: 6px;
+  gap: 14px;
   right: calc(6px + env(safe-area-inset-right));
 }
 .is-narrow.sheet-open .rail-btn {
   position: relative;
   min-width: 0;
 }
-/* The discs are small; the finger's target is not (36 × 44 px, reaching left of the disc and into the gaps). */
+/* The discs are small; the finger's target is not (44 × 44 px on a 44 px pitch, reaching into the gaps). */
 .is-narrow.sheet-open .rail-btn::after {
   content: "";
   position: absolute;
-  inset: -3px -6px -3px -8px;
+  inset: -7px -7px -7px -7px;
 }
 .is-narrow.sheet-open .rail-btn > span {
   position: absolute;
@@ -2957,7 +2967,7 @@ a {
   font-weight: 500;
 }
 .select-bar .link-btn {
-  min-height: 30px;
+  min-height: var(--touch, 44px);
   padding: 0 10px;
   border-radius: 999px;
 }
@@ -3197,6 +3207,11 @@ a {
   font-size: var(--fs-xs);
   font-weight: 500;
 }
+/* A tap opens Subjects with the outlines (App.tsx). The pill itself lets taps through to the picture otherwise. */
+.pill--subject.is-tappable {
+  pointer-events: auto;
+  cursor: pointer;
+}
 .pill--subject.is-ai {
   padding-left: 12px;
 }
@@ -3206,4 +3221,43 @@ a {
 }
 .is-narrow .pill--subject.is-under-bar {
   top: calc(var(--topbar-h) + env(safe-area-inset-top) + var(--s-2) + 46px);
+}
+
+/* Subjects → Detection: Basic | AI (panels.tsx). */
+.seg-choice {
+  display: flex;
+  gap: 8px;
+}
+.seg-choice .btn {
+  flex: 1;
+  min-height: 44px;
+}
+.seg-choice .btn.is-on {
+  background: var(--accent, #5ad1ff);
+  color: var(--on-accent, #04121c);
+  border-color: transparent;
+}
+
+/* ErrorBoundary (ui/error-boundary.tsx). */
+.crash-screen {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px 16px;
+  text-align: center;
+}
+
+/* A minimised export: the Export button carries its progress (App.tsx). */
+.export-btn.is-running {
+  font-variant-numeric: tabular-nums;
+  animation: export-pulse 1.6s ease-in-out infinite;
+}
+@keyframes export-pulse {
+  50% { opacity: 0.75; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .export-btn.is-running { animation: none; }
 }

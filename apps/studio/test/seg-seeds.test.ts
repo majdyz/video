@@ -361,10 +361,11 @@ await quiet(async () => {
   const r = run(f, 20, { autoCap: 2 });
   await r.done;
   assert.deepEqual(r.errors, []);
-  // Every slot is taken: the regular starts only (0, 8, 16 s), and one look a second after a slot is given up.
-  assert.deepEqual(r.looks.map((x) => x.t), [0, 8, 12.5, 16]);
-  assert.deepEqual(r.looks.map((x) => x.search), [true, true, false, true]);
-  assert.deepEqual(r.looks.map((x) => x.found), [2, 0, 1, 0], "0 s: the two largest; 8 s: all three are regions again, two followed already and no room for the third; 12.5 s: B has left, C comes in");
+  // Every slot is taken and both subjects are followed surely: no look at the regular starts (8, 16 s: find once,
+  // then follow, SEG.followLookS), only the one a second after a slot is given up.
+  assert.deepEqual(r.looks.map((x) => x.t), [0, 12.5]);
+  assert.deepEqual(r.looks.map((x) => x.search), [true, false]);
+  assert.deepEqual(r.looks.map((x) => x.found), [2, 1], "0 s: the two largest; 12.5 s: B has left, C comes in");
   // A is followed by one track from the first keyframe to the last; B until it has shown nothing for SEG.goneS; C
   // from the look a second after that.
   assert.deepEqual(tracks(f, "A"), [{ key: "1f", from: 0, to: 20 }], "one id, one memory, all through");
@@ -385,9 +386,9 @@ await quiet(async () => {
   const r = run(f, 20, { autoCap: 3 });
   await r.done;
   assert.deepEqual(r.errors, []);
-  assert.deepEqual(r.looks.map((x) => x.t), [0, 4, 8, 16], "room for a third: a look at 4 s; full from there: the regular starts only");
-  assert.deepEqual(r.looks.map((x) => x.search), [true, false, true, true], "the extra look asks about the engine's regions only (no grid)");
-  assert.deepEqual(r.looks.map((x) => x.found), [2, 1, 0, 0]);
+  assert.deepEqual(r.looks.map((x) => x.t), [0, 4], "room for a third: a look at 4 s; full from there and all followed surely: no more looks (find once, then follow)");
+  assert.deepEqual(r.looks.map((x) => x.search), [true, false], "the extra look asks about the engine's regions only (no grid)");
+  assert.deepEqual(r.looks.map((x) => x.found), [2, 1]);
   assert.deepEqual(tracks(f, "A"), [{ key: "1f", from: 0, to: 20 }]);
   assert.deepEqual(tracks(f, "B"), [{ key: "2f", from: 0, to: 20 }]);
   assert.deepEqual(tracks(f, "C"), [{ key: "3f", from: 4, to: 20 }], "C came in at 1.5 s: followed from the look at 4 s, not from the next regular start at 8 s");

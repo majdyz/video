@@ -99,16 +99,16 @@ import type { SessionFrameOut } from "../src/pipeline/seg/session.ts";
 {
   const st = (p: Partial<SegStatus>): SegStatus => ({ on: true, phase: "ready", progress: null, note: null, ...p });
   const tracking = st({ phase: "tracking", progress: 0.07 });
-  assert.deepEqual(subjectChip("mask", tracking, "5 min left", null, true), { tone: "ai", line: "AI subject ✓", sub: "Following the AI 7%" });
-  assert.deepEqual(subjectChip("none", tracking, null, null, true), { tone: "ai", line: "AI: no subject here", sub: "Following the AI 7%" });
-  assert.deepEqual(subjectChip("mask", tracking, "5 min left", null, false), { tone: "ai", line: "AI subject ✓", sub: "Rest of clip 7%" });
-  assert.deepEqual(subjectChip("mask", st({}), null, null, true), { tone: "ai", line: "AI subject ✓", sub: null }, "the pass is through: nothing to follow");
+  assert.deepEqual(subjectChip("mask", tracking, "5 min left", null, true), { tone: "ai", line: "AI: subject outlined", sub: "AI 7% · view follows it" });
+  assert.deepEqual(subjectChip("none", tracking, null, null, true), { tone: "ai", line: "AI: no subject here", sub: "AI 7% · view follows it" });
+  assert.deepEqual(subjectChip("mask", tracking, "5 min left", null, false), { tone: "ai", line: "AI: subject outlined", sub: "Rest of clip 7%" });
+  assert.deepEqual(subjectChip("mask", st({}), null, null, true), { tone: "ai", line: "AI: subject outlined", sub: null }, "the pass is through: nothing to follow");
   // The panel's line under the toggle no longer repeats the chip's percentage.
   assert.doesNotMatch(segStatusText(tracking)!, /%|Finding subjects/);
   assert.match(segStatusText(tracking)!, /export any time/);
   assert.equal(segStatusText(st({ phase: "looking" })), segStatusText(tracking));
   assert.match(segStatusText(st({ phase: "download", progress: 0.4 }))!, /Downloading the model… 40%/, "the download's progress is the panel's own");
-  console.log("chip: \"Following the AI 7%\" in follow mode; the panel no longer repeats the pass's progress: ok");
+  console.log("chip: \"AI 7% · view follows it\" in follow mode; the panel no longer repeats the pass's progress: ok");
 }
 
 // ---------------------------------------------------------------- a failure after the page was in the background

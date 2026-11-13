@@ -104,6 +104,8 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
   const segChoice = !photo && open && exp.state === "idle" ? studio.segExportChoice() : null;
   const choice = segChoice ? exportChoice(segChoice) : null;
   const bigSource = !!info && Math.min(info.displayW, info.displayH) > 1080;
+  // Size (and, after a first export on this device, time) before starting (Fable review, 13 Nov).
+  const estimate = !photo && open && exp.state === "idle" ? studio.exportEstimate() : null;
 
   // In the app the output lives (or is copied) in the sandbox and goes to
   // Photos / the gallery and the system share sheet through the plugin.
@@ -157,7 +159,7 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
   const outSize = info ? `${info.displayW}×${info.displayH}` : "–";
 
   return (
-    <Sheet open={open} onClose={onClose} title={exp.state === "done" ? "Ready" : photo ? "Export photo" : "Export"} locked={running} className="sheet--export">
+    <Sheet open={open} onClose={onClose} title={exp.state === "done" ? "Ready" : photo ? "Export photo" : "Export"} locked={false} className="sheet--export">
       <div className="export">
         <div hidden={exp.state === "idle" || exp.state === "error"} className={`export__preview${hasThumb ? " has-frame" : ""}`} style={{ aspectRatio: String(aspect), height: `min(30dvh, calc((min(100vw, 460px) - 48px) / ${aspect.toFixed(4)}))` }}>
           <canvas ref={thumbRef} aria-hidden="true" />
@@ -173,6 +175,7 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
             <dl className="export__facts">
               <div><dt>Processing</dt><dd>{processingChain(chainTools, photo ? 1 : visibleSegments(snap.segments.cuts, snap.trim, duration).length, !photo && snap.seg.on && snap.seg.phase !== "unavailable")}</dd></div>
               <div><dt>Output</dt><dd>{photo ? `${outSize} · JPEG` : `${outSize}${info?.fps ? ` · ${Math.round(info.fps)} fps` : ""} · MP4${info?.hasAudio ? " · original audio" : ""}`}</dd></div>
+              {!photo && estimate && <div><dt>Estimate</dt><dd>{estimate.mb >= 1000 ? `about ${(estimate.mb / 1000).toFixed(1)} GB` : `about ${Math.max(1, Math.round(estimate.mb))} MB`}{estimate.sec !== null ? ` · about ${estimate.sec < 90 ? `${Math.max(5, Math.round(estimate.sec / 5) * 5)} s` : `${Math.round(estimate.sec / 60)} min`} on this device` : ""}</dd></div>}
               {!photo && <div><dt>Length</dt><dd>{snap.trim ? `${selectionLabel(snap.trim, duration)} · ${formatTimecode(snap.trim.start)}–${formatTimecode(snap.trim.end)}` : formatTime(duration)}</dd></div>}
               {photo && snap.photoLimited && <div><dt>Note</dt><dd>Original is {snap.photoLimited.w}×{snap.photoLimited.h}; this browser renders at most {outSize}</dd></div>}
             </dl>
@@ -227,7 +230,7 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
             <p className="export__note">{exp.paused ? "Paused while the app is in the background: it carries on when you come back."
               : exportMode === "realtime" ? "Keep this screen open: switching away pauses the recording."
               : exportMode === "native" ? "You can switch apps: the export carries on or pauses until you come back, and progress shows on the Lock Screen or in notifications."
-              : "Keep this screen open while it renders. If it's interrupted, it picks up where it stopped."}</p>
+              : "You can close this sheet: the Export button shows the progress. Keep the app open while it renders; if it's interrupted, it picks up where it stopped."}</p>
           </>
         )}
 

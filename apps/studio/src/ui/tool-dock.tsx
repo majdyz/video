@@ -124,7 +124,7 @@ function subjectParams(tools: ToolsState, set: Setter, subjects: SubjectControls
   ];
   const warm = c.popWarmth ?? DEFAULT_COLOUR.popWarmth ?? 0;
   ps.push({ id: "warm", label: "Warmth", value: warm ? pct(warm) : "Off", slider: { value: warm, min: 0, max: 100, def: DEFAULT_COLOUR.popWarmth, format: (v) => (v < 1 ? "Off" : String(Math.round(v))), onChange: (v) => set((t) => ({ ...t, colour: { ...t.colour, popWarmth: v } })) } });
-  if (!photo && subjects.ai) ps.push({ id: "ai", label: "AI detect", value: subjects.ai.on ? "On" : "Off", toggle: { on: subjects.ai.on, onChange: subjects.ai.onToggle } });
+  if (!photo && subjects.ai) ps.push({ id: "ai", label: "Detection", value: subjects.ai.on ? "AI" : "Basic", toggle: { on: subjects.ai.on, onChange: subjects.ai.onToggle } });
   ps.push({ id: "reset", label: "Reset picks", action: subjects.onReset, disabled: !subjects.corrections });
   return ps;
 }

@@ -217,13 +217,15 @@ export function SubjectsPanel({ tools, setTools, subjects, colourOn, disabled, p
             format={(v) => (v < 1 ? "Off" : String(Math.round(v)))} onChange={(v) => up({ popWarmth: v })} />
           <p className="adv__hint">Warms the subjects (red back into a shark's skin) while the water keeps its colour.</p>
           {!photo && subjects.ai && (
-            <label className={`lookrow${subjects.ai.on ? " is-on" : ""}`}>
-              <span className="lookrow__text">
-                <span className="lookrow__name">AI detection</span>
-                <small role="status" aria-live="polite">{subjects.ai.status ?? "Follows each subject through the clip with an on-device model (33 MB, once)"}</small>
-              </span>
-              <Switch checked={subjects.ai.on} onChange={subjects.ai.onToggle} label="AI subject detection" disabled={disabled} />
-            </label>
+            // Basic or AI, a choice of its own (owner, 13 Nov: basic is sometimes what you want, and as a switch it
+            // read as "AI off" only): basic is instant and rough, the AI follows each subject precisely but takes time.
+            <div className="adv__field">
+              <span className="adv__label">Detection <small role="status" aria-live="polite">{subjects.ai.on ? (subjects.ai.status ?? "AI: follows each subject through the clip with an on-device model (33 MB, once)") : "Basic: instant, rougher edges. AI: precise, takes a few minutes"}</small></span>
+              <div className="seg-choice" role="radiogroup" aria-label="Subject detection">
+                <button type="button" role="radio" aria-checked={!subjects.ai.on} className={`btn btn--ghost${!subjects.ai.on ? " is-on" : ""}`} disabled={disabled} onClick={() => subjects.ai!.on && subjects.ai!.onToggle(false)}>Basic</button>
+                <button type="button" role="radio" aria-checked={subjects.ai.on} className={`btn btn--ghost${subjects.ai.on ? " is-on" : ""}`} disabled={disabled} onClick={() => !subjects.ai!.on && subjects.ai!.onToggle(true)}>AI</button>
+              </div>
+            </div>
           )}
           <div className="adv__actions">
             <button type="button" className="link-btn" onClick={subjects.onReset} disabled={!subjects.corrections || disabled}>Reset selection</button>

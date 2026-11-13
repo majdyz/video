@@ -222,6 +222,8 @@ type ObjState = {
   viaF: { m: Float32Array; luma: Float32Array } | null;
   /** Forward keyframes carried, not stepped at (the memory bank's clock counts real steps only). */
   skipF: number;
+  /** Clip time of its last real forward tracker step (strideAt: a dormant subject is stepped once per SEG.dormantStepS). */
+  realF: number;
   /** The last real forward step was an easy one: a mask, no fresh prompt, no runaway, not a hard step. */
   calmF: boolean;
   /** Why it was not ("" when it was): first, prompt, runaway, hard, empty (the profile counts them: strideAt). */
@@ -296,7 +298,7 @@ export class SegSession {
   private asked = NaN;
   /** Steps done (for the progress). */
   private stepsDone = 0;
-  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0, extraKeys: 0, carried: 0, runMs: 0, held: 0, rechecks: 0, recovered: 0, strided: 0, strideOdd: 0, strideBig: 0, stridePrompt: 0, strideFirst: 0, strideOther: 0, gridsSkipped: 0, flowPx: 0, flows: 0 };
+  private prof: SessionProfile = { decodeMs: 0, decodes: 0, guardMs: 0, fillMs: 0, filledFrames: 0, productMs: 0, frames: 0, waitSeedsMs: 0, extraKeys: 0, carried: 0, runMs: 0, held: 0, rechecks: 0, recovered: 0, strided: 0, strideOdd: 0, strideBig: 0, stridePrompt: 0, strideFirst: 0, strideOther: 0, gridsSkipped: 0, skippedLooks: 0, dormant: 0, flowPx: 0, flows: 0 };
   private waitSince = 0;
 
   private model: EdgeTam;
@@ -405,7 +407,7 @@ export class SegSession {
   }
 
   private newObj(o: SegObject & { id: number }, auto: boolean, seg: number, hidden: boolean, fwd: number[], bwd: number[]): ObjState {
-    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0, ranF: 0, ranB: 0, keptF: false, keptB: false, lastF: 0, lastB: 0, anchor: 0, anchor0: 0, anchorT: 0, viaF: null, skipF: 0, calmF: false, uncalm: "first" };
+    return { o, auto, seg, hidden, peek: false, backFirst: false, keys: new Map(), shown: new Set(), conf: new Map(), fi: 0, bi: 0, prevF: null, prevB: null, fwd, bwd, hard: false, fineF: 0, fineB: 0, lockF: newLock(), lockB: newLock(), sureF: null, sureB: null, emptyB: 0, ranF: 0, ranB: 0, keptF: false, keptB: false, lastF: 0, lastB: 0, anchor: 0, anchor0: 0, anchorT: 0, viaF: null, skipF: 0, realF: -Infinity, calmF: false, uncalm: "first" };
   }
 
   /** Canonical frame of segment k (k = 0: the first seeds' frame; then every SEG.segmentS, snapped). */
@@ -564,6 +566,7 @@ export class SegSession {
     if (!objs) return false;
     this.given.delete(t0);
     this.seeded.add(t0);
+    if (!this.skippedAt.has(t0)) this.lookedAt = t0;
     if (this.waitSince) { this.prof.waitSeedsMs += performance.now() - this.waitSince; this.waitSince = 0; }
     const t1 = this.segStarts[k + 1] ?? this.base[this.base.length - 1];
     const span = this.stepsBetween(t0, t1, [t0, t1]);
@@ -627,8 +630,35 @@ export class SegSession {
     if (k < 0 || !this.seeded.has(this.segStarts[k])) return;
     const r = this.addStart(k, t + SEG.lookSoonS, false);
     if (r === null) return;
+    this.mustLook.add(r);
     for (const s of alive) if (s.fwd[s.fwd.length - 1] > r + 1e-6) s.fwd = s.fwd.filter((x) => x <= r + 1e-6);
   }
+  /** The last segment start a look was made at (takeSeeds; not a skipped one). */
+  private lookedAt = -Infinity;
+  /** Starts whose look was skipped (followedSurely). */
+  private skippedAt = new Set<number>();
+  /** Starts that look whatever is followed: a slot was given up just before (lookSoon). */
+  private mustLook = new Set<number>();
+
+  /**
+   * Whether the look at segment start k can be skipped (SEG.followLookS): something is followed into it, and every
+   * subject followed into it is shown on its frame with a sure mask (confidence HOLD.lockConf or more, not running
+   * away) and either every slot is taken, or the phone is short of memory and the last look was less than
+   * SEG.followLookS ago.
+   * Decided from the pass's own masks only, so a replay skips the same looks.
+   */
+  private followedSurely(k: number): boolean {
+    const t = this.segStarts[k];
+    if (this.mustLook.has(t)) return false;
+    const into = this.endedAt(t).filter((s) => s.o.kind === "include" && !s.hidden);
+    if (!into.length) return false;
+    if (!into.every((s) => s.shown.has(t) && (s.conf.get(t) ?? 0) >= HOLD.lockConf && s.ranF === 0)) return false;
+    if (into.length >= this.autoCap) return true;
+    // Room for more: a phone short of memory (cap SEG.weakAutos) looks only every SEG.followLookS; elsewhere the
+    // looks keep their cadence (SEG.topUpS: a subject that swims in is picked up within it).
+    return this.autoCap <= SEG.weakAutos && t - this.lookedAt < SEG.followLookS - 1e-6;
+  }
+
   /** Segment starts whose carry-over is decided (carryOver: once each). */
   private carriedAt = new Set<number>();
 
@@ -1201,6 +1231,13 @@ export class SegSession {
             await yieldNow();
             continue;
           }
+          // Find once, then follow: a look the followed subjects don't need is not made (SEG.followLookS).
+          if (k > 0 && !this.seeded.has(ts) && this.followedSurely(k)) {
+            this.given.set(ts, []);
+            this.skippedAt.add(ts);
+            this.prof.skippedLooks++;
+            console.info(`[seg] look at ${ts.toFixed(2)} s skipped: the followed subject(s) are tracked surely`);
+          }
           if (!this.takeSeeds(k)) {
             if (this.asked !== ts) { this.asked = ts; this.waitSince = performance.now(); this.ev.needSeeds(k, ts, !this.noSearch.has(ts)); }
             break;
@@ -1547,6 +1584,7 @@ export class SegSession {
     if (goFwd) {
       s.prevF = { m, luma };
       s.viaF = null;
+      s.realF = t;
       s.uncalm = first ? "first" : reprompts ? "prompt" : ranAway ? "runaway" : s.hard ? "hard" : area(m) > 0 ? "" : "empty";
       s.calmF = s.uncalm === "";
       s.fi++;
@@ -1708,6 +1746,13 @@ export class SegSession {
       calm: s.calmF && s.ranF === 0 && s.fineF <= 0,
       area: area(s.prevF.m) / (this.mw * this.mh),
     };
+    // Dormant: a subject that has shown nothing for SEG.dormantS (out of the picture, behind a rock) is stepped only
+    // once per SEG.dormantStepS until it shows again, its keyframes between carried (empty). Every step is a third
+    // of the pass (memory attention 1.7 s each on a phone's WASM), and an empty stretch had them all.
+    if (!o.start && !o.last && s.ranF === 0 && s.fi > 0) {
+      const seen = Math.max(-Infinity, ...s.shown);
+      if (t - seen >= SEG.dormantS - 1e-6 && t - s.realF < SEG.dormantStepS - 1e-6) { this.prof.dormant++; return true; }
+    }
     const due = strideDue(o);
     // For the profile: of the keyframes a subject could have been carried over (its place on the grid), how many
     // were, and what stood in the way of the rest (too large, a fresh prompt at the step before, a new track's

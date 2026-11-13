@@ -29,7 +29,7 @@ export type SegPhase = "off" | "download" | "starting" | "ready" | "looking" | "
  * session died while the model worked (crumbs.ts aiCrashedLast), so AI was turned off for this one (until turned on). */
 export type SegStatus = { on: boolean; phase: SegPhase; progress: number | null; note: string | null; weak?: boolean; crashed?: boolean };
 
-export const WEAK_DEVICE_NOTE = "AI detection starts off on this phone: the model is slow here and can run out of memory. Turn it on to try it";
+export const WEAK_DEVICE_NOTE = "Basic is on. AI follows each subject precisely: a 33 MB download once, then a few minutes per clip on this phone";
 export const CRASHED_NOTE = "AI tracking crashed last time on this phone, so it's off; turn on to retry";
 
 function readPref(): boolean {
@@ -233,7 +233,8 @@ export type SubjectChip = { tone: "ai" | "busy" | "basic"; line: string; sub: st
 
 /**
  * The one chip on the preview that says what the picture is graded with right now (Subject pop on a clip):
- *   "AI subject ✓"                    this frame's own AI mask is in use (while the pass still runs: how far it is);
+ *   "AI: subject outlined"            this frame's own AI mask is in use (while the pass still runs: how far it is,
+ *                                     "AI 44% · view follows it" in follow mode: the playhead keeps up with the AI);
  *   "AI: no subject here"             the AI has this frame and found nothing to pop on it ("AI unsure, not applied"
  *                                     when it has a mask it does not trust enough to pop);
  *   "Finding subjects 73%"            the pass is running and has not reached this frame (second line: time left),
@@ -254,8 +255,9 @@ export function subjectChip(frame: SegFrameState, s: SegStatus, eta: string | nu
   const pc = s.progress !== null ? ` ${Math.round(s.progress * 100)}%` : "";
   const tracking = s.on && s.phase === "tracking";
   // Follow mode (studio.ts followStep): the frame on screen is the one the pass has just finished.
-  const rest = follow ? `Following the AI${pc || "…"}` : `Rest of clip${pc || "…"}`;
-  if (s.on && frame === "mask") return { tone: "ai", line: "AI subject ✓", sub: tracking ? rest : null };
+  // ("Following the AI 44%" read as "following the subject" or "following the AI?": owner, 13 Nov.)
+  const rest = follow ? `AI${pc || "…"} · view follows it` : `Rest of clip${pc || "…"}`;
+  if (s.on && frame === "mask") return { tone: "ai", line: "AI: subject outlined", sub: tracking ? rest : null };
   if (s.on && frame === "none") return { tone: "ai", line: "AI: no subject here", sub: tracking ? rest : null };
   // The playhead's look is on this frame: say so (the pass's percentage alone read as "nothing is happening here").
   if (tracking && peek === "looking") return { tone: "busy", line: "Looking at this frame…", sub: `Rest of clip${pc || "…"}` };
@@ -698,7 +700,7 @@ export function profileLine(p: Record<string, number>, ep = ""): string {
     `attn ${per("attendMs", "steps")} dec ${per("decoderMs", "steps")} mem ${per("memEncMs", "steps")}ms×${n("steps")} steps`,
     `keys ${n("keyframes")} (${n("fps")}/s +${n("extraKeys")} extra) objs ${n("objects")}`,
     `decode ${s("decodeMs")}s×${n("decodes")} (${n("restarts")} restarts)`,
-    `guard ${s("guardMs")}s fill ${s("fillMs")}s×${n("filledFrames")} maps ${s("productMs")}s seeds ${s("waitSeedsMs")}s${n("gridsSkipped") ? ` (${n("gridsSkipped")} grids skipped)` : ""}${n("flowPxS") ? ` flow ${n("flowPxS").toFixed(1)}px/s` : ""}`,
+    `guard ${s("guardMs")}s fill ${s("fillMs")}s×${n("filledFrames")} maps ${s("productMs")}s seeds ${s("waitSeedsMs")}s${n("gridsSkipped") ? ` (${n("gridsSkipped")} grids skipped)` : ""}${n("skippedLooks") ? ` (${n("skippedLooks")} looks skipped)` : ""}${n("dormant") ? ` (${n("dormant")} dormant)` : ""}${n("flowPxS") ? ` flow ${n("flowPxS").toFixed(1)}px/s` : ""}`,
     // The stride: steps carried of the keyframes a subject could have been carried over, and what kept the rest.
     ...(n("strideOdd") ? [`stride ${n("strided")}/${n("strideOdd")} (large ${n("strideBig")}, re-prompted ${n("stridePrompt")}, new ${n("strideFirst")}, other ${n("strideOther")})`] : []),
     `total ${s("runMs")}s for ${n("clipS").toFixed(1)}s${n("heapMB") ? ` · heap ${n("heapMB")} MB` : ""}`,
@@ -845,12 +847,12 @@ export class SubjectSeg {
           dispose: (w) => w.dispose(),
           onFailed: (e, a, retrying) => {
             // The first failure's own words: the one worth having on a phone (About, the crash crumbs).
-            crumb(`ai: model start failed (${a.wasm ? "wasm" : "webgpu"}${a.threads ? `, ${a.threads} thr` : ""}): ${errText(e)}${retrying ? "; once more in a fresh worker (wasm, 1 thread)" : ""}`);
+            crumb(`ai: model start failed (${a.wasm ? "wasm" : "webgpu"}${a.threads ? `, ${a.threads} thr` : ""}): ${errText(e)}${retrying ? "; again in a fresh worker (wasm, 1 thread)" : ""}`);
             segLog(`model failed to start${retrying ? "; trying a fresh worker on WASM with one thread" : ""}`, e);
             if (retrying) { aiWorking(true, "wasm"); this.set({ phase: "starting", progress: null }); }
           },
         });
-        if (tries > 1) crumb("ai: model started at the second try");
+        if (tries > 1) crumb(`ai: model started at try ${tries}`);
         m.onEvent = (e) => this.onEvent(e);
         this.model = m;
         // What it got (WebGPU falls back to WASM in the worker when no adapter comes).

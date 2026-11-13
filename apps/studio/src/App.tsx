@@ -151,9 +151,17 @@ export default function App() {
   const onFrameSize = useCallback((w: number, h: number) => studio.setStageSize(w, h, window.devicePixelRatio), [studio]);
   const onZoom = useCallback((z: number) => studio.setZoom(z), [studio]);
   const exporting = s.exp.state === "preparing" || s.exp.state === "running";
+  const inBatchRef = useRef(false);
+  // A minimised export that finishes (or fails) brings its sheet back: the file to save, or what went wrong.
+  const expState = s.exp.state;
+  useEffect(() => {
+    if ((expState === "done" || expState === "error") && !inBatchRef.current) setExportOpen(true);
+  }, [expState]);
   const ready = s.phase === "ready";
   // Colour on and its analysis (the clip's scene lock, the photo's balance) not in yet: an export now would come out
   // without it, so Export waits (the panel says "Reading the water…").
+  // (Export stays on while this is pending (Fable review, 13 Nov: a greyed Export for the first 10–30 s was the first
+  // impression): an export started meanwhile waits for the colour ("Reading the water…", studio.ts exportVideo).)
   const colourPending = ready && tools.colour.enabled && !s.colourProfiled && studio.hasColourEngine;
   const photo = s.kind === "photo";
 
@@ -327,6 +335,7 @@ export default function App() {
     };
   }, [batchKey]);
   const inBatch = !!batch && batch.length > 1 && s.phase !== "empty";
+  inBatchRef.current = inBatch;
   const openSample = () => {
     setSplit(0.5);
     setSelLook(0);
@@ -385,7 +394,7 @@ export default function App() {
     : null);
   // Subject pop on a clip: one chip says what the frame on screen is graded with (its AI mask, the search still
   // running, or the basic detection), in place of the old "AI subjects 73% · about a minute left" pill that wrapped.
-  const chip = !pill && ready && s.subjectFrame && !exporting && !immersive ? subjectChip(s.subjectFrame.ai, s.seg, segEtaShort, s.subjectFrame.peek ?? null, s.segFollow) : null;
+  const chip = !pill && ready && s.subjectFrame && s.seg.on && !exporting && !immersive ? subjectChip(s.subjectFrame.ai, s.seg, segEtaShort, s.subjectFrame.peek ?? null, s.segFollow) : null;
   // Follow mode off while the pass runs: the chip offers it ("watch it work").
   const canFollow = !!chip && s.seg.on && s.seg.phase === "tracking" && !s.segFollow;
 
@@ -485,11 +494,10 @@ export default function App() {
   );
 
   const exportBtn = (
-    <button type="button" className="btn btn--primary export-btn" onClick={() => { studio.pause(); if (inBatch) setBatchOpen(true); else setExportOpen(true); }} disabled={!ready || !s.canExport || colourPending}
-      title={colourPending ? `Export unlocks once the colour analysis of this ${photo ? "photo" : "clip"} is done` : undefined}>
-      {/* While the colour is read, the stage pill ("Profiling colour…") is the one spinner; the button just waits greyed out. */}
+    <button type="button" className={`btn btn--primary export-btn${exporting && !exportOpen && !inBatch ? " is-running" : ""}`} onClick={() => { studio.pause(); if (inBatch) setBatchOpen(true); else setExportOpen(true); }} disabled={!ready || !s.canExport}>
       <IconExport size={18} />
-      <span>{inBatch ? (wide ? `Export all ${batch!.length}` : `Export ${batch!.length}`) : "Export"}</span>
+      {/* A running export minimised (the sheet closed while it runs): the button is its progress, a tap brings it back. */}
+      <span>{inBatch ? (wide ? `Export all ${batch!.length}` : `Export ${batch!.length}`) : exporting && !exportOpen ? `${Math.round(s.exp.progress * 100)}%` : "Export"}</span>
     </button>
   );
   const subjectsOn = !!panelTools.colour.subjectPop && tools.colour.enabled;
@@ -596,7 +604,11 @@ export default function App() {
               <div className="pill" role="status"><span className="pill__dot" aria-hidden="true" />{pill}</div>
             )}
             {chip && !pickActive && (
-              <div className={`pill pill--subject is-${chip.tone}${selectActive ? " is-under-bar" : ""}`} role="status" data-subject-chip={chip.tone}>
+              <div className={`pill pill--subject is-${chip.tone}${selectActive ? " is-under-bar" : ""}${!selectActive && popOn ? " is-tappable" : ""}`} role="status" data-subject-chip={chip.tone}
+                // A tap on the chip shows what it is about: Subjects opens with the AI's outlines on this frame, where a
+                // tap on the picture adds or removes a subject ("what does the check mark mean": owner, 13 Nov).
+                onClick={!selectActive && popOn ? () => openPane("subjects") : undefined}
+                title={!selectActive && popOn ? "Show the outline" : undefined}>
                 {chip.tone === "busy" && <span className="pill__dot" aria-hidden="true" />}
                 <span className="pill__lines"><span>{chip.line}</span>{chip.sub && <small>{chip.sub}</small>}</span>
                 {canFollow && <button type="button" className="pill__action" data-follow-ai onClick={(e) => { e.stopPropagation(); studio.setSegFollow(true); }}>Follow AI</button>}

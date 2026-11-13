@@ -13,7 +13,7 @@
     "build:aqua": "pnpm --filter aqua-fix build",
     "build:motion": "pnpm --filter motion-fix build",
     "preview": "vite preview --outDir dist",
-    "predeploy": "pnpm check:shaders && pnpm build",
+    "predeploy": "pnpm check:shaders && pnpm --filter studio test && pnpm build",
     "deploy": "gh-pages -d dist --nojekyll",
     "dev:dewarp": "pnpm --filter dewarp dev",
     "build:dewarp": "pnpm --filter dewarp build",

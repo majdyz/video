@@ -1,4 +1,4 @@
-// AI subjects, starting the model: one more try in a fresh worker before "not available on this device".
+// AI subjects, starting the model: more tries in fresh workers before "not available on this device".
 //
 // The runtime (onnxruntime-web) remembers a failed start for the life of its instance: once its WASM init has
 // thrown (out of memory while the threads' heaps are made, a WebGPU attempt that took the page's memory with it),
@@ -12,11 +12,16 @@
 export const RETRY_THREADS = 1;
 
 /** One try: which worker (the plain WASM runtime, or the one with WebGPU) and how many threads (undefined: the device's). */
-export type LoadAttempt = { wasm: boolean; threads?: number };
+export type LoadAttempt = { wasm: boolean; threads?: number; waitMs?: number };
+
+/** The last try waits this long first (ms): an out-of-memory start on a phone (owner's iPhone, a 50 s clip in a
+ * fresh tab: both tries "RangeError: Out of memory") often has the memory back once the page has settled and the
+ * failed workers' heaps are collected. */
+export const LAST_WAIT_MS = 3000;
 
 /** The tries for a model that would start as `first`: that, then plain WASM on RETRY_THREADS threads. */
 export function loadAttempts(first: LoadAttempt): LoadAttempt[] {
-  return [first, { wasm: true, threads: RETRY_THREADS }];
+  return [first, { wasm: true, threads: RETRY_THREADS }, { wasm: true, threads: RETRY_THREADS, waitMs: LAST_WAIT_MS }];
 }
 
 /**
@@ -30,10 +35,14 @@ export async function loadWithRetry<M>(o: {
   load: (m: M, a: LoadAttempt) => Promise<unknown>;
   dispose: (m: M) => void;
   onFailed?: (err: unknown, a: LoadAttempt, retrying: boolean) => void;
+  /** How a try's waitMs is waited (tests: at once). */
+  wait?: (ms: number) => Promise<void>;
 }): Promise<{ model: M; attempt: LoadAttempt; tries: number }> {
   let last: unknown = new Error("no attempt");
   for (let i = 0; i < o.attempts.length; i++) {
-    const a = o.attempts[i], m = o.make(a);
+    const a = o.attempts[i];
+    if (a.waitMs) await (o.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(a.waitMs);
+    const m = o.make(a);
     try {
       await o.load(m, a);
       return { model: m, attempt: a, tries: i + 1 };

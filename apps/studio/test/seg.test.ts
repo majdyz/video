@@ -346,20 +346,20 @@ const img = (dx: number, dy: number): Gray => {
 // The status chip on the preview: exactly what the frame on screen is graded with, in two short lines.
 {
   const st = (p: Partial<SegStatus>): SegStatus => ({ on: true, phase: "ready", progress: null, note: null, ...p });
-  assert.deepEqual(subjectChip("mask", st({}), null), { tone: "ai", line: "AI subject ✓", sub: null });
-  assert.deepEqual(subjectChip("mask", st({ phase: "tracking", progress: 0.731 }), "1 min left"), { tone: "ai", line: "AI subject ✓", sub: "Rest of clip 73%" });
+  assert.deepEqual(subjectChip("mask", st({}), null), { tone: "ai", line: "AI: subject outlined", sub: null });
+  assert.deepEqual(subjectChip("mask", st({ phase: "tracking", progress: 0.731 }), "1 min left"), { tone: "ai", line: "AI: subject outlined", sub: "Rest of clip 73%" });
   assert.deepEqual(subjectChip(null, st({ phase: "tracking", progress: 0.731 }), "1 min left"), { tone: "busy", line: "Finding subjects 73%", sub: "1 min left" });
   assert.deepEqual(subjectChip(null, st({ phase: "tracking", progress: 0.02 }), null), { tone: "busy", line: "Finding subjects 2%", sub: null }, "no estimate yet: one line");
   assert.deepEqual(subjectChip(null, st({ phase: "tracking" }), null).line, "Finding subjects…");
   assert.deepEqual(subjectChip(null, st({}), null), { tone: "basic", line: "Basic detection", sub: "No AI mask for this frame" }, "the model is loaded, the pass idle, nothing for this frame: not 'AI not ready'");
   // The model is loaded and finds the clip's first subjects (the proof run read "AI not ready" for 44 s here).
   assert.deepEqual(subjectChip(null, st({ phase: "looking" }), null), { tone: "busy", line: "Looking for subjects…", sub: null });
-  assert.equal(subjectChip("mask", st({ phase: "looking" }), null).line, "AI subject ✓");
+  assert.equal(subjectChip("mask", st({ phase: "looking" }), null).line, "AI: subject outlined");
   // Paused ahead of the pass: the look at this very frame is said, and so is a look that found nothing.
   assert.deepEqual(subjectChip(null, st({ phase: "tracking", progress: 0.02 }), "9 min left", "looking"), { tone: "busy", line: "Looking at this frame…", sub: "Rest of clip 2%" });
   assert.deepEqual(subjectChip("weak", st({ phase: "tracking", progress: 0.02 }), null, "looking").line, "Looking at this frame…", "its mask is still easing in");
   assert.deepEqual(subjectChip(null, st({ phase: "tracking", progress: 0.02 }), "9 min left", "none"), { tone: "busy", line: "Finding subjects 2%", sub: "Nothing found here yet" });
-  assert.equal(subjectChip("mask", st({ phase: "tracking", progress: 0.02 }), null, "looking").line, "AI subject ✓", "the frame has its mask: the look is over");
+  assert.equal(subjectChip("mask", st({ phase: "tracking", progress: 0.02 }), null, "looking").line, "AI: subject outlined", "the frame has its mask: the look is over");
   assert.equal(subjectChip(null, st({}), null, "looking").line, "Basic detection", "no pass running: no look either");
   assert.deepEqual(subjectChip(null, st({ phase: "download", progress: 0.4 }), null), { tone: "busy", line: "Basic detection, AI not ready", sub: "Loading AI model 40%" });
   assert.equal(subjectChip(null, st({ phase: "starting" }), null).sub, "Starting AI model…");

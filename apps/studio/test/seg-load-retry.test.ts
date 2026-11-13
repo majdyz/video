@@ -29,6 +29,7 @@ const run = (fails: (i: number) => boolean, first: LoadAttempt, failed: string[]
     make: (a) => new FakeWorker(a, fails(FakeWorker.made.length)),
     load: (w) => w.init(),
     dispose: (w) => { w.disposed = true; },
+    wait: async () => {},
     onFailed: (e, a, retrying) => failed.push(`${a.wasm ? "wasm" : "webgpu"}${a.threads ? `/${a.threads}` : ""}: ${(e as Error).message}${retrying ? " (retrying)" : ""}`),
   });
 };
@@ -66,14 +67,23 @@ const run = (fails: (i: number) => boolean, first: LoadAttempt, failed: string[]
   assert.deepEqual(failed, []);
 }
 
-// Both fail: "not available", with the last error; both workers shut down, both failures reported, no third try.
+// All fail: "not available", with the last error; every worker shut down, every failure reported. The last try
+// waits first (LAST_WAIT_MS) for the page's memory to come back.
 {
   const failed: string[] = [];
   await assert.rejects(run(() => true, { wasm: true }, failed), /Out of memory/);
-  assert.equal(FakeWorker.made.length, 2);
+  assert.equal(FakeWorker.made.length, 3);
   assert.ok(FakeWorker.made.every((w) => w.disposed), "nothing left alive");
-  assert.deepEqual(failed, ["wasm: RangeError: Out of memory (retrying)", "wasm/1: RangeError: Out of memory"]);
-  console.log("model start: both tries fail → unavailable, both workers shut down, both errors reported: ok");
+  assert.deepEqual(failed, ["wasm: RangeError: Out of memory (retrying)", "wasm/1: RangeError: Out of memory (retrying)", "wasm/1: RangeError: Out of memory"]);
+  assert.ok((loadAttempts({ wasm: true })[2].waitMs ?? 0) >= 1000, "the last try waits");
+  console.log("model start: every try fails → unavailable, every worker shut down, every error reported: ok");
+}
+// Out of memory twice, then the page has settled: the third try (after its wait) starts.
+{
+  const r = await run((i) => i < 2, { wasm: false });
+  assert.equal(r.tries, 3);
+  assert.equal(FakeWorker.made.length, 3);
+  console.log("model start: out of memory twice → the delayed third try starts: ok");
 }
 
 // The frames' transfer list: every map its own buffer, or the post throws (as the worker's postMessage does).
