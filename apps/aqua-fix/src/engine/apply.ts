@@ -11,6 +11,7 @@ import { SEG_TONE, segJbuWeights } from "./grade-shader.ts";
 import { unpackSegR } from "./seg-overlay.ts";
 import { calmParams, calmSettings } from "./calm.ts";
 import { BACKDROP, backdropDev, backdropSubject } from "./backdrop.ts";
+import { fitLook, fitLookAmountOf, fitLookGateOf, fitLookMixOf, skinGuard, skinGuardCool } from "./look-fit.ts";
 import { RED, chromaRebuild, greenNeutral, greenWeight, guideSmooth, greenSettings, redGainStrength, redGuard, waterRedGain, warmMaterial, murkHold } from "./red.ts";
 
 export type ApplyContext = {
@@ -18,6 +19,8 @@ export type ApplyContext = {
   debug?: boolean;
   /** When set, gradePixel records its intermediates here (diagnostics). */
   trace?: Record<string, unknown>;
+  /** When set, called per pixel with the graded Oklab colour just before the fitted Look and what the end of the pixel needs (finishPixel): chroma floor, detail ratio, strength, the gate of the Look (its amount for a set that is not the identity) and style mix. */
+  lookTap?: (L: number, a: number, b: number, cFloor: number, dr: number, strength: number, look: number, mix: number) => void;
   params: GradeParams;
   settings: UserSettings;
   depth: DepthMap;
@@ -37,13 +40,13 @@ export type ApplyContext = {
 };
 
 /** The context as gradePixel reads it: intensity already resolved. */
-type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings; /** Seabed recovery amount (seabedAmountOf). */ seabed?: number; /** "Water colour" hue rotation, radians (waterTintOf). */ waterTint?: number };
+type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings; /** Seabed recovery amount (seabedAmountOf). */ seabed?: number; /** "Water colour" hue rotation, radians (waterTintOf). */ waterTint?: number; /** Fitted Look amount, its gate (the amount of a set that is not the identity) and style mix (look-fit.ts). */ fitLook?: number; fitLookGate?: number; fitLookMix?: number };
 
 export function resolveContext(ctx: ApplyContext): PixelContext {
   const hz = ctx.settings.hazeAuto !== false;
   const params = tapParams(lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(ctx.params), pushOf(ctx.settings)), ctx.settings)), ctx.settings), ctx.settings);
   const base = greenSettings(presetSettings(calmSettings(resolveSettings(ctx.settings), params), ctx.settings), params);
-  return { ...ctx, params, settings: { ...lookSettings(hz ? hazeSettings(base, params) : base, params), vivid: vividAmountOf(params, ctx.settings), blue: blueAmountOf(params, ctx.settings) }, seabed: seabedAmountOf(params, ctx.settings), waterTint: waterTintOf(ctx.settings) };
+  return { ...ctx, params, settings: { ...lookSettings(hz ? hazeSettings(base, params) : base, params), vivid: vividAmountOf(params, ctx.settings), blue: blueAmountOf(params, ctx.settings) }, seabed: seabedAmountOf(params, ctx.settings), waterTint: waterTintOf(ctx.settings), fitLook: fitLookAmountOf(params, ctx.settings), fitLookGate: fitLookGateOf(params, ctx.settings), fitLookMix: fitLookMixOf(ctx.settings) };
 }
 
 /** Seabed recovery amount as packUniforms sends it (p25.x): setting × missing red × not open water. */
@@ -389,23 +392,40 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   }
   // Tone target (analyze.ts TONE): one gamma on the graded lightness, the same for every pixel of the frame.
   if ((p.toneGamma ?? 1) > 1) bl[0] = toneCurve(bl[0], p.toneGamma!);
-  const capped = capChroma(bl[0], bl[1], bl[2], Math.max(cSrc, wk * WARM_POP.cMin * 1.5, bl[3]));
-  const [r1, g1, b1] = oklabToLinear(bl[0], capped[0], capped[1]);
-  void C;
-
+  // Skin guard (look-fit.ts SKIN_GUARD): a person's skin never red or orange, pale skin not cold. After every look.
+  if (person > 0) {
+    const spare = 1 - vividW;
+    [bl[1], bl[2]] = skinGuard(bl[0], bl[1], bl[2], smoothstep(SKIN.wLo, SKIN.wHi, person) * spare, smoothstep(SKIN.wLo, SKIN.wHi, personS) * spare, Math.max(skinGuardCool(a0, bb0), skinGuardCool(...guideAb(ctx.depth, u, v)), objectNeutralOf(p)));
+  }
   // Artifact guard: the pixel's detail against its base, at unit gain.
   const dr = base ? detailRatio(sr, sg, sb, r0, g0, b0) : 1;
-  const [r2, g2, b2] = fitToGamut(r1 * dr, g1 * dr, b1 * dr);
-  const rs = linearToSrgb(r2), gs = linearToSrgb(g2), bs = linearToSrgb(b2);
+  const cFloor = Math.max(cSrc, wk * WARM_POP.cMin * 1.5, bl[3]);
+  void C;
+  if (ctx.lookTap) ctx.lookTap(bl[0], bl[1], bl[2], cFloor, dr, s.strength, ctx.fitLookGate ?? 0, ctx.fitLookMix ?? 0);
+  // Fitted Look, chroma knee, detail ratio, gamut fit.
+  const [rs, gs, bs] = finishPixel(bl[0], bl[1], bl[2], cFloor, dr, ctx.fitLook ?? 0, ctx.fitLookMix ?? 0);
   if (ctx.trace) {
     const f3 = (v: number[]) => v.map((x) => +x.toFixed(3));
-    Object.assign(ctx.trace, { subj, srcC: f3(srcC), redS: +redS.toFixed(2), lin: f3([r0, g0, b0]), z: +z.toFixed(2), k: +k.toFixed(2), conf: +conf.toFixed(2), veilScale: +veilScale.toFixed(2), B: f3(Bv), sig: +sig.toFixed(2), wSub: +wSub.toFixed(2), full: f3(full), outPreLevels: f3(out.map((v) => v)), Y: +Y.toFixed(3), C: +C.toFixed(3), cMax: +cMax.toFixed(3), scale: +scale.toFixed(2), o1: f3([r1, g1, b1]), o2: f3([r2, g2, b2]) });
+    Object.assign(ctx.trace, { subj, srcC: f3(srcC), redS: +redS.toFixed(2), lin: f3([r0, g0, b0]), z: +z.toFixed(2), k: +k.toFixed(2), conf: +conf.toFixed(2), veilScale: +veilScale.toFixed(2), B: f3(Bv), sig: +sig.toFixed(2), wSub: +wSub.toFixed(2), full: f3(full), outPreLevels: f3(out.map((v) => v)), Y: +Y.toFixed(3), C: +C.toFixed(3), cMax: +cMax.toFixed(3), scale: +scale.toFixed(2), o2: f3([rs, gs, bs]) });
   }
   return [
     sr + (rs - sr) * s.strength,
     sg + (gs - sg) * s.strength,
     sb + (bs - sb) * s.strength,
   ];
+}
+
+/**
+ * The end of the pixel: the fitted Look (look-fit.ts; the last colour decision, a global function of the graded
+ * colour), the chroma knee short of the gamut edge, the detail ratio and the gamut fit. Returns encoded sRGB.
+ * (eval/fit-look2.ts replays exactly this on colours recorded through ApplyContext.lookTap.)
+ */
+export function finishPixel(L: number, a: number, b: number, cFloor: number, dr: number, look: number, mix: number, sets?: Parameters<typeof fitLook>[5]): [number, number, number] {
+  const lk = fitLook(L, a, b, look, mix, sets);
+  const capped = capChroma(lk[0], lk[1], lk[2], cFloor);
+  const [r1, g1, b1] = oklabToLinear(lk[0], capped[0], capped[1]);
+  const [r2, g2, b2] = fitToGamut(r1 * dr, g1 * dr, b1 * dr);
+  return [linearToSrgb(r2), linearToSrgb(g2), linearToSrgb(b2)];
 }
 
 /** Warm pop (grade-shader warmPop): the subject's chroma toward a warm cream hue (k = weight × warmth). */
@@ -496,6 +516,14 @@ export function segToneWeight(an: readonly number[], lab0: readonly [number, num
 }
 
 /** The analysis guide's luminance at upright (u, v), plain bilinear (no range weight): the source's low-pass. */
+/** The analysis guide's Oklab (a, b) at (u, v), plain bilinear: the colour of the source around the pixel (grade-shader guideAb). */
+function guideAb(d: DepthMap, u: number, v: number): [number, number] {
+  const fx = Math.min(Math.max(u * d.width - 0.5, 0), d.width - 1), fy = Math.min(Math.max(v * d.height - 0.5, 0), d.height - 1);
+  const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(x0 + 1, d.width - 1), y1 = Math.min(y0 + 1, d.height - 1), tx = fx - x0, ty = fy - y0;
+  const at = (c: number) => { const g = (x: number, y: number) => d.guide[(y * d.width + x) * 3 + c]; return (g(x0, y0) + (g(x1, y0) - g(x0, y0)) * tx) * (1 - ty) + (g(x0, y1) + (g(x1, y1) - g(x0, y1)) * tx) * ty; };
+  const lab = linearToOklab(Math.max(0, at(0)), Math.max(0, at(1)), Math.max(0, at(2)));
+  return [lab[1], lab[2]];
+}
 function guideLum(d: DepthMap, u: number, v: number): number {
   const fx = Math.min(Math.max(u * d.width - 0.5, 0), d.width - 1), fy = Math.min(Math.max(v * d.height - 0.5, 0), d.height - 1);
   const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(x0 + 1, d.width - 1), y1 = Math.min(y0 + 1, d.height - 1), tx = fx - x0, ty = fy - y0;

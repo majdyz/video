@@ -24,6 +24,59 @@ const temporal = await load("apps/aqua-fix/src/engine/temporal.ts");
 const { WEBGPU_LAYOUTS } = await load("apps/aqua-fix/src/engine/webgpu-layouts.ts");
 const warp = await load("apps/dewarp/src/warp-shader.ts");
 const dewarpGl = await load("apps/dewarp/src/webgl.ts");
+const lookFit = await load("apps/aqua-fix/src/engine/look-fit.ts");
+
+// Numerical parity of the fitted Look and the skin guard (look-fit.ts; the guard runs on the look's output with the
+// case's m and 0.8 t as its two weights and the input's swapped (b, a) as the source colour): the GLSL and the WGSL twin are run on a grid of Oklab colours
+// (float render target) and compared with the CPU reference, for the shipped parameter sets and for a synthetic
+// pair of sets with every parameter set (so a term dropped from one twin shows even while a shipped value is 0).
+// Tolerance: the GPU's own atan / cos / sin (SwiftShader here) are good to about 1e-4; an 8-bit step is 4e-3.
+const PARITY_W = 64, PARITY_H = 64, PARITY_TOL = 3e-4;
+const paritySets = (() => {
+  const L = lookFit.FIT_LOOK_LIMITS;
+  const a = { sh: 0.5 * L.tone, mid: -0.7 * L.tone, hi: 0.3 * L.tone, rot: 0.8 * L.rot, sat: 0.3 * L.sat, coolSat: -0.5 * L.sat, warmSat: 0.6 * L.sat, satL: -0.4 * L.sat, shA: 0.5 * L.tint, shB: -0.9 * L.tint, hiA: -0.3 * L.tint, hiB: 0.7 * L.tint };
+  const b = Object.fromEntries(Object.entries(a).map(([k, v], i) => [k, -0.6 * (v as number) * (i % 2 ? 1 : -1.3)]));
+  return [{ name: "shipped", sets: lookFit.FIT_LOOK }, { name: "synthetic", sets: { vivid: a, blue: b } }];
+})();
+/** The grid's input colour at pixel (x, y): 16 × 16 (a, b) values over ±0.3 (the neutral axis included) at each of 16 lightnesses over −0.05..1.05. Plain arithmetic, mirrored in both shaders. */
+const parityIn = (x: number, y: number): [number, number, number] => [
+  Math.fround(-0.05 + (1.1 * (Math.floor(x / 16) + 4 * Math.floor(y / 16))) / 15),
+  Math.fround((0.3 * ((x % 16) - 8)) / 8),
+  Math.fround((0.3 * ((y % 16) - 8)) / 8),
+];
+const PARITY_IN_GLSL = `vec3 lab = vec3(-0.05 + 1.1 * (floor(px.x / 16.0) + 4.0 * floor(px.y / 16.0)) / 15.0, 0.3 * (mod(px.x, 16.0) - 8.0) / 8.0, 0.3 * (mod(px.y, 16.0) - 8.0) / 8.0);`;
+const SMOOTHSTEPF_GLSL = "float smoothstepf(float e0, float e1, float x) { float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }";
+const SMOOTHSTEPF_WGSL = "fn smoothstepf(e0: f32, e1: f32, x: f32) -> f32 { let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }";
+type Parity = { name: string; t: number; m: number; sets: unknown; glsl: string; wgsl: string };
+const parity: Parity[] = [];
+for (const ps of paritySets) for (const [t, m] of [[1, 0], [1, 1], [0.6, 0.35]]) {
+  const lit = (v: number) => v.toFixed(4);
+  parity.push({
+    name: `${ps.name} t=${t} m=${m}`, t, m, sets: ps.sets,
+    glsl: `#version 300 es
+precision highp float;
+out vec4 o;
+${SMOOTHSTEPF_GLSL}
+${lookFit.fitLookGlsl(ps.sets)}
+void main() {
+  vec2 px = floor(gl_FragCoord.xy);
+  ${PARITY_IN_GLSL}
+  vec3 lk = fitLook(lab, ${lit(t)}, ${lit(m)});
+  o = vec4(lk.x, skinGuard(lk, ${lit(m)}, ${lit(t)} * 0.8, skinGuardCool(lab.zy)), 1.0);
+}`,
+    wgsl: `${SMOOTHSTEPF_WGSL}
+${lookFit.fitLookWgsl(ps.sets)}
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  return vec4<f32>(f32((i << 1u) & 2u) * 2.0 - 1.0, f32(i & 2u) * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let px = floor(pos.xy);
+  let lab = vec3<f32>(-0.05 + 1.1 * (floor(px.x / 16.0) + 4.0 * floor(px.y / 16.0)) / 15.0, 0.3 * (px.x - 16.0 * floor(px.x / 16.0) - 8.0) / 8.0, 0.3 * (px.y - 16.0 * floor(px.y / 16.0) - 8.0) / 8.0);
+  let lk = fitLook(lab, ${lit(t)}, ${lit(m)});
+  return vec4<f32>(lk.x, skinGuard(lk, ${lit(m)}, ${lit(t)} * 0.8, skinGuardCool(lab.zy)), 1.0);
+}`,
+  });
+}
 
 type Wgsl = { name: string; code: string; layout?: string; targets?: string[] };
 type Glsl = { name: string; vs: string; fs: string };
@@ -74,6 +127,7 @@ async function loadPlaywright() {
 const { chromium } = await loadPlaywright();
 const browser = await chromium.launch({ args: ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan", "--ignore-gpu-blocklist"] });
 let failures: string[] = [];
+let parityOut: { name: string; kind: string; data?: number[]; error?: string }[] = [];
 try {
   const page = await browser.newPage();
   // navigator.gpu needs a secure context: serve an empty page on a routed https origin (no network).
@@ -137,8 +191,8 @@ try {
       const src = tex("rgba8unorm", new Uint8Array([200, 120, 40, 255]), 4);
       const data = () => tex("rgba32float", new Float32Array([1, 1, 1, 1]));
       const half = () => tex("rgba16float", new Uint16Array(4), 8);
-      const ubuf = device.createBuffer({ size: 144 * 4, usage: B.UNIFORM | B.COPY_DST });
-      const u = new Float32Array(144);
+      const ubuf = device.createBuffer({ size: 148 * 4, usage: B.UNIFORM | B.COPY_DST });
+      const u = new Float32Array(148);
       u[2] = 0; // p[0].z strength
       device.queue.writeBuffer(ubuf, 0, u);
       const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
@@ -183,9 +237,64 @@ try {
     device.destroy();
     return out;
   }, { wgsl, glsl, layouts: WEBGPU_LAYOUTS });
+
+  // Fitted Look parity: each twin drawn into a float target; the values come back here and are compared below.
+  parityOut = await page.evaluate(async ({ parity, W, H, VS }: { parity: { name: string; glsl: string; wgsl: string }[]; W: number; H: number; VS: string }) => {
+    const out: { name: string; kind: string; data?: number[]; error?: string }[] = [];
+    const gl = new OffscreenCanvas(W, H).getContext("webgl2");
+    const okFloat = gl && gl.getExtension("EXT_color_buffer_float");
+    for (const c of parity) {
+      if (!gl || !okFloat) { out.push({ name: c.name, kind: "GLSL", error: "WebGL2 float render target unavailable" }); continue; }
+      const sh = (type: number, src: string) => { const o = gl.createShader(type)!; gl.shaderSource(o, src); gl.compileShader(o); return o; };
+      const prog = gl.createProgram()!, fsh = sh(gl.FRAGMENT_SHADER, c.glsl);
+      gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, fsh); gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { out.push({ name: c.name, kind: "GLSL", error: `${gl.getShaderInfoLog(fsh)} ${gl.getProgramInfoLog(prog)}` }); continue; }
+      const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, W, H);
+      const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      gl.viewport(0, 0, W, H); gl.useProgram(prog); gl.drawArrays(gl.TRIANGLES, 0, 3);
+      const px = new Float32Array(W * H * 4); gl.readPixels(0, 0, W, H, gl.RGBA, gl.FLOAT, px);
+      out.push({ name: c.name, kind: "GLSL", data: Array.from(px) });
+    }
+    const gpu = (navigator as any).gpu, adapter = gpu && (await gpu.requestAdapter());
+    if (!adapter) { for (const c of parity) out.push({ name: c.name, kind: "WGSL", error: "WebGPU adapter unavailable" }); return out; }
+    const device = await adapter.requestDevice(), T = (globalThis as any).GPUTextureUsage, B = (globalThis as any).GPUBufferUsage;
+    for (const c of parity) {
+      device.pushErrorScope("validation");
+      const module = device.createShaderModule({ code: c.wgsl });
+      const pipe = device.createRenderPipeline({ layout: "auto", vertex: { module, entryPoint: "vs" }, fragment: { module, entryPoint: "fs", targets: [{ format: "rgba32float" }] }, primitive: { topology: "triangle-list" } });
+      const target = device.createTexture({ size: [W, H], format: "rgba32float", usage: T.RENDER_ATTACHMENT | T.COPY_SRC });
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+      pass.setPipeline(pipe); pass.draw(3); pass.end();
+      const rb = device.createBuffer({ size: W * H * 16, usage: B.COPY_DST | B.MAP_READ });
+      enc.copyTextureToBuffer({ texture: target }, { buffer: rb, bytesPerRow: W * 16 }, [W, H]);
+      device.queue.submit([enc.finish()]);
+      const err = await device.popErrorScope();
+      if (err) { out.push({ name: c.name, kind: "WGSL", error: err.message }); continue; }
+      await rb.mapAsync(1);
+      out.push({ name: c.name, kind: "WGSL", data: Array.from(new Float32Array(rb.getMappedRange().slice(0))) });
+    }
+    device.destroy();
+    return out;
+  }, { parity: parity.map((c) => ({ name: c.name, glsl: c.glsl, wgsl: c.wgsl })), W: PARITY_W, H: PARITY_H, VS: "#version 300 es\nvoid main() { gl_Position = vec4(float((gl_VertexID << 1) & 2) * 2.0 - 1.0, float(gl_VertexID & 2) * 2.0 - 1.0, 0.0, 1.0); }" });
 } finally {
   await browser.close();
 }
+
+// Fitted Look parity: shader values against the CPU reference.
+let parityWorst = 0;
+for (const r of parityOut) {
+  const c = parity.find((x) => x.name === r.name)!;
+  if (!r.data) { failures.push(`fitted Look parity ${r.kind} (${r.name}): ${r.error}`); continue; }
+  let worst = 0, at = "";
+  for (let y = 0; y < PARITY_H; y++) for (let x = 0; x < PARITY_W; x++) {
+    const inp = parityIn(x, y), lk = lookFit.fitLook(inp[0], inp[1], inp[2], c.t, c.m, c.sets), want = [lk[0], ...lookFit.skinGuard(lk[0], lk[1], lk[2], c.m, c.t * 0.8, lookFit.skinGuardCool(inp[2], inp[1]))];
+    for (let k = 0; k < 3; k++) { const d = Math.abs(want[k] - r.data[(y * PARITY_W + x) * 4 + k]); if (!(d <= worst)) { worst = d; at = `(${x}, ${y}) in ${inp.map((v) => v.toFixed(4))}: CPU ${want.map((v: number) => v.toFixed(6))}, shader ${r.data.slice((y * PARITY_W + x) * 4, (y * PARITY_W + x) * 4 + 3).map((v) => v.toFixed(6))}`; } }
+  }
+  parityWorst = Math.max(parityWorst, worst);
+  if (!(worst <= PARITY_TOL)) failures.push(`fitted Look parity ${r.kind} (${r.name}): off by ${worst.toExponential(2)} at ${at}`);
+}
+if (parityOut.length !== parity.length * 2) failures.push(`fitted Look parity: ${parityOut.length} of ${parity.length * 2} runs came back`);
 
 const total = wgsl.length + glsl.length;
 if (failures.length) {
@@ -193,4 +302,4 @@ if (failures.length) {
   console.error(`\ncheck:shaders FAILED (${failures.length} problem(s) across ${total} shaders)`);
   process.exit(1);
 }
-console.log(`check:shaders ok: ${wgsl.length} WGSL modules (compiled, pipelines built with their layouts, grade drawn) and ${glsl.length} GLSL programs`);
+console.log(`check:shaders ok: ${wgsl.length} WGSL modules (compiled, pipelines built with their layouts, grade drawn) and ${glsl.length} GLSL programs; fitted Look + skin guard GLSL / WGSL match the CPU reference on ${PARITY_W * PARITY_H} colours × ${parity.length} cases (worst ${parityWorst.toExponential(1)})`);

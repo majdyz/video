@@ -8,6 +8,7 @@ import { UNIFORM_FLOATS } from "./backend.ts";
 import { linearToOklab } from "./color.ts";
 import { calmParams, calmSettings, type CalmEvidence } from "./calm.ts";
 import { greenSettings, greenWeight } from "./red.ts";
+import { fitLookAmountOf, fitLookMixOf } from "./look-fit.ts";
 
 /** ULAP depth prior (Song et al. 2018): d = mu0 + mu1·max(G,B) + mu2·R on 0..1 sRGB. */
 export const ULAP = { mu0: 0.53214829, mu1: 0.51309827, mu2: -0.91066194 };
@@ -1230,7 +1231,7 @@ export type DepthMap = {
  * are untouched.
  */
 export const SKIN = {
-  hue: (18 * Math.PI) / 180, // pink: the reference skin measures ~19° (35° read peach/cream)
+  hue: (45 * Math.PI) / 180, // natural: was 18° (pink), which the looks after it saturated into red hands and faces (owner, 13 Nov; eval/skin-check.ts); the owner's own grade of skin measures 55° on h2, about 5° (pale) on u1. Same hue as SKIN_GUARD (look-fit.ts)
   bandHue: (65 * Math.PI) / 180, // candidates: hue within ~15°–115° …
   bandIn: (50 * Math.PI) / 180,
   bandOut: (75 * Math.PI) / 180,
@@ -1286,6 +1287,7 @@ export const CLAHE_BINS = 32;
  *  p25: Seabed amount, water L, bright L, Blue water amount (blueAmountOf)
  *  p26: Noise reduction level, its history valid, hold, "Water colour" hue rotation (waterTintOf)
  *  p27–p35: Seabed grid (SEABED.grid² cells, row-major; GradeParams.seabedGrid)
+ *  p36: fitted Look amount (fitLookAmountOf), its style mix (fitLookMixOf; 0 = Vivid's set, 1 = Blue water's)
  *  p13: veilColor.rgb, achroma
  *  p14: veilHueA, veilHueB, waterExposure, zMean  (unit vector of the veil's Oklab hue)
  */
@@ -1348,6 +1350,9 @@ export function packUniforms(
   u[107] = waterTintOf(settings); // p26.w: "Water colour" hue rotation (WATER_TINT)
   // p27–p35: Seabed grid (zeros without one: no seabed anywhere).
   if (params.seabedGrid && params.seabedGrid.length === SEABED.grid * SEABED.grid) u.set(params.seabedGrid, 108);
+  // p36: the fitted Look (look-fit.ts): amount, style mix.
+  u[144] = fitLookAmountOf(params, settings);
+  u[145] = fitLookMixOf(settings);
   return u;
 }
 

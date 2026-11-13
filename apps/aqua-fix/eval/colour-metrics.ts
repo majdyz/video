@@ -61,17 +61,26 @@ const DIRS: [number, number, number][] = (() => {
   return Array.from({ length: 64 }, () => { const v = [gauss(), gauss(), gauss()], n = Math.hypot(...v); return [v[0] / n, v[1] / n, v[2] / n] as [number, number, number]; });
 })();
 const QN = 200;
+/** The quantile table of a CIELAB point set along the fixed directions (DIRS.length × QN): half of swd, reusable for a fixed reference. */
+export function swdQuantiles(p: Lab): Float64Array {
+  const n = p.length / 3, o = new Float64Array(n), out = new Float64Array(DIRS.length * QN);
+  for (let j = 0; j < DIRS.length; j++) {
+    const d = DIRS[j];
+    for (let i = 0; i < n; i++) o[i] = p[i * 3] * d[0] + p[i * 3 + 1] * d[1] + p[i * 3 + 2] * d[2];
+    o.sort();
+    for (let k = 0; k < QN; k++) out[j * QN + k] = quantile(o, 0.005 + (0.99 * k) / (QN - 1));
+  }
+  return out;
+}
+/** The distance between two quantile tables (swdQuantiles). */
+export function swdOf(a: Float64Array, b: Float64Array): number {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+  return (sum / a.length) * Math.sqrt(3);
+}
 /** Sliced Wasserstein distance between two CIELAB point sets (units of ΔE*ab). */
 export function swd(x: Lab, y: Lab): number {
-  const proj = (p: Lab, d: [number, number, number]) => { const n = p.length / 3, o = new Float64Array(n); for (let i = 0; i < n; i++) o[i] = p[i * 3] * d[0] + p[i * 3 + 1] * d[1] + p[i * 3 + 2] * d[2]; return o.sort(); };
-  let sum = 0;
-  for (const d of DIRS) {
-    const a = proj(x, d), b = proj(y, d);
-    let s = 0;
-    for (let k = 0; k < QN; k++) { const q = 0.005 + (0.99 * k) / (QN - 1); s += Math.abs(quantile(a, q) - quantile(b, q)); }
-    sum += s / QN;
-  }
-  return (sum / DIRS.length) * Math.sqrt(3);
+  return swdOf(swdQuantiles(x), swdQuantiles(y));
 }
 export type Region = { waterHue: number | null; L50: number; L5: number; warmC: number | null; /** Median chroma (C*ab) of the frame, of its water, and the 95th percentile of the warm-hued chroma (0 where the hue is not warm). */ C50: number; waterC: number | null; subjC: number };
 /** Region statistics of one image: water = chroma > 10 and CIELAB hue 170–310°; sand/skin = the other pixels above L* 45;

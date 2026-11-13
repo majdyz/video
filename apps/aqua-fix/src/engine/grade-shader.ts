@@ -9,6 +9,7 @@ import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGH
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 import { BACKDROP } from "./backdrop.ts";
 import { RED_GLSL, RED_WGSL } from "./red.ts";
+import { fitLookGlsl, fitLookWgsl } from "./look-fit.ts";
 
 /**
  * AI subject detection (studio seg/, data texture 3; seg-overlay.ts composeSegStrength): how the ML mask turns into
@@ -475,6 +476,7 @@ vec2 waterTint(vec2 ab, float t, float g) {
   float cs = cos(ang), sn = sin(ang);
   return vec2(ab.x * cs - ab.y * sn, ab.x * sn + ab.y * cs);
 }
+${fitLookGlsl()}
 // Saturation by hue (see RICH_LOOK in params.ts; mirrors apply.ts richLook). v = Vivid amount. Returns (a, b).
 vec2 richLook(vec3 lab, float v) {
   float C = length(lab.yz);
@@ -741,6 +743,16 @@ float toneWeight(float subj, vec4 an, float depart, vec3 lab0) {
   // would pop it in full.
   return smoothstepf(0.0, rin, d) * inner * max(p[22].z, segPop(an)) * an.y * min(1.0, SR_POP_GATE * p[23].w);
 }
+// The analysis guide's Oklab (a, b) at uv, plain bilinear: the colour of the source around the pixel (apply.ts guideAb).
+vec2 guideAb(vec2 uv) {
+  ivec2 size = textureSize(u_data2, 0);
+  vec2 f = clamp(uv * vec2(size) - 0.5, vec2(0.0), vec2(size) - 1.0);
+  ivec2 i0 = ivec2(floor(f));
+  ivec2 i1 = min(i0 + 1, size - 1);
+  vec2 t = f - vec2(i0);
+  return linearToOklab(max(mix(mix(texelFetch(u_data2, i0, 0).rgb, texelFetch(u_data2, ivec2(i1.x, i0.y), 0).rgb, t.x),
+                 mix(texelFetch(u_data2, ivec2(i0.x, i1.y), 0).rgb, texelFetch(u_data2, i1, 0).rgb, t.x), t.y), vec3(0.0))).yz;
+}
 // The analysis guide's luminance at uv, plain bilinear (no range weight): the source's low-pass (apply.ts guideLum).
 float guideLum(vec2 uv) {
   ivec2 size = textureSize(u_data2, 0);
@@ -1001,6 +1013,10 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   if (segS > 0.0) lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0)));
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
   if (p[24].w > 1.0) { float tl = max(lk.x, 1e-6); lk.x = pow(tl, 1.0 + (p[24].w - 1.0) * smoothstepf(TONE_TOE_LO, TONE_TOE_HI, tl)); }
+  // Skin guard (look-fit.ts SKIN_GUARD): a person's skin never red or orange, pale skin not cold. After every look.
+  if (person > 0.0) lk.yz = skinGuard(lk, smoothstepf(SKIN_W_LO, SKIN_W_HI, person) * (1.0 - vividW), smoothstepf(SKIN_W_LO, SKIN_W_HI, personS) * (1.0 - vividW), max(max(skinGuardCool(lab0.yz), skinGuardCool(guideAb(uv))), p[16].w));
+  // Fitted Look (look-fit.ts, p36: amount, style mix): the last colour decision, the same for every pixel.
+  lk = fitLook(lk, p[36].x, p[36].y);
   // The warm chroma may exceed the source-relative cap (a cyan shark has little to start from).
   vec3 o1 = oklabToLinear(capChroma(lk, max(max(cSrc, wk * WP_CMIN * 1.5), bl.w)));
   vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
@@ -1222,6 +1238,7 @@ fn waterTint(ab: vec2<f32>, t: f32, g: f32) -> vec2<f32> {
   let sn = sin(ang);
   return vec2<f32>(ab.x * cs - ab.y * sn, ab.x * sn + ab.y * cs);
 }
+${fitLookWgsl()}
 // Saturation by hue (mirrors the GLSL / apply.ts richLook). v = Vivid amount. Returns (a, b).
 fn richLook(lab: vec3<f32>, v: f32) -> vec2<f32> {
   let C = length(lab.yz);
@@ -1444,6 +1461,15 @@ fn toneWeight(subj: f32, an: vec4<f32>, depart: f32, lab0: vec3<f32>) -> f32 {
   let rin = select(SEG_RAMP_IN, mix(SEG_RAMP_IN, SEG_RAMP_EV, ev * clamp(g_segThin, 0.0, 1.0)), an.x >= 0.0 && an.x <= 2.0);
   return smoothstepf(0.0, rin, d) * inner * max(params.p[22].z, segPop(an)) * an.y * min(1.0, SR_POP_GATE * params.p[23].w);
 }
+fn guideAb(uv: vec2<f32>) -> vec2<f32> {
+  let size = vec2<i32>(textureDimensions(u_data2, 0));
+  let f = clamp(uv * vec2<f32>(size) - 0.5, vec2<f32>(0.0), vec2<f32>(size) - 1.0);
+  let i0 = vec2<i32>(floor(f));
+  let i1 = min(i0 + 1, size - 1);
+  let t = f - vec2<f32>(i0);
+  return linearToOklab(max(mix(mix(textureLoad(u_data2, i0, 0).rgb, textureLoad(u_data2, vec2<i32>(i1.x, i0.y), 0).rgb, t.x),
+                 mix(textureLoad(u_data2, vec2<i32>(i0.x, i1.y), 0).rgb, textureLoad(u_data2, i1, 0).rgb, t.x), t.y), vec3<f32>(0.0))).yz;
+}
 fn guideLum(uv: vec2<f32>) -> f32 {
   let size = vec2<i32>(textureDimensions(u_data2, 0));
   let f = clamp(uv * vec2<f32>(size) - 0.5, vec2<f32>(0.0), vec2<f32>(size) - 1.0);
@@ -1650,6 +1676,10 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   if (segS > 0.0) { lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0))); }
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
   if (params.p[24].w > 1.0) { let tl = max(lk.x, 1e-6); lk = vec3(pow(tl, 1.0 + (params.p[24].w - 1.0) * smoothstepf(TONE_TOE_LO, TONE_TOE_HI, tl)), lk.yz); }
+  // Skin guard (look-fit.ts SKIN_GUARD): a person's skin never red or orange, pale skin not cold. After every look.
+  if (person > 0.0) { lk = vec3(lk.x, skinGuard(lk, smoothstepf(SKIN_W_LO, SKIN_W_HI, person) * (1.0 - vividW), smoothstepf(SKIN_W_LO, SKIN_W_HI, personS) * (1.0 - vividW), max(max(skinGuardCool(lab0.yz), skinGuardCool(guideAb(uv))), p[16].w))); }
+  // Fitted Look (look-fit.ts, p36: amount, style mix): the last colour decision, the same for every pixel.
+  lk = fitLook(lk, params.p[36].x, params.p[36].y);
   let o1 = oklabToLinear(capChroma(lk, max(max(cSrc, wk * WP_CMIN * 1.5), bl.w)));
   let o2 = fitToGamut(o1 * detailRatio(src, lin));
   let outS = linearToSrgb(o2);
