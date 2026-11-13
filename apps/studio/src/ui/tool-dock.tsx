@@ -165,6 +165,11 @@ export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, 
   useEffect(() => { setSel(params[0]?.id ?? ""); rowRef.current?.scrollTo({ left: 0 }); }, [pane]); // eslint-disable-line react-hooks/exhaustive-deps
   const current = params.find((p) => p.id === sel && (p.slider || p.choices));
   const main = params.filter((p) => !p.more), extra = params.filter((p) => p.more);
+  // The rarely used options sit behind "More" (Fable review, 13 Nov: Colour had 14 bubbles in a row 2.8 screens wide):
+  // open while one of them is selected, and closed again with a new tool.
+  const [moreOpen, setMoreOpen] = useState(false);
+  useEffect(() => setMoreOpen(false), [pane]);
+  const showExtra = moreOpen || extra.some((p) => p.id === current?.id);
 
   const bubble = (p: Param) => {
     const on = p.id === current?.id;
@@ -210,7 +215,13 @@ export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, 
           <span className="bubble__label">{enabled ? "On" : "Off"}</span>
         </button>
         {main.map(bubble)}
-        {extra.map(bubble)}
+        {extra.length > 0 && !showExtra && (
+          <button type="button" className="bubble bubble--more" onClick={() => setMoreOpen(true)} aria-expanded={false}>
+            <span className="bubble__label">More</span>
+            <span className="bubble__value">{extra.length}</span>
+          </button>
+        )}
+        {showExtra && extra.map(bubble)}
       </div>
     </div>
   );
