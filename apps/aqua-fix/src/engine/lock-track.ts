@@ -102,6 +102,12 @@ export class LockTrack {
     return k;
   }
 
+  /** True while one shot's estimate is handing over to the next through an uncut window (a dissolve): the frame belongs to neither shot yet. */
+  blending(timeSec: number): boolean {
+    for (let i = 1; i < this.segments.length; i++) { const w = this.share(i, timeSec); if (w > 0.02 && w < 0.98) return true; }
+    return false;
+  }
+
   /** The locked estimate at `timeSec`, each shot with its balance curve, blended through an uncut window. */
   paramsAt(timeSec: number, withCurves = true): GradeParams {
     const of = (i: number) => (withCurves ? applyCurve(this.segments[i].params, this.curves[i], timeSec) : this.segments[i].params);

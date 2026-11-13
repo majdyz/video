@@ -174,7 +174,7 @@ const along = (a: number, b: number) => a * wx + b * wy;
   const lab = (c: number[]) => linearToOklab(srgbToLinear(c[0] / 255), srgbToLinear(c[1] / 255), srgbToLinear(c[2] / 255));
   const [wL, wa, wb] = lab(b0), C0 = Math.hypot(wa, wb), hue = (a: number, b: number) => (Math.atan2(b, a) * 180) / Math.PI;
   assert.ok(b1[0] > b50[0] && b50[0] > b0[0], `the back gets some red back (${b0.map(Math.round)} -> ${b50.map(Math.round)} -> ${b1.map(Math.round)})`);
-  for (const [name, c, lo, hi] of [["50", b50, 0.45, 0.85], ["100", b1, 0.3, 0.7]] as const) {
+  for (const [name, c, lo, hi] of [["50", b50, 0.45, 0.85], ["100", b1, 0.27, 0.7]] as const) { // (0.27: the tone target's shadow toe leaves this dark back a little lighter, and its plain-grade chroma reads 3 points higher; the restore itself is unchanged)
     const [L, a, b] = lab(c), kept = Math.hypot(a, b) / C0;
     assert.ok(kept >= lo && kept <= hi, `Pop ${name}: ${(kept * 100).toFixed(0)}% of the back's cast is kept (a share goes, never all)`);
     assert.ok(along(a, b) < -0.01, `Pop ${name}: the back stays on the water's side of neutral (${along(a, b).toFixed(3)})`);

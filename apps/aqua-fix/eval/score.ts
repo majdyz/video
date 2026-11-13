@@ -2,7 +2,7 @@
 //
 //   node --experimental-strip-types apps/aqua-fix/eval/score.ts [--pairs <dir>] [--valset <dir>] [--out <dir>]
 //        [--before <dir>] [--write-baseline] [--baseline <file>] [--jobs 2] [--secs 8] [--only-pairs] [--only-clips]
-//        [--tune OBJ.field=value,…]
+//        [--tune OBJ.field=value,…] [--all] [--cache <dir>] [--max <n>]
 //
 // Three scores, printed and compared with eval/baseline-score.json (--write-baseline replaces that file):
 //
@@ -17,8 +17,16 @@
 //  3. Stability per shot. The harm clips plus a fixed set of difficult clips: within each locked shot, the standard
 //     deviation over time of the grade's own lightness shift (median L* out − source) and balance shift (mean a*, b*
 //     out − source), the largest step of the lightness shift between samples 0.5 s apart, and how far the balance
-//     and exposure parameters move. Lower is steadier. Diagnostics per clip: dL* (mean lightness shift; a crush reads
+//     and exposure parameters move. Lower is steadier. Frames inside a dissolve from one shot to the next (the lock
+//     handing over through an uncut window) belong to neither shot and are left out; `handover` counts them.
+//     `lightJumpOwn` is the largest step where the source's own median moved less than 5 L* (a jump the grade made). Diagnostics per clip: dL* (mean lightness shift; a crush reads
 //     strongly negative) and the output chroma / pink share of the source's brightest 2 % (white fins must stay neutral).
+//
+// --all scores every clip of the valset (section 4: how many clips still swing the balance by more than 1.25× inside
+// a shot, jump more than 5 L* between samples, lose more than a quarter of their chroma; the headline scores 2 and 3
+// stay on their fixed sets so they compare with the baseline). --cache <dir> keeps each clip's result as
+// <dir>/<id>.json and reuses it; with --max <n> a run scores at most n new clips and exits with code 3 while clips are
+// left, so a long sweep can be split into short runs (the cache belongs to ONE engine state: use a new dir per change).
 //
 // What the CPU reference renders: every stage of the shader including Seabed recovery; person segmentation, AI
 // subjects and the temporal layer are inputs the harness leaves empty (as in the app for a clip without people and
@@ -54,6 +62,7 @@ const JOBS = parseInt(opt("jobs", "2"));
 const SECS = parseFloat(opt("secs", "8"));
 // Tuning experiments: --tune TONE.target=0.07,TONE.strength=0.5 overrides fields of the engine's exported tuning objects (analyze.ts, params.ts, red.ts).
 const TUNE = opt("tune", "");
+const ALL = flag("all"), CACHE = opt("cache", ""), MAX_NEW = parseInt(opt("max", "0")) || Infinity;
 for (const kv of TUNE.split(",").filter(Boolean)) {
   const [key, val] = kv.split("="), [obj, field] = key.split(".");
   const o = (analyzeModule as unknown as Record<string, Record<string, unknown>>)[obj] ?? (paramsModule as unknown as Record<string, Record<string, unknown>>)[obj] ?? (redModule as unknown as Record<string, Record<string, unknown>>)[obj] ?? (lockModule as unknown as Record<string, Record<string, unknown>>)[obj];
@@ -157,12 +166,18 @@ type ClipScore = {
   dE: number; dEMax: number;
   /** Per shot (frame-weighted mean over shots): std of the lightness shift (L*), its largest 0.5 s step, std of the balance shift (a*, b*). */
   lightStd: number; lightJump: number; wbStd: number;
+  /** Largest 0.5 s step of the lightness shift while the source's own median L* moved by less than 5 (the grade's own jump), and the samples left out as a dissolve between shots. */
+  lightJumpOwn: number; handover: number;
   /** Largest swing of the balance gains and of the exposure inside a shot (max/min ratio − 1). */
   wbSwing: number; expSwing: number;
   /** Share of the source's water-coloured pixels that come out warm or magenta (%), and output/source mean chroma. */
   waterWarm: number; chroma: number;
   /** Mean lightness shift (median L* out − source): a large negative value on a bright clip is a crush. */
   dL: number;
+  /** Mean of the do-no-harm score over the samples (calm.ts: 1 = the engine stands down; the grade is "active" under 0.5). */
+  calm: number;
+  /** Tone and water of the output: mean over the samples of its median L*; the hue (CIELAB, circular mean; null without water) of the pixels that are water-coloured in the source; and the share (%) of the frame the grade crushes (source L* ≥ 20, output L* < 8). */
+  outL50: number; waterHue: number | null; crush: number;
   /** The source's brightest 2 % (white fins, sand, foam): their mean output chroma (C*ab; neutral = low) and the share that comes out pink or magenta (%). */
   hiC: number; hiPink: number;
 };
@@ -186,10 +201,10 @@ function scoreClip(c: { id: string; category: string; file: string }): ClipScore
   const sim = new ClipSim("preview", fps, 1);
   sim.profile(thumbs);
   const step = Math.max(1, Math.round(EVERY * fps));
-  type S = { seg: number; dL: number; da: number; db: number; wbR: number; wbB: number; exp: number };
+  type S = { seg: number; dL: number; srcL: number; da: number; db: number; wbR: number; wbB: number; exp: number; calm: number };
   const samples: S[] = [];
   let dESum = 0, dEMax = 0, water = 0, warm = 0, cOut = 0, cSrc = 0;
-  let hiN = 0, hiC = 0, hiPink = 0;
+  let hiN = 0, hiC = 0, hiPink = 0, hx = 0, hy = 0, crush = 0, pix = 0, l50 = 0;
   for (let f = 0; f < thumbs.length; f++) {
     sim.step(f, thumbs);
     if (f % step) continue;
@@ -205,6 +220,8 @@ function scoreClip(c: { id: string; category: string; file: string }): ClipScore
       de += deltaE00(s, o);
       const cs = Math.hypot(s[1], s[2]), co = Math.hypot(o[1], o[2]), hs = ((Math.atan2(s[2], s[1]) * 180) / Math.PI + 360) % 360;
       cSrc += cs; cOut += co;
+      if (s[0] >= 20 && o[0] < 8) crush++;
+      if (cs > 14 && hs > 170 && hs < 300 && co > 4) { hx += o[1] / co; hy += o[2] / co; }
       if (cs > 14 && hs > 170 && hs < 300) { water++; const ho = ((Math.atan2(o[2], o[1]) * 180) / Math.PI + 360) % 360; if (co >= 8 && (ho < 150 || ho > 310)) warm++; }
     }
     {
@@ -218,21 +235,43 @@ function scoreClip(c: { id: string; category: string; file: string }): ClipScore
     }
     Ls.sort(); Lo.sort();
     de /= n; dESum += de; dEMax = Math.max(dEMax, de);
-    samples.push({ seg: x.segment, dL: quantile(Lo, 0.5) - quantile(Ls, 0.5), da: da / n, db: db / n, wbR: x.params.wb[0], wbB: x.params.wb[2], exp: x.params.exposure });
+    pix += n; l50 += quantile(Lo, 0.5);
+    samples.push({ seg: x.blending ? -1 : x.segment, dL: quantile(Lo, 0.5) - quantile(Ls, 0.5), srcL: quantile(Ls, 0.5), da: da / n, db: db / n, wbR: x.params.wb[0], wbB: x.params.wb[2], exp: x.params.exposure, calm: Math.max(x.params.calm ?? 0, x.params.calmTone ?? 0) });
   }
   // Per shot, weighted by its frames.
-  const segs = [...new Set(samples.map((s) => s.seg))];
-  let lightStd = 0, wbStd = 0, lightJump = 0, wbSwing = 0, expSwing = 0;
+  const inShot = samples.filter((s) => s.seg >= 0), segs = [...new Set(inShot.map((s) => s.seg))];
+  let lightStd = 0, wbStd = 0, lightJump = 0, lightJumpOwn = 0, wbSwing = 0, expSwing = 0;
   for (const sg of segs) {
-    const v = samples.filter((s) => s.seg === sg), wgt = v.length / samples.length;
+    const v = inShot.filter((s) => s.seg === sg), wgt = v.length / inShot.length;
     lightStd += wgt * std(v.map((s) => s.dL));
     wbStd += wgt * Math.hypot(std(v.map((s) => s.da)), std(v.map((s) => s.db)));
-    for (let i = 1; i < v.length; i++) lightJump = Math.max(lightJump, Math.abs(v[i].dL - v[i - 1].dL));
+    for (let i = 1; i < v.length; i++) {
+      const j = Math.abs(v[i].dL - v[i - 1].dL);
+      lightJump = Math.max(lightJump, j);
+      if (Math.abs(v[i].srcL - v[i - 1].srcL) < 5) lightJumpOwn = Math.max(lightJumpOwn, j);
+    }
     const swing = (k: "wbR" | "wbB" | "exp") => Math.max(...v.map((s) => s[k])) / Math.min(...v.map((s) => s[k])) - 1;
     wbSwing = Math.max(wbSwing, swing("wbR"), swing("wbB"));
     expSwing = Math.max(expSwing, swing("exp"));
   }
-  return { id: c.id, category: c.category, frames: samples.length, shots: segs.length, dE: dESum / Math.max(1, samples.length), dEMax, lightStd, lightJump, wbStd, wbSwing, expSwing, waterWarm: water ? (100 * warm) / water : 0, chroma: cSrc > 0 ? cOut / cSrc : 1, dL: samples.reduce((a, x) => a + x.dL, 0) / Math.max(1, samples.length), hiC: hiN ? hiC / hiN : 0, hiPink: hiN ? (100 * hiPink) / hiN : 0 };
+  return { id: c.id, category: c.category, frames: samples.length, shots: segs.length, dE: dESum / Math.max(1, samples.length), dEMax, lightStd, lightJump, lightJumpOwn, handover: samples.length - inShot.length, wbStd, wbSwing, expSwing, waterWarm: water ? (100 * warm) / water : 0, chroma: cSrc > 0 ? cOut / cSrc : 1, dL: samples.reduce((a, x) => a + x.dL, 0) / Math.max(1, samples.length), calm: samples.reduce((a, x) => a + x.calm, 0) / Math.max(1, samples.length), outL50: l50 / Math.max(1, samples.length), waterHue: water > 0.05 * pix ? ((Math.atan2(hy, hx) * 180) / Math.PI + 360) % 360 : null, crush: pix ? (100 * crush) / pix : 0, hiC: hiN ? hiC / hiN : 0, hiPink: hiN ? (100 * hiPink) / hiN : 0 };
+}
+
+/** Section 4 (--all): every clip of the valset against the colour review's counts. A clip is "active" when the engine does not stand down on it (calm < 0.5). */
+function valsetSummary(v: ClipScore[]) {
+  const act = v.filter((c) => c.calm < 0.5), med = (x: number[]) => (x.length ? quantile(Float64Array.from(x).sort(), 0.5) : NaN);
+  const m = (x: number[]) => (x.length ? x.reduce((a, b) => a + b, 0) / x.length : NaN);
+  return {
+    clips: v.length, active: act.length,
+    wbSwingOver25: v.filter((c) => c.wbSwing > 0.25).length, wbSwingOver50: v.filter((c) => c.wbSwing > 0.5).length, wbSwingMax: Math.max(0, ...v.map((c) => c.wbSwing)),
+    lightJumpOver5: v.filter((c) => c.lightJump > 5).length, lightJumpOwnOver5: v.filter((c) => c.lightJumpOwn > 5).length, handoverClips: v.filter((c) => c.handover > 0).length, lightJumpMean: m(v.map((c) => c.lightJump)), lightStdMean: m(v.map((c) => c.lightStd)), wbStdMean: m(v.map((c) => c.wbStd)),
+    chromaMedianActive: med(act.map((c) => c.chroma)), chromaLossOver25: act.filter((c) => c.chroma < 0.75).length, chromaGainOver25: act.filter((c) => c.chroma > 1.25).length,
+    // The references: low-key (median L* 21–40 over the eight pairs) cobalt water (CIELAB 240–290°).
+    waterClips: act.filter((c) => c.waterHue !== null).length, waterHueInRange: act.filter((c) => c.waterHue !== null && c.waterHue >= 240 && c.waterHue <= 290).length,
+    outL50Median: med(act.map((c) => c.outL50)), outL50InRange: act.filter((c) => c.outL50 >= 21 && c.outL50 <= 40).length,
+    crushMean: m(act.map((c) => c.crush)), crushOver2: act.filter((c) => c.crush > 2).length,
+    waterWarmMean: m(v.map((c) => c.waterWarm)), waterWarmOver2: v.filter((c) => c.waterWarm > 2).length, hiPinkOver5: v.filter((c) => c.hiPink > 5).length,
+  };
 }
 
 // ---------- main ----------
@@ -245,26 +284,38 @@ if (flag("clip")) {
   process.stdout.write(JSON.stringify(scoreClip(c)) + "\n");
 } else {
   const t0 = performance.now();
-  const list = valset().filter((c) => (HARM_CATEGORIES.has(c.category) || STABILITY_CLIPS.includes(c.id)) && fs.existsSync(path.join(VALSET, c.file)));
-  const clips: ClipScore[] = [];
+  const inSet = (c: { id: string; category: string }) => HARM_CATEGORIES.has(c.category) || STABILITY_CLIPS.includes(c.id);
+  const list = valset().filter((c) => (ALL || inSet(c)) && fs.existsSync(path.join(VALSET, c.file)));
+  const all: ClipScore[] = [];
   const queue = flag("only-pairs") ? [] : [...list];
+  if (CACHE) fs.mkdirSync(CACHE, { recursive: true });
+  let fresh = 0, left = 0;
+  const partial = CACHE !== "" && queue.filter((c) => !fs.existsSync(path.join(CACHE, `${c.id}.json`))).length > MAX_NEW;
   const worker = async () => {
     for (let c = queue.shift(); c; c = queue.shift()) {
-      const id = c.id;
+      const id = c.id, cached = CACHE ? path.join(CACHE, `${id}.json`) : "";
+      if (cached && fs.existsSync(cached)) { all.push(JSON.parse(fs.readFileSync(cached, "utf8"))); continue; }
+      if (fresh >= MAX_NEW) { left++; continue; }
+      fresh++;
       const out = await new Promise<string>((resolve, reject) => {
         const ch = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", fileURLToPath(import.meta.url), "--clip", id, "--valset", VALSET, "--secs", String(SECS), ...(TUNE ? ["--tune", TUNE] : [])], { stdio: ["ignore", "pipe", "inherit"] });
         let s = "";
         ch.stdout.on("data", (d) => (s += d));
         ch.on("close", (code) => (code === 0 ? resolve(s) : reject(new Error(`clip ${id} failed (${code})`))));
       });
-      clips.push(JSON.parse(out.trim().split("\n").pop()!));
+      const line = out.trim().split("\n").pop()!;
+      all.push(JSON.parse(line));
+      if (cached) fs.writeFileSync(cached, line + "\n");
       process.stderr.write(`clip ${id} done\n`);
     }
   };
   const pool = Promise.all(Array.from({ length: Math.max(1, JOBS) }, worker));
-  const pairs = flag("only-clips") ? {} : await scorePairs();
+  const pairs = flag("only-clips") || partial ? {} : await scorePairs();
   await pool;
-  clips.sort((a, b) => a.id.localeCompare(b.id));
+  if (left) { console.log(`${fresh} clip(s) scored, ${left} left: run again with the same --cache`); process.exit(3); }
+  all.sort((a, b) => a.id.localeCompare(b.id));
+  // Scores 2 and 3 stay on their fixed sets (comparable with the baseline); --all adds section 4 over every clip.
+  const clips = all.filter(inSet);
 
   const mean = (v: (number | null)[]) => { const x = v.filter((y): y is number => y !== null && Number.isFinite(y)); return x.length ? x.reduce((a, b) => a + b, 0) / x.length : NaN; };
   const P = Object.values(pairs), harm = clips.filter((c) => HARM_CATEGORIES.has(c.category));
@@ -277,12 +328,13 @@ if (flag("clip")) {
     harm: { dE: mean(harm.map((c) => c.dE)), dEMax: Math.max(0, ...harm.map((c) => c.dEMax)) },
     stability: { lightStd: mean(clips.map((c) => c.lightStd)), lightJump: mean(clips.map((c) => c.lightJump)), wbStd: mean(clips.map((c) => c.wbStd)), wbSwing: mean(clips.map((c) => c.wbSwing)), expSwing: mean(clips.map((c) => c.expSwing)) },
     diagnostics: { waterWarm: mean(clips.map((c) => c.waterWarm)), chroma: mean(clips.map((c) => c.chroma)) },
+    ...(ALL ? { valset: valsetSummary(all) } : {}),
   };
   const round = (o: unknown): unknown => (typeof o === "number" ? r2(o) : Array.isArray(o) ? o.map(round) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o).map(([k, v]) => [k, round(v)])) : o);
   const result = round({
     note: "CPU reference (apply.ts) incl. Seabed recovery; person segmentation, AI subjects and the temporal layer are not simulated. Default style = Vivid + Seabed 0.6 (the studio default).",
     config: { defaultStyle: DEFAULT_STYLE, scorePx: SCORE_PX, clipW: CLIP_W, every: EVERY, secs: SECS },
-    summary, pairs, clips: Object.fromEntries(clips.map((c) => [c.id, c])),
+    summary, pairs, clips: Object.fromEntries(all.map((c) => [c.id, c])),
   }) as { summary: typeof summary; pairs: Record<string, PairScore>; clips: Record<string, ClipScore> };
 
   const base = fs.existsSync(BASELINE) ? (JSON.parse(fs.readFileSync(BASELINE, "utf8")) as typeof result) : null;
@@ -310,6 +362,18 @@ if (flag("clip")) {
     const s = result.summary.stability, b = base?.summary.stability, d = result.summary.diagnostics;
     lines.push(`${"MEAN".padEnd(30)}        ${f(s.lightStd, 9)}  ${f(s.lightJump, 10)}  ${f(s.wbStd, 11)}  ${s.wbSwing.toFixed(2).padStart(8)}  ${s.expSwing.toFixed(2).padStart(9)} |         ${f(d.waterWarm, 12)}  ${d.chroma.toFixed(2).padStart(8)}`);
     if (b) lines.push(`vs baseline: light std${dl(s.lightStd, b.lightStd)}  light jump${dl(s.lightJump, b.lightJump)}  balance std${dl(s.wbStd, b.wbStd)}  wb swing${dl(s.wbSwing, b.wbSwing)}  exp swing${dl(s.expSwing, b.expSwing)}`);
+  }
+  if (ALL && all.length) {
+    const v = (result.summary as unknown as { valset: ReturnType<typeof valsetSummary> }).valset, bv = (base?.summary as unknown as { valset?: ReturnType<typeof valsetSummary> } | undefined)?.valset;
+    const dn = (x: number, b: number | undefined) => (typeof b === "number" ? ` (${x - b >= 0 ? "+" : ""}${Math.round((x - b) * 100) / 100})` : "");
+    lines.push("", `4. VALSET (${v.clips} clips, ${v.active} with the engine active; default style)`);
+    lines.push(`${"clip".padEnd(30)} ${"category".padEnd(22)} calm  light std  light jump  balance std  wb swing | dE src  water→warm %  chroma x    dL*  bright pink % | out L50  water hue  crush %  own jump`);
+    for (const c of all) { const k = result.clips[c.id]; lines.push(`${c.id.padEnd(30)} ${c.category.padEnd(22)} ${(k.calm ?? 0).toFixed(2)}  ${f(k.lightStd, 9)}  ${f(k.lightJump, 10)}  ${f(k.wbStd, 11)}  ${(k.wbSwing ?? 0).toFixed(2).padStart(8)} | ${f(k.dE)}  ${f(k.waterWarm, 12)}  ${(k.chroma ?? 0).toFixed(2).padStart(8)}  ${f(k.dL, 5)}  ${f(k.hiPink, 12)} | ${f(k.outL50, 7)}  ${f(k.waterHue, 9)}  ${f(k.crush, 7)}  ${f(k.lightJumpOwn, 8)}`); }
+    lines.push(`balance swing inside a shot > 1.25x: ${v.wbSwingOver25} clips${dn(v.wbSwingOver25, bv?.wbSwingOver25)}, > 1.5x: ${v.wbSwingOver50}${dn(v.wbSwingOver50, bv?.wbSwingOver50)}, largest ${(1 + v.wbSwingMax).toFixed(2)}x`);
+    lines.push(`lightness jump > 5 L* in 0.5 s: ${v.lightJumpOver5} clips${dn(v.lightJumpOver5, bv?.lightJumpOver5)}, of them with a steady source (the grade's own jump): ${v.lightJumpOwnOver5}${dn(v.lightJumpOwnOver5, bv?.lightJumpOwnOver5)}; ${v.handoverClips} clips hold a dissolve between shots (left out); mean jump ${v.lightJumpMean.toFixed(2)}${dn(v.lightJumpMean, bv?.lightJumpMean)}, mean light std ${v.lightStdMean.toFixed(2)}${dn(v.lightStdMean, bv?.lightStdMean)}, mean balance std ${v.wbStdMean.toFixed(2)}${dn(v.wbStdMean, bv?.wbStdMean)}`);
+    lines.push(`chroma kept (active clips, output / source): median ${v.chromaMedianActive.toFixed(2)}${dn(v.chromaMedianActive, bv?.chromaMedianActive)}; lose > 25 %: ${v.chromaLossOver25}${dn(v.chromaLossOver25, bv?.chromaLossOver25)}, gain > 25 %: ${v.chromaGainOver25}${dn(v.chromaGainOver25, bv?.chromaGainOver25)}`);
+    lines.push(`look (active clips): water hue inside 240–290° in ${v.waterHueInRange} of ${v.waterClips} clips with water${dn(v.waterHueInRange, bv?.waterHueInRange)}; median L* ${v.outL50Median.toFixed(1)}${dn(v.outL50Median, bv?.outL50Median)}, inside 21–40 in ${v.outL50InRange} of ${v.active}${dn(v.outL50InRange, bv?.outL50InRange)}; crushed (source L* ≥ 20 → under 8): mean ${v.crushMean.toFixed(2)} %${dn(v.crushMean, bv?.crushMean)}, > 2 % in ${v.crushOver2} clips${dn(v.crushOver2, bv?.crushOver2)}`);
+    lines.push(`water turned warm: mean ${v.waterWarmMean.toFixed(2)} %${dn(v.waterWarmMean, bv?.waterWarmMean)}, > 2 % in ${v.waterWarmOver2} clips${dn(v.waterWarmOver2, bv?.waterWarmOver2)}; pink highlights > 5 % in ${v.hiPinkOver5} clips${dn(v.hiPinkOver5, bv?.hiPinkOver5)}`);
   }
   const s = result.summary;
   lines.push("", `SUMMARY  reference ${f(s.reference[DEFAULT_STYLE], 0)} (source ${f(s.reference.source, 0)})${dl(s.reference[DEFAULT_STYLE], base?.summary.reference[DEFAULT_STYLE])} · harm dE ${f(s.harm.dE, 0)}${dl(s.harm.dE, base?.summary.harm.dE)} · stability light ${f(s.stability.lightStd, 0)}${dl(s.stability.lightStd, base?.summary.stability.lightStd)} / balance ${f(s.stability.wbStd, 0)}${dl(s.stability.wbStd, base?.summary.stability.wbStd)}${P.length ? ` · chroma error median ${f(s.reference.C50Err, 0)}${dl(s.reference.C50Err, base?.summary.reference.C50Err)} / water ${f(s.reference.waterCErr, 0)}${dl(s.reference.waterCErr, base?.summary.reference.waterCErr)} / warm ${f(s.reference.subjCErr, 0)}${dl(s.reference.subjCErr, base?.summary.reference.subjCErr)} · water hue error ${f(s.reference.waterHueErr, 0)}°${dl(s.reference.waterHueErr, base?.summary.reference.waterHueErr)}` : ""}${base ? "   (deltas vs " + path.basename(BASELINE) + ")" : ""}`);

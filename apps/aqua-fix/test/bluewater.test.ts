@@ -123,3 +123,37 @@ const run = (x: [number, number, number], v = 1, g = 0) => blueLook(x[0], x[1], 
   assert.ok(hueOf(v) < 240 && Math.abs(hueOf(b) - BLUE_WATER.target / D) < 4, `vivid ${hueOf(v).toFixed(1)} → blue ${hueOf(b).toFixed(1)}`);
   console.log("ok  on top of Vivid");
 }
+
+// Off-hue water (BLUE_WATER.far*): at the default look's share, cyan / teal / green water goes further toward the
+// cobalt than the plain share would take it; water already near the cobalt, warm colours, near-greys and the full
+// style (amount 1) are untouched by the boost; the map stays smooth at the default share.
+{
+  const T = BLUE_WATER.target / D, v = WATER_HUE.amount, boost = BLUE_WATER.farBoost;
+  const withBoost = (x: [number, number, number], k: number, amount = v, g = 0) => { BLUE_WATER.farBoost = k; const o = run(x, amount, g); BLUE_WATER.farBoost = boost; return o; };
+  const dist = (o: readonly number[]) => Math.abs(hueOf(o) - T);
+  // Green and teal water in a green-water frame (g = 1; elsewhere those hues are vegetation and keep their colour), and cyan-teal water anywhere.
+  for (const [h, g] of [[165, 1], [180, 1], [190, 1], [198, 0]] as const) {
+    const x = lab(0.45, 0.07, h), o1 = withBoost(x, boost, v, g), o0 = withBoost(x, 0, v, g);
+    assert.ok(dist(o1) < dist(o0) - 2, `off-hue water ${h}° (g ${g}): ${hueOf(o0).toFixed(1)}° → ${hueOf(o1).toFixed(1)}° (target ${T.toFixed(0)}°)`);
+    assert.ok(chromaOf(o1) < 0.13, "no neon");
+  }
+  const grass = lab(0.5, 0.07, 120), g1 = withBoost(grass, boost), g0 = withBoost(grass, 0);
+  assert.ok(Math.hypot(g1[1] - g0[1], g1[2] - g0[2]) < 1e-9 && Math.abs(hueOf(g1) - 120) < 3, "vegetation keeps its green");
+  for (const [L, C, h] of [[0.4, 0.07, 240], [0.4, 0.07, 258], [0.4, 0.07, 280], [0.6, 0.08, 60], [0.5, 0.01, 180], [0.5, 0.06, 95]] as const) {
+    const x = lab(L, C, h), o1 = withBoost(x, boost), o0 = withBoost(x, 0);
+    assert.ok(Math.hypot(o1[1] - o0[1], o1[2] - o0[2]) < 1e-9, `${h}° C ${C} is not boosted`);
+  }
+  const x = lab(0.45, 0.07, 170), f1 = withBoost(x, boost, 1), f0 = withBoost(x, 0, 1);
+  assert.ok(Math.hypot(f1[1] - f0[1], f1[2] - f0[2]) < 1e-9, "the full style is unchanged");
+  let worst = 0, noise = 0;
+  for (let i = 0; i < 20000; i++) {
+    const p = lab(0.05 + 0.9 * Math.random(), 0.15 * Math.random(), 360 * Math.random());
+    const q: [number, number, number] = [p[0] + 0.002 * (Math.random() - 0.5), p[1] + 0.002 * (Math.random() - 0.5), p[2] + 0.002 * (Math.random() - 0.5)];
+    const a = run(p, v), b = run(q, v);
+    const g = Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) / Math.max(1e-6, Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]));
+    worst = Math.max(worst, g);
+    if (Math.hypot(p[1], p[2]) < 0.02) noise = Math.max(noise, g);
+  }
+  assert.ok(worst < 8 && noise < 3, `local gain ${worst.toFixed(1)}, near-grey ${noise.toFixed(2)}`);
+  console.log(`ok  off-hue water goes further at the default share (local gain ${worst.toFixed(1)}×, near-grey ${noise.toFixed(2)}×)`);
+}

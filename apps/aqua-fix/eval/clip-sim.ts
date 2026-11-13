@@ -197,7 +197,7 @@ export class ClipSim {
     }
   }
 
-  state(): { params: GradeParams; depth: DepthMap; clahe: ClaheLuts; segment: number } {
+  state(): { params: GradeParams; depth: DepthMap; clahe: ClaheLuts; segment: number; /** A dissolve between two shots is in progress (lock-track.ts blending). */ blending: boolean } {
     const w = this.mapW, h = this.mapH;
     const guide3 = new Float32Array(w * h * 3);
     for (let i = 0; i < w * h; i++) { guide3[i * 3] = this.guide![i * 4]; guide3[i * 3 + 1] = this.guide![i * 4 + 1]; guide3[i * 3 + 2] = this.guide![i * 4 + 2]; }
@@ -206,6 +206,7 @@ export class ClipSim {
       depth: { width: w, height: h, fields: this.fields!, guide: guide3 },
       clahe: { ...this.claheShape!, data: this.clahe! },
       segment: this.segmentIndex(),
+      blending: this.track ? this.track.blending(this.lastTick) : false,
     };
   }
 }

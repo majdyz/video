@@ -86,6 +86,24 @@ export const RED = {
   whiteLo: 0.55,
   whiteHi: 0.78,
   whiteC: 0.015,
+  /**
+   * Cool-source magenta (bounded balance): a pixel the source held on the blue / green side of neutral that comes
+   * out a faint magenta-pink is the balance overshooting on water, haze or the surface seen from below
+   * (school_sardines: lavender water at L 0.6 turned mauve, 41 % of that region), never a subject. Output hues
+   * within `magIn..magOut` of `magHue`, from mid-tones up (`magLLo..magLHi`), whose source lies on the cool side
+   * of the warm axis (`magDir`, projection under `magSrcLo..magSrcHi`), take the whites' ceiling (whiteC). Only a
+   * faint cast (`magCLo..magCHi`): a vivid magenta is a subject (soft coral, anthias) and is left alone.
+   */
+  magHue: 335 * D2R,
+  magIn: 35 * D2R,
+  magOut: 55 * D2R,
+  magLLo: 0.35,
+  magLHi: 0.5,
+  magDir: 45 * D2R,
+  magSrcLo: -0.008,
+  magSrcHi: 0.004,
+  magCLo: 0.05,
+  magCHi: 0.12,
   /** Skin (detected person, red-starved in the source): hue floor and chroma ceiling. */
   skinHueMin: 15 * D2R,
   skinCMax: 0.085,
@@ -336,11 +354,14 @@ export function redGuard(L: number, a: number, b: number, a0: number, b0: number
   }
   // Ceiling: red band; light pink pixels far lower (not on skin); never below what the source itself held.
   let cap = RED.cMax + (RED.whiteC - RED.cMax) * smoothstep(RED.whiteLo, RED.whiteHi, L) * pink * (1 - ws);
+  // Cool-source magenta: a faint pink on a pixel the source held blue / green is balance overshoot.
+  const mag = smoothstep(Math.cos(RED.magOut), Math.cos(RED.magIn), (a * Math.cos(RED.magHue) + b * Math.sin(RED.magHue)) / C) * (1 - smoothstep(RED.magSrcLo, RED.magSrcHi, a0 * Math.cos(RED.magDir) + b0 * Math.sin(RED.magDir))) * smoothstep(RED.magLLo, RED.magLHi, L) * (1 - smoothstep(RED.magCLo, RED.magCHi, C)) * (1 - ws);
+  cap = Math.min(cap, RED.cMax + (RED.whiteC - RED.cMax) * mag);
   cap += (Math.min(cap, RED.skinCMax) - cap) * ws;
   const cosr0 = cSrc > 1e-5 ? (a0 * Math.cos(RED.hue) + b0 * Math.sin(RED.hue)) / cSrc : 0;
   const held = cSrc * smoothstep(Math.cos(RED.bandOut), Math.cos(RED.bandIn), cosr0);
   cap = Math.max(cap, held);
-  const w = Math.max(band, pink, ws);
+  const w = Math.max(band, pink, ws, mag);
   const knee = Math.max(RED.knee * cap, held);
   let C2 = C;
   if (C2 > knee && w > 0) {
@@ -378,6 +399,18 @@ const float RED_PINK_COS = ${Math.cos(RED.pinkHue).toFixed(6)};
 const float RED_PINK_SIN = ${Math.sin(RED.pinkHue).toFixed(6)};
 const float RED_PINK_COS_IN = ${Math.cos(RED.pinkIn).toFixed(6)};
 const float RED_PINK_COS_OUT = ${Math.cos(RED.pinkOut).toFixed(6)};
+const float RED_MAG_COS = ${Math.cos(RED.magHue).toFixed(6)};
+const float RED_MAG_SIN = ${Math.sin(RED.magHue).toFixed(6)};
+const float RED_MAG_COS_IN = ${Math.cos(RED.magIn).toFixed(6)};
+const float RED_MAG_COS_OUT = ${Math.cos(RED.magOut).toFixed(6)};
+const float RED_MAG_L_LO = ${RED.magLLo.toFixed(4)};
+const float RED_MAG_L_HI = ${RED.magLHi.toFixed(4)};
+const float RED_MAG_DIR_COS = ${Math.cos(RED.magDir).toFixed(6)};
+const float RED_MAG_DIR_SIN = ${Math.sin(RED.magDir).toFixed(6)};
+const float RED_MAG_SRC_LO = ${RED.magSrcLo.toFixed(4)};
+const float RED_MAG_SRC_HI = ${RED.magSrcHi.toFixed(4)};
+const float RED_MAG_C_LO = ${RED.magCLo.toFixed(4)};
+const float RED_MAG_C_HI = ${RED.magCHi.toFixed(4)};
 const float RED_C_MAX = ${RED.cMax.toFixed(4)};
 const float RED_KNEE = ${RED.knee.toFixed(4)};
 const float RED_WHITE_LO = ${RED.whiteLo.toFixed(4)};
@@ -470,11 +503,13 @@ vec2 redGuard(float L, vec2 ab, vec2 ab0, float person, float srcFar) {
     h += (hr - h) * ws;
   }
   float cap = RED_C_MAX + (RED_WHITE_C - RED_C_MAX) * smoothstepf(RED_WHITE_LO, RED_WHITE_HI, L) * pink * (1.0 - ws);
+  float mag = smoothstepf(RED_MAG_COS_OUT, RED_MAG_COS_IN, dot(ab, vec2(RED_MAG_COS, RED_MAG_SIN)) / C) * (1.0 - smoothstepf(RED_MAG_SRC_LO, RED_MAG_SRC_HI, dot(ab0, vec2(RED_MAG_DIR_COS, RED_MAG_DIR_SIN)))) * smoothstepf(RED_MAG_L_LO, RED_MAG_L_HI, L) * (1.0 - smoothstepf(RED_MAG_C_LO, RED_MAG_C_HI, C)) * (1.0 - ws);
+  cap = min(cap, RED_C_MAX + (RED_WHITE_C - RED_C_MAX) * mag);
   cap += (min(cap, RED_SKIN_C_MAX) - cap) * ws;
   float cosr0 = cSrc > 1e-5 ? dot(ab0, hv) / cSrc : 0.0;
   float held = cSrc * smoothstepf(RED_COS_OUT, RED_COS_IN, cosr0);
   cap = max(cap, held);
-  float w = max(max(band, pink), ws);
+  float w = max(max(band, pink), max(ws, mag));
   float knee = max(RED_KNEE * cap, held);
   float C2 = C;
   if (C2 > knee && w > 0.0) {
@@ -546,11 +581,13 @@ fn redGuard(L: f32, ab: vec2<f32>, ab0: vec2<f32>, person: f32, srcFar: f32) -> 
     h += (hr - h) * ws;
   }
   var cap = RED_C_MAX + (RED_WHITE_C - RED_C_MAX) * smoothstepf(RED_WHITE_LO, RED_WHITE_HI, L) * pink * (1.0 - ws);
+  let mag = smoothstepf(RED_MAG_COS_OUT, RED_MAG_COS_IN, dot(ab, vec2(RED_MAG_COS, RED_MAG_SIN)) / C) * (1.0 - smoothstepf(RED_MAG_SRC_LO, RED_MAG_SRC_HI, dot(ab0, vec2(RED_MAG_DIR_COS, RED_MAG_DIR_SIN)))) * smoothstepf(RED_MAG_L_LO, RED_MAG_L_HI, L) * (1.0 - smoothstepf(RED_MAG_C_LO, RED_MAG_C_HI, C)) * (1.0 - ws);
+  cap = min(cap, RED_C_MAX + (RED_WHITE_C - RED_C_MAX) * mag);
   cap += (min(cap, RED_SKIN_C_MAX) - cap) * ws;
   let cosr0 = select(0.0, dot(ab0, hv) / cSrc, cSrc > 1e-5);
   let held = cSrc * smoothstepf(RED_COS_OUT, RED_COS_IN, cosr0);
   cap = max(cap, held);
-  let w = max(max(band, pink), ws);
+  let w = max(max(band, pink), max(ws, mag));
   let knee = max(RED_KNEE * cap, held);
   var C2 = C;
   if (C2 > knee && w > 0.0) {

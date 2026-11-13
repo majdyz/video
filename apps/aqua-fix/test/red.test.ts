@@ -278,3 +278,30 @@ const inRect = (x: number, y: number, x0: number, y0: number, x1: number, y1: nu
   assert.ok(w1[0] > wm[0] + 0.03, `water less crushed than under the murk treatment (L ${w1[0].toFixed(2)} vs ${wm[0].toFixed(2)})`);
   console.log("ok  lit green water: no murk weight, white fins, water keeps colour and light");
 }
+
+// Cool-source magenta (RED.mag*): a faint magenta-pink on a pixel the source held blue / green (balance overshoot on
+// water, haze, the surface from below) goes to the whites' ceiling from the mid-tones up; a vivid magenta, a warm
+// source, a dark pixel and every other hue are left alone; the map stays monotone in chroma.
+{
+  const D = Math.PI / 180, at = (C: number, h: number): [number, number] => [C * Math.cos(h * D), C * Math.sin(h * D)];
+  const chroma = (x: readonly number[]) => Math.hypot(x[0], x[1]);
+  const coolSrc = at(0.03, 250), warmSrc = at(0.03, 40);
+  for (const h of [310, 320, 335, 350, 5]) {
+    const o = redGuard(0.6, ...at(0.035, h), ...coolSrc, 0, 0);
+    assert.ok(chroma(o) < 0.02, `faint pink ${h}° on a cool source: C 0.035 → ${chroma(o).toFixed(3)}`);
+  }
+  assert.ok(Math.abs(chroma(redGuard(0.6, ...at(0.035, 320), ...warmSrc, 0, 0)) - 0.035) < 1e-9, "a warm source keeps its pink");
+  assert.ok(Math.abs(chroma(redGuard(0.3, ...at(0.035, 320), ...coolSrc, 0, 0)) - 0.035) < 1e-9, "shadows are not touched");
+  // (A vivid magenta meets only the red ceiling's own roll-off, the same on any source.)
+  assert.ok(Math.abs(chroma(redGuard(0.6, ...at(0.14, 325), ...coolSrc, 0, 0)) - chroma(redGuard(0.6, ...at(0.14, 325), ...warmSrc, 0, 0))) < 1e-9 && chroma(redGuard(0.6, ...at(0.14, 325), ...coolSrc, 0, 0)) > 0.1, "a vivid magenta subject is left alone");
+  for (const h of [60, 120, 200, 258, 280]) assert.ok(Math.abs(chroma(redGuard(0.6, ...at(0.035, h), ...coolSrc, 0, 0)) - 0.035) < 1e-9, `hue ${h}° is not magenta`);
+  let prev = 0, worst = 0;
+  for (let C = 0.002; C <= 0.16; C += 0.002) {
+    const c2 = chroma(redGuard(0.6, ...at(C, 325), ...coolSrc, 0, 0));
+    assert.ok(c2 >= prev - 1e-9, `monotone in chroma (C ${C.toFixed(3)})`);
+    worst = Math.max(worst, (c2 - prev) / 0.002);
+    prev = c2;
+  }
+  assert.ok(worst < 3.5, `chroma gain through the ramp ${worst.toFixed(2)}`);
+  console.log(`ok  cool-source magenta: faint pink on blue-source pixels goes neutral (ramp gain ${worst.toFixed(2)}×)`);
+}

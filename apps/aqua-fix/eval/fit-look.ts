@@ -41,7 +41,7 @@ const STYLES: Record<string, UserSettings> = {
 const STYLE = STYLES[opt("style", "vivid")];
 const require = createRequire(path.resolve(HERE, "../package.json"));
 
-const DEG = /^(target|warmDir|warmHue|(veg|warm|mag|cool)(In|Out)\d|vio\d)$/; // angles: given in degrees on the command line
+const DEG = /^(target|warmDir|warmHue|(veg|warm|mag|cool)(In|Out)\d|vio\d|far(Lo|Hi|Min\d))$/; // angles: given in degrees on the command line
 function slot(key: string): { o: Record<string, number>; f: string; k: number } {
   const [obj, f] = key.split(".");
   const o = ((paramsModule as unknown as Record<string, Record<string, number>>)[obj] ?? (analyzeModule as unknown as Record<string, Record<string, number>>)[obj]);

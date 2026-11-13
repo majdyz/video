@@ -57,6 +57,9 @@ export const SHOT = {
   stepMax: 0.6,
   /** Fastest the offset may move (log gain per second): ×1.5 takes four seconds. */
   maxRate: 0.1,
+  /** Largest total change of the offset over one shot (log gain): just under ×1.25 end to end. A longer trend is compressed
+   *  about its middle (tilt_reef_to_blue_barracuda still moved ×1.33 inside one shot). */
+  maxSwing: Math.log(1.24),
   /** Spread of the corrections (weighted median absolute deviation, log gain) from which a constant offset is
    *  backed off, and where it is dropped: frames that disagree about the offset are no evidence for one. */
   spreadLo: 0.06,
@@ -111,7 +114,10 @@ function trend(t: number[], x: number[], w: number[]): number[] | null {
   const mid = fit.length >> 1;
   for (let i = mid + 1; i < fit.length; i++) fit[i] = clampAround(fit[i], fit[i - 1], SHOT.maxRate * (t[i] - t[i - 1]));
   for (let i = mid - 1; i >= 0; i--) fit[i] = clampAround(fit[i], fit[i + 1], SHOT.maxRate * (t[i + 1] - t[i]));
-  return fit.map((v) => Math.max(-ANCHOR.maxLog, Math.min(ANCHOR.maxLog, v)));
+  // Bounded swing: the whole trend is compressed about its mid value.
+  const lo = Math.min(fit[0], fit[fit.length - 1]), hi = Math.max(fit[0], fit[fit.length - 1]);
+  const k = hi - lo > SHOT.maxSwing ? SHOT.maxSwing / (hi - lo) : 1, c = (lo + hi) / 2;
+  return fit.map((v) => Math.max(-ANCHOR.maxLog, Math.min(ANCHOR.maxLog, c + (v - c) * k)));
 }
 
 /** The offset (log R, log B gain) at clip time `t`; [0, 0] without a curve. */

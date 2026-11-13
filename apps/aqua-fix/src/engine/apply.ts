@@ -5,7 +5,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, tapParams, waterTintOf, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { toneCurve, nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, tapParams, waterTintOf, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { SEG_TONE, segJbuWeights } from "./grade-shader.ts";
 import { unpackSegR } from "./seg-overlay.ts";
@@ -388,7 +388,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
     [bl[0], bl[1], bl[2]] = segRestore(bl[0], bl[1], bl[2], segS, s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0, lr, 0, segColourK(an!), popK > 1 ? segS * (1 - 1 / popK) : 0);
   }
   // Tone target (analyze.ts TONE): one gamma on the graded lightness, the same for every pixel of the frame.
-  if ((p.toneGamma ?? 1) > 1) bl[0] = Math.pow(Math.max(0, bl[0]), p.toneGamma!);
+  if ((p.toneGamma ?? 1) > 1) bl[0] = toneCurve(bl[0], p.toneGamma!);
   const capped = capChroma(bl[0], bl[1], bl[2], Math.max(cSrc, wk * WARM_POP.cMin * 1.5, bl[3]));
   const [r1, g1, b1] = oklabToLinear(bl[0], capped[0], capped[1]);
   void C;
@@ -730,7 +730,9 @@ export function blueLook(L: number, a: number, b: number, v: number, g: number):
   const neutral = smoothstep(B.neutralLLo, B.neutralLHi, L) * (1 - smoothstep(B.neutralCLo, B.neutralCHi, C0));
   const ct = Math.min(B.cMax, B.cK * L) * (1 - B.hiDrop * smoothstep(B.hiLo, B.hiHi, L));
   const veg = smoothstep(B.vegCLo, B.vegCHi, C0) * smoothstep(B.vegIn0, B.vegIn1, hh) * (1 - smoothstep(B.vegOut0, B.vegOut1, hh)) * (1 - B.vegGreen * g);
-  const w = B.mix * cool * (1 - vio) * (1 - veg) * (1 - neutral) * v;
+  // Off-hue water (cyan, teal, green) goes further toward the cobalt than water already near it.
+  const offHue = smoothstep(B.farLo, B.farHi, B.target - hh) * smoothstep(B.farMin0, B.farMin1, hh) * smoothstep(B.farCLo, B.farCHi, C0);
+  const w = B.mix * cool * (1 - vio) * (1 - veg) * (1 - neutral) * Math.min(1, v * (1 + B.farBoost * offHue));
   a2 += (ct * Math.cos(B.target) - a2) * w;
   b2 += (ct * Math.sin(B.target) - b2) * w;
   // Silver / white: neutral (cool side only; warm whites keep their warmth).

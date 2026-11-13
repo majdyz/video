@@ -740,6 +740,18 @@ export const BLUE_WATER = {
   warmCMax: 0.15,
   shadowK: 0.25,
   shadowHi: 0.4,
+  // Off-hue water: at the default look's share (WATER_HUE.amount) cyan, teal and green water stopped 25–30° short
+  // of the references' cobalt (h1, h2: CIELAB 245° against 270–274°) while blue water was already there. Water
+  // whose hue lies `farLo..farHi` on the green side of the target, with real chroma (`farCLo..farCHi`: near-greys
+  // have no hue), takes up to (1 + farBoost)× the amount (never more than the full style): the further off, the
+  // more of the way. Blue water, and so graded blue footage, is unchanged.
+  farLo: (50 * Math.PI) / 180,
+  farHi: (80 * Math.PI) / 180,
+  farMin0: (105 * Math.PI) / 180, // … and not past the greens into the yellows (not water)
+  farMin1: (140 * Math.PI) / 180,
+  farCLo: 0.02,
+  farCHi: 0.05,
+  farBoost: 0.43, // 1 / WATER_HUE.amount − 1: the whole map on fully off-hue water
 };
 
 /**
@@ -801,6 +813,21 @@ export function blueGateOf(veilL: number, veilC: number, lift: number): number {
   const night = Math.max(smoothstepP(G.veilLLo, G.veilLHi, veilL), smoothstepP(-BLUE_GATE.sunLo, -BLUE_GATE.sunHi, -lift));
   const rov = smoothstepP(G.liftLo, G.liftHi, lift) * (1 - smoothstepP(G.veilCLo, G.veilCHi, veilC));
   return night * (1 - (1 - G.rovKeep) * rov);
+}
+
+/**
+ * Shadow toe of the tone target (analyze.ts TONE; uniform p24.w carries its gamma g). A plain gamma L^g darkens in
+ * proportion most where the picture is already darkest: at g 1.25 a shadow at Oklab L 0.1 lost 44 %, and subjects
+ * in shade (a ray's back, a diver's suit, reef under an overhang) fell to black: 1.2 % of the valset's pixels went
+ * from L* ≥ 20 to under 8, all of it this stage. The exponent now eases in with the lightness itself:
+ * L^(1 + (g − 1)·smoothstep(lo, hi, L)): the full gamma from `hi` up (the mid-tones and the water, where the
+ * references are low-key; white stays white), none below `lo`. Monotone for g up to 1.7 (test/tone-toe.test.ts).
+ */
+export const TONE_TOE = { lo: 0.1, hi: 0.45 };
+/** The tone-target curve on the graded Oklab lightness (mirrored in GLSL / WGSL). */
+export function toneCurve(L: number, g: number): number {
+  const x = Math.max(0, L);
+  return g > 1 && x > 0 ? Math.pow(x, 1 + (g - 1) * smoothstepP(TONE_TOE.lo, TONE_TOE.hi, x)) : x;
 }
 
 /**

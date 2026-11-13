@@ -171,7 +171,11 @@ const dAb = (a: number[], b: number[]) => deltaE00(a, [a[0], b[1], b[2]]);
     assert.ok(v - prev <= SHOT.maxRate * 0.05 + 1e-9, `the curve moves at most ${SHOT.maxRate} log/s`);
     prev = v;
   }
-  assert.ok(swing(tilt) > 0.2 && swing(tilt) < 0.32);
+  assert.ok(swing(tilt) > 0.19 && swing(tilt) <= SHOT.maxSwing + 1e-9, `swing ${swing(tilt)}`);
+  // Bounded: however far the anchor says the light moved, one shot's balance changes by at most ×1.25 end to end.
+  const far = shotCurve(S([[0.5, -0.4, 0.2], [1.5, -0.3, 0.15], [2.5, -0.15, 0.08], [3.5, 0.0, 0.0], [4.5, 0.12, -0.06], [5.5, 0.3, -0.15], [6.5, 0.4, -0.2], [7.5, 0.45, -0.22]]));
+  assert.ok(far!.t.length > 1 && swing(far) <= SHOT.maxSwing + 1e-9 && swing(far) > 0.19, `bounded swing ${swing(far)}`);
+  for (let t = 0.05, p = curveAt(far, 0)[0]; t <= 8; t += 0.05) { const v = curveAt(far, t)[0]; assert.ok(v >= p - 1e-9, "bounded curve stays one-way"); p = v; }
   // Too small to move for, too few well-anchored frames, or frames that barely hold the anchor: frozen.
   assert.equal(swing(shotCurve(S([[0.5, 0], [1.5, 0.02], [2.5, 0.04], [3.5, 0.06], [4.5, 0.08]].map((x) => [x[0], x[1], 0] as [number, number, number])))), 0);
   assert.equal(swing(shotCurve(S([[0.5, -0.2, 0], [2.5, 0, 0], [4.5, 0.2, 0]]))), 0);

@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, WARM_POP, SEABED } from "./params.ts";
+import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, TONE_TOE, WARM_POP, SEABED } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 import { BACKDROP } from "./backdrop.ts";
 import { RED_GLSL, RED_WGSL } from "./red.ts";
@@ -247,6 +247,8 @@ ${Object.entries(VIVID_LOOK).map(([k, v]) => `const float VL_${k.replace(/[A-Z]/
 ${Object.entries(BLUE_WATER).map(([k, v]) => `const float BW_${k.replace(/[A-Z]/g, (c) => "_" + c).toUpperCase()} = ${v.toFixed(6)};`).join("\n")}
 ${Object.entries(RICH_LOOK).map(([k, v]) => `const float RL_${k.replace(/[A-Z]/g, (c) => "_" + c).toUpperCase()} = ${v.toFixed(6)};`).join("\n")}
 ${Object.entries(HIGHLIGHT_PINK).map(([k, v]) => `const float HP_${k.replace(/[A-Z]/g, (c) => "_" + c).toUpperCase()} = ${v.toFixed(6)};`).join("\n")}
+const float TONE_TOE_LO = ${TONE_TOE.lo.toFixed(6)};
+const float TONE_TOE_HI = ${TONE_TOE.hi.toFixed(6)};
 `;
 const LOOK_CONSTS_WGSL = LOOK_CONSTS_GLSL.replace(/const float (\w+) = ([^;]+);/g, "const $1: f32 = $2;");
 
@@ -453,7 +455,8 @@ vec4 blueLook(vec3 lab, float v, float g) {
   float neutral = smoothstepf(BW_NEUTRAL_L_LO, BW_NEUTRAL_L_HI, lab.x) * (1.0 - smoothstepf(BW_NEUTRAL_C_LO, BW_NEUTRAL_C_HI, C0));
   float ct = min(BW_C_MAX, BW_C_K * lab.x) * (1.0 - BW_HI_DROP * smoothstepf(BW_HI_LO, BW_HI_HI, lab.x));
   float veg = smoothstepf(BW_VEG_C_LO, BW_VEG_C_HI, C0) * smoothstepf(BW_VEG_IN0, BW_VEG_IN1, hh) * (1.0 - smoothstepf(BW_VEG_OUT0, BW_VEG_OUT1, hh)) * (1.0 - BW_VEG_GREEN * g);
-  float w = BW_MIX * cool * (1.0 - vio) * (1.0 - veg) * (1.0 - neutral) * v;
+  float offHue = smoothstepf(BW_FAR_LO, BW_FAR_HI, BW_TARGET - hh) * smoothstepf(BW_FAR_MIN0, BW_FAR_MIN1, hh) * smoothstepf(BW_FAR_C_LO, BW_FAR_C_HI, C0);
+  float w = BW_MIX * cool * (1.0 - vio) * (1.0 - veg) * (1.0 - neutral) * min(1.0, v * (1.0 + BW_FAR_BOOST * offHue));
   ab += (ct * vec2(cos(BW_TARGET), sin(BW_TARGET)) - ab) * w;
   ab *= 1.0 - BW_NEUTRAL_K * neutral * cool * v;
   float L2 = lab.x * (1.0 - BW_SHADOW_K * v * (1.0 - smoothstepf(0.0, BW_SHADOW_HI, lab.x)));
@@ -997,7 +1000,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // AI subject restore: after every look, so none of them amplifies it.
   if (segS > 0.0) lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0)));
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
-  if (p[24].w > 1.0) lk.x = pow(max(lk.x, 0.0), p[24].w);
+  if (p[24].w > 1.0) { float tl = max(lk.x, 1e-6); lk.x = pow(tl, 1.0 + (p[24].w - 1.0) * smoothstepf(TONE_TOE_LO, TONE_TOE_HI, tl)); }
   // The warm chroma may exceed the source-relative cap (a cyan shark has little to start from).
   vec3 o1 = oklabToLinear(capChroma(lk, max(max(cSrc, wk * WP_CMIN * 1.5), bl.w)));
   vec3 o2 = fitToGamut(o1 * detailRatio(src, lin));
@@ -1198,7 +1201,8 @@ fn blueLook(lab: vec3<f32>, v: f32, g: f32) -> vec4<f32> {
   let neutral = smoothstepf(BW_NEUTRAL_L_LO, BW_NEUTRAL_L_HI, lab.x) * (1.0 - smoothstepf(BW_NEUTRAL_C_LO, BW_NEUTRAL_C_HI, C0));
   let ct = min(BW_C_MAX, BW_C_K * lab.x) * (1.0 - BW_HI_DROP * smoothstepf(BW_HI_LO, BW_HI_HI, lab.x));
   let veg = smoothstepf(BW_VEG_C_LO, BW_VEG_C_HI, C0) * smoothstepf(BW_VEG_IN0, BW_VEG_IN1, hh) * (1.0 - smoothstepf(BW_VEG_OUT0, BW_VEG_OUT1, hh)) * (1.0 - BW_VEG_GREEN * g);
-  let w = BW_MIX * cool * (1.0 - vio) * (1.0 - veg) * (1.0 - neutral) * v;
+  let offHue = smoothstepf(BW_FAR_LO, BW_FAR_HI, BW_TARGET - hh) * smoothstepf(BW_FAR_MIN0, BW_FAR_MIN1, hh) * smoothstepf(BW_FAR_C_LO, BW_FAR_C_HI, C0);
+  let w = BW_MIX * cool * (1.0 - vio) * (1.0 - veg) * (1.0 - neutral) * min(1.0, v * (1.0 + BW_FAR_BOOST * offHue));
   ab += (ct * vec2<f32>(cos(BW_TARGET), sin(BW_TARGET)) - ab) * w;
   ab *= 1.0 - BW_NEUTRAL_K * neutral * cool * v;
   let L2 = lab.x * (1.0 - BW_SHADOW_K * v * (1.0 - smoothstepf(0.0, BW_SHADOW_HI, lab.x)));
@@ -1645,7 +1649,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   // AI subject restore: after every look, so none of them amplifies it.
   if (segS > 0.0) { lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0))); }
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
-  if (params.p[24].w > 1.0) { lk = vec3(pow(max(lk.x, 0.0), params.p[24].w), lk.yz); }
+  if (params.p[24].w > 1.0) { let tl = max(lk.x, 1e-6); lk = vec3(pow(tl, 1.0 + (params.p[24].w - 1.0) * smoothstepf(TONE_TOE_LO, TONE_TOE_HI, tl)), lk.yz); }
   let o1 = oklabToLinear(capChroma(lk, max(max(cSrc, wk * WP_CMIN * 1.5), bl.w)));
   let o2 = fitToGamut(o1 * detailRatio(src, lin));
   let outS = linearToSrgb(o2);
