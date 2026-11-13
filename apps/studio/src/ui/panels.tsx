@@ -179,6 +179,8 @@ export type NeutralControls = { active: boolean; pick: NeutralPick | null; onTog
 export type SubjectControls = {
   corrections: number;
   onReset: () => void;
+  /** Basic detection found no animal on the frame on screen: the line that says so (studio-seg.ts basicNoneNote); null otherwise. */
+  none?: string | null;
   /** AI subject detection (beta): the per-device toggle and its inline status (download / following progress). */
   ai?: { on: boolean; status: string | null; onToggle: (on: boolean) => void };
 };
@@ -198,7 +200,7 @@ export function SubjectsPanel({ tools, setTools, subjects, colourOn, disabled, p
   const c = tools.colour;
   const on = !!c.subjectPop && colourOn;
   const up = (patch: Partial<typeof c>) => setTools((t) => ({ ...t, colour: { ...t.colour, ...patch, enabled: true } }));
-  const status = !colourOn ? "Needs Colour on" : !c.subjectPop ? "Separates fish, divers and animals from the blue" : subjects.corrections ? `${subjects.corrections} ${subjects.corrections === 1 ? "change" : "changes"} to the automatic choice` : "Tap an animal in the picture to add or remove it";
+  const status = !colourOn ? "Needs Colour on" : !c.subjectPop ? "Separates fish, divers and animals from the blue" : subjects.none ? subjects.none : subjects.corrections ? `${subjects.corrections} ${subjects.corrections === 1 ? "change" : "changes"} to the automatic choice` : "Tap an animal in the picture to add or remove it";
   return (
     <div className={`panel${on ? "" : " is-off"}`}>
       <div className="panel__head">

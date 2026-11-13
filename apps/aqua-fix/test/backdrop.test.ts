@@ -126,4 +126,57 @@ const run = (px: Uint8ClampedArray) => { const { L, A, B } = lab(px); const out 
   assert.equal(seeded[20 * w + 110], 1, "a seeded region is kept");
   assert.equal(seeded[20 * w + 30], 1, "other subjects unchanged");
 }
+// A school of small, separate animals (each well under the size an animal is toned from): Subject pop's own map
+// (`small`) holds each of them by itself, the base map (`out`) none; the water between them stays water. Faint
+// patches, specks, a line along the top edge, unsure water and a frame full of small regions (texture) get nothing.
+{
+  const w = 256, h = 144, n = w * h;
+  const mk = () => ({ obj: new Float32Array(n), dev: new Float32Array(n), out: new Float32Array(n), small: new Float32Array(n) });
+  const blob = (s: { obj: Float32Array; dev: Float32Array }, cx: number, cy: number, rx: number, ry: number, d: number, seeded = true) => {
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 < 1) { s.dev[y * w + x] = d; if (seeded) s.obj[y * w + x] = 1; }
+  };
+  const grow = (s: ReturnType<typeof mk>, validity = 1) => growSubjects(s.obj, s.dev, validity, w, h, s.out, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, s.small);
+  const a = mk();
+  blob(a, 60, 40, 14, 3, 0.5); blob(a, 150, 60, 16, 3, 0.4); blob(a, 90, 100, 12, 3, 0.6); // three far sharks, ~0.3–0.4 % each
+  blob(a, 200, 110, 14, 3, 0.1, false); // a faint patch of haze
+  blob(a, 30, 120, 2, 1.5, 1); // a particle
+  for (let x = 0; x < w; x++) { a.dev[x] = 1; a.obj[x] = 1; } // a dark line along the top edge
+  const tone = grow(a);
+  assert.ok(a.out.every((v) => v === 0), "the base map is unchanged: nothing of this size");
+  for (const [x, y] of [[60, 40], [150, 60], [90, 100]]) assert.equal(a.small[y * w + x], 1, `far shark at ${x},${y} is a subject`);
+  assert.equal(a.small[50 * w + 105], 0, "the water between the sharks stays water");
+  assert.equal(a.small[110 * w + 200], 0, "a faint patch is not a subject");
+  assert.equal(a.small[120 * w + 30], 0, "a particle is not a subject");
+  assert.equal(a.small[128], 0, "a line along the top edge is not a subject");
+  assert.equal(tone, 1, "a school counts as the clip's lit animal (no lightness data: lit)");
+  // Not surely open water (a reef in the frame): small regions are rocks and shadows as often as animals.
+  const b = mk();
+  blob(b, 60, 40, 14, 3, 0.5);
+  grow(b, 0.4);
+  assert.ok(b.small.every((v) => v === 0), "low water validity: no small subjects");
+  // Texture: a frame full of small regions (ripples, a bait ball) is not a school of animals.
+  const c = mk();
+  for (let k = 0; k < 18; k++) blob(c, 25 + (k % 6) * 40, 25 + Math.floor(k / 6) * 45, 12, 3, 0.6);
+  grow(c);
+  assert.ok(c.small.every((v) => v === 0), "too many small regions: texture, none toned");
+  // Clutter: one shark-sized region among two dozen patches (a smooth seabed the surface fits) is not toned either.
+  const e = mk();
+  blob(e, 60, 40, 14, 3, 0.5);
+  for (let k = 0; k < 26; k++) blob(e, 20 + (k % 9) * 26, 80 + Math.floor(k / 9) * 18, 3, 2, 0.5, false);
+  grow(e);
+  assert.ok(e.small.every((v) => v === 0), "a cluttered frame: no small subjects");
+  // A whole animal the solidity test drops (no pixel departs strongly) but that departs well on average: dropped
+  // from the base map as before, a subject in Subject pop's map; a hazy group stays out of both.
+  const f = mk();
+  blob(f, 80, 50, 40, 12, 0.6); blob(f, 180, 110, 40, 12, 0.3);
+  grow(f);
+  assert.equal(f.out[50 * w + 80], 0, "the base map keeps the solidity verdict");
+  assert.equal(f.small[50 * w + 80], 1, "a strong whole animal is a Subject pop subject");
+  assert.equal(f.small[110 * w + 180], 0, "a hazy group is not");
+  // Without the `small` output nothing changes for callers that do not ask for it.
+  const d = mk();
+  blob(d, 60, 40, 14, 3, 0.5);
+  growSubjects(d.obj, d.dev, 1, w, h, d.out);
+  assert.ok(d.out.every((v) => v === 0));
+}
 console.log("ok  backdrop / artifact guard / object neutral / warm clamp");

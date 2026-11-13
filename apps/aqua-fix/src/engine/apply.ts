@@ -5,7 +5,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { toneCurve, nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, tapParams, waterTintOf, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { popFields, toneCurve, nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, tapParams, waterTintOf, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { SEG_TONE, segJbuWeights } from "./grade-shader.ts";
 import { unpackSegR } from "./seg-overlay.ts";
@@ -42,7 +42,18 @@ export type ApplyContext = {
 /** The context as gradePixel reads it: intensity already resolved. */
 type PixelContext = Omit<ApplyContext, "settings"> & { settings: GradeSettings; /** Seabed recovery amount (seabedAmountOf). */ seabed?: number; /** "Water colour" hue rotation, radians (waterTintOf). */ waterTint?: number; /** Fitted Look amount, its gate (the amount of a set that is not the identity) and style mix (look-fit.ts). */ fitLook?: number; fitLookGate?: number; fitLookMix?: number };
 
-export function resolveContext(ctx: ApplyContext): PixelContext {
+/** Subject pop's view of a depth map (DepthMap.popConf in the fields' conf channel), one copy per map. */
+const POP_DEPTH = new WeakMap<DepthMap, DepthMap>();
+function popDepth(d: DepthMap): DepthMap {
+  if (!d.popConf) return d;
+  let p = POP_DEPTH.get(d);
+  if (!p) { p = { ...d, fields: popFields(new Float32Array(d.fields), d.popConf) }; POP_DEPTH.set(d, p); }
+  return p;
+}
+
+export function resolveContext(ctxIn: ApplyContext): PixelContext {
+  // Subject pop on: the map with the small animals of a school in it (params.ts DepthMap.popConf), as the engine does.
+  const ctx = ctxIn.settings.subjectPop && ctxIn.depth.popConf ? { ...ctxIn, depth: popDepth(ctxIn.depth) } : ctxIn;
   const hz = ctx.settings.hazeAuto !== false;
   const params = tapParams(lookParams((hz ? hazeParams : (p: GradeParams) => p)(presetParams(boostParams(calmParams(ctx.params), pushOf(ctx.settings)), ctx.settings)), ctx.settings), ctx.settings);
   const base = greenSettings(presetSettings(calmSettings(resolveSettings(ctx.settings), params), ctx.settings), params);

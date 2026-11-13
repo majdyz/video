@@ -44,10 +44,10 @@ const at = (s: { width: number; data: Float32Array }, x: number, y: number) => s
   assert.ok(s1 > 0.05 && s1 < 0.6, `fades in (${s1})`);
   for (let i = 0; i < 90; i++) tr.step(1 / 30);
   assert.ok(at(tr.strength(0.3), cx + 3, cy) > 0.9, "fully toned after a while");
-  // Gone: fades out over tauDown.
-  tr.update(labelAnimals(new Float32Array(W * H), new Float32Array(W * H), W, H, MW, MH), 0.6);
+  // Gone (for longer than the grace, ANIMALS.graceS): fades out over tauDown.
+  tr.update(labelAnimals(new Float32Array(W * H), new Float32Array(W * H), W, H, MW, MH), 1.0);
   tr.step(0.1);
-  const s2 = at(tr.strength(0.7), cx + 3, cy);
+  const s2 = at(tr.strength(1.1), cx + 3, cy);
   assert.ok(s2 > 0.5 && s2 < 0.95, `fades out (${s2})`);
 }
 
@@ -229,5 +229,42 @@ const at = (s: { width: number; data: Float32Array }, x: number, y: number) => s
   const sel = tr.selection(0.7)!;
   assert.equal(sel.animals.length, 1, "one animal, not a chain of new ones");
   assert.ok(sel.animals[0].strength > 0.9, `still toned (${sel.animals[0].strength})`);
+}
+// A small, far animal (a thin mask of a few texels): followed by its centre when its masks do not overlap, and
+// held through an analysis that misses it (no popped / plain / popped flicker); gone for longer, it fades.
+{
+  const tr = new AnimalTracker();
+  const far = (x: number, y: number) => scene([[x, y, 16, 2.5, 1, 1]]);
+  const cellY = (y: number) => Math.round((y * MH) / H), cellX = (x: number) => Math.round((x * MW) / W);
+  let t = 0;
+  const feed = (s: ReturnType<typeof scene> | null) => {
+    tr.update(s ? labelAnimals(s.map, s.dev, W, H, MW, MH) : { width: MW, height: MH, labels: new Uint8Array(MW * MH), list: [] }, t);
+    for (let i = 0; i < 3; i++) tr.step(1 / 30);
+    t += 0.1;
+  };
+  assert.equal(labelAnimals(far(100, 60).map, far(100, 60).dev, W, H, MW, MH).list.length, 1, "a far shark (0.3 % of the frame) is labelled");
+  // It drifts down a texel and a half an analysis: consecutive masks (three texels tall) barely overlap.
+  for (let k = 0; k < 30; k++) feed(far(100 + k, 40 + 2.4 * k));
+  let sel = tr.selection(t)!;
+  assert.equal(sel.animals.length, 1, `one animal followed by its centre, not ${sel.animals.length}`);
+  const id = sel.animals[0].id;
+  assert.ok(sel.animals[0].strength > 0.8, `toned (${sel.animals[0].strength})`);
+  // Two analyses miss it: it keeps its tone and its place; found again, it is the same animal.
+  const before = sel.animals[0].strength;
+  feed(null); feed(null);
+  sel = tr.selection(t)!;
+  assert.equal(sel.animals.length, 1);
+  assert.ok(sel.animals[0].strength >= before - 1e-6, `held through a miss (${sel.animals[0].strength} from ${before})`);
+  assert.ok(at(tr.strength(t), cellX(131), cellY(40 + 2.4 * 31)) > 0.8, "still in the strength map where it was heading");
+  feed(far(132, 40 + 2.4 * 32));
+  sel = tr.selection(t)!;
+  assert.deepEqual(sel.animals.map((a) => a.id), [id], "found again: the same animal");
+  // Gone for good: it fades (never a snap) and is dropped.
+  for (let k = 0; k < 5; k++) feed(null);
+  const s5 = tr.selection(t)!.animals[0]?.strength ?? 0;
+  assert.ok(s5 > 0.02 && s5 < before, `fading after the grace (${s5})`);
+  for (let k = 0; k < 40; k++) feed(null);
+  assert.equal(tr.selection(t)!.animals.length, 0, "gone");
+  assert.equal(tr.popped, 0);
 }
 console.log("ok  animals");

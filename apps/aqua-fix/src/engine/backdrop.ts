@@ -84,6 +84,39 @@ export const BACKDROP = {
   seedFrac: 0.5,
   growDev: 0.06,
   minArea: 0.008,
+  /** Small, clearly separate animals (the far sharks of a school: 0.2–1 % of the frame each, under minArea): toned
+   * too when the frame is open water (validity smallValidLo..Hi: a school in the blue is 0.6–1, the sharks themselves
+   * take from it; a seabed clip is ruled out by the clutter test below), a confident seed lies in the region (an
+   * outline and contrast of its own, not a faint patch of haze), its mean veto-ramped departure reaches
+   * smallDevLo..Hi (seeded far hammerheads 0.24–0.7, haze patches 0.06–0.2) and it covers smallLo..smallHi of the
+   * frame (a particle or a far fish is a few thumbnail pixels). Never joined to a neighbour (no closing), so a
+   * school is toned shark by shark with the water between them left alone. More than smallMax of them in a frame is
+   * texture (ripples, a bait ball), not a school of animals: none is toned. */
+  smallLo: 0.0015,
+  smallHi: 0.0022,
+  smallDevLo: 0.16,
+  smallDevHi: 0.24,
+  smallValidLo: 0.45,
+  smallValidHi: 0.6,
+  /** A whole animal the solidity test drops (solidLo) is still a Subject pop subject when its mean veto-ramped
+   * departure reaches strongDevLo..Hi: a big shark seen from above at 0.55 sat at 23 % solid, on the edge of the
+   * test, and was dropped on one paused frame in two (owner's hammerhead clip, 25 s); a hazy group is 0.3 or less.
+   * In Subject pop's map only (`small`): the base grade keeps the solidity verdict. */
+  strongDevLo: 0.38,
+  strongDevHi: 0.48,
+  smallMax: 14,
+  /** Clutter: with this many regions (of BLOB.minPx pixels or more) departing from the "water" (lo..hi), the frame
+   * is a seabed or sediment the surface happens to fit, and its small regions are patches and shadows: none is
+   * toned. A school in the blue has 0–15 regions (owner's hammerhead clip), a smooth seabed 24–80 (ROV clips). */
+  clutterLo: 18,
+  clutterHi: 24,
+  /** A region this thin (thumbnail pixels) spanning lineSpan of the frame's width or height is a line (a letterbox
+   * row, the surface seen edge-on), never an animal; so is one with rimShare of its pixels in the outermost lineThick
+   * rows or columns of the top, left or right side, over rimSpan of that side. */
+  lineThick: 3,
+  lineSpan: 0.9,
+  rimShare: 0.7,
+  rimSpan: 0.5,
   /** An unseeded region joins when its veto-ramped departure has an outline this steep (per thumbnail pixel). */
   /** A subject is toned only when this share of it (lo..hi) is lighter than the water by lightDL (Oklab L). */
   lightDL: 0.03,
@@ -389,11 +422,20 @@ function blobOf(members: Int32Array, cnt: number, w: number, h: number, dev: Flo
  * frame): small fish keep the normal grade and their own colour. `dev` is the
  * veto-ramped departure (backdropObjectness devOut). Output 0..1 in `out`.
  * `blobs` (out): every flood region, toned or not (SubjectBlob).
+ * `small` (out, optional): the small, clearly separate animals (BACKDROP.smallLo: the sharks of a school) where they
+ * weigh more than `out` does, kept out of `out` so the base grade's map is what it was; Subject pop reads the larger
+ * of the two (analyze.ts popConf). The lit-animal
+ * verdict returned counts them.
  */
-export function growSubjects(objectness: Float32Array, dev: Float32Array, validity: number, w: number, h: number, out: Float32Array, L?: Float32Array, fit?: ArrayLike<number>, waterW?: Float32Array, seeds?: readonly { u: number; v: number }[], A?: Float32Array, B?: Float32Array, notAnimal?: Float32Array, blobs?: SubjectBlob[]): number {
+export function growSubjects(objectness: Float32Array, dev: Float32Array, validity: number, w: number, h: number, out: Float32Array, L?: Float32Array, fit?: ArrayLike<number>, waterW?: Float32Array, seeds?: readonly { u: number; v: number }[], A?: Float32Array, B?: Float32Array, notAnimal?: Float32Array, blobs?: SubjectBlob[], small?: Float32Array): number {
   const n = w * h;
   out.fill(0, 0, n);
+  small?.fill(0, 0, n);
   if (validity <= 0) return 0;
+  const smallValid = small ? smoothstep(BACKDROP.smallValidLo, BACKDROP.smallValidHi, validity) : 0;
+  /** Small animals found (members, weight, lit share), written once their count is known. */
+  const smalls: { cells: Int32Array; k: number; lit: number }[] = [];
+  let regionCount = 0;
   // User seeds (a tap asking for a subject there, animals.ts): pixels near each start a flood that is accepted
   // whatever the automatic tests say (size, solidity, edges), as long as it departs from the water at all.
   const userSeed = new Uint8Array(n);
@@ -425,11 +467,12 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
   };
   for (let s = 0; s < n; s++) {
     if (label[s] >= 0 || (block && block[s] > 0) || (objectness[s] < seed && dev[s] < BACKDROP.growDev)) continue;
-    let top = 0, cnt = 0, seeded = false, edge = 0, light = 0, user = false;
+    let top = 0, cnt = 0, seeded = false, edge = 0, light = 0, user = false, bx0 = w, bx1 = 0, by0 = h, by1 = 0, devSum = 0, rimT = 0, rimL = 0, rimR = 0;
     stack[top++] = s; label[s] = s;
     while (top > 0) {
       const i = stack[--top];
       members[cnt++] = i;
+      { const px = i % w, py = (i - px) / w; if (px < bx0) bx0 = px; if (px > bx1) bx1 = px; if (py < by0) by0 = py; if (py > by1) by1 = py; devSum += dev[i]; if (py < BACKDROP.lineThick) rimT++; if (px < BACKDROP.lineThick) rimL++; if (px >= w - BACKDROP.lineThick) rimR++; }
       if (objectness[i] >= seed) seeded = true;
       if (userSeed[i]) user = true;
       if (L && fit) { const fx = ((i % w) + 0.5) / w - 0.5, fy = (Math.floor(i / w) + 0.5) / h - 0.5; if (L[i] - evalAt3(fit, fx, fy) > BACKDROP.lightDL) light++; }
@@ -442,6 +485,12 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     // A region with no confident seed still counts when it has an outline
     // (a dim, far animal); a sun glow departs just as far but has none.
     let accept = seeded ? 1 : smoothstep(BACKDROP.growEdgeLo, BACKDROP.growEdgeHi, edge);
+    // A thin line across the frame (a letterbox row, the surface edge-on) is no animal; nor is a region that lies
+    // mostly in the frame's outermost rows or columns over rimSpan of that side (the same line with a patch of
+    // glare joined to it). The bottom edge has its own, stricter test below.
+    const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
+    if ((bw > BACKDROP.lineSpan * w && bh <= BACKDROP.lineThick) || (bh > BACKDROP.lineSpan * h && bw <= BACKDROP.lineThick)) accept = 0;
+    if ((rimT >= BACKDROP.rimShare * cnt && bw > BACKDROP.rimSpan * w) || (Math.max(rimL, rimR) >= BACKDROP.rimShare * cnt && bh > BACKDROP.rimSpan * h)) accept = 0;
     {
       let bottom = 0;
       for (let m = 0; m < cnt; m++) if (members[m] >= n - w) bottom++;
@@ -472,7 +521,20 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     // frames (the same shark turning away) keep the same tone.
     const lit = L && fit ? smoothstep(BACKDROP.lightShareLo, BACKDROP.lightShareHi, light / cnt) : 1;
     litAny = Math.max(litAny, lit * accept * smoothstep(BACKDROP.minArea, 2 * BACKDROP.minArea, cnt / n));
+    // A small, clearly separate animal (see BACKDROP.smallLo): kept aside for Subject pop.
+    if (small && smallValid > 0 && seeded && !user && cnt / n < 2 * BACKDROP.minArea) {
+      const k = accept * smallValid * smoothstep(BACKDROP.smallLo, BACKDROP.smallHi, cnt / n) * smoothstep(BACKDROP.smallDevLo, BACKDROP.smallDevHi, devSum / cnt) * (1 - (st ? bubbleLike(st) : 0));
+      if (k > 0) {
+        // Its own strong part only (the relative hysteresis below): the lit water the flood crept into stays water.
+        const ds = new Float32Array(cnt);
+        for (let m = 0; m < cnt; m++) ds[m] = dev[members[m]];
+        ds.sort();
+        const keepDev = BACKDROP.relKeep * ds[Math.min(cnt - 1, Math.floor(0.9 * cnt))];
+        smalls.push({ cells: members.slice(0, cnt).filter((i) => dev[i] >= keepDev || objectness[i] >= seed), k, lit });
+      }
+    }
     if (GROW_DEBUG && cnt / n > 0.004 && st) GROW_DEBUG.push({ ...st, area: cnt / n, seeded: seeded ? 1 : 0, edge, accept, lit });
+    if (cnt >= BLOB.minPx) regionCount++;
     // Every region that departs from the water, whatever its size and whether or not it is toned: the AI subjects'
     // prompt candidates (SubjectBlob). A hammerhead of a school is under the size a subject is toned from.
     if (blobs && cnt >= BLOB.minPx && cnt / n <= BLOB.maxArea) blobs.push(blobOf(members, cnt, w, h, dev, accept, seeded, st ? bubbleLike(st) : 0));
@@ -522,7 +584,24 @@ export function growSubjects(objectness: Float32Array, dev: Float32Array, validi
     let userRegion = false;
     for (const r of regions) if (accepted[r] === 2) userRegion = true;
     const keep = userRegion ? 1 : regions.size >= BACKDROP.schoolN ? 0 : smoothstep(BACKDROP.solidLo, BACKDROP.solidHi, solid / cnt);
+    if (keep < 1 && small && !userRegion && regions.size < BACKDROP.schoolN) {
+      // Dropped as too faint, but strong on average: still a subject for Subject pop (BACKDROP.strongDevLo).
+      let sd = 0;
+      for (let m = 0; m < cnt; m++) sd += dev[members[m]];
+      const strong = smoothstep(BACKDROP.strongDevLo, BACKDROP.strongDevHi, sd / cnt);
+      if (strong > keep) for (let m = 0; m < cnt; m++) small[members[m]] = Math.max(small[members[m]], out[members[m]] * strong);
+    }
     if (keep < 1) for (let m = 0; m < cnt; m++) out[members[m]] *= keep;
+  }
+  // The small animals, each by itself (no closing: the water between the sharks of a school stays water), where
+  // they weigh more than the map above. Too many of them is texture, not animals.
+  const clear = 1 - smoothstep(BACKDROP.clutterLo, BACKDROP.clutterHi, regionCount);
+  if (small && smalls.length && smalls.length <= BACKDROP.smallMax && clear > 0) {
+    for (const sm of smalls) {
+      const k = sm.k * clear;
+      for (const i of sm.cells) if (k > out[i] && k > small[i]) small[i] = k;
+      litAny = Math.max(litAny, sm.lit * k);
+    }
   }
   return litAny;
 }
