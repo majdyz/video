@@ -9,14 +9,14 @@ export type StyleThumbSource = {
   playing: boolean;
 };
 
-/** While the clip plays the thumbnails follow it at this pace (three small draws a second, not three per frame). */
-const PLAYING_REFRESH_MS = 1000;
 
 /**
  * Colour → Style as three small pictures: the frame on screen graded Natural, Vivid and Blue water, so the choice is
  * seen before it is made. They are painted from the frame the engine already holds (no decode, no analysis): once
  * when shown, again when the frame or a colour setting changes (and once more a little later, when that frame's own
- * analysis has landed), and once a second while the clip plays. Until a picture is in, each is a plain labelled tile.
+ * analysis has landed). Never while the clip plays: each paint is three full renders of the shared engine and a GPU
+ * readback, which made playback stutter and the picture flicker on an iPhone (owner, 13 Nov); they catch up on pause.
+ * Until a picture is in, each is a plain labelled tile.
  */
 export function StyleThumbs({ items, value, onChange, disabled, source }: {
   items: { id: ColourStyle; label: string; hint?: string }[];
@@ -44,14 +44,10 @@ export function StyleThumbs({ items, value, onChange, disabled, source }: {
   }, []);
 
   useEffect(() => {
+    if (source.playing) return;
     const a = window.setTimeout(run, 60), b = window.setTimeout(run, 900);
     return () => { clearTimeout(a); clearTimeout(b); };
-  }, [run, source.key]);
-  useEffect(() => {
-    if (!source.playing) return;
-    const id = window.setInterval(run, PLAYING_REFRESH_MS);
-    return () => clearInterval(id);
-  }, [run, source.playing]);
+  }, [run, source.key, source.playing]);
 
   return (
     <div className="style-thumbs" role="radiogroup" aria-label="Style">
