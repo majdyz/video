@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ColourStyle } from "../pipeline/tools.ts";
+import { styleThumbsDue, type ColourStyle } from "../pipeline/tools.ts";
 
 /** What paints the thumbnails (Studio.paintStyleThumbs) and when they are due again. */
 export type StyleThumbSource = {
@@ -14,9 +14,10 @@ export type StyleThumbSource = {
  * Colour → Style as three small pictures: the frame on screen graded Natural, Vivid and Blue water, so the choice is
  * seen before it is made. They are painted from the frame the engine already holds (no decode, no analysis): once
  * when shown, again when the frame or a colour setting changes (and once more a little later, when that frame's own
- * analysis has landed). Never while the clip plays: each paint is three full renders of the shared engine and a GPU
- * readback, which made playback stutter and the picture flicker on an iPhone (owner, 13 Nov); they catch up on pause.
- * Until a picture is in, each is a plain labelled tile.
+ * analysis has landed). Not again and again while the clip plays: each paint is three full renders of the shared
+ * engine and a GPU readback, which made playback stutter and the picture flicker on an iPhone (owner, 13 Nov). In
+ * play they paint once when their picture is missing (the panel opened mid-play left them blank: owner, 13 Nov), then
+ * rest and catch up on pause. Until a picture is in, each is a plain labelled tile.
  */
 export function StyleThumbs({ items, value, onChange, disabled, source }: {
   items: { id: ColourStyle; label: string; hint?: string }[];
@@ -40,12 +41,21 @@ export function StyleThumbs({ items, value, onChange, disabled, source }: {
       if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
       targets.push({ style, canvas });
     }
-    if (targets.length && paintRef.current(targets)) setPainted(true);
+    if (!targets.length || !paintRef.current(targets)) return false;
+    setPainted(true);
+    return true;
   }, []);
 
+  /** The `source.key` whose picture is in the thumbnails (null: none yet). */
+  const paintedKey = useRef<string | null>(null);
   useEffect(() => {
-    if (source.playing) return;
-    const a = window.setTimeout(run, 60), b = window.setTimeout(run, 900);
+    const key = source.key, playing = source.playing;
+    if (!styleThumbsDue(playing, key, paintedKey.current)) return;
+    const paint = () => { if (run()) paintedKey.current = key; };
+    // In play: one paint; the later try only runs if the first could not (the engine was busy, the canvases not laid out).
+    // (120 ms: the Strength slider sits under the pictures, and a drag should not paint on every step.)
+    const a = window.setTimeout(paint, 120);
+    const b = window.setTimeout(() => { if (!playing || paintedKey.current !== key) paint(); }, 900);
     return () => { clearTimeout(a); clearTimeout(b); };
   }, [run, source.key, source.playing]);
 

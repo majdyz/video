@@ -22,6 +22,7 @@ export type ColourState = {
   preset: ScenePreset;
   /** Main slider, 0..100; 50 = the engine's own estimate (intensity 1). */
   strength: number;
+  /** The old "Deep blue" slider (the engine's deep-blue look). No control any more: Style → Blue water is that choice, and the engine is always sent 0. */
   look: number;
   saturation: number;
   clarity: number;
@@ -76,7 +77,7 @@ export function neutralNote(r: NeutralResult): string {
 }
 export const NEUTRAL_HINT = "Tap something that should be white or grey";
 
-/** The Water colour slider's value text. */
+/** The Water tint slider's value text. */
 export function waterHueLabel(v: number): string {
   const x = Math.round(v);
   return x === 0 ? "Auto" : x < 0 ? `Teal ${-x}` : `Blue ${x}`;
@@ -88,7 +89,7 @@ export const NOISE_CHOICES: { id: NoiseReduction; label: string }[] = [
   { id: "auto", label: "Auto" },
   { id: "strong", label: "Strong" },
 ];
-export const NOISE_HINT = "Averages grain over time before the colour is corrected; Auto only acts on noisy clips, moving subjects are left alone";
+export const NOISE_HINT = "Smooths grain. Auto only on grainy clips";
 
 /** The "Subject pop" switch stays hidden until its mask tracking is clean (the engine path ships off; `?pop=1` forces it on for checks). */
 export const SUBJECT_POP_UI = true;
@@ -99,6 +100,18 @@ export function subjectPopVisible(search: string = typeof location === "undefine
 }
 
 export const COLOUR_PRESETS: Chip<ScenePreset>[] = SCENE_PRESETS.map((p) => ({ id: p.id, label: p.id === "reef" ? "Reef" : p.label, hint: p.hint }));
+/** The label of the water-type choice (the engine's scene preset): a correction hint, not a look. Auto = the engine's own reading of the clip, no preset on top. */
+export const SHOT_IN_LABEL = "Shot in";
+export const SHOT_IN_HINT = "The water it was filmed in. Auto reads it from the clip; pick one only if the colour is off";
+
+/**
+ * Whether the Style thumbnails should paint now. Paused: always (the caller repaints on every change of `key`).
+ * Playing: only when the picture for this `key` is not in yet (the panel was opened mid-play, or a setting changed),
+ * so they paint once and then rest until pause: repainting in play made playback stutter on an iPhone.
+ */
+export function styleThumbsDue(playing: boolean, key: string, paintedKey: string | null): boolean {
+  return !playing || paintedKey !== key;
+}
 
 export const DEFAULT_COLOUR: ColourState = {
   enabled: true,
@@ -191,7 +204,8 @@ export function colourSettings(c: ColourLook, clip?: string): UserSettings {
     ...DEFAULT_SETTINGS,
     preset: c.preset,
     intensity: (Math.min(100, Math.max(0, c.strength)) / 100) * INTENSITY_MAX,
-    look: c.look,
+    // The deep-blue look has no control any more (Style → Blue water replaced it): a value left in a state is ignored.
+    look: 0,
     saturation: c.saturation,
     clarity: c.clarity,
     veil: c.veil,

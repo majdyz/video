@@ -53,6 +53,7 @@ export function Stage({
   onHold,
   onTap,
   onTapAt,
+  onTapDown,
   tapHint,
   overlay,
   onZoom,
@@ -78,6 +79,8 @@ export function Stage({
   onTap?: () => void;
   /** A tap at upright picture position (u, v), 0..1 (takes over from onTap; e.g. selecting subjects). */
   onTapAt?: (u: number, v: number) => void;
+  /** The finger landed on the picture at (u, v), before it is known to be a tap: for instant feedback only (onTapAt follows a real tap, after the double-tap wait). */
+  onTapDown?: (u: number, v: number) => void;
   /** What a tap at a point does, for the accessible description (default: selecting subjects). */
   tapHint?: string;
   /** Drawn over the picture inside the zoomed content (follows pinch and pan). */
@@ -243,6 +246,11 @@ export function Stage({
       else splitCandidate = v.z <= 1.01;
     }
     g.current = { mode, id: e.pointerId, x0: x, y0: y, t0: performance.now(), view0: v, d0: 0, mid0: [x, y], splitCandidate };
+    if (mode === "pending" && onTapDown) {
+      const [fx, fy] = inFrame(x, y);
+      const u = (fx - v.tx) / v.z / box.w, w = (fy - v.ty) / v.z / box.h;
+      if (u >= 0 && u <= 1 && w >= 0 && w <= 1) onTapDown(u, w);
+    }
     if (mode === "pending" && split === null && v.z <= 1.01 && onHold) {
       holdTimer.current = window.setTimeout(() => {
         if (g.current?.mode === "pending") {

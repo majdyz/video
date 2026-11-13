@@ -2264,6 +2264,22 @@ a {
   -webkit-mask: linear-gradient(180deg, #000 0 14px, transparent 14px 26px, #000 26px);
   mask: linear-gradient(180deg, #000 0 14px, transparent 14px 26px, #000 26px);
 }
+.tap-ring {
+  position: absolute;
+  width: 56px;
+  height: 56px;
+  margin: -28px 0 0 -28px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  opacity: 0;
+  animation: tap-ring 520ms var(--ease-out);
+}
+@keyframes tap-ring {
+  from { opacity: 0.95; transform: scale(0.3); }
+  to { opacity: 0; transform: scale(1); }
+}
 .neutral-mark.is-limited {
   border-style: dashed;
 }
@@ -2755,9 +2771,26 @@ a {
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
 }
+/* Which one is chosen must read at a glance on any picture (owner, 13 Nov: a white pill among grey ones did not):
+   the chosen chip is filled with the accent and ticked, the others are dim and outlined. */
+.tool-dock__choices .chip {
+  background: rgba(0, 0, 0, 0.38);
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  color: rgba(255, 255, 255, 0.86);
+  font-weight: 500;
+}
 .tool-dock__choices .chip.is-on {
-  background: #fff;
-  color: #0a0c10;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+}
+.tool-dock__choices .chip.is-on::before {
+  content: "✓";
+  margin-right: 6px;
+}
+.tool-dock__under {
+  margin-top: var(--s-2);
 }
 .tool-dock__note {
   margin: var(--s-2) 0 0;
@@ -3028,6 +3061,13 @@ a {
 }
 .is-narrow .select-bar .link-btn {
   flex: none;
+}
+/* The buttons keep clear of the text (owner, 13 Nov: "Done" touched it): .link-btn's own −8px margin ate the gap. */
+.select-bar .link-btn {
+  margin-left: 0;
+}
+.is-narrow .select-bar {
+  gap: var(--s-2);
 }
 
 /* ------------------------------------------------------------ batch (several photos / videos) */

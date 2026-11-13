@@ -156,7 +156,31 @@ const STYLES: Record<string, UserSettings> = { natural: { ...DEFAULT_SETTINGS },
       const ctx: ApplyContext = { params: P, settings: style, ...maps(lin, 0) };
       const s = solveTap(ctx, water, 0.5, 0.5);
       assert.ok(s.ok && s.limited, JSON.stringify(s));
-      if (s.ok) assert.deepEqual(s.gains, [1, 1], `${name} water ${lin} wb ${wbr}: gains ${s.gains}`);
+      if (!s.ok) continue;
+      // Not re-balanced for it: at most the small pull-down (TAP_SOLVE.fall*: blue down, a little red), which
+      // sheds chroma, or nothing at all.
+      const [r, b] = s.gains;
+      assert.ok(r >= 1 && r <= TAP_SOLVE.fallRed + 1e-9 && b <= 1 && b >= 1 / TAP_SOLVE.fallBlue - 1e-9, `${name} water ${lin} wb ${wbr}: gains ${s.gains}`);
+      assert.ok(r === 1 && b === 1 ? s.after === s.before : s.after <= (1 - TAP_SOLVE.fallGain) * s.before, `${name} water ${lin}: ${s.before} → ${s.after}`);
+    }
+  }
+  // Sand in deep blue water, its red all but gone (owner, 13 Nov: the tap answered "No red left" and did nothing):
+  // the pull-down acts — bounded, flagged, less cast on the correction and on screen in every style, never green.
+  {
+    const lin = [0.012, 0.16, 0.34], sand = srgb(lin);
+    const P: GradeParams = { ...PARAMS, wb: [3, 1, 1], waterWb: [1.9, 1, 1], veilColor: [0.01, 0.12, 0.3] };
+    for (const conf of [1, 0.5]) for (const [name, style] of Object.entries(STYLES)) {
+      const ctx: ApplyContext = { params: P, settings: style, ...maps(lin, conf) };
+      const s = solveTap(ctx, sand, 0.5, 0.5);
+      assert.ok(s.ok && s.limited, JSON.stringify(s));
+      if (!s.ok) continue;
+      assert.ok(s.gains[0] !== 1 || s.gains[1] !== 1, `${name} conf ${conf}: the tap did nothing (${JSON.stringify(s)})`);
+      assert.ok(s.gains[0] <= TAP_SOLVE.limitedMax && s.gains[1] >= 1 / TAP_SOLVE.limitedMax, `${name}: bounded ${s.gains}`);
+      assert.ok(s.after < s.before, `${name}: ${s.before} → ${s.after}`);
+      const o = gradeAt({ ...ctx, settings: { ...correctionOnly(style), wbTap: s.gains } }, sand);
+      const [, a, b] = linearToOklab(srgbToLinear(o[0]), srgbToLinear(o[1]), srgbToLinear(o[2]));
+      const h = ((Math.atan2(b, a) / D) % 360 + 360) % 360;
+      assert.ok(!(Math.hypot(a, b) > TAP_SOLVE.limited && h > TAP_SOLVE.greenLo && h < TAP_SOLVE.greenHi), `${name}: green (${h.toFixed(0)}°)`);
     }
   }
   assert.ok(TAP_SOLVE.limitedMax < TAP.max && TAP_SOLVE.limitedMax >= 2);

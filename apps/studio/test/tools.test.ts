@@ -26,6 +26,9 @@ import {
   styleOf,
   COLOUR_STYLES,
   VIVID_PREF_KEY,
+  styleThumbsDue,
+  SHOT_IN_LABEL,
+  COLOUR_PRESETS,
 } from "../src/pipeline/tools.ts";
 import { DEFAULT_GYRO_PARAMS } from "../../motion-fix/src/lib/gyro/gyro-stabilize.ts";
 import { dewarpParams, dewarpUniforms } from "../src/pipeline/dewarp.ts";
@@ -48,6 +51,20 @@ assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 100 }).intensit
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 0 }).intensity, 0);
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, strength: 140 }).intensity, 2, "clamped");
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, preset: "murky" }).preset, "murky");
+// "Shot in" (the scene preset, behind More): Auto first and the default; the engine is sent no preset on top of its own reading.
+assert.equal(SHOT_IN_LABEL, "Shot in");
+assert.equal(COLOUR_PRESETS[0].id, "auto");
+assert.equal(DEFAULT_TOOLS.colour.preset, "auto");
+// The "Deep blue" slider is gone (Style → Blue water is that choice): a value left in a state never reaches the engine.
+assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, look: 0.8 }).look, 0);
+assert.deepEqual(colourSettings({ ...DEFAULT_TOOLS.colour, look: 0.8 }), colourSettings(DEFAULT_TOOLS.colour));
+// Style thumbnails: paused, every change paints; in play they paint once per picture (opened mid-play they were
+// blank), then rest until pause or a change of what they show.
+assert.equal(styleThumbsDue(false, "a", null), true);
+assert.equal(styleThumbsDue(false, "a", "a"), true);
+assert.equal(styleThumbsDue(true, "a", null), true, "opened while playing: one paint");
+assert.equal(styleThumbsDue(true, "a", "a"), false, "painted: not again in play");
+assert.equal(styleThumbsDue(true, "b", "a"), true, "another clip or setting in play: one paint");
 // Vivid is on by default; a saved explicit "off" is respected; ?vivid=0|1 overrides both.
 assert.equal(DEFAULT_TOOLS.colour.vivid, true);
 assert.equal(colourSettings({ ...DEFAULT_TOOLS.colour, vivid: true }).vivid, 1);

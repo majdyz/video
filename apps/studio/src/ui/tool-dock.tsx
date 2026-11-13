@@ -14,6 +14,8 @@ import {
   COLOUR_STYLES,
   NOISE_CHOICES,
   NOISE_HINT,
+  SHOT_IN_HINT,
+  SHOT_IN_LABEL,
   waterHueLabel,
   type ToolId,
   type ToolsState,
@@ -40,6 +42,8 @@ type Param = {
   more?: boolean;
   slider?: { value: number; min: number; max: number; def?: number; format?: (v: number) => string; onChange: (v: number) => void };
   choices?: { items: { id: string; label: string; hint?: string }[]; value: string; onChange: (id: string) => void; note?: string };
+  /** A slider under the choices, in the same bar (Colour → Style carries Strength). */
+  under?: { label: string } & NonNullable<Param["slider"]>;
   toggle?: { on: boolean; onChange: (v: boolean) => void };
   action?: () => void;
   /** An action that is a mode (tap-to-neutral waiting for a tap): shown lit while on. */
@@ -59,16 +63,16 @@ function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | n
   const up = (patch: Partial<typeof c>) => set((t) => ({ ...t, colour: { ...t.colour, ...patch, enabled: true } }));
   const scene = COLOUR_PRESETS.find((p) => p.id === c.preset);
   const noise = c.noise ?? DEFAULT_COLOUR.noise ?? "auto";
-  const STYLE: Param = { id: STYLE_ID, label: "Style", value: COLOUR_STYLES.find((s) => s.id === styleOf(c))?.label ?? "Vivid", choices: { items: COLOUR_STYLES, value: styleOf(c), onChange: (id) => { const s = id as ReturnType<typeof styleOf>; saveStyle(s); up(styleFlags(s)); } } };
+  // Style and Strength are one panel (owner, 13 Nov): which look, and how much of the correction, in one tap.
+  const strength: NonNullable<Param["under"]> = { label: "Strength", value: c.strength, min: 0, max: 100, def: DEFAULT_COLOUR.strength, onChange: (v) => up({ strength: v }) };
+  const STYLE: Param = { id: STYLE_ID, label: "Style", value: `${COLOUR_STYLES.find((s) => s.id === styleOf(c))?.label ?? "Vivid"} ${pct(c.strength)}`, under: strength, choices: { items: COLOUR_STYLES, value: styleOf(c), onChange: (id) => { const s = id as ReturnType<typeof styleOf>; saveStyle(s); up(styleFlags(s)); } } };
   const ps: Param[] = [
-    // Style first (the main creative choice): it is the bar Colour opens on, as three pictures of the frame (StyleThumbs).
+    // Style (the main creative choice) is the one main option: the bar Colour opens on, three pictures of the frame (StyleThumbs) over the Strength slider.
     STYLE,
-    { id: "strength", label: "Strength", value: pct(c.strength), slider: { value: c.strength, min: 0, max: 100, def: DEFAULT_COLOUR.strength, onChange: (v) => up({ strength: v }) } },
-    { id: "scene", label: "Scene", value: scene?.label ?? "Auto", choices: { items: COLOUR_PRESETS, value: c.preset, onChange: (id) => up({ preset: id as typeof c.preset }) } },
-    // The manual overrides, after the one-tap controls: a white point (tap the picture) and the water's hue.
+    // Behind More: the manual overrides. What water it was shot in (a correction hint; Auto = the engine's own reading), a white point (tap the picture) and the water's tint.
+    { id: "scene", label: SHOT_IN_LABEL, more: true, value: scene?.label ?? "Auto", choices: { items: COLOUR_PRESETS, value: c.preset, onChange: (id) => up({ preset: id as typeof c.preset }), note: SHOT_IN_HINT } },
     ...(neutral ? [{ id: "white", label: "White point", more: true, value: neutral.active ? "Tap…" : neutral.pick ? "Set" : "Auto", action: neutral.onToggle, lit: neutral.active } as Param] : []),
-    { id: "water", label: "Water", more: true, value: waterHueLabel(c.waterHue ?? 0), slider: { value: c.waterHue ?? 0, min: -100, max: 100, def: 0, format: waterHueLabel, onChange: (v) => up({ waterHue: Math.abs(v) < 4 ? 0 : v }) } },
-    { id: "look", label: "Deep blue", more: true, value: pct(c.look * 100), slider: { value: c.look * 100, min: 0, max: 100, def: 0, onChange: (v) => up({ look: v / 100 }) } },
+    { id: "water", label: "Water tint", more: true, value: waterHueLabel(c.waterHue ?? 0), slider: { value: c.waterHue ?? 0, min: -100, max: 100, def: 0, format: waterHueLabel, onChange: (v) => up({ waterHue: Math.abs(v) < 4 ? 0 : v }) } },
     { id: "sat", label: "Saturation", more: true, value: `${Math.round(c.saturation * 100)}%`, slider: { value: c.saturation * 100, min: 0, max: 200, def: 100, format: (v) => `${Math.round(v)}%`, onChange: (v) => up({ saturation: v / 100 }) } },
     { id: "clarity", label: "Clarity", more: true, value: pct(c.clarity * 100), slider: { value: c.clarity * 100, min: 0, max: 100, def: DEFAULT_COLOUR.clarity * 100, onChange: (v) => up({ clarity: v / 100 }) } },
     { id: "haze", label: "Haze", more: true, value: pct(c.veil * 100), slider: { value: c.veil * 100, min: 0, max: 120, def: DEFAULT_COLOUR.veil * 100, onChange: (v) => up({ veil: v / 100 }) } },
@@ -81,7 +85,7 @@ function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | n
       choices: {
         items: [{ id: "auto", label: `Auto · ${FOOTAGE_SHORT[detected]}` }, ...(["standard", "dlogm", "gplog", "hlg", "pq", "applelog", "wide"] as const).map((id) => ({ id, label: FOOTAGE_SHORT[id] }))],
         value: footage.choice, onChange: (id) => onFootage(id as FootageChoice),
-        note: footage.active === "standard" ? "No conversion: treated as Rec.709" : `${FOOTAGE_SHORT[footage.active]} is converted to Rec.709 first`,
+        note: footage.active === "standard" ? "What the camera recorded. Standard is used as it is" : `What the camera recorded. ${FOOTAGE_SHORT[footage.active]} is turned into standard colour first`,
       },
     });
   }
@@ -167,7 +171,7 @@ export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, 
     : subjectParams(tools, setTools, subjects, photo);
   const enabled = pane === "subjects" ? !!tools.colour.subjectPop && tools.colour.enabled : tools[pane].enabled;
   const setEnabled = (v: boolean) => setTools((t) => (pane === "subjects" ? { ...t, colour: { ...t.colour, subjectPop: v, enabled: v || t.colour.enabled } } : { ...t, [pane]: { ...t[pane], enabled: v } }));
-  const [sel, setSel] = useState<string>("strength");
+  const [sel, setSel] = useState<string>(pane === "colour" ? STYLE_ID : "strength");
   const rowRef = useRef<HTMLDivElement>(null);
   // A new tool: its first bar (Strength / Pop), the row scrolled back to its start.
   useEffect(() => { setSel(params[0]?.id ?? ""); rowRef.current?.scrollTo({ left: 0 }); }, [pane]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -202,13 +206,22 @@ export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, 
           <button type="button" className="tool-dock__enable" onClick={() => setEnabled(true)} disabled={disabled}>Turn {pane === "subjects" ? "Subject pop" : pane === "colour" ? "Colour" : pane === "stabilise" ? "Stabilise" : "Dewarp"} on</button>
         ) : current?.slider ? (
           <Slider label={current.label} value={current.slider.value} min={current.slider.min} max={current.slider.max} defaultValue={current.slider.def} format={current.slider.format} onChange={current.slider.onChange} disabled={disabled} />
-        ) : current?.choices && pane === "colour" && current.id === STYLE_ID && styleThumbs ? (
-          <StyleThumbs items={COLOUR_STYLES} value={styleOf(tools.colour)} onChange={current.choices.onChange} disabled={disabled} source={styleThumbs} />
         ) : current?.choices ? (
-          <div className="tool-dock__choices">
-            <Chips label={current.label} items={current.choices.items} value={current.choices.value} onChange={current.choices.onChange} disabled={disabled} />
-            {current.choices.note && <p className="tool-dock__note">{current.choices.note}</p>}
-          </div>
+          <>
+            {pane === "colour" && current.id === STYLE_ID && styleThumbs ? (
+              <StyleThumbs items={COLOUR_STYLES} value={styleOf(tools.colour)} onChange={current.choices.onChange} disabled={disabled} source={styleThumbs} />
+            ) : (
+              <div className="tool-dock__choices">
+                <Chips label={current.label} items={current.choices.items} value={current.choices.value} onChange={current.choices.onChange} disabled={disabled} />
+                {current.choices.note && <p className="tool-dock__note">{current.choices.note}</p>}
+              </div>
+            )}
+            {current.under && (
+              <div className="tool-dock__under">
+                <Slider label={current.under.label} value={current.under.value} min={current.under.min} max={current.under.max} defaultValue={current.under.def} format={current.under.format} onChange={current.under.onChange} disabled={disabled} />
+              </div>
+            )}
+          </>
         ) : null}
       </div>
       <div className="tool-dock__status" aria-live="polite">{status}</div>
