@@ -1,3 +1,4 @@
+import { trackCrumb } from "./analytics.ts";
 // Crash breadcrumbs: iPhone Safari kills a page that crashes ("A problem repeatedly occurred") with no log left
 // anywhere. The last steps are kept in localStorage as they happen; a session that ends cleanly marks itself, and
 // the next load shows what an unmarked one was doing (About).
@@ -102,6 +103,7 @@ export function aiCrashedLast(): boolean {
 export function crumb(msg: string): void {
   // (After the page's pagehide: see `leaving`.)
   if (leaving) return;
+  trackCrumb(msg);
   try {
     const a = JSON.parse(localStorage.getItem(KEY) || "[]") as string[];
     if (a[a.length - 1] === DONE && msg !== DONE) a.pop();

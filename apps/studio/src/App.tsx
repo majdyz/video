@@ -14,6 +14,7 @@ import type { FeedbackContext } from "./pipeline/feedback.ts";
 import { SubjectOutlines } from "./ui/subjects";
 import { NeutralMark } from "./ui/neutral";
 import { ExportSheet } from "./ui/export-sheet";
+import { analyticsOptedOut, setAnalyticsOptOut } from "./pipeline/analytics.ts";
 import { BatchSheet, BatchStrip, makeThumb, type BatchItem } from "./ui/batch";
 import { kindOf, splitBatch } from "./pipeline/batch.ts";
 import { EmptyState } from "./ui/empty";
@@ -98,6 +99,7 @@ export default function App() {
   /** Tap-to-neutral: the picture is waiting for a tap on something white or grey (Colour → White point). */
   const [picking, setPicking] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [analyticsOff, setAnalyticsOff] = useState(analyticsOptedOut);
   /** Several photos opened at once (ui/batch.tsx): the strip under the picture, Export all. Null for one clip / photo. */
   const [batch, setBatch] = useState<BatchItem[] | null>(null);
   /** Bumped per new batch: restarts its thumbnails. */
@@ -782,6 +784,10 @@ export default function App() {
             <li><b>Batch</b> pick several photos and videos at once: tweak any of them, then Export all (each one still gets its own colour balance), saved together to Photos on a phone or as one ZIP.</li>
             <li><b>10-bit, HDR and log</b> HLG / PQ (iPhone, GoPro, Osmo HDR), DJI D-Log M and Apple Log are converted to standard Rec.709 before the tools run; exports are 8-bit SDR.</li>
           </ul>
+          <p className="about__fine">
+            Your photos and videos never leave this device. The app counts anonymous usage (page opens, exports, AI on) to improve it: no files, names or locations.{" "}
+            <button type="button" className="link-btn" onClick={() => { setAnalyticsOptOut(!analyticsOff); setAnalyticsOff(!analyticsOff); }}>{analyticsOff ? "Turn usage counts back on" : "Turn off usage counts"}</button>
+          </p>
           <p className="about__fine">
             {s.engine === "webgpu" ? "WebGPU" : s.engine === "webgl2" ? "WebGL2" : s.engine === "failed" ? "No GPU" : "GPU starting"}
             {" · "}

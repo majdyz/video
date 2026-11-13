@@ -12,10 +12,12 @@ import "./theme/tokens.css";
 import "./styles/app.css";
 import App from "./App.tsx";
 import { catchGlobalErrors, ErrorBoundary } from "./ui/error-boundary.tsx";
+import { trackView } from "./pipeline/analytics.ts";
 
 // No StrictMode: the GPU contexts and the <video> element are owned by one
 // long-lived Studio session; a double mount would tear them down mid-init.
 catchGlobalErrors();
+trackView();
 createRoot(document.getElementById("root")!).render(<ErrorBoundary><App /></ErrorBoundary>);
 
 // No service worker inside the native app (apps/mobile): the bundle ships in
