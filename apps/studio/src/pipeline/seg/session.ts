@@ -49,7 +49,7 @@
 //   iPhone's page died there, 12 Nov). Every job leaves a breadcrumb when it starts and when it ends, with its
 //   number, so a crash log shows what was alive.
 import type { EdgeTam } from "./edgetam.ts";
-import { cellLab, nearMapNear, departFromCells, framePop, sdfFeatherNear, area, bbox, centroid, guidedFilterNear, iou, promptFromMask, rleDecode, rleEncode, shiftMap, waterContrast } from "./mask.ts";
+import { growToSubject, cellLab, nearMapNear, departFromCells, framePop, sdfFeatherNear, area, bbox, centroid, guidedFilterNear, iou, promptFromMask, rleDecode, rleEncode, shiftMap, waterContrast } from "./mask.ts";
 import { denseFlow, warp, type Gray } from "./flow.ts";
 import { fillInterval, HOLD, keyTimes, lockStep, maskSize, newLock, remap, SEG, sigmoidResize, toU8, type Keyframe, type Lock, type SegObject } from "./track.ts";
 import { assignSlots, edgeShare, gridWanted, inCorner, overlap, SEEDS, STRIDE, strideDue, topUpAt, type SeedCandidate } from "./seeds.ts";
@@ -2025,9 +2025,13 @@ export class SegSession {
   }
 
   /** The overlay-ready maps of one frame (feather, near, exclude, water departure; see track.ts SegTrack.at). */
-  private product(i: number, incRaw: Float32Array, excRaw: Float32Array | null, luma: Float32Array): SessionFrameOut {
+  private product(i: number, incRaw0: Float32Array, excRaw: Float32Array | null, luma: Float32Array): SessionFrameOut {
     const { mw: w, mh: h } = this;
-    const bb = bbox(incRaw, w, h);
+    const bb0 = bbox(incRaw0, w, h);
+    // The parts of the subject the coarse mask missed (bright wing tips, a dark head) that stand out from plain water
+    // right next to it (mask.ts growToSubject).
+    const incRaw = bb0 && SEG.growShare > 0 ? growToSubject(incRaw0, luma, w, h, Math.max(2, Math.round(SEG.growShare * Math.hypot(bb0.x1 - bb0.x0 + 1, bb0.y1 - bb0.y0 + 1)))) : incRaw0;
+    const bb = bb0 ? bbox(incRaw, w, h) : null;
     if (!bb && !excRaw) {
       // Nothing here: an empty frame (coded in a few bytes; the overlay is then the engine's alone).
       const z = new Uint8Array(w * h), zq = new Uint8Array(qsize(w) * qsize(h));

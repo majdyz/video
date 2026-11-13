@@ -137,6 +137,9 @@ export const SEG = {
   dormantS: 1,
   /** ...and is stepped by the tracker only once per this long (s) until it shows again (session.ts strideAt). */
   dormantStepS: 1,
+  /** The overlay's mask grows onto what stands out from the water within this share of the subject's diagonal (px on
+   * the mask grid; session.ts product, mask.ts growToSubject). 0: off. */
+  growShare: 0.06,
   /** Probability remap before the guided filter: drop sub-threshold haze, keep the 0.5 contour. */
   remapLo: 0.15,
   remapSpan: 0.7,

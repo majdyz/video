@@ -71,7 +71,8 @@ function studioSegModels(): Plugin {
 /**
  * Versions the service worker: after the bundle is written, sw.js gets a hash
  * of every built asset as its cache name and the shell + all JS/CSS chunks
- * (lazy tool chunks and workers included) as its precache list. Fonts, the
+ * (lazy tool chunks and workers included, except the AI workers: ~430 kB gzip most users never need; they are
+ * cached on first use like the model) as its precache list. Fonts, the
  * MediaPipe models and icons are cached on first use.
  */
 function studioServiceWorker(): Plugin {
@@ -90,7 +91,7 @@ function studioServiceWorker(): Plugin {
       const version = hash.digest("hex").slice(0, 12);
       // The HDR calibration clips (a few KB) too: an HDR clip opened offline still gets measured.
       const calib = existsSync(join(dir, "calib")) ? readdirSync(join(dir, "calib")).sort().map((f) => `./calib/${f}`) : [];
-      const precache = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg", "./icon-192.png", "./apple-touch-icon.png", ...calib, ...assets.filter((a) => /\.(js|css)$/.test(a)).map((a) => `./assets/${a}`)];
+      const precache = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg", "./icon-192.png", "./apple-touch-icon.png", ...calib, ...assets.filter((a) => /\.(js|css)$/.test(a) && !/^seg-worker/.test(a)).map((a) => `./assets/${a}`)];
       const src = readFileSync(sw, "utf8").replace("__BUILD_VERSION__", version).replace("__PRECACHE__", JSON.stringify(precache));
       writeFileSync(sw, src);
       this.info?.(`sw.js: cache studio-${version}, ${precache.length} files precached`);

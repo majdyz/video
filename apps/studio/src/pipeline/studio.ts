@@ -2949,6 +2949,7 @@ export class Studio {
           if (!res) throw new Error("Export failed");
         }
         console.info(`[export] done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (${used}), ${res.blob.type}, audio ${res.audioIncluded ? "kept" : "dropped"}`);
+        crumb(`export done: ${res.frames} frames in ${(res.elapsedMs / 1000).toFixed(1)} s (${used}, ${(res.frames / Math.max(0.001, res.elapsedMs / 1000)).toFixed(1)} fps, ${"width" in res ? res.width : info.displayW}×${"height" in res ? res.height : info.displayH})`);
         this.noteExportSpeed(res.frames, res.elapsedMs, "width" in res ? (res.width as number) : info.displayW, "height" in res ? (res.height as number) : info.displayH);
         this.setExp({
           state: "done",
@@ -3395,6 +3396,9 @@ export class Studio {
     const ps = e?.precomputeStats;
     const ahead = look ? ` · analyse-first ${look.analysed} thumbnails, ${ps?.hits ?? 0} used, ${ps?.misses ?? 0} live${ps?.mismatches ? `, ${ps.mismatches} mismatched` : ""}${ps && ps.personHits + ps.personMisses ? `; person ${ps.personHits} ahead, ${ps.personMisses} live` : ""}` : "";
     console.info(`[export] profile: ${line}${ahead}`);
+    // In the breadcrumbs too (About): a phone's per-stage numbers, where the export's time goes (decode, render, readback,
+    // encode), are otherwise only in a console nobody can open on an iPhone.
+    crumb(`export profile: ${line}`.slice(0, 400));
     console.info(`[export] profile ms: ${JSON.stringify(prof.table())}`);
     this.setExp({ profile: line + ahead });
   }

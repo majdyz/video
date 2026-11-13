@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { assembleMemory, frameIndex, isEmpty, MEM_DIM, MEM_TOKENS, newBank, pruneBank, storeMemory, type MemEntry } from "../src/pipeline/seg/bank.ts";
 import { denseFlow, warp, type Gray } from "../src/pipeline/seg/flow.ts";
-import { boxMean, DEPART_STEP, departMap, distanceTransform, feather, framePop, guidedFilter, iou, nearMap, promptFromMask, rleDecode, rleEncode, sdfFeather } from "../src/pipeline/seg/mask.ts";
+import { boxMean, growToSubject, DEPART_STEP, departMap, distanceTransform, feather, framePop, guidedFilter, iou, nearMap, promptFromMask, rleDecode, rleEncode, sdfFeather } from "../src/pipeline/seg/mask.ts";
 import { clipPopDirection, composeSegStrength, popDirection, SEG_THICK, SEG_WATER, unpackSegR, waterField } from "../../aqua-fix/src/engine/seg-overlay.ts";
 import { SEG_TONE } from "../../aqua-fix/src/engine/grade-shader.ts";
 import { clearCast } from "../../aqua-fix/src/engine/apply.ts";
@@ -484,6 +484,33 @@ const img = (dx: number, dy: number): Gray => {
   let qmin = 1;
   for (let i = 0; i < n; i++) qmin = Math.min(qmin, live.qualityAt(i));
   assert.ok(qmin > 0.99, `steady growth is not a fragment (min ${qmin.toFixed(2)})`);
+}
+
+// growToSubject: the coarse mask's missed wing tip (bright, next to the mask, on plain water) joins; plain water and
+// a subject over a busy background (sand texture) do not.
+{
+  const w = 80, h = 40, n = w * h;
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5) * 0.02;
+  const luma = new Float32Array(n), m = new Float32Array(n);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    luma[i] = 0.3 + rnd();
+    if (x >= 30 && x < 50 && y >= 15 && y < 25) { luma[i] = 0.5; m[i] = 1; }   // body, masked
+    if (x >= 50 && x < 54 && y >= 18 && y < 22) luma[i] = 0.9;                   // white tip, missed
+  }
+  const g = growToSubject(m, luma, w, h, 6);
+  assert.equal(g[20 * w + 52], 1, "the bright tip next to the mask joins");
+  assert.equal(g[20 * w + 60], 0, "plain water beyond it does not");
+  assert.equal(g[5 * w + 40], 0, "water above the body does not");
+  assert.equal(m[20 * w + 52], 0, "the input mask is untouched");
+  // The same subject over sand: a textured background, no growth.
+  const sand = Float32Array.from(luma, (v, i) => (m[i] ? v : 0.3 + (((i * 7919) % 13) / 13 - 0.5) * 0.5));
+  const g2 = growToSubject(m, sand, w, h, 6);
+  let grown = 0;
+  for (let i = 0; i < n; i++) if (g2[i] > 0.5 && m[i] <= 0.5) grown++;
+  assert.equal(grown, 0, "over a busy background the mask stays as it is");
+  console.log("seg: mask grows onto a missed bright wing tip on plain water, not onto water or sand: ok");
 }
 
 console.log("seg tests passed");

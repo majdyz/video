@@ -196,6 +196,44 @@ export function dilateBin(bin: Float32Array, w: number, h: number, r: number): F
   return o;
 }
 
+/**
+ * Grows a subject's mask onto the parts of it the tracker's coarse mask missed (owner's eagle ray, 13 Nov: the white
+ * wing tips and the head lay outside the phone model's mask): pixels within `r` px of the mask (grown one ring at a
+ * time, each touching the mask or the ring before) whose luma stands out from the water around the subject. The
+ * water is the band r..2r outside the mask: its mean and spread; a pixel joins when it differs from that mean by
+ * more than max(k × spread, floor). A subject over sand or reef (no plain water around it: the band's spread is
+ * high) grows little or not at all. Returns a new mask (0..1); `m` is not changed.
+ */
+export function growToSubject(m: Float32Array, luma: Float32Array, w: number, h: number, r: number, k = 3, floor = 0.06): Float32Array {
+  const n = w * h, out = Float32Array.from(m);
+  if (r < 1) return out;
+  const bin = new Float32Array(n);
+  let any = false;
+  for (let i = 0; i < n; i++) if (m[i] > 0.5) { bin[i] = 1; any = true; }
+  if (!any) return out;
+  const near = dilateBin(bin, w, h, r), far = dilateBin(bin, w, h, 2 * r);
+  let c = 0, sum = 0, sq = 0;
+  for (let i = 0; i < n; i++) if (far[i] > 0 && near[i] === 0) { c++; sum += luma[i]; sq += luma[i] * luma[i]; }
+  if (c < 16) return out;
+  const mean = sum / c, sd = Math.sqrt(Math.max(0, sq / c - mean * mean));
+  const thr = Math.max(k * sd, floor);
+  // Spread too high: the subject is not on plain water (sand, reef, a busy background): leave the mask as it is.
+  if (sd > 0.08) return out;
+  let front = bin;
+  for (let step = 0; step < r; step++) {
+    const ring = dilateBin(front, w, h, 1);
+    let added = 0;
+    const next = Float32Array.from(front);
+    for (let i = 0; i < n; i++) {
+      if (front[i] > 0 || ring[i] === 0 || near[i] === 0) continue;
+      if (Math.abs(luma[i] - mean) > thr) { next[i] = 1; added++; if (out[i] < 1) out[i] = 1; }
+    }
+    if (!added) break;
+    front = next;
+  }
+  return out;
+}
+
 /** sRGB code value (0..255) → linear light. */
 const SRGB_LIN = Float32Array.from({ length: 256 }, (_, i) => { const c = i / 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
 
