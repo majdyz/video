@@ -24,6 +24,7 @@ import type { FootageStatus, StabStatus } from "../pipeline/studio.ts";
 import type { CameraInfo } from "../../../dewarp/src/camera-detect.ts";
 import type { NeutralControls, SubjectControls } from "./panels";
 import { Chips, Slider } from "./controls";
+import { StyleThumbs, type StyleThumbSource } from "./style-thumbs";
 import { IconCheck, IconPause, IconPlay, IconReset } from "./icons";
 
 /**
@@ -48,6 +49,9 @@ type Param = {
 
 type Setter = (fn: (t: ToolsState) => ToolsState) => void;
 
+/** Colour's Style option (Natural / Vivid / Blue water). */
+const STYLE_ID = "vivid";
+
 const pct = (v: number) => String(Math.round(v));
 
 function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | null, onFootage: ((c: FootageChoice) => void) | null, neutral: NeutralControls | null): Param[] {
@@ -55,10 +59,12 @@ function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | n
   const up = (patch: Partial<typeof c>) => set((t) => ({ ...t, colour: { ...t.colour, ...patch, enabled: true } }));
   const scene = COLOUR_PRESETS.find((p) => p.id === c.preset);
   const noise = c.noise ?? DEFAULT_COLOUR.noise ?? "auto";
+  const STYLE: Param = { id: STYLE_ID, label: "Style", value: COLOUR_STYLES.find((s) => s.id === styleOf(c))?.label ?? "Vivid", choices: { items: COLOUR_STYLES, value: styleOf(c), onChange: (id) => { const s = id as ReturnType<typeof styleOf>; saveStyle(s); up(styleFlags(s)); } } };
   const ps: Param[] = [
+    // Style first (the main creative choice): it is the bar Colour opens on, as three pictures of the frame (StyleThumbs).
+    STYLE,
     { id: "strength", label: "Strength", value: pct(c.strength), slider: { value: c.strength, min: 0, max: 100, def: DEFAULT_COLOUR.strength, onChange: (v) => up({ strength: v }) } },
     { id: "scene", label: "Scene", value: scene?.label ?? "Auto", choices: { items: COLOUR_PRESETS, value: c.preset, onChange: (id) => up({ preset: id as typeof c.preset }) } },
-    { id: "vivid", label: "Style", value: COLOUR_STYLES.find((s) => s.id === styleOf(c))?.label ?? "Vivid", choices: { items: COLOUR_STYLES, value: styleOf(c), onChange: (id) => { const s = id as ReturnType<typeof styleOf>; saveStyle(s); up(styleFlags(s)); } } },
     // The manual overrides, after the one-tap controls: a white point (tap the picture) and the water's hue.
     ...(neutral ? [{ id: "white", label: "White point", more: true, value: neutral.active ? "Tap…" : neutral.pick ? "Set" : "Auto", action: neutral.onToggle, lit: neutral.active } as Param] : []),
     { id: "water", label: "Water", more: true, value: waterHueLabel(c.waterHue ?? 0), slider: { value: c.waterHue ?? 0, min: -100, max: 100, def: 0, format: waterHueLabel, onChange: (v) => up({ waterHue: Math.abs(v) < 4 ? 0 : v }) } },
@@ -133,7 +139,9 @@ function subjectParams(tools: ToolsState, set: Setter, subjects: SubjectControls
  * The phone's tool controls, floating over the picture: the selected option's one bar (a slider or a row of
  * choices) and the tool's options as one scrolling row of bubbles (on/off first, the rarer ones last). Nothing here takes picture space: it sits on a soft scrim at the bottom of the full-screen preview.
  */
-export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, onFootage, onMotionLog, subjects, neutral, disabled, status, onClose, playback }: {
+export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, onFootage, onMotionLog, subjects, neutral, disabled, status, onClose, playback, styleThumbs }: {
+  /** Colour → Style as pictures of the frame on screen; without it, the plain choices. */
+  styleThumbs?: StyleThumbSource | null;
   /** Colour: tap-to-neutral (the "White point" bubble). */
   neutral?: NeutralControls | null;
   onClose: () => void;
@@ -194,6 +202,8 @@ export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, 
           <button type="button" className="tool-dock__enable" onClick={() => setEnabled(true)} disabled={disabled}>Turn {pane === "subjects" ? "Subject pop" : pane === "colour" ? "Colour" : pane === "stabilise" ? "Stabilise" : "Dewarp"} on</button>
         ) : current?.slider ? (
           <Slider label={current.label} value={current.slider.value} min={current.slider.min} max={current.slider.max} defaultValue={current.slider.def} format={current.slider.format} onChange={current.slider.onChange} disabled={disabled} />
+        ) : current?.choices && pane === "colour" && current.id === STYLE_ID && styleThumbs ? (
+          <StyleThumbs items={COLOUR_STYLES} value={styleOf(tools.colour)} onChange={current.choices.onChange} disabled={disabled} source={styleThumbs} />
         ) : current?.choices ? (
           <div className="tool-dock__choices">
             <Chips label={current.label} items={current.choices.items} value={current.choices.value} onChange={current.choices.onChange} disabled={disabled} />

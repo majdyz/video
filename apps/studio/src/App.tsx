@@ -22,7 +22,8 @@ import { IntroSheet, introDue, markIntroSeen } from "./ui/intro";
 import { FeedbackSheet } from "./ui/feedback";
 import { IconButton, Segmented } from "./ui/controls";
 import { IconClose, IconCompare, IconExpand, IconExport, IconMore, IconPlus, IconShrink, IconSpark, IconWarning } from "./ui/icons";
-import { useMedia } from "./ui/use-media";
+import { useMedia, useViewport } from "./ui/use-media";
+import { phoneLayout } from "./ui/layout.ts";
 import { FootageField } from "./ui/footage";
 import { isNativeShell } from "./native/registry.ts";
 import { formatTimecode, trimAt } from "./pipeline/trim.ts";
@@ -36,8 +37,8 @@ const THEMES: { id: Theme; label: string }[] = [
   { id: "light", label: "Light" },
 ];
 
-/** Same breakpoint as the CSS: wide screens and phones in landscape get the sidebar layout. */
-const WIDE_QUERY = "(min-width: 960px), (orientation: landscape) and (max-height: 560px) and (min-width: 600px)";
+/** Same breakpoint as the CSS: wide screens get the sidebar layout (a phone on its side has its own: ui/layout.ts). */
+const WIDE_QUERY = "(min-width: 960px)";
 const ACCEPT = "video/*,image/*,.mov,.mp4,.m4v,.heic,.heif";
 
 function initialTools(): ToolsState {
@@ -119,6 +120,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const motionLogRef = useRef<HTMLInputElement>(null);
   const wide = useMedia(WIDE_QUERY);
+  const viewport = useViewport();
 
   useEffect(() => {
     const c = colourRef.current, g = geoRef.current, v = videoRef.current;
@@ -399,6 +401,21 @@ export default function App() {
   const canFollow = !!chip && s.seg.on && s.seg.phase === "tracking" && !s.segFollow;
 
   const closeSheet = useCallback(() => setSheetOpen(false), []);
+  // Phone layout (ui/layout.ts): a landscape clip in portrait leaves letterbox bars, and the chip, the tools and the
+  // dock go there ("stacked": nothing on the picture); a phone on its side gets the picture full-bleed with the rail
+  // in the pillarbox and the dock along the bottom; a tall clip keeps the controls floating on it.
+  const phone = wide || s.phase === "empty" || immersive ? null : phoneLayout(viewport.w, viewport.h, aspect);
+  const stacked = phone === "stacked", landscape = phone === "landscape";
+  // The rail as slim unlabelled discs: wherever it has to sit on or beside the picture in little room.
+  const folded = !wide && !immersive && (landscape || (sheetOpen && !stacked));
+  // Colour → Style: three pictures of the frame on screen, due again when that frame or a colour setting changes.
+  const paintThumbs = useCallback((targets: Parameters<Studio["paintStyleThumbs"]>[0]) => studio.paintStyleThumbs(targets), [studio]);
+  const lookKey = useMemo(() => { const { vivid: _v, blue: _b, ...rest } = panelTools.colour; return JSON.stringify(rest); }, [panelTools.colour]);
+  const styleThumbs = useMemo(() => ({
+    paint: paintThumbs,
+    key: `${s.fileName}|${s.info?.displayW}x${s.info?.displayH}|${s.playing ? "playing" : s.currentTime.toFixed(2)}|${s.colourProfiled}|${lookKey}|${tools.dewarp.enabled}|${tools.stabilise.enabled}|${phone}`,
+    playing: s.playing,
+  }), [paintThumbs, s.fileName, s.info?.displayW, s.info?.displayH, s.playing, s.currentTime, s.colourProfiled, lookKey, tools.dewarp.enabled, tools.stabilise.enabled, phone]);
   const popOn = !!panelTools.colour.subjectPop || new URLSearchParams(location.search).get("pop") === "1";
   const paneOpen = wide || sheetOpen;
   /**
@@ -555,7 +572,7 @@ export default function App() {
   );
 
   return (
-    <div className={`app phase-${s.phase}${wide ? " is-wide" : " is-narrow"}${!wide && sheetOpen ? " sheet-open" : ""}${immersive ? " is-immersive" : ""}${pickActive ? " is-picking" : ""}`} style={aspect ? ({ ["--clip-ar" as string]: aspect.toFixed(4) }) : undefined} data-stab={s.stab.state} data-export={s.exp.state} data-kind={s.kind ?? "none"}>
+    <div className={`app phase-${s.phase}${wide ? " is-wide" : " is-narrow"}${stacked ? " is-stacked" : ""}${landscape ? " is-landscape" : ""}${folded ? " is-folded" : ""}${!wide && sheetOpen ? " sheet-open" : ""}${immersive ? " is-immersive" : ""}${pickActive ? " is-picking" : ""}`} style={aspect ? ({ ["--clip-ar" as string]: aspect.toFixed(4) }) : undefined} data-stab={s.stab.state} data-export={s.exp.state} data-kind={s.kind ?? "none"}>
       <header className="topbar">
         <div className="brand">
           <h1 className="wordmark">{BRAND.name}</h1>
@@ -598,6 +615,7 @@ export default function App() {
             paused={!s.playing}
             showPlayHint={ready && !photo && !s.busy && !exporting && !selectActive && !pickActive}
             resetKey={`${s.fileName}:${s.info?.displayW}x${s.info?.displayH}`}
+            grow={!wide}
           >
             {s.phase === "empty" && <EmptyState accept={ACCEPT} onFiles={openFiles} onPick={native ? pick : undefined} onSample={openSample} busy={s.busy} />}
             {s.phase !== "empty" && pill && !selectActive && !pickActive && (
@@ -644,10 +662,14 @@ export default function App() {
                 footage={s.kind === "video" ? s.footage : null} onFootage={s.kind === "video" ? (c) => studio.setFootage(c) : null}
                 onMotionLog={s.kind === "video" ? () => motionLogRef.current?.click() : null}
                 subjects={subjectControls} neutral={neutralControls} onClose={closeSheet}
+                styleThumbs={ready && !exporting ? styleThumbs : null}
+                // On its side the open tool's row takes the timeline's place: play / pause moves into the row.
+                playback={landscape && !photo ? { playing: s.playing, toggle: () => studio.togglePlay() } : null}
                 status={pane === "subjects" ? (s.kind === "video" && (s.seg.on || s.seg.phase === "unavailable" || s.seg.weak || s.seg.crashed) ? segStatusText(s.seg) : null) : <>{segScope && tab === "colour" ? `${segScope} · ` : ""}{toolStatus({ tool: tab, tools: tab === "colour" ? panelTools : tools, stab: s.stab, info: s.info, colourProfiled: s.colourProfiled, photo, camera: s.camera })}</>} />
             ) : null}
-            {/* The timeline (play / pause, scrub) stays while a tool is open: a change is checked across the clip. */}
-            {bar}
+            {/* The timeline (play / pause, scrub) stays while a tool is open: a change is checked across the clip.
+                (Not on a phone on its side: there is no height for both, the row has its own play button.) */}
+            {!(landscape && sheetOpen) && bar}
           </aside>
         )}
 

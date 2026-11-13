@@ -36,6 +36,7 @@ import { mapPrompt } from "./seg/track.ts";
 import { gridWanted, type SeedCandidate } from "./seg/seeds.ts";
 import { exportWaitS, headWait, SEG_EXPORT, SEG_EXPORT_RUNNING, SEG_EXPORT_UNAVAILABLE, segCoverageNote, SegExportUse } from "./seg/export-use.ts";
 import type { ClipInfo } from "./probe.ts";
+import { COLOUR_STYLES, styleFlags, type ColourStyle } from "./tools.ts";
 import { clipKeyOf, colourSettings, DEFAULT_TOOLS, exportSuffix, neutralNote, profileDefaults, solveParams, type ColourLook, type ColourState, type DewarpState, type NeutralPick, type ToolsState } from "./tools.ts";
 import type { TapSolve } from "../../../aqua-fix/src/engine/tap.ts";
 
@@ -324,6 +325,8 @@ export class Studio {
   private motion: MotionMod | null = null;
   private dewarpMod: DewarpMod | null = null;
   private engine: Engine | null = null;
+  /** The canvas the colour engine draws into (the style thumbnails copy it). */
+  private colourCanvas: HTMLCanvasElement | null = null;
   private enginePromise: Promise<Engine | null> | null = null;
   private geo: GeometryRenderer | null = null;
   /** WebKit: this clip's offline export falls back to the real-time recorder when it runs slower than real time. */
@@ -508,6 +511,7 @@ export class Studio {
         }
       }
     });
+    this.colourCanvas = colourCanvas;
     this.enginePromise = this.startEngine(colourCanvas);
     await this.enginePromise;
   }
@@ -1426,6 +1430,48 @@ export class Studio {
     const s = colourSettings(c, this.clipKey);
     if (new URLSearchParams(location.search).get("pop") === "1") s.subjectPop = true;
     return s;
+  }
+
+  // ------------------------------------------------------------ style thumbnails
+
+  /**
+   * Colour → Style: the frame on screen graded with each style, copied into the given 2D canvases (centre-cropped
+   * to their shape). Cheap: per style one more draw of the frame the engine already holds (no upload, no analysis,
+   * no readback), then one draw that puts the picture back as it was, all inside this call, so none of it reaches
+   * the screen. False when there is nothing to draw from (no clip, Colour off, an export running): the caller
+   * keeps its plain labels.
+   */
+  paintStyleThumbs(targets: { style: ColourStyle; canvas: HTMLCanvasElement }[]): boolean {
+    const e = this.engine, c = this.colourCanvas;
+    if (!e || !c || c.width < 2 || c.height < 2 || this.exporting || this.segSeedBusy || this.shownT === null || this.snap.phase !== "ready" || !this.tools.colour.enabled) return false;
+    const t = this.shownT;
+    const s = this.segs;
+    const look: ColourLook = (this.snap.kind === "video" && s.cuts.length ? s.looks[lookIndexAt(s.cuts, t, this.trim, this.snap.duration, this.snap.info?.fps || 30)] : null) ?? this.tools.colour;
+    const split = e.split;
+    let ok = true;
+    try {
+      e.split = 0;
+      for (const { style, canvas } of targets) {
+        if (!COLOUR_STYLES.some((x) => x.id === style)) continue;
+        const ctx = canvas.getContext("2d");
+        if (!ctx || !canvas.width || !canvas.height) continue;
+        e.settings = this.colourFor({ ...look, ...styleFlags(style) });
+        e.render();
+        // Centre crop to the thumbnail's shape.
+        const dAr = canvas.width / canvas.height;
+        let sw = c.width, sh = c.height;
+        if (sw / sh > dAr) sw = sh * dAr;
+        else sh = sw / dAr;
+        ctx.drawImage(c, (c.width - sw) / 2, (c.height - sh) / 2, sw, sh, 0, 0, canvas.width, canvas.height);
+      }
+    } catch {
+      ok = false;
+    } finally {
+      e.settings = this.settingsAt(t);
+      e.split = split;
+      try { e.render(); } catch { /* the next repaint draws it */ }
+    }
+    return ok;
   }
 
   // ------------------------------------------------------------ manual colour overrides

@@ -2050,8 +2050,8 @@ a {
   }
 }
 
-/* Wide screens and phones in landscape: picture left, controls right. */
-@media (min-width: 960px), (orientation: landscape) and (max-height: 560px) and (min-width: 600px) {
+/* Wide screens: picture left, controls right. (A phone on its side is not one: see "phone v4" at the end.) */
+@media (min-width: 960px) {
   .workspace {
     flex-direction: row;
   }
@@ -2103,6 +2103,9 @@ a {
     mask-image: none;
     overflow: visible;
   }
+}
+/* Sheets are centred dialogs on wide screens and on a phone on its side. */
+@media (min-width: 960px), (orientation: landscape) and (max-height: 560px) and (min-width: 600px) {
   .sheet {
     left: 50%;
     right: auto;
@@ -2127,10 +2130,15 @@ a {
   }
 }
 
-@media (orientation: landscape) and (max-height: 560px) and (min-width: 600px) {
+@media (orientation: landscape) and (max-height: 560px) {
+  :root {
+    --topbar-h: 48px;
+  }
+}
+/* A wide but low window: the sidebar slims down. */
+@media (min-width: 960px) and (max-height: 560px) {
   :root {
     --sidebar-w: 320px;
-    --topbar-h: 48px;
   }
   .panel {
     min-height: 0;
@@ -2884,21 +2892,21 @@ a {
 /* Phone, a tool open: you are looking at the picture while you drag a slider, and the rail's labelled column covered
    its right edge (a followed subject swam under it). The rail folds to a slim column of small, more see-through
    discs: no labels (still read to assistive tech), the open tool's disc stays solid white. */
-.is-narrow.sheet-open .canvas-rail {
+.is-narrow.is-folded .canvas-rail {
   gap: 14px;
   right: calc(6px + env(safe-area-inset-right));
 }
-.is-narrow.sheet-open .rail-btn {
+.is-narrow.is-folded .rail-btn {
   position: relative;
   min-width: 0;
 }
 /* The discs are small; the finger's target is not (44 × 44 px on a 44 px pitch, reaching into the gaps). */
-.is-narrow.sheet-open .rail-btn::after {
+.is-narrow.is-folded .rail-btn::after {
   content: "";
   position: absolute;
   inset: -7px -7px -7px -7px;
 }
-.is-narrow.sheet-open .rail-btn > span {
+.is-narrow.is-folded .rail-btn > span {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -2906,18 +2914,18 @@ a {
   clip-path: inset(50%);
   white-space: nowrap;
 }
-.is-narrow.sheet-open .rail-btn > svg {
+.is-narrow.is-folded .rail-btn > svg {
   width: 16px;
   height: 16px;
   padding: 7px;
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
-.is-narrow.sheet-open .rail-btn:not(.is-on) > svg {
+.is-narrow.is-folded .rail-btn:not(.is-on) > svg {
   background: rgba(0, 0, 0, 0.22);
   color: rgba(255, 255, 255, 0.82);
 }
-.is-narrow.sheet-open .rail-sep {
+.is-narrow.is-folded .rail-sep {
   width: 14px;
   margin: 0;
 }
@@ -3260,4 +3268,244 @@ a {
 }
 @media (prefers-reduced-motion: reduce) {
   .export-btn.is-running { animation: none; }
+}
+
+/* ------------------------------------------------------------ phone v4: picture first */
+
+/* The phone layout is picked in ui/layout.ts (App.tsx sets the class). The bars a layout keeps free are padding on
+   the stage: the Stage fits the picture into what is left and reports where it sits (--frame-top / --frame-bottom). */
+.is-narrow {
+  --rail-row-h: 68px;
+  --chip-slot: 52px;
+  --dock-h: 224px;
+  --rail-col: 56px;
+}
+/* Zoomed in, the picture's window grows into the free area (stage.tsx, layout.ts zoomWindow); a double-tap animates it. */
+.stage__frame.is-animating {
+  transition: opacity var(--dur-3) var(--ease-out), transform var(--dur-4) var(--ease-out), width var(--dur-3) var(--ease-out), height var(--dur-3) var(--ease-out);
+}
+.stage__content {
+  right: auto;
+  bottom: auto;
+  width: 100%;
+  height: 100%;
+}
+
+/* Stacked (portrait, a landscape clip): the picture has the full width and nothing on it. The chip sits in the bar
+   above it, the tools are a labelled row right under it (in thumb reach), the dock is at the foot. */
+.is-narrow.is-stacked .stage {
+  padding-top: calc(var(--topbar-h) + env(safe-area-inset-top) + var(--chip-slot));
+  padding-bottom: calc(var(--rail-row-h) + var(--dock-h) + env(safe-area-inset-bottom));
+}
+.is-narrow.is-stacked .canvas-rail {
+  top: calc(var(--frame-bottom) + var(--s-2));
+  left: 0;
+  right: 0;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+}
+.is-narrow.is-stacked .rail-btn {
+  min-width: 58px;
+}
+.is-narrow.is-stacked .rail-btn:last-child {
+  min-width: 66px;
+}
+.is-narrow.is-stacked .rail-sep {
+  align-self: flex-start;
+  width: 1px;
+  height: 22px;
+  margin: 8px 3px 0;
+}
+.is-narrow.is-stacked .pill,
+.is-narrow.is-stacked .select-bar {
+  top: auto;
+  bottom: calc(100% - var(--frame-top) + var(--s-2));
+}
+.is-narrow.is-stacked .pill {
+  max-width: calc(100% - 2 * var(--s-3));
+}
+.is-narrow.is-stacked .select-bar {
+  left: var(--s-3);
+  right: var(--s-3);
+}
+.is-narrow.is-stacked .pill--subject.is-under-bar {
+  top: auto;
+  bottom: calc(100% - var(--frame-top) + var(--s-2) + 54px);
+}
+/* The dock is on the letterbox, not on footage: no scrim. */
+.is-narrow.is-stacked:not(.phase-empty) .controls {
+  background: none;
+}
+/* Before / After in the picture's top corners again (nothing else is there now). */
+.is-narrow.is-stacked .split__tag {
+  top: var(--s-2);
+  margin-top: 0;
+}
+.is-narrow.is-stacked .split__tag--before {
+  left: var(--s-3);
+  transform: none;
+}
+.is-narrow.is-stacked .split__tag--after {
+  left: auto;
+  right: var(--s-3);
+}
+/* A small phone (iPhone SE): the tool row without labels (still read out), a slimmer chip slot. */
+@media (max-height: 640px), (max-width: 359px) {
+  .is-narrow.is-stacked {
+    --rail-row-h: 52px;
+    --chip-slot: 40px;
+  }
+  .is-narrow.is-stacked .rail-btn {
+    min-width: 44px;
+  }
+  .is-narrow.is-stacked .rail-btn > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .is-narrow.is-stacked .rail-btn > svg {
+    padding: 12px;
+  }
+  .is-narrow.is-stacked .rail-sep {
+    margin-top: 11px;
+  }
+  .is-narrow.is-stacked .rail-btn:last-child {
+    min-width: 44px;
+  }
+  .is-narrow.is-stacked .pill--subject.is-under-bar {
+    display: none;
+  }
+  /* No room above the picture for the picking bar (it is 52 px): it sits on the picture's top edge, as it did. */
+  .is-narrow.is-stacked .select-bar {
+    top: calc(var(--frame-top) + var(--s-2));
+    bottom: auto;
+  }
+  /* A long state line (the AI note) keeps to two lines: the dock must not reach the tool row. */
+  .is-narrow.is-stacked .tool-dock__status {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+  }
+  .is-narrow.is-stacked .tool-dock__status:empty {
+    display: none;
+  }
+}
+
+/* A phone on its side: the picture full-bleed in the height, the rail a column in the pillarbox at the right, the
+   dock along the bottom (one row: the options, and the selected one's bar beside them). The app already keeps clear
+   of the notch (padding on .app). */
+.is-narrow.is-landscape .stage {
+  padding-right: var(--rail-col);
+}
+.is-narrow.is-landscape .canvas-rail {
+  top: calc(var(--topbar-h) + env(safe-area-inset-top) + var(--s-2));
+  right: 13px;
+  bottom: calc(env(safe-area-inset-bottom) + var(--s-1));
+  flex-wrap: wrap-reverse;
+  align-content: flex-start;
+  column-gap: 14px;
+}
+.is-narrow.is-landscape:not(.phase-empty) .controls {
+  right: var(--rail-col);
+  padding: 28px var(--s-3) calc(var(--s-2) + env(safe-area-inset-bottom));
+}
+.is-narrow.is-landscape .tool-dock {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 40%);
+  grid-template-areas: "status status" "bubbles bar";
+  column-gap: var(--s-4);
+  row-gap: var(--s-1);
+  align-items: end;
+}
+.is-narrow.is-landscape .tool-dock__status {
+  grid-area: status;
+}
+.is-narrow.is-landscape .tool-dock__bar {
+  grid-area: bar;
+  min-width: 0;
+}
+.is-narrow.is-landscape .bubbles {
+  grid-area: bubbles;
+  min-width: 0;
+}
+.is-narrow.is-landscape .select-bar {
+  right: auto;
+  width: max-content;
+  max-width: 60%;
+  gap: var(--s-3);
+}
+.is-narrow.is-landscape .select-bar span {
+  white-space: nowrap;
+}
+
+/* Colour → Style: the three styles as small pictures of the frame on screen (ui/style-thumbs.tsx). */
+.style-thumbs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s-2);
+}
+.style-thumb {
+  position: relative;
+  height: 58px;
+  overflow: hidden;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.13);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+  transition: transform var(--dur-1) var(--ease-out);
+}
+.style-thumb:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.style-thumb:disabled {
+  opacity: 0.45;
+}
+.style-thumb canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+.style-thumb.has-picture canvas {
+  opacity: 1;
+}
+.style-thumb span {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 14px 4px 4px;
+  text-align: center;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+}
+.style-thumb.has-picture span {
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.62), rgba(0, 0, 0, 0));
+}
+.style-thumb::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  pointer-events: none;
+}
+.style-thumb.is-on::after {
+  box-shadow: inset 0 0 0 2.5px #fff;
+}
+.style-thumb:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
