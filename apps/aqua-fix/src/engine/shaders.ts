@@ -193,7 +193,8 @@ export const WGSL_DOWNSCALE_EXT = externalVariant(WGSL_DOWNSCALE);
 
 // Compare wipe. The grade never applies it: while the wipe is on, the
 // backends grade into a texture (so moving the split need not grade again) and this pass draws
-// the screen from it, showing the "before" picture left of the split. Moving
+// the screen from it, showing the "before" picture left of the split (u_mix / cp.mix of it over the graded frame:
+// 1 normally, less while the studio fades the original in behind the line it sweeps in). Moving
 // the split while paused only re-runs this pass. u_before / u_source is the
 // grade's source (rotated like the grade) or a separate upright picture (the
 // studio's raw frame when a geometry pass feeds the engine).
@@ -203,17 +204,19 @@ precision highp int;
 uniform sampler2D u_before;
 uniform sampler2D u_graded;
 uniform float u_split;
+uniform float u_mix;
 uniform int u_rot;
 in vec2 v_uv;
 out vec4 o_color;
 ${ROTATE_GLSL}
 void main() {
-  if (v_uv.x < u_split) o_color = vec4(texture(u_before, rotateUV(v_uv, u_rot)).rgb, 1.0);
-  else o_color = vec4(texelFetch(u_graded, ivec2(gl_FragCoord.xy), 0).rgb, 1.0);
+  vec3 graded = texelFetch(u_graded, ivec2(gl_FragCoord.xy), 0).rgb;
+  if (v_uv.x < u_split) o_color = vec4(mix(graded, texture(u_before, rotateUV(v_uv, u_rot)).rgb, u_mix), 1.0);
+  else o_color = vec4(graded, 1.0);
 }`;
 
 export const WGSL_COMPOSITE = `
-struct CompParams { split: f32, rot: f32, pad0: f32, pad1: f32 };
+struct CompParams { split: f32, rot: f32, mix: f32, pad1: f32 };
 @group(0) @binding(0) var<uniform> cp: CompParams;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var u_source: texture_2d<f32>;
@@ -230,6 +233,6 @@ ${ROTATE_WGSL}
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
   let orig = textureSampleLevel(u_source, samp, rotateUV(in.uv, u32(cp.rot + 0.5)), 0.0).rgb;
   let graded = textureLoad(u_graded, vec2<i32>(in.pos.xy), 0).rgb;
-  return vec4(select(graded, orig, in.uv.x < cp.split), 1.0);
+  return vec4(select(graded, mix(graded, orig, cp.mix), in.uv.x < cp.split), 1.0);
 }`;
 export const WGSL_COMPOSITE_EXT = externalVariant(WGSL_COMPOSITE);

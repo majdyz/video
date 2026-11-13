@@ -70,6 +70,11 @@ export interface GpuBackend {
    * when there is no reusable frame (anything changed since): call render().
    */
   recomposite?(split: number): boolean;
+  /**
+   * How much of the "before" picture shows left of the split: 1 (default) = the original, 0 = the graded frame there
+   * too. The studio ramps it while its compare line sweeps in over a picture that was graded edge to edge.
+   */
+  beforeMix?: number;
   dispose(): void;
 }
 

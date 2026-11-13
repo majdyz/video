@@ -615,9 +615,10 @@ export class GradeEngine {
   /**
    * Runs one analysis and waits for it (photos, export keyframes). Rejects
    * on a GPU/worker failure or after `timeoutMs`, so callers can carry on
-   * with the ungraded frame instead of hanging.
+   * with the ungraded frame instead of hanging. `withPerson` false (a clip's first preview frame): the snap does not
+   * wait for the person mask (its model can take seconds to start); the mask eases in when it lands, as in playback.
    */
-  async analyzeNow(snap: boolean, timeoutMs = 10_000, dueSec?: number): Promise<void> {
+  async analyzeNow(snap: boolean, timeoutMs = 10_000, dueSec?: number, withPerson = true): Promise<void> {
     const wait = () =>
       new Promise<AnalysisPacket>((resolve, reject) => {
         this.resolveWaiters.push(resolve);
@@ -632,7 +633,7 @@ export class GradeEngine {
     const p = wait();
     await this.startAnalysis({ dueSec });
     const packet = await withTimeout(p);
-    if (snap) {
+    if (snap && withPerson) {
       // First frame of an export / a photo: let the person mask land too so
       // the snap carries it (bounded by the same timeout; failure is fine).
       await withTimeout(this.waitPerson()).catch(() => undefined);
@@ -1180,6 +1181,14 @@ export class GradeEngine {
   recomposite(split: number): boolean {
     this.split = split;
     return this.backend.recomposite?.(split) ?? false;
+  }
+
+  /**
+   * How much of the original shows left of the compare split: 1 = all of it (default), 0 = the graded frame there too.
+   * Takes effect with the next render() or recomposite().
+   */
+  set beforeMix(k: number) {
+    this.backend.beforeMix = Math.min(1, Math.max(0, k));
   }
 
   /** The picture shown left of the compare split when the source is not the original (see GpuBackend.setBefore). */

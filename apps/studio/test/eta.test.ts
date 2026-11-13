@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { etaShort, etaText, Eta } from "../src/pipeline/eta.ts";
+import { colourStatus, etaShort, etaText, Eta } from "../src/pipeline/eta.ts";
 
 assert.equal(etaText(0, 0.01, 10_000), null, "too little progress");
 assert.equal(etaText(0, 0.5, 2_000), null, "too early");
@@ -17,4 +17,10 @@ assert.equal(etaShort(0, 0.5, 70_000), "1 min left");
 assert.equal(etaShort(0, 0.25, 60_000), "3 min left");
 assert.equal(e.short(0.2, 61_000), "4 min left", "one run: the same start as text()");
 assert.equal(new Eta().short(null), null);
+// The colour profile's pill: plain words, whole seconds, never "0 s".
+assert.equal(colourStatus(null), "Fine-tuning colour…");
+assert.equal(colourStatus(3.2), "Fine-tuning colour… 4 s left");
+assert.equal(colourStatus(0.1), "Fine-tuning colour… 1 s left");
+assert.equal(colourStatus(-2), "Fine-tuning colour… 1 s left");
+assert.equal(colourStatus(Infinity), "Fine-tuning colour…");
 console.log("eta tests passed");

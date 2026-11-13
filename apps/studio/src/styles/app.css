@@ -1670,6 +1670,27 @@ a {
   flex-direction: column;
   gap: var(--s-1);
   margin-top: var(--s-2);
+  /* Both ways in stay in view however short the phone (on a 320×568 one they sat below the fold, re-score 13 Nov):
+     the steps scroll under them. */
+  position: sticky;
+  bottom: 0;
+  padding-top: var(--s-2);
+  background: var(--sheet-bg);
+  box-shadow: 0 -10px 10px -4px var(--sheet-bg);
+}
+@media (max-height: 640px) {
+  .intro__body {
+    gap: var(--s-3);
+  }
+  .intro__steps {
+    gap: var(--s-2);
+  }
+  .intro__actions {
+    margin-top: 0;
+  }
+  .intro__actions .btn {
+    height: 44px;
+  }
 }
 
 /* Send feedback */
@@ -2334,7 +2355,7 @@ a {
   top: calc(var(--s-3) + env(safe-area-inset-top));
 }
 
-/* Status text over the picture wraps instead of running off or being cut ("Profiling colour…", AI progress). */
+/* Status text over the picture wraps instead of running off or being cut ("Fine-tuning colour… 4 s left", AI progress). */
 .pill {
   white-space: normal;
   max-width: calc(100% - 2 * var(--s-3) - 140px);

@@ -97,6 +97,8 @@ export class WebGPUBackend implements GpuBackend {
   private beforeTex: GPUTexture | null = null;
   private wipeTex: GPUTexture | null = null;
   private lastGraded: GPUTexture | null = null;
+  /** Share of the "before" picture left of the split (GpuBackend.beforeMix). */
+  beforeMix = 1;
 
   private constructor(canvas: HTMLCanvasElement, device: GPUDevice) {
     this.canvas = canvas;
@@ -534,7 +536,7 @@ export class WebGPUBackend implements GpuBackend {
   private composite(encoder: GPUCommandEncoder, graded: GPUTexture, target: GPUTexture, split: number, ext: GPUExternalTexture | null): void {
     const before = this.beforeTex ? this.beforeTex.createView() : ext ?? this.source!.createView();
     const pipe = !this.beforeTex && ext ? this.compPipeExt : this.compPipe;
-    this.device.queue.writeBuffer(this.compBuf, 0, new Float32Array([split, this.beforeTex ? 0 : this.rotation, 0, 0]));
+    this.device.queue.writeBuffer(this.compBuf, 0, new Float32Array([split, this.beforeTex ? 0 : this.rotation, this.beforeMix, 0]));
     const group = this.device.createBindGroup({
       layout: pipe.getBindGroupLayout(0),
       entries: [

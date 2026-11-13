@@ -40,3 +40,12 @@ export class Eta {
     return etaShort(this.start, progress, now);
   }
 }
+
+/**
+ * The stage pill while a clip's colour is profiled (the picture already shows a provisional grade): plain words and
+ * the seconds left, "Fine-tuning colour… 4 s left"; no number until the first sample has shown the pace.
+ */
+export function colourStatus(secLeft: number | null): string {
+  if (secLeft === null || !Number.isFinite(secLeft)) return "Fine-tuning colour…";
+  return `Fine-tuning colour… ${Math.max(1, Math.ceil(secLeft))} s left`;
+}

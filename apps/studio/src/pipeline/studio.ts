@@ -55,6 +55,8 @@ import { releaseExportBlob } from "@dive-tools/shared/output-sink.ts";
 import { exportSettingsKey } from "./export-key.ts";
 import { ExportProfile } from "@dive-tools/shared/export-profile.ts";
 import { AnalysisLookahead } from "./lookahead.ts";
+import { colourStatus } from "./eta.ts";
+import { benchExport, firstExportSpeed } from "./export-bench.ts";
 import { PROFILE_MAX_ROUNDS, PROFILE_SAMPLE_BUDGETS_MS, withRetries } from "./profile-retry.ts";
 import { detectFootage, FOOTAGE_LABEL, FOOTAGE_MODE, isHdrProfile, parseCodec, resolveFootage, type FootageChoice, type FootageInfo, type FootageProfile } from "./footage.ts";
 import type { CalibKind, SignalCalibration } from "./signal-probe.ts";
@@ -188,7 +190,7 @@ export type Snapshot = {
   duration: number;
   currentTime: number;
   playing: boolean;
-  /** Short status for the stage pill ("Reading clip…", "Profiling colour…"). */
+  /** Short status for the stage pill ("Reading clip…", "Fine-tuning colour… 4 s left"). */
   busy: string | null;
   colourProfiled: boolean;
   stab: StabStatus;
@@ -279,6 +281,8 @@ export function codecHelp(codecString: string | null | undefined): string | null
 
 /** This device's last export speed, megapixel-frames a second (Studio.exportEstimate). */
 const EXPORT_SPEED_KEY = "deepfix.exportMpxPerSec";
+/** Before a first export: the pace the export sheet's short test measured here (export-bench.ts). */
+const EXPORT_BENCH_KEY = "deepfix.exportBenchMpxPerSec";
 const IDLE_EXPORT: ExportStatus = { state: "idle", progress: 0, frames: 0, fps: 0, etaSec: null, detail: "", message: null, result: null, note: null, paused: false, profile: null };
 const STAB_OFF: StabStatus = { state: "off", progress: 0, summary: null, message: null, info: null, refine: "idle", refineProgress: 0, bobbing: null, motionLog: null };
 
@@ -361,6 +365,7 @@ export class Studio {
   private tools: ToolsState = DEFAULT_TOOLS;
   private dewarpU: WarpUniforms | null = null;
   private split: number | null = null;
+  private beforeMix = 1;
   /** Pending split repaint (one per frame) and whether the engine holds the raw frame as its "before" picture. */
   private splitRaf = 0;
   private beforeSet = false;
@@ -1669,8 +1674,15 @@ export class Studio {
     this.repaint();
   }
 
-  setSplit(split: number | null): void {
+  /**
+   * The compare line (null = off). `beforeMix`: how much of the original shows left of it, 1 normally; App ramps it
+   * from 0 while the line sweeps in after the colour profile, so the picture (graded edge to edge until then) never
+   * flashes back to the original.
+   */
+  setSplit(split: number | null, beforeMix = 1): void {
     this.split = split;
+    this.beforeMix = beforeMix;
+    if (this.engine) this.engine.beforeMix = beforeMix;
     // One paint per frame however fast the pointer moves. A paused frame only
     // re-composites the wipe over the last graded frame: no upload, geometry,
     // temporal pass or grade.
@@ -1795,10 +1807,16 @@ export class Studio {
       if (mode !== "realtime" && clip.canDecode === false) console.info("[export] WebCodecs can't decode this clip here; export disabled");
       this.set({ info: clip, duration: v.duration || clip.duration, phase: "ready", currentTime: 0, exportMode: mode, canExport });
       await this.updateDewarp();
-      // First frame graded before anything shows, so the clip never flashes uncorrected.
+      // First frame graded before anything shows, so the clip never flashes uncorrected. It does not wait for the
+      // person mask (seconds while its model starts): the graded picture is up as soon as the frame is analysed,
+      // and the mask eases in like any other during playback.
+      const tFirst = performance.now();
       this.uploadToEngine(v, v.currentTime, false);
-      await e.analyzeNow(true).catch((err: unknown) => this.fail(err, "Analysis failed"));
+      await e.analyzeNow(true, 10_000, undefined, false).catch((err: unknown) => this.fail(err, "Analysis failed"));
       if (gen !== this.gen) return;
+      // Painted now, not at the player's next frame callback (which can be a while on a busy phone).
+      this.draw(v, v.currentTime, false);
+      console.info(`[open] first graded frame ${Math.round(performance.now() - tFirst)} ms after the clip was read`);
       this.set({ busy: null });
       this.startPreview();
       if (this.tools.colour.enabled) void this.profileColour();
@@ -2089,6 +2107,7 @@ export class Studio {
     if (!e || !info) return;
     const split = withSplit ? this.split : null;
     e.split = split ?? 0;
+    e.beforeMix = withSplit ? this.beforeMix : 1;
     const sw = (src as HTMLVideoElement).videoWidth || (src as ImageBitmap).width || info.displayW;
     const sh = (src as HTMLVideoElement).videoHeight || (src as ImageBitmap).height || info.displayH;
     this.beforeSet = false;
@@ -2579,7 +2598,16 @@ export class Studio {
       // Split: every segment gets frames of its own for its lock (the base spacing may miss a short one).
       const extra = topUpTimes(times, visibleSegments(this.segs.cuts, span, v.duration));
       const all = [...times, ...extra];
-      this.set({ busy: "Profiling colour…" });
+      // Plain words and seconds (the picture is already graded, provisionally): the time left comes from the pace of
+      // the samples taken so far, counted down between them.
+      const started = performance.now(), toTake = all.filter((t) => !this.cachedSample(t)).length;
+      let taken = 0, endAt: number | null = null;
+      const say = () => {
+        const busy = colourStatus(endAt === null ? null : (endAt - performance.now()) / 1000);
+        if (gen === this.gen && this.snap.busy !== busy) this.set({ busy });
+      };
+      say();
+      const tick = window.setInterval(say, 500);
       // One steady provisional grade while the clip is read: the grade on screen now holds until the lock is in
       // (the engine crossfades to it, lockFrom). Before, the picture kept changing as the samples came in.
       e.holdGlobals();
@@ -2604,6 +2632,10 @@ export class Studio {
             }), PROFILE_SAMPLE_BUDGETS_MS, () => gen === this.gen, (n, err) => console.info(`[profile] sample at ${t.toFixed(2)} s: retry ${n} (${err instanceof Error ? err.message : err})`));
             // A sample taken before a framing change is stale: dropped (the next round takes it again).
             if (r && epoch === this.profileEpoch) this.sampleCache.push({ t, params: r.params, mean: r.mean });
+            taken++;
+            const now = performance.now();
+            endAt = now + ((now - started) / taken) * Math.max(0, toTake - taken);
+            say();
           }
         }
         if (gen !== this.gen) return;
@@ -2617,6 +2649,7 @@ export class Studio {
         this.profiledSpan = span;
         this.set({ colourProfiled: true });
       } finally {
+        window.clearInterval(tick);
         // No lock after all (too few samples, a profile cut short): the frame's own estimate rules again.
         if (!locked && gen === this.gen) e.releaseHold();
         if (gen === this.gen) {
@@ -2910,9 +2943,11 @@ export class Studio {
   /**
    * Before an export starts (the sheet): about how big the file will be (the bitrate the export picks, over the
    * output length) and, once this device has exported before, about how long it takes (its last export's speed in
-   * megapixel-frames a second, EXPORT_SPEED_KEY). Null before a clip is open.
+   * megapixel-frames a second, EXPORT_SPEED_KEY). Before a first export the time is a first guess (`guess`): the
+   * clip's own length where the export records in real time, else from a short test of this device
+   * (primeExportEstimate, export-bench.ts) or a cautious default. Null before a clip is open.
    */
-  exportEstimate(): { mb: number; sec: number | null } | null {
+  exportEstimate(): { mb: number; sec: number | null; guess: boolean } | null {
     const file = this.file, info = this.snap.info;
     if (!file || !info || this.snap.kind !== "video") return null;
     const clipLen = this.snap.duration || info.duration;
@@ -2920,12 +2955,50 @@ export class Studio {
     const bitrate = bitrateFromSource(file.size, clipLen) ?? pickBitrate(info.displayW, info.displayH, info.fps);
     const len = outputLength(this.trim, clipLen);
     const mb = (bitrate * len) / 8 / 1e6 + (info.hasAudio ? (192_000 * len) / 8 / 1e6 : 0);
+    const work = (len * (info.fps || 30) * info.displayW * info.displayH) / 1e6;
     let sec: number | null = null;
     try {
       const mpxs = Number(localStorage.getItem(EXPORT_SPEED_KEY));
-      if (mpxs > 0) sec = (len * (info.fps || 30) * info.displayW * info.displayH) / 1e6 / mpxs;
+      if (mpxs > 0) sec = work / mpxs;
     } catch { /* storage blocked */ }
-    return { mb, sec };
+    if (sec !== null) return { mb, sec, guess: false };
+    // Nothing exported here yet. The recorder plays the clip through once: its length is the time.
+    if (this.snap.exportMode === "realtime") return { mb, sec: len, guess: true };
+    let bench: number | null = this.benchMpxs;
+    try {
+      const stored = Number(localStorage.getItem(EXPORT_BENCH_KEY));
+      if (bench === null && stored > 0) bench = stored;
+    } catch { /* storage blocked */ }
+    const mobile = typeof navigator !== "undefined" && isMobile({ ua: navigator.userAgent, touch: navigator.maxTouchPoints });
+    return { mb, sec: work / firstExportSpeed(bench, mobile), guess: true };
+  }
+
+  private benchMpxs: number | null = null;
+  private benching: Promise<boolean> | null = null;
+  /**
+   * The export sheet opened and this device has no export speed on file: a short test (under a second on a phone's
+   * GPU) of grading, capturing and encoding the picture on screen, once per device. The clip is paused (the sheet
+   * pauses it), so the extra renders redraw the frame on screen, as the style thumbnails do; an export that starts
+   * meanwhile ends the test. Resolves true when exportEstimate has a better number now.
+   */
+  primeExportEstimate(): Promise<boolean> {
+    if (this.benching) return this.benching;
+    const c = this.colourCanvas;
+    let known = this.benchMpxs !== null;
+    try { known = known || Number(localStorage.getItem(EXPORT_SPEED_KEY)) > 0 || Number(localStorage.getItem(EXPORT_BENCH_KEY)) > 0; } catch { /* storage blocked */ }
+    const e = this.engine, v = this.video;
+    if (known || !c || !e || !v?.paused || c.width < 2 || this.exporting || this.segSeedBusy || !this.tools.colour.enabled || this.snap.phase !== "ready" || this.snap.kind !== "video" || this.snap.exportMode === "realtime") return Promise.resolve(false);
+    const gen = this.gen;
+    const alive = () => gen === this.gen && !this.exporting && !this.segSeedBusy && v.paused && this.snap.phase === "ready";
+    this.benching = benchExport(c, c.width, c.height, () => { try { e.render(); } catch { /* the next repaint draws it */ } }, alive).then((mpxs) => {
+      this.benching = null;
+      if (mpxs === null) return false;
+      this.benchMpxs = mpxs;
+      console.info(`[export] first-time estimate: grade + capture + encode at ${mpxs.toFixed(1)} Mpx-frames/s here`);
+      try { localStorage.setItem(EXPORT_BENCH_KEY, String(mpxs)); } catch { /* storage blocked */ }
+      return true;
+    });
+    return this.benching;
   }
 
   /** After an export: this device's speed for the next estimate (exportEstimate). */

@@ -169,35 +169,49 @@ export default function App() {
   const colourPending = ready && tools.colour.enabled && !s.colourProfiled && studio.hasColourEngine;
   const photo = s.kind === "photo";
 
-  // ---- before/after reveal: while the colour is being read the line waits at the right edge (all original);
-  // once the grade is in it sweeps to where the user left it, so the result wipes in instead of jumping.
-  const [splitAnim, setSplitAnim] = useState<number | null>(null);
+  // ---- before/after reveal: while the colour is being read the picture shows the provisional grade edge to edge
+  // (no line: Fable re-score, 13 Nov: the original was on screen for the whole wait). Once the grade is in, the line
+  // sweeps in from the right edge to where the user left it (the owner's ask, 11 Nov) and the original fades in
+  // behind it (`mix`), so the picture never jumps back to ungraded on the way.
+  const [reveal, setReveal] = useState<{ x: number; mix: number } | null>(null);
   const revealRaf = useRef(0);
-  const wasPending = useRef(false);
+  const [wasPending, setWasPending] = useState(colourPending);
+  if (wasPending !== colourPending) {
+    // Derived in render, so no frame is painted between "pending" and the reveal's first step.
+    setWasPending(colourPending);
+    const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    setReveal(!colourPending && split !== null && !reduce ? { x: 1, mix: 0 } : null);
+  }
+  const revealing = reveal !== null;
   const splitNow = useRef(split);
   splitNow.current = split;
   useEffect(() => {
-    const was = wasPending.current;
-    wasPending.current = colourPending;
-    cancelAnimationFrame(revealRaf.current);
-    if (colourPending) { setSplitAnim(1); return; }
+    if (colourPending || !revealing) return;
     const target = splitNow.current;
-    const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (!was || target === null || reduce) { setSplitAnim(null); return; }
-    const t0 = performance.now();
+    if (target === null) { setReveal(null); return; }
+    // Its own clock, a frame's worth at a time: a hitch right when the grade lands (a busy phone) delays the sweep
+    // instead of eating it.
+    let last = performance.now(), run = 0;
     const step = (now: number) => {
-      const p = Math.min(1, (now - t0) / 900);
+      run += Math.min(120, Math.max(0, now - last));
+      last = now;
+      const p = Math.min(1, run / 900);
       const e = 1 - (1 - p) ** 3;
-      setSplitAnim(p < 1 ? 1 + (target - 1) * e : null);
+      setReveal(p < 1 ? { x: 1 + (target - 1) * e, mix: e } : null);
       if (p < 1) revealRaf.current = requestAnimationFrame(step);
     };
     revealRaf.current = requestAnimationFrame(step);
-  }, [colourPending]);
-  useEffect(() => () => cancelAnimationFrame(revealRaf.current), []);
-  const splitShown = split === null ? null : splitAnim ?? split;
+    return () => cancelAnimationFrame(revealRaf.current);
+    // `revealing` turns false only when the sweep ends or is taken over (moveSplit): nothing to restart.
+  }, [colourPending, revealing]);
+  const splitShown = split === null || colourPending ? null : reveal?.x ?? split;
+  // What the engine draws. While pending: the line parked at the right edge with none of the original behind it, so
+  // the picture is the grade edge to edge yet drawn the same way as during the sweep (no first-use hitch when it starts).
+  const engineSplit = colourPending && split !== null ? 1 : splitShown;
+  const splitMix = colourPending ? 0 : reveal ? reveal.mix : 1;
   const moveSplit = useCallback((v: number) => {
     cancelAnimationFrame(revealRaf.current);
-    setSplitAnim(null);
+    setReveal(null);
     setSplit(v);
   }, []);
 
@@ -452,7 +466,7 @@ export default function App() {
   const neutralControls = { active: pickActive, pick: neutralPick, onToggle: () => setPicking((v) => !v), onReset: () => studio.clearNeutral() };
   // The mark sits where the tap was: on a clip, only around the frame it was made on (the scene moves on).
   const neutralMark = neutralPick && (photo || Math.abs(s.currentTime - neutralPick.t) < 0.25) ? neutralPick : null;
-  useEffect(() => studio.setSplit(holding ? 1 : selectActive || pickActive ? null : splitShown), [studio, splitShown, holding, selectActive, pickActive]);
+  useEffect(() => studio.setSplit(holding ? 1 : selectActive || pickActive ? null : engineSplit, holding ? 1 : splitMix), [studio, engineSplit, splitMix, holding, selectActive, pickActive]);
   const getSelection = useCallback(() => studio.outlineSelection(), [studio]);
   const openPane = (id: Pane) => {
     setPane(id);

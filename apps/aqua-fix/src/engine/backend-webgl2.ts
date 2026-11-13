@@ -122,6 +122,8 @@ export class WebGL2Backend implements GpuBackend {
   private beforePx = 0;
   private wipe: { tex: WebGLTexture; fbo: WebGLFramebuffer; w: number; h: number } | null = null;
   private lastGraded: WebGLTexture | null = null;
+  /** Share of the "before" picture left of the split (GpuBackend.beforeMix). */
+  beforeMix = 1;
   // A source drawn in this context by another stage (beginSourceDraw / endSourceDraw): its
   // target, and a framebuffer on the source texture the target is blitted into.
   private drawTarget: { tex: WebGLTexture; fbo: WebGLFramebuffer; w: number; h: number } | null = null;
@@ -144,7 +146,7 @@ export class WebGL2Backend implements GpuBackend {
     const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
     this.grade = this.link(VS, GLSL_FRAGMENT, ["u_source", "u_data0", "u_data1", "u_data2", "u_data3", "u_tpF0", "u_tpF1", "u_tpNr"]);
     this.down = this.link(VS, GLSL_DOWNSCALE_FRAGMENT, ["u_source", "u_rotation", "u_srcSize", "u_outSize", "u_rect"]);
-    this.comp = this.link(VS, GLSL_COMPOSITE, ["u_before", "u_graded", "u_split", "u_rot"]);
+    this.comp = this.link(VS, GLSL_COMPOSITE, ["u_before", "u_graded", "u_split", "u_mix", "u_rot"]);
     this.vao = gl.createVertexArray()!;
     this.source = this.makeTexture(gl.LINEAR);
     for (let i = 0; i < DATA_SLOTS; i++) {
@@ -770,6 +772,7 @@ export class WebGL2Backend implements GpuBackend {
     this.bindTex(0, this.beforeTex ?? this.source, this.comp, "u_before");
     this.bindTex(4, graded, this.comp, "u_graded");
     gl.uniform1f(this.comp.loc.get("u_split")!, split);
+    gl.uniform1f(this.comp.loc.get("u_mix")!, this.beforeMix);
     gl.uniform1i(this.comp.loc.get("u_rot")!, this.beforeTex ? 0 : this.rotation);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }

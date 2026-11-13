@@ -2,22 +2,40 @@
 // export done, AI on, crash). No cookies, no video, file names or location: only the event name, the screen width and
 // the build. Sent as a fire-and-forget beacon, so it needs no third-party script and works under the app's
 // cross-origin isolation (a beacon's response is never read). Off when the viewer opts out (About), in the native
-// shell, on localhost and under automation.
+// shell, on localhost, under automation and on our own test runs: `?debug=1` in the address, or the opt-out key set
+// by the test scripts before the page loads (the devbox's browser hides navigator.webdriver, so that check alone let
+// its runs through).
 
 const ENDPOINT = "https://divegrade.goatcounter.com/count";
 const OPT_OUT_KEY = "deepfix.analyticsOff";
 
 declare const __BUILD_ID__: string;
 
-function enabled(): boolean {
-  try {
-    if (localStorage.getItem(OPT_OUT_KEY) === "1") return false;
-  } catch { /* storage blocked: still count */ }
-  if (typeof navigator === "undefined" || !navigator.sendBeacon) return false;
-  if ((navigator as Navigator & { webdriver?: boolean }).webdriver) return false;
-  if (/^(localhost|127\.|192\.168\.)/.test(location.hostname)) return false;
-  if ("Capacitor" in window) return false;
+/** Whether this page load is counted: pure, so the rules are tested (test/analytics.test.ts). */
+export function countable(f: { optOut: boolean; beacon: boolean; webdriver: boolean; hostname: string; search: string; native: boolean; ua: string }): boolean {
+  if (f.optOut || !f.beacon || f.webdriver || f.native) return false;
+  if (/^(localhost|127\.|192\.168\.|10\.)/.test(f.hostname)) return false;
+  // Our own runs: every headless check opens the app with ?debug (App.tsx exposes the studio on it).
+  if (new URLSearchParams(f.search).has("debug")) return false;
+  if (/HeadlessChrome|Playwright|Puppeteer/i.test(f.ua)) return false;
   return true;
+}
+
+function enabled(): boolean {
+  let optOut = false;
+  try {
+    optOut = localStorage.getItem(OPT_OUT_KEY) === "1";
+  } catch { /* storage blocked: still count */ }
+  if (typeof navigator === "undefined" || typeof location === "undefined" || !navigator.sendBeacon) return false;
+  return countable({
+    optOut,
+    beacon: !!navigator.sendBeacon,
+    webdriver: !!(navigator as Navigator & { webdriver?: boolean }).webdriver,
+    hostname: location.hostname,
+    search: location.search,
+    native: "Capacitor" in window,
+    ua: navigator.userAgent,
+  });
 }
 
 function send(path: string, title: string, event: boolean): void {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Snapshot, Studio } from "../pipeline/studio.ts";
 import { debugStats, processingChain, type ToolsState } from "../pipeline/tools.ts";
 import { Sheet } from "./sheet";
@@ -6,6 +6,7 @@ import { IconDownload, IconExport, IconShare, IconWarning } from "./icons";
 import { formatTime } from "./timeline";
 import { formatTimecode, selectionLabel } from "../pipeline/trim.ts";
 import { visibleSegments } from "../pipeline/segments.ts";
+import { aboutDuration } from "../pipeline/export-bench.ts";
 import { BRAND, donateUrl } from "../brand.ts";
 import { exportChoice } from "../pipeline/seg/export-use.ts";
 import { isNativeShell } from "../native/registry.ts";
@@ -105,7 +106,20 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
   const choice = segChoice ? exportChoice(segChoice) : null;
   const bigSource = !!info && Math.min(info.displayW, info.displayH) > 1080;
   // Size (and, after a first export on this device, time) before starting (Fable review, 13 Nov).
+  // Before a first export the time is a first guess; a short test of this device sharpens it (export-bench.ts).
+  // No time is shown while the test runs (a layout effect: set before the sheet's first paint), so the number does
+  // not change under the reader's eyes.
+  const [testing, setTesting] = useState(false);
+  const idle = exp.state === "idle";
+  useLayoutEffect(() => {
+    if (!open || photo || !idle) return;
+    let live = true;
+    setTesting(true);
+    void studio.primeExportEstimate().finally(() => { if (live) setTesting(false); });
+    return () => { live = false; setTesting(false); };
+  }, [open, photo, idle, studio]);
   const estimate = !photo && open && exp.state === "idle" ? studio.exportEstimate() : null;
+  const estimateSec = estimate && !(testing && estimate.guess) ? estimate.sec : null;
 
   // In the app the output lives (or is copied) in the sandbox and goes to
   // Photos / the gallery and the system share sheet through the plugin.
@@ -175,7 +189,7 @@ export function ExportSheet({ open, onClose, studio, snap, tools }: { open: bool
             <dl className="export__facts">
               <div><dt>Processing</dt><dd>{processingChain(chainTools, photo ? 1 : visibleSegments(snap.segments.cuts, snap.trim, duration).length, !photo && snap.seg.on && snap.seg.phase !== "unavailable")}</dd></div>
               <div><dt>Output</dt><dd>{photo ? `${outSize} · JPEG` : `${outSize}${info?.fps ? ` · ${Math.round(info.fps)} fps` : ""} · MP4${info?.hasAudio ? " · original audio" : ""}`}</dd></div>
-              {!photo && estimate && <div><dt>Estimate</dt><dd>{estimate.mb >= 1000 ? `about ${(estimate.mb / 1000).toFixed(1)} GB` : `about ${Math.max(1, Math.round(estimate.mb))} MB`}{estimate.sec !== null ? ` · about ${estimate.sec < 90 ? `${Math.max(5, Math.round(estimate.sec / 5) * 5)} s` : `${Math.round(estimate.sec / 60)} min`} on this device` : ""}</dd></div>}
+              {!photo && estimate && <div><dt>Estimate</dt><dd>{estimate.mb >= 1000 ? `about ${(estimate.mb / 1000).toFixed(1)} GB` : `about ${Math.max(1, Math.round(estimate.mb))} MB`}{estimateSec !== null ? ` · ${aboutDuration(estimateSec)}${estimate.guess ? " (a first guess for this device)" : " on this device"}` : ""}</dd></div>}
               {!photo && <div><dt>Length</dt><dd>{snap.trim ? `${selectionLabel(snap.trim, duration)} · ${formatTimecode(snap.trim.start)}–${formatTimecode(snap.trim.end)}` : formatTime(duration)}</dd></div>}
               {photo && snap.photoLimited && <div><dt>Note</dt><dd>Original is {snap.photoLimited.w}×{snap.photoLimited.h}; this browser renders at most {outSize}</dd></div>}
             </dl>
