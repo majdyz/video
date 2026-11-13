@@ -386,8 +386,21 @@ export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFol
  *                                         now Pop 50 (7, 38, 62) 94% 247°, Pop 100 (10, 39, 61) 88% 246°
  * and the subject's lightness against the water (Oklab L, −0.085 close / −0.063 far in the plain grade) moves by
  * under 0.01 (it was 0.04–0.06 L closer to the water: the grey patch).
+ *
+ * The upper half of the Pop slider (13 Nov, the owner: "Pop barely changes the picture"). Up to Pop 50 everything
+ * above is unchanged (the tuned look). Past 50 the terms above had little left to give: the cast share stops at
+ * castMax from Pop 75, the lift is 0.012 L per unit and the local contrast only went from an exponent of 0.25 to
+ * 0.5, so Pop 100 read as Pop 50. The boost X = the AI weight × (the multiplier − 1) (0 up to Pop 50, 1 at Pop 100
+ * deep inside a close subject; grade-shader gradeD) adds, per unit X:
+ *   boostDetail    to the local-contrast exponent (0.5 → 1.2 at Pop 100): spots and markings clearly lighter, the
+ *                  back around them darker. This is the bite, and it is separation, not a wash: against the guide's
+ *                  low-pass a small dark animal moves away from the water's lightness, not toward it;
+ *   boostLift      a little more midtone lift (0.024 → 0.049 L per 4·L·(1 − L) at Pop 100);
+ *   boostWarm / boostWarmShare  more of the warm hue (with the Warmth slider) and a higher ceiling for it (still a
+ *                  share of what is left on the cool side: never neutral, never warm).
+ * No more of the cast comes off than before (castMax): the grey sticker was the cast going, not the contrast.
  */
-export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, cast: 0.45, castMax: 0.62, hue: (65 * Math.PI) / 180, warm: 0.014, warmShare: 0.12, litLo: 0.1, litHi: 0.35, hiLo: 0.85, hiHi: 0.97, detail: 0.25, rMin: 0.7, rMax: 1.45, lift: 0.012, edge: 3, farKeep: 0.35, veilLo: 0.065, veilHi: 0.125, pack: 32, levels: 16 };
+export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, cast: 0.45, castMax: 0.62, hue: (65 * Math.PI) / 180, warm: 0.014, warmShare: 0.12, litLo: 0.1, litHi: 0.35, hiLo: 0.85, hiHi: 0.97, detail: 0.25, rMin: 0.7, rMax: 1.45, lift: 0.012, boostWarm: 0.03, boostWarmShare: 0.15, boostDetail: 0.7, boostLift: 0.025, edge: 3, farKeep: 0.35, veilLo: 0.065, veilHi: 0.125, pack: 32, levels: 16 };
 
 /** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
 export function popStrengthK(s: { subjectPopStrength?: number }): number {

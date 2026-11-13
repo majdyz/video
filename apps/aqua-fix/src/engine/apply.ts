@@ -385,7 +385,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // AI subject restore (SEG_RESTORE; grade-shader segRestore): after every look, so none of them amplifies it.
   if (segS > 0) {
     const lr = (lumI + DETAIL_GUARD.eps) / (guideLum(ctx.depth, u, v) + DETAIL_GUARD.eps);
-    [bl[0], bl[1], bl[2]] = segRestore(bl[0], bl[1], bl[2], segS, s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0, lr, 0, segColourK(an!));
+    [bl[0], bl[1], bl[2]] = segRestore(bl[0], bl[1], bl[2], segS, s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0, lr, 0, segColourK(an!), popK > 1 ? segS * (1 - 1 / popK) : 0);
   }
   // Tone target (analyze.ts TONE): one gamma on the graded lightness, the same for every pixel of the frame.
   if ((p.toneGamma ?? 1) > 1) bl[0] = Math.pow(Math.max(0, bl[0]), p.toneGamma!);
@@ -519,9 +519,11 @@ export function segColourK(an: readonly number[]): number {
  * weight × the Pop multiplier (0..2), `warmth` = the Warmth slider (0..1), `lr` =
  * the source pixel's luminance over its neighbourhood's (the analysis guide), `lifted` = the lift Subject pop has
  * already applied (SUBJECT_POP.lift × P × the clip's direction; negative = deepened), `ck` = the colour share
- * (segColourK). The colour stays on the water's side of neutral: a share of the cast goes, never all of it.
+ * (segColourK), `x` = the boost of the slider's upper half (the AI weight × (the Pop multiplier − 1): 0 up to Pop 50,
+ * 1 at Pop 100; SEG_RESTORE boost*). The colour stays on the water's side of neutral: a share of the cast goes, never
+ * all of it.
  */
-export function segRestore(L: number, a: number, b: number, s: number, warmth: number, lr: number, lifted = 0, ck = 1): [number, number, number] {
+export function segRestore(L: number, a: number, b: number, s: number, warmth: number, lr: number, lifted = 0, ck = 1, x = 0): [number, number, number] {
   if (s <= 0) return [L, a, b];
   const R = SEG_RESTORE, wx = Math.cos(R.hue), wy = Math.sin(R.hue);
   // De-blue: a cool pixel loses a share of its chroma (hue kept); warm, green and magenta pixels keep theirs.
@@ -532,12 +534,12 @@ export function segRestore(L: number, a: number, b: number, s: number, warmth: n
   // Warm-up: a little chroma along the warm hue, never more than warmShare of what is left on the cool side of it
   // (the colour never reaches neutral); lit parts only, highlights stay white.
   const lit = smoothstep(R.litLo, R.litHi, L) * (1 - smoothstep(R.hiLo, R.hiHi, L));
-  const add = Math.min(R.warm * s * Math.min(1, 2 * warmth) * lit * ck, R.warmShare * Math.max(0, -(a * wx + b * wy)));
+  const add = Math.min((R.warm * s + R.boostWarm * x) * Math.min(1, 2 * warmth) * lit * ck, (R.warmShare + R.boostWarmShare * x) * Math.max(0, -(a * wx + b * wy)));
   a += wx * add; b += wy * add;
   // Local contrast against the neighbourhood, then the midtone lift: up to lift × S in all, whatever the pop's own
   // lift did (its dark fade, or its deepening of a subject darker than the water, is made up for).
-  let L1 = L * Math.pow(clamp(lr, R.rMin, R.rMax), R.detail * s);
-  L1 += Math.max(0, R.lift * s - lifted) * 4 * L1 * Math.max(0, 1 - L1);
+  let L1 = L * Math.pow(clamp(lr, R.rMin, R.rMax), R.detail * s + R.boostDetail * x);
+  L1 += Math.max(0, R.lift * s + R.boostLift * x - lifted) * 4 * L1 * Math.max(0, 1 - L1);
   return [L1, a, b];
 }
 

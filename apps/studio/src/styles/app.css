@@ -2871,6 +2871,46 @@ a {
   margin: 2px 0;
   background: rgba(255, 255, 255, 0.35);
 }
+/* Phone, a tool open: you are looking at the picture while you drag a slider, and the rail's labelled column covered
+   its right edge (a followed subject swam under it). The rail folds to a slim column of small, more see-through
+   discs: no labels (still read to assistive tech), the open tool's disc stays solid white. */
+.is-narrow.sheet-open .canvas-rail {
+  gap: 6px;
+  right: calc(6px + env(safe-area-inset-right));
+}
+.is-narrow.sheet-open .rail-btn {
+  position: relative;
+  min-width: 0;
+}
+/* The discs are small; the finger's target is not (36 × 44 px, reaching left of the disc and into the gaps). */
+.is-narrow.sheet-open .rail-btn::after {
+  content: "";
+  position: absolute;
+  inset: -3px -6px -3px -8px;
+}
+.is-narrow.sheet-open .rail-btn > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.is-narrow.sheet-open .rail-btn > svg {
+  width: 16px;
+  height: 16px;
+  padding: 7px;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.is-narrow.sheet-open .rail-btn:not(.is-on) > svg {
+  background: rgba(0, 0, 0, 0.22);
+  color: rgba(255, 255, 255, 0.82);
+}
+.is-narrow.sheet-open .rail-sep {
+  width: 14px;
+  margin: 0;
+}
 .is-narrow:not(.phase-empty) .controls {
   padding-top: 36px;
   background: linear-gradient(to top, rgba(0, 0, 0, 0.6) 0%, rgba(0, 0, 0, 0.3) 60%, rgba(0, 0, 0, 0) 100%);
