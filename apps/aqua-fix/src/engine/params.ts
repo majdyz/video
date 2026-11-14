@@ -283,7 +283,11 @@ export const SUBJECT_CLEAR = { k: 0, cMax: 0, desat: -0.4, edgeFloor: 0 };
  *   darkLo/Hi  the whole pop (clearing included) fades out as the graded lightness (Oklab L) drops through
  *              lo..hi: a dark, low-chroma part (a thresher's long tail) keeps the plain grade's colour.
  *   hueMax     on the subject, the output hue stays within this angle (radians) of the source pixel's own hue:
- *              the tone never rotates a dark blue toward magenta or brown.
+ *              the tone never rotates a dark blue toward magenta or brown. Only where the source has no red left:
+ *              what still has red (yellow fins) keeps the hue the plain grade gave it (held to its cast source's
+ *              hue it went green, 14 Nov).
+ *   hiLo/hiHi  the lift and the extra clarity fade out over this graded lightness: a small pale fish next to the
+ *              subject went a blocky, chalky white (14 Nov).
  */
 /**
  * Warm pop: on the subject only (the pop's weight × warmth), its Oklab chroma pulled toward a warm cream hue (`hue`,
@@ -338,7 +342,7 @@ export const SEABED = { hue: (75 * Math.PI) / 180, chroma: 0.02, keep: 0.15, lif
 export const WARM_POP = { hue: (65 * Math.PI) / 180, cMin: 0.026, cMax: 0.034, keep: 0.25, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3, side: 4, castLo: 0.015, castHi: 0.045, litLo: 0.3, litHi: 0.5, upLo: -0.03, upHi: 0.05, floor: 0.018, floorKeep: 0.5, engineTone: 0.35, amount: 0 };
 
 /** 14 Nov, third pass ("almost no pop"): lift 0.1 → 0.28 and clarity 0.22 → 0.38 with the engine's own masks (the mild step of the strength sweep, greyfix/v3: the middle one washed overlapping sharks out). The engine's masks reach past the subject, so the pop's lift, clarity and Vivid sparing also need the pixel itself to stand off the backdrop (waterLo..waterHi of its departure, a stricter ramp than the tone's): the water and the blurred rim around a diver's arms came up as a pale glow. */
-export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.3, lift: 0.2, waterLo: 0.05, waterHi: 0.12, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
+export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.3, lift: 0.2, hiLo: 0.62, hiHi: 0.9, waterLo: 0.05, waterHi: 0.12, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
 
 /**
  * AI subject restore: what a real AI mask on the frame adds to Subject pop (grade-shader segRestore; never with the
@@ -436,12 +440,14 @@ export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.3, lift: 0.2, waterLo: 0
  *   sep / boostSep   its lightness moves away from the local water's (per unit S up to Pop 50 / per unit X above, × 4·L·(1 − L)): what is lighter
  *                    than the water behind it gets lighter, what is darker gets darker, by how far the source's L is
  *                    from the water's over `sepRange` (signed, smooth through 0; the clip's pop direction where
- *                    there is no water to compare with). A dark diver against bright water is not lifted into it;
- *                    never downward (a dark blue pushed darker leaves the display's gamut and comes back
- *                    greyer); what is darker than the water is lifted by `sepDark` of the step instead (a midtone
- *                    lift: the subject as if seen through less water, with room for more of its colour);
+ *                    there is no water to compare with). Upward only here: what is darker than the water is
+ *                    deepened by SUBJECT_DEEP instead (fourth pass; lifted by a share of the step, as in the third
+ *                    pass, a black wetsuit went a milky navy). `sepClose` × the range for a close subject (it
+ *                    straddles the water's lightness: its shading was cut into a pale band and a dark rest);
  *   detail / boostDetail  the local contrast (per unit S up to Pop 50 / per unit X above), upward only (rMin 1: what
- *                    is lighter than its neighbourhood gets lighter; nothing is darkened, the gamut again);
+ *                    is lighter than its neighbourhood gets lighter; nothing is darkened, the gamut again), and by
+ *                    how far the pixel stands above the water like the lift (a patch of sand under a leaked outline
+ *                    was sharpened into a blotch);
  *   head             all the lightening together takes at most this share of the pixel's headroom to white (a soft
  *                    shoulder): a light spot lifted to white lost its colour (clipped);
  *   vib / boostVib   a little more of its own colour (chroma × (1 + vib), hue kept; fading out vibLo..vibHi so a
@@ -454,8 +460,44 @@ export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.3, lift: 0.2, waterLo: 0
  * 28–29 s): the chroma boost stops where the colour is as strong as open water's (vibLo..vibHi 0.06..0.12: a lifted
  * dark torso went electric blue), and the lift and the local contrast fade out over hiLo..hiHi (graded L) with `head` 0.4 (bright water
  * under a leaked outline went white).
+ * Fourth pass, 14 Nov (blind rounds against Subjects off and against the third pass): the lit side is as it was
+ * (weaker, the pale sharks lost to the third pass), behind the leak gates of SUBJECT_DEEP; the dark side moved there.
  */
-export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, sep: 0.13, boostSep: 0.04, sepRange: 0.12, sepDark: 0.45, head: 0.4, vib: 0.45, boostVib: 0.15, vibLo: 0.06, vibHi: 0.12, rimLo: 0.07, rimHi: 0.15, thick: 9, hue: (65 * Math.PI) / 180, hiLo: 0.7, hiHi: 0.9, detail: 0.8, rMin: 1, rMax: 1.45, boostDetail: 0.7, edge: 3, farKeep: 0.35, veilLo: 0.065, veilHi: 0.125, pack: 32, levels: 16 };
+export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, sep: 0.13, boostSep: 0.04, sepRange: 0.12, sepClose: 1.3, head: 0.4, vib: 0.45, boostVib: 0.15, vibLo: 0.06, vibHi: 0.12, rimLo: 0.07, rimHi: 0.15, thick: 9, hue: (65 * Math.PI) / 180, hiLo: 0.7, hiHi: 0.9, detail: 0.8, rMin: 1, rMax: 1.45, boostDetail: 0.7, edge: 3, farKeep: 0.35, veilLo: 0.065, veilHi: 0.125, pack: 32, levels: 16 };
+
+/**
+ * Deepening and the pop's gates (Subjects on; fourth pass, 14 Nov, after blind rounds against Subjects off). A subject
+ * darker than the water behind it (a diver in a black wetsuit against lit water, a ray's back, a dark tail) is not
+ * lifted (lifting it lifts the veil of water in front of it: "milky navy", it read closer to the water) but
+ * deepened toward a cleaner black, with either mask; what is lighter is lifted as before (SEG_RESTORE, SUBJECT_POP).
+ *   k        the share of the lightness taken off per unit weight (Oklab L × (1 − k·w)); the weight is the subject
+ *            weight × how far the source's L is under its reference over `range` × the Pop multiplier. The
+ *            reference is the AI overlay's (seg-overlay.ts waterField: one direction and one strength per region,
+ *            so an animal is not cut into patches) or, with the engine's masks, the fitted backdrop's L;
+ *   toeLo/Hi what is black already (graded L under toeHi) is taken down less: no crushed, detail-less blacks;
+ *   detail   local contrast both ways (L × (the pixel's luminance over its neighbourhood's, rMin..rMax) ^ (detail·w));
+ *   chroma   the chroma follows the lightness (× f ^ chroma): hue and saturation stay, the colour stays in gamut
+ *            (a dark blue pushed darker alone left the gamut and came back greyer);
+ *   engine   the weight with the engine's own masks (no AI outline); there the pixel has to be clearly under the
+ *            backdrop (engineLo..engineHi of L: the fit is not the water next to the subject, and a pale shark a
+ *            little under it went dimmer and bluer), and the lit pop fades out over 0..engineLo;
+ *   wMax     the weight's cap (Pop 100 doubles it);
+ *   farKeep  the share of the pop (lit and dark) left on a colourful thing whose hue is not the water's (VIVID
+ *            cLo..cHi of its source chroma × its hue's distance from the veil's): a red buoy lifted, or darkened
+ *            with the diver, pulled the eye off the diver;
+ *   farLit / farLo / farHi  the share of the AI lit pop left on a part that is both faint (closeness under
+ *            farLo..farHi) and thick (thinness 0): a stretch of reef or lighter water under a leaked outline went a
+ *            pale patch; a faint animal is thin (a far shark), a thick one stands out;
+ *   spot / spotLo / spotHi  what is clearly lighter than its neighbourhood (the luminance ratio over spotLo..spotHi: a
+ *            ray's spots, a mask's rim) is not deepened with the body but lifted by `spot` per unit weight: deepened
+ *            with it the ray's pattern was lost (blind round against the third pass). A small lift, and none on what
+ *            is bright already (graded L over spotLLo..spotLHi): at 0.2 the particles and bubbles on a diver's suit
+ *            and the highlights of his mask went hard white specks;
+ *   bed      over the seabed (the Seabed grid's weight) a faint light part keeps 1 − bed of the lit pop: a paler
+ *            patch of sand under a leaked outline went a round blotch (not all of it off: lit haze reads as seabed
+ *            to that grid, and the far sharks in it lost their pop).
+ */
+export const SUBJECT_DEEP = { k: 0.3, range: 0.2, toeLo: 0, toeHi: 0.12, detail: 0.4, rMin: 0.85, rMax: 1.25, chroma: 1, engine: 1, engineLo: 0.12, engineHi: 0.3, wMax: 1.5, farKeep: 0.3, farLit: 0.45, farLo: 0.07, farHi: 0.15, bed: 0.4, spot: 0.06, spotLo: 1.1, spotHi: 1.35, spotLLo: 0.45, spotLHi: 0.65 };
 
 /**
  * White guard (Subjects on, open water). Subjects on puts the subject's pixels on the object path (the pop's own

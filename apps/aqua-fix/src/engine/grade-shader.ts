@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { WHITE_GUARD, CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, TONE_TOE, WARM_POP, SEABED } from "./params.ts";
+import { WHITE_GUARD, CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, SUBJECT_DEEP, SEG_RESTORE, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, TONE_TOE, WARM_POP, SEABED } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 import { BACKDROP } from "./backdrop.ts";
 import { RED_GLSL, RED_WGSL } from "./red.ts";
@@ -231,7 +231,7 @@ const float SR_POP_GATE = ${SEG_RESTORE.popGate.toFixed(4)};
 const float SR_SEP = ${SEG_RESTORE.sep.toFixed(4)};
 const float SR_X_SEP = ${SEG_RESTORE.boostSep.toFixed(4)};
 const float SR_SEP_RANGE = ${SEG_RESTORE.sepRange.toFixed(4)};
-const float SR_SEP_DARK = ${SEG_RESTORE.sepDark.toFixed(4)};
+const float SR_SEP_CLOSE = ${SEG_RESTORE.sepClose.toFixed(4)};
 const float WG_L_LO = ${WHITE_GUARD.lLo.toFixed(4)};
 const float WG_L_HI = ${WHITE_GUARD.lHi.toFixed(4)};
 const float WG_CROSS = ${WHITE_GUARD.cross.toFixed(4)};
@@ -256,6 +256,30 @@ const float SR_DETAIL = ${SEG_RESTORE.detail.toFixed(4)};
 const float SR_R_MIN = ${SEG_RESTORE.rMin.toFixed(4)};
 const float SR_R_MAX = ${SEG_RESTORE.rMax.toFixed(4)};
 const float SR_X_DETAIL = ${SEG_RESTORE.boostDetail.toFixed(4)};
+const float SD_K = ${SUBJECT_DEEP.k.toFixed(4)};
+const float SD_RANGE = ${SUBJECT_DEEP.range.toFixed(4)};
+const float SP_HI_LO = ${SUBJECT_POP.hiLo.toFixed(4)};
+const float SP_HI_HI = ${SUBJECT_POP.hiHi.toFixed(4)};
+const float SD_DETAIL = ${SUBJECT_DEEP.detail.toFixed(4)};
+const float SD_R_MIN = ${SUBJECT_DEEP.rMin.toFixed(4)};
+const float SD_R_MAX = ${SUBJECT_DEEP.rMax.toFixed(4)};
+const float SD_CHROMA = ${SUBJECT_DEEP.chroma.toFixed(4)};
+const float SD_ENGINE = ${SUBJECT_DEEP.engine.toFixed(4)};
+const float SD_ENGINE_LO = ${SUBJECT_DEEP.engineLo.toFixed(4)};
+const float SD_ENGINE_HI = ${SUBJECT_DEEP.engineHi.toFixed(4)};
+const float SD_TOE_LO = ${SUBJECT_DEEP.toeLo.toFixed(4)};
+const float SD_TOE_HI = ${SUBJECT_DEEP.toeHi.toFixed(4)};
+const float SD_W_MAX = ${SUBJECT_DEEP.wMax.toFixed(4)};
+const float SD_FAR_KEEP = ${SUBJECT_DEEP.farKeep.toFixed(4)};
+const float SD_FAR_LIT = ${SUBJECT_DEEP.farLit.toFixed(4)};
+const float SD_SPOT = ${SUBJECT_DEEP.spot.toFixed(4)};
+const float SD_SPOT_LO = ${SUBJECT_DEEP.spotLo.toFixed(4)};
+const float SD_SPOT_HI = ${SUBJECT_DEEP.spotHi.toFixed(4)};
+const float SD_SPOT_L_LO = ${SUBJECT_DEEP.spotLLo.toFixed(4)};
+const float SD_SPOT_L_HI = ${SUBJECT_DEEP.spotLHi.toFixed(4)};
+const float SD_BED = ${SUBJECT_DEEP.bed.toFixed(4)};
+const float SD_FAR_LO = ${SUBJECT_DEEP.farLo.toFixed(4)};
+const float SD_FAR_HI = ${SUBJECT_DEEP.farHi.toFixed(4)};
 const float ON_WARM_COS = ${Math.cos(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_SIN = ${Math.sin(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_LO = ${OBJECT_NEUTRAL.warmLo.toFixed(4)};
@@ -742,7 +766,7 @@ float seabedW(vec2 uv) {
   // The seabed lies below: the top of the frame (bright water toward the surface) is spared, softly.
   return smoothstepf(SB_W_LO, SB_W_HI, acc) * smoothstepf(SB_Y0, SB_Y1, uv.y);
 }
-float popLift(float L, float P) { return L + SP_LIFT * P * p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
+float popLift(float L, float P) { return L + SP_LIFT * P * p[24].x * 4.0 * L * max(0.0, 1.0 - L) * (1.0 - smoothstepf(SP_HI_LO, SP_HI_HI, L)); }
 // Hue guard: on the subject (weight w) the output hue stays within SUBJECT_POP.hueMax of the source pixel's hue.
 vec2 popHue(vec2 ab, vec2 abSrc, float w) {
   float C = length(ab), Cs = length(abSrc);
@@ -833,13 +857,26 @@ float segColourK(vec4 an) {
 // keeps its own hue: a little more of its own chroma (never less), local contrast, its lightness away from the water's.
 vec3 segRestore(vec3 lk, float s, float lr, float ck, float x, float t) {
   if (s <= 0.0) return lk;
-  float kv = 1.0 + (SR_VIB * min(1.0, s) + SR_X_VIB * x) * ck * (1.0 - smoothstepf(SR_VIB_LO, SR_VIB_HI, length(lk.yz))) * abs(clamp(t, -1.0, 1.0));
-  float L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), (SR_DETAIL * min(1.0, s) + SR_X_DETAIL * x) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x)));
-  L += (SR_SEP * min(1.0, s) + SR_X_SEP * x) * (t < 0.0 ? -SR_SEP_DARK : 1.0) * clamp(t, -1.0, 1.0) * 4.0 * L * max(0.0, 1.0 - L) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
+  float tp = clamp(t, 0.0, 1.0);
+  float kv = 1.0 + (SR_VIB * min(1.0, s) + SR_X_VIB * x) * ck * (1.0 - smoothstepf(SR_VIB_LO, SR_VIB_HI, length(lk.yz))) * tp;
+  float L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), (SR_DETAIL * min(1.0, s) + SR_X_DETAIL * x) * tp * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x)));
+  L += (SR_SEP * min(1.0, s) + SR_X_SEP * x) * tp * 4.0 * L * max(0.0, 1.0 - L) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
   // A soft shoulder on the lightening: at most SR_HEAD of the headroom to white.
   float hr = SR_HEAD * max(0.0, 1.0 - lk.x);
   if (L > lk.x) L = hr > 1e-5 ? lk.x + hr * (1.0 - exp(-(L - lk.x) / hr)) : lk.x;
   return vec3(L, lk.yz * kv);
+}
+// Deepening of a subject darker than the water behind it (SUBJECT_DEEP in params.ts; mirrors apply.ts subjectDeepen)
+// on the finished Oklab colour: w = the subject weight x how far the source's L is under the local water's, lr = the
+// source pixel's luminance over its neighbourhood's. Lightness down with local contrast both ways; the chroma
+// follows it (hue and saturation kept: a richer black, never a grey one).
+vec3 subjectDeepen(vec3 lk, float w, float lr) {
+  if (w <= 0.0 || lk.x <= 1e-5) return lk;
+  float g = min(SD_W_MAX, w);
+  // (What is clearly lighter than its neighbourhood, a ray's spots, is lifted a little instead: SD_SPOT.)
+  float hl = smoothstepf(SD_SPOT_LO, SD_SPOT_HI, lr) * (1.0 - smoothstepf(SD_SPOT_L_LO, SD_SPOT_L_HI, lk.x));
+  float f = pow(clamp(lr, SD_R_MIN, SD_R_MAX), SD_DETAIL * g) * (1.0 - SD_K * g * smoothstepf(SD_TOE_LO, SD_TOE_HI, lk.x) * (1.0 - hl) + SD_SPOT * g * hl);
+  return vec3(lk.x * f, lk.yz * pow(min(1.0, f), SD_CHROMA));
 }
 float warmClamp(vec2 ab, vec3 lin, float srcFar, float person, float strength) {
   if (strength <= 0.0) return 1.0;
@@ -980,15 +1017,34 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   float popS = popStrength(an);
   // (With the engine's own masks the pop also needs the pixel itself to stand off the backdrop: SP_WATER_LO..HI.)
   float popP = ow * popS * p[23].w * (p[24].y > 0.5 ? 1.0 : smoothstepf(SP_WATER_LO, SP_WATER_HI, bdev));
+  // Which way the subject's lightness goes (SR_SEP / SUBJECT_DEEP): away from the local water's, -1..1.
+  float waterL = p[24].y > 0.5 ? segWaterL(an) : (p[16].w > 0.0 ? backdropL(uv) : -1.0);
+  // (A close subject under an AI outline: a wider range, SR_SEP_CLOSE x; see apply.ts.)
+  float sepR = SR_SEP_RANGE * (1.0 + (SR_SEP_CLOSE - 1.0) * (p[24].y > 0.5 ? clamp(g_segClose, 0.0, 1.0) : 0.0));
+  float sepT = waterL >= 0.0 ? (lab0.x >= waterL ? smoothstepf(0.0, sepR, lab0.x - waterL) : -smoothstepf(0.0, SD_RANGE, waterL - lab0.x)) : p[24].x;
   // AI subject restore amount (SEG_RESTORE): the AI weight (its own, lower dark fade) x the Pop multiplier; 0
   // without a real AI mask on the frame.
   // Near the contour a pixel that is plain water gets none of it (segRim): no grey ring around the subject.
-  float segS = p[24].y > 0.5 ? tw * smoothstepf(SR_DARK_LO, SR_DARK_HI, cbY) * p[23].w * segRim(an, lab0) : 0.0;
+  float segW = p[24].y > 0.5 ? tw * p[23].w * segRim(an, lab0) : 0.0;
+  // A colourful thing whose hue is not the water's (a red buoy) takes a small share of the lit pop only (SD_FAR_KEEP).
+  // Over the seabed a faint light part (g_segClose -> 0; with the engine's masks any) is not lifted (apply.ts popCol).
+  float farCol = 1.0 - (1.0 - SD_FAR_KEEP) * smoothstepf(VIVID_C_LO, VIVID_C_HI, length(lab0.yz)) * veilFar;
+  float popCol = farCol * (1.0 - SD_BED * seabedW(uv) * (1.0 - (p[24].y > 0.5 ? clamp(g_segClose, 0.0, 1.0) : 0.0)));
+  // A faint part that is thick as well (a far, big thing; water or reef under a leaked outline) keeps SD_FAR_LIT of the lit pop.
+  float litPart = max(SD_FAR_LIT, max(smoothstepf(SD_FAR_LO, SD_FAR_HI, g_segClose), min(1.0, 4.0 * clamp(g_segThin, 0.0, 1.0))));
+  float segS = segW * smoothstepf(SR_DARK_LO, SR_DARK_HI, cbY) * popCol * litPart;
+  // What stands lighter than the water is lifted (the pop, the AI restore); what stands darker is deepened instead
+  // (SUBJECT_DEEP), with no dark fade: the engine pop keeps its lit share, deepW is the weight of the deepening.
+  // (With the engine's masks the pixel has to be clearly under the fitted backdrop: SD_ENGINE_LO..HI of L.)
+  float under = waterL >= 0.0 ? waterL - lab0.x : 0.0;
+  // (Under an AI outline the deepening fades in over a longer way on a thick part: a soft step inside a big body.)
+  float deepW = (p[24].y > 0.5 ? segW * max(0.0, -sepT) * smoothstepf(0.0, mix(SEG_ALPHA_R, SEG_RAMP_IN, clamp(g_segThin, 0.0, 1.0)), (an.z - 0.5) * 2.0 * SEG_ALPHA_R) : SD_ENGINE * objectWeight(subj) * depart * smoothstepf(SP_WATER_LO, SP_WATER_HI, bdev) * popS * p[23].w * (waterL >= 0.0 ? smoothstepf(SD_ENGINE_LO, SD_ENGINE_HI, under) : 0.0)) * farCol;
+  if (p[24].y <= 0.5) popP *= (1.0 - smoothstepf(0.0, SD_ENGINE_LO, under)) * popCol;
   // Local contrast on encoded luminance (the subject takes more of it: SUBJECT_POP.clarity).
   if (clarity > 0.0) {
     float encY = linearToSrgb(vec3(Y)).x;
     float eq = sampleClahe(uv, encY, tilesX, tilesY, bins);
-    float encNew = clamp(encY + (eq - encY) * (clarity + SP_CLARITY * popP), 0.0, 1.0);
+    float encNew = clamp(encY + (eq - encY) * (clarity + SP_CLARITY * popP * (1.0 - smoothstepf(SP_HI_LO, SP_HI_HI, cbY))), 0.0, 1.0);
     float Ynew = srgbToLinear(vec3(encNew)).x;
     ratio = Y > 1e-5 ? Ynew / Y : 1.0;
     o *= ratio;
@@ -1044,15 +1100,13 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   float cf = mix(SP_CHROMA_DARK, SP_CHROMA, smoothstepf(SP_KEEP_LO, SP_KEEP_HI, Lv));
   lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
   lk.yz = highlightPink(lk.x, lk.yz);
-  lk.yz = popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0));
+  // (Only where the source has no red left; what still has red keeps the hue the plain grade gave it.)
+  lk.yz = popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0) * (1.0 - redKeep));
   // The engine's own masks are blobs reaching past the animal: there the warmth also needs the pixel's own departure
   // from the water (it hugs the animal's outline); an AI mask is the outline already.
   // The warm pull is for what stands lighter than the water behind it (skin, a pale belly: lit); what is darker (a
   // wetsuit, a dark back, the blurred rim of either against bright water) keeps the water's light.
-  float waterL = p[24].y > 0.5 ? segWaterL(an) : (p[16].w > 0.0 ? backdropL(uv) : -1.0);
   float warmUp = waterL >= 0.0 ? smoothstepf(WP_UP_LO, WP_UP_HI, lab0.x - waterL) : 1.0;
-  // Which way the AI restore moves the subject's lightness (SR_SEP): away from the local water's.
-  float sepT = waterL >= 0.0 ? sign(lab0.x - waterL) * smoothstepf(0.0, SR_SEP_RANGE, abs(lab0.x - waterL)) : p[24].x;
   float wk = smoothstepf(WP_WLO, WP_WHI, ow) * min(1.0, 2.0 * p[24].z) * WP_AMOUNT * (p[24].y > 0.5 ? 0.0 : depart) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale) * warmLit(lk.x) * warmUp;
   lk.yz = warmPop(lk.x, lk.yz, wk, WP_ENGINE_TONE);
   // Blue water style (opt-in, p25.w): cobalt water, orange warm subjects, neutral silver, deeper shadows.
@@ -1070,6 +1124,8 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   }
   // AI subject restore: after every look, so none of them amplifies it.
   if (segS > 0.0) lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0)), sepT);
+  // What is darker than the water behind it is deepened (SUBJECT_DEEP), with either mask.
+  if (deepW > 0.0) lk = subjectDeepen(lk, deepW, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS));
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
   if (p[24].w > 1.0) { float tl = max(lk.x, 1e-6); lk.x = pow(tl, 1.0 + (p[24].w - 1.0) * smoothstepf(TONE_TOE_LO, TONE_TOE_HI, tl)); }
   // Skin guard (look-fit.ts SKIN_GUARD): a person's skin never red or orange, pale skin not cold. After every look.
@@ -1518,7 +1574,7 @@ fn seabedW(uv: vec2<f32>) -> f32 {
   // The seabed lies below: the top of the frame (bright water toward the surface) is spared, softly.
   return smoothstepf(SB_W_LO, SB_W_HI, acc) * smoothstepf(SB_Y0, SB_Y1, uv.y);
 }
-fn popLift(L: f32, P: f32) -> f32 { return L + SP_LIFT * P * params.p[24].x * 4.0 * L * max(0.0, 1.0 - L); }
+fn popLift(L: f32, P: f32) -> f32 { return L + SP_LIFT * P * params.p[24].x * 4.0 * L * max(0.0, 1.0 - L) * (1.0 - smoothstepf(SP_HI_LO, SP_HI_HI, L)); }
 fn popHue(ab: vec2<f32>, abSrc: vec2<f32>, w: f32) -> vec2<f32> {
   let C = length(ab); let Cs = length(abSrc);
   let wc = w * smoothstepf(0.01, 0.04, Cs);
@@ -1577,12 +1633,21 @@ fn segColourK(an: vec4<f32>) -> f32 {
 // AI subject restore (SEG_RESTORE; see the GLSL segRestore).
 fn segRestore(lk: vec3<f32>, s: f32, lr: f32, ck: f32, x: f32, t: f32) -> vec3<f32> {
   if (s <= 0.0) { return lk; }
-  let kv = 1.0 + (SR_VIB * min(1.0, s) + SR_X_VIB * x) * ck * (1.0 - smoothstepf(SR_VIB_LO, SR_VIB_HI, length(lk.yz))) * abs(clamp(t, -1.0, 1.0));
-  var L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), (SR_DETAIL * min(1.0, s) + SR_X_DETAIL * x) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x)));
-  L = L + (SR_SEP * min(1.0, s) + SR_X_SEP * x) * select(1.0, -SR_SEP_DARK, t < 0.0) * clamp(t, -1.0, 1.0) * 4.0 * L * max(0.0, 1.0 - L) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
+  let tp = clamp(t, 0.0, 1.0);
+  let kv = 1.0 + (SR_VIB * min(1.0, s) + SR_X_VIB * x) * ck * (1.0 - smoothstepf(SR_VIB_LO, SR_VIB_HI, length(lk.yz))) * tp;
+  var L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), (SR_DETAIL * min(1.0, s) + SR_X_DETAIL * x) * tp * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x)));
+  L = L + (SR_SEP * min(1.0, s) + SR_X_SEP * x) * tp * 4.0 * L * max(0.0, 1.0 - L) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
   let hr = SR_HEAD * max(0.0, 1.0 - lk.x);
   if (L > lk.x) { if (hr > 1e-5) { L = lk.x + hr * (1.0 - exp(-(L - lk.x) / hr)); } else { L = lk.x; } }
   return vec3<f32>(L, lk.yz * kv);
+}
+// Deepening of a subject darker than the water behind it (SUBJECT_DEEP; see the GLSL subjectDeepen).
+fn subjectDeepen(lk: vec3<f32>, w: f32, lr: f32) -> vec3<f32> {
+  if (w <= 0.0 || lk.x <= 1e-5) { return lk; }
+  let g = min(SD_W_MAX, w);
+  let hl = smoothstepf(SD_SPOT_LO, SD_SPOT_HI, lr) * (1.0 - smoothstepf(SD_SPOT_L_LO, SD_SPOT_L_HI, lk.x));
+  let f = pow(clamp(lr, SD_R_MIN, SD_R_MAX), SD_DETAIL * g) * (1.0 - SD_K * g * smoothstepf(SD_TOE_LO, SD_TOE_HI, lk.x) * (1.0 - hl) + SD_SPOT * g * hl);
+  return vec3<f32>(lk.x * f, lk.yz * pow(min(1.0, f), SD_CHROMA));
 }
 fn warmClamp(ab: vec2<f32>, lin: vec3<f32>, srcFar: f32, person: f32, strength: f32) -> f32 {
   if (strength <= 0.0) { return 1.0; }
@@ -1696,14 +1761,30 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let tw = toneWeight(subj, an, depart, lab0);
   let ow = tw * smoothstepf(SP_DARK_LO, SP_DARK_HI, cbY);
   let popS = popStrength(an);
-  let popP = ow * popS * p[23].w * select(smoothstepf(SP_WATER_LO, SP_WATER_HI, bdev), 1.0, p[24].y > 0.5);
+  var popP = ow * popS * p[23].w * select(smoothstepf(SP_WATER_LO, SP_WATER_HI, bdev), 1.0, p[24].y > 0.5);
+  // Which way the subject's lightness goes (SR_SEP / SUBJECT_DEEP): away from the local water's (see the GLSL).
+  var waterL = -1.0;
+  if (p[24].y > 0.5) { waterL = segWaterL(an); } else if (p[16].w > 0.0) { waterL = backdropL(uv); }
+  let sepR = SR_SEP_RANGE * (1.0 + (SR_SEP_CLOSE - 1.0) * select(0.0, clamp(g_segClose, 0.0, 1.0), p[24].y > 0.5));
+  let sepT = select(p[24].x, select(-smoothstepf(0.0, SD_RANGE, waterL - lab0.x), smoothstepf(0.0, sepR, lab0.x - waterL), lab0.x >= waterL), waterL >= 0.0);
   // AI subject restore amount (SEG_RESTORE): 0 without a real AI mask on the frame.
-  var segS = 0.0;
-  if (p[24].y > 0.5) { segS = tw * smoothstepf(SR_DARK_LO, SR_DARK_HI, cbY) * p[23].w * segRim(an, lab0); }
+  var segW = 0.0;
+  if (p[24].y > 0.5) { segW = tw * p[23].w * segRim(an, lab0); }
+  let farCol = 1.0 - (1.0 - SD_FAR_KEEP) * smoothstepf(VIVID_C_LO, VIVID_C_HI, length(lab0.yz)) * veilFar;
+  let popCol = farCol * (1.0 - SD_BED * seabedW(uv) * (1.0 - select(0.0, clamp(g_segClose, 0.0, 1.0), p[24].y > 0.5)));
+  let litPart = max(SD_FAR_LIT, max(smoothstepf(SD_FAR_LO, SD_FAR_HI, g_segClose), min(1.0, 4.0 * clamp(g_segThin, 0.0, 1.0))));
+  let segS = segW * smoothstepf(SR_DARK_LO, SR_DARK_HI, cbY) * popCol * litPart;
+  // The deepening's weight (SUBJECT_DEEP); the engine pop keeps its lit share (see the GLSL).
+  let under = select(0.0, waterL - lab0.x, waterL >= 0.0);
+  var deepW = segW * max(0.0, -sepT) * smoothstepf(0.0, mix(SEG_ALPHA_R, SEG_RAMP_IN, clamp(g_segThin, 0.0, 1.0)), (an.z - 0.5) * 2.0 * SEG_ALPHA_R) * farCol;
+  if (p[24].y <= 0.5) {
+    deepW = SD_ENGINE * objectWeight(subj) * depart * smoothstepf(SP_WATER_LO, SP_WATER_HI, bdev) * popS * p[23].w * select(0.0, smoothstepf(SD_ENGINE_LO, SD_ENGINE_HI, under), waterL >= 0.0) * farCol;
+    popP = popP * (1.0 - smoothstepf(0.0, SD_ENGINE_LO, under)) * popCol;
+  }
   if (clarity > 0.0) {
     let encY = linearToSrgb(vec3(Y)).x;
     let eq = sampleClahe(uv, encY, tilesX, tilesY, bins);
-    let encNew = clamp(encY + (eq - encY) * (clarity + SP_CLARITY * popP), 0.0, 1.0);
+    let encNew = clamp(encY + (eq - encY) * (clarity + SP_CLARITY * popP * (1.0 - smoothstepf(SP_HI_LO, SP_HI_HI, cbY))), 0.0, 1.0);
     let Ynew = srgbToLinear(vec3(encNew)).x;
     ratio = select(1.0, Ynew / Y, Y > 1e-5);
     o *= ratio;
@@ -1747,11 +1828,8 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let cf = mix(SP_CHROMA_DARK, SP_CHROMA, smoothstepf(SP_KEEP_LO, SP_KEEP_HI, Lv));
   lk = vec3(Lp, lkV.yz * (1.0 + cf * (Lp / max(1e-4, Lv) - 1.0)));
   lk = vec3(lk.x, highlightPink(lk.x, lk.yz));
-  lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0)));
-  var waterL = -1.0;
-  if (p[24].y > 0.5) { waterL = segWaterL(an); } else if (p[16].w > 0.0) { waterL = backdropL(uv); }
+  lk = vec3(lk.x, popHue(lk.yz, lab0.yz, clamp(ow * popS, 0.0, 1.0) * (1.0 - redKeep)));
   let warmUp = select(1.0, smoothstepf(WP_UP_LO, WP_UP_HI, lab0.x - waterL), waterL >= 0.0);
-  let sepT = select(p[24].x, sign(lab0.x - waterL) * smoothstepf(0.0, SR_SEP_RANGE, abs(lab0.x - waterL)), waterL >= 0.0);
   let wk = smoothstepf(WP_WLO, WP_WHI, ow) * min(1.0, 2.0 * p[24].z) * WP_AMOUNT * select(depart, 0.0, p[24].y > 0.5) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale) * warmLit(lk.x) * warmUp;
   lk = vec3(lk.x, warmPop(lk.x, lk.yz, wk, WP_ENGINE_TONE));
   let bl = blueLook(lk, params.p[25].w, p[22].w);
@@ -1764,6 +1842,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   }
   // AI subject restore: after every look, so none of them amplifies it.
   if (segS > 0.0) { lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0)), sepT); }
+  if (deepW > 0.0) { lk = subjectDeepen(lk, deepW, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS)); }
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
   if (params.p[24].w > 1.0) { let tl = max(lk.x, 1e-6); lk = vec3(pow(tl, 1.0 + (params.p[24].w - 1.0) * smoothstepf(TONE_TOE_LO, TONE_TOE_HI, tl)), lk.yz); }
   // Skin guard (look-fit.ts SKIN_GUARD): a person's skin never red or orange, pale skin not cold. After every look.

@@ -133,8 +133,10 @@ function blur(src: Float32Array, W: number, H: number, r: number): Float32Array 
  *           Now a feather: 2.5 mask px on a fish, up to 8 on a body that fills the frame, enough for no halo;
  *           the water a fat contour covers is held back by the per-pixel test instead (thin parts: most of them
  *           now) and by the regional trust.
+ *   dirRange / dirLo / dirHi  the reference lightness of the pop (waterField): the region's direction over ±dirRange
+ *           of its mean departure, and how far a texel itself has to depart that way to take part (dirLo..dirHi).
  */
-export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02, evLo: 0.012, evHi: 0.035, nearBand: 1 / 8, farLo: 0.05, farHi: 0.09, region: 1 / 32, trustLo: 0.15, trustHi: 0.45, rampK: 0.15, rampLong: 8, thickR: 28, thinLo: 4, thinHi: 9 };
+export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02, evLo: 0.012, evHi: 0.035, nearBand: 1 / 8, farLo: 0.05, farHi: 0.09, region: 1 / 32, trustLo: 0.15, trustHi: 0.45, rampK: 0.15, rampLong: 8, thickR: 28, thinLo: 4, thinHi: 9, dirRange: 0.04, dirLo: 0.01, dirHi: 0.04, dirOwn: 0.5, dirUnder: 0.45 };
 
 type Guide = { width: number; height: number; data: Float32Array };
 
@@ -282,7 +284,42 @@ export function waterField(g: Guide, o: SegOverlay): { L: Float32Array; trust: F
   // How far each guide texel stands off its local water (Oklab ΔE), for the subjects' closeness (subjectCloseness).
   const dE = new Float32Array(n);
   for (let i = 0; i < n; i++) dE[i] = Math.hypot(lab[i * 3] - water[0][i], lab[i * 3 + 1] - water[1][i], lab[i * 3 + 2] - water[2][i]);
-  return { L: resample(water[0], gw, gh, W, H), trust: resample(trust, gw, gh, W, H), sep: { width: gw, height: gh, dE, inside } };
+  // The lightness the subject is compared with (which way it pops, and how far). Not the water's itself: per pixel
+  // that cut one animal into patches (a shark's back went near-black where it dipped under the water's lightness,
+  // a thresher's tail black next to a pale body: 14 Nov blind rounds). Instead each texel of the mask carries its own
+  // L moved by the region's departure, so that every pixel of a region is treated alike:
+  //   dl     the texel's signed departure from its background: the nearest of the local water's L and the L of what
+  //          actually surrounds the mask there (every clear texel, the departing ones too: a patch of sand the
+  //          outline leaked onto stands off the water but hardly off the sand around it); 0 between the two;
+  //   dir    the region's direction: the mean dl of the mask's texels within `blur` of the point over ±dirRange. A
+  //          region lighter than its background is only lifted, a darker one only deepened; where a light body
+  //          meets its dark tail the treatment fades out and back in, it never flips inside one stretch;
+  //   D      how far: the mean of the region's departures in that direction (the others count as 0);
+  //   ev     the texel itself has to depart that way (dirLo..dirHi): water under a fat outline keeps its own L as the
+  //          reference, and nothing is done to it.
+  const around = estimate(wt0);
+  const dl = new Float32Array(n), mIn = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    if (clear[i]) continue;
+    mIn[i] = inside[i]; // (the region's means are over the mask's own texels: the soft band outside the contour is water)
+    const own = lab[i * 3], lo = around ? Math.min(water[0][i], around[0][i]) : water[0][i], hi = around ? Math.max(water[0][i], around[0][i]) : water[0][i];
+    dl[i] = own > hi ? own - hi : own < lo ? own - lo : 0;
+  }
+  const mDen = blur(mIn, gw, gh, r1);
+  const reg = (f: (v: number) => number) => { const b = blur(Float32Array.from(dl, (v, i) => (mIn[i] ? f(v) : 0)), gw, gh, r1); return b.map((v, i) => (mDen[i] > 1e-4 ? v / mDen[i] : 0)); };
+  const sMean = reg((v) => v), dDark = reg((v) => Math.max(0, -v)), dLight = reg((v) => Math.max(0, v));
+  const ref = Float32Array.from(water[0], (wl, i) => {
+    if (clear[i]) return wl;
+    const dir = Math.min(1, Math.max(-1, sMean[i] / SEG_WATER.dirRange));
+    // (At least the texel's own departure: a faint far animal whose outline takes in some water is not diluted.)
+    // (On the dark side half the region's and half the texel's own (dirOwn): the lighter parts of a dark subject, a
+    // face, hands, a mask, are deepened less than its suit, so it keeps its modelling and does not go a flat cut-out.)
+    // (In a light region the parts under the background's lightness, a shark's back and tail, take dirUnder of the
+    // region's lift: left out, a lifted shark was a lit belly stripe on a dim body.)
+    const dk = Math.max(dDark[i], -dl[i]) + (-dl[i] - Math.max(dDark[i], -dl[i])) * SEG_WATER.dirOwn;
+    return lab[i * 3] + Math.max(0, -dir) * dk * sstep(SEG_WATER.dirLo, SEG_WATER.dirHi, -dl[i]) - Math.max(0, dir) * (Math.max(dLight[i], dl[i]) * sstep(SEG_WATER.dirLo, SEG_WATER.dirHi, dl[i]) + SEG_WATER.dirUnder * dLight[i] * sstep(SEG_WATER.dirLo, SEG_WATER.dirHi, -dl[i]));
+  });
+  return { L: resample(ref, gw, gh, W, H), trust: resample(trust, gw, gh, W, H), sep: { width: gw, height: gh, dE, inside } };
 }
 
 /**

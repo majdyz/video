@@ -16,7 +16,7 @@
 //   6. CLAHE tile LUTs on the encoded luminance for local contrast
 
 import { labelAnimals, type AnimalMap } from "./animals.ts";
-import { BACKDROP, backdropObjectness, growSubjects, type SubjectBlob } from "./backdrop.ts";
+import { BACKDROP, backdropL, backdropObjectness, growSubjects, type SubjectBlob } from "./backdrop.ts";
 import { calmEvidence, calmScores } from "./calm.ts";
 import { RED, greenCastOf, greenLitOf } from "./red.ts";
 import { SRGB_TO_LINEAR_LUT, linearToOklab, linearToSrgb, luminance, oklabHueDeg } from "./color.ts";
@@ -30,7 +30,7 @@ import {
   type FrameAnalysis,
   type GradeParams,
   type Vec3,
- CONF_BRIGHT, DEFAULT_SETTINGS, HAZE_AUTO, hazeLiftRatio, hazeWeightOf, SEABED, blueGateOf, vividGateOf } from "./params.ts";
+ CONF_BRIGHT, OBJECT_NEUTRAL, DEFAULT_SETTINGS, HAZE_AUTO, hazeLiftRatio, hazeWeightOf, SEABED, blueGateOf, vividGateOf } from "./params.ts";
 
 /** Thumbnail size the engine analyses at (upright, 16:9 box). */
 export const ANALYSIS_W = 256;
@@ -678,7 +678,27 @@ export function analyzeThumbnail(rgba: Uint8ClampedArray, w: number, h: number, 
     for (let i = 0; i < n; i++) if (small[i] > subj[i]) { all = temp("subjAll", n); break; }
     if (all !== subj) {
       popConf = temp("confPop", n);
-      for (let i = 0; i < n; i++) { all[i] = Math.max(subj[i], small[i]); popConf[i] = conf[i] + (all[i] - conf[i]) * backdropValidity; }
+      // Not a small light thing that still has red (a white rope near the surface, a buoy's line): the map would put
+      // it on the object path, and its white went cream with Subjects on (14 Nov blind test). It stays out and keeps
+      // the plain grade. What has no red left (the far animals of a school: the grade keeps such pixels on the water
+      // path's colour whatever the map says) and what is darker than the water (a far diver) stay in.
+      const noRed = (i: number) => {
+        const red = smoothstep(OBJECT_NEUTRAL.rLo, OBJECT_NEUTRAL.rHi, lin[i * 3] / Math.max(1e-4, lin[i * 3 + 1], lin[i * 3 + 2]));
+        const lit = backdropFit ? smoothstep(0, 0.04, okL[i] - backdropL(((i % w) + 0.5) / w, (Math.floor(i / w) + 0.5) / h, backdropFit)) : 1;
+        return 1 - red * lit;
+      };
+      for (let i = 0; i < n; i++) {
+        let k = 1;
+        if (small[i] > subj[i]) {
+          const x = i % w, y = (i - x) / w;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < w && yy < h) k = Math.min(k, noRed(yy * w + xx)); }
+          k = smoothstep(0.5, 1, k);
+        }
+        // (At SMALL_TONE of its weight: the small animals around a subject take part of the pop, not all of it: a
+        // little pale fish next to a shark went a chalky white blob.)
+        all[i] = Math.max(subj[i], small[i] * k * SMALL_TONE);
+        popConf[i] = conf[i] + (all[i] - conf[i]) * backdropValidity;
+      }
     }
     animals = labelAnimals(all, bdDev, w, h, MAP_W, MAP_H, notAnimal);
   }
@@ -1149,6 +1169,9 @@ function buildMaps(z: Float32Array, conf: Float32Array, ds: Float32Array, veilSc
   }
   return { width: MAP_W, height: MAP_H, fields, guide };
 }
+
+/** The share of Subject pop's tone the small, separate animals of a school take (DepthMap.popConf). */
+const SMALL_TONE = 0.85;
 
 /** One conf map on the fields' grid, blurred and averaged exactly as buildMaps does its conf channel (DepthMap.popConf). */
 function confTexels(conf: Float32Array, w: number, h: number): Float32Array {
