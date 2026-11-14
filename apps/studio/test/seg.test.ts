@@ -283,7 +283,7 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(dOf(60, 10 + SEG_WATER.rampLong) >= SEG_TONE.rampIn, `and is toned in full within the feather (${dOf(60, 10 + SEG_WATER.rampLong).toFixed(2)} at ${SEG_WATER.rampLong} px in)`);
   assert.ok(dOf(60, 40) >= SEG_TONE.rampIn, `its middle is toned in full (${dOf(60, 40).toFixed(2)})`);
   assert.ok(dOf(130, 39) > 0.5 && dOf(130, 39) > 0.9 * Math.max(0, (a[39 * W + 130] - 0.5) * 2 * SEG_TONE.alphaR), `a thin fin keeps its short ramp (${dOf(130, 39).toFixed(2)})`);
-  assert.ok(unpackSegR(c[(39 * W + 130) * 4])[0] < 2 && unpackSegR(c[(14 * W + 60) * 4])[0] === SEG_THICK, "the per-pixel water test on thin parts only (R)");
+  assert.ok(unpackSegR(c[(39 * W + 130) * 4])[0] < 2 && unpackSegR(c[(14 * W + 60) * 4])[0] >= SEG_THICK && unpackSegR(c[(14 * W + 60) * 4])[0] <= SEG_THICK + 1.5, "the tone's per-pixel water test on thin parts only (R; thick parts carry SEG_THICK + the water's L for the restore's rim test)");
   let step = 0;
   for (let y = 11; y < 69; y++) for (let x = 21; x < 99; x++) step = Math.max(step, Math.abs(dOf(x + 1, y) - dOf(x, y)), Math.abs(dOf(x, y + 1) - dOf(x, y)));
   // (Never steeper than the plain feather of a thin part, 1 per texel: the thickness changes the slope gently.)

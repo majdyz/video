@@ -260,7 +260,8 @@ export const DETAIL_TAPS: readonly (readonly [number, number, number])[] = [
  * forward instead of fading to grey; a full clearing with desaturation turns a blue-grey shark into a flat white
  * cut-out (the clearing alone raises a blue-cast grey's luminance).
  */
-export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.3 };
+/** edgeFloor 0.3 → 0 (14 Nov): the engine's masks reach past the subject, and a third of the tone on plain water showed as a paler ring around it. */
+export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0 };
 
 /**
  * Subject pop separation (on top of SUBJECT_CLEAR), per unit of the pop weight P = subject tone weight × pop
@@ -323,7 +324,16 @@ export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.
  */
 export const SEABED = { hue: (75 * Math.PI) / 180, chroma: 0.02, keep: 0.15, lift: 0.06, grid: 6, wLo: 0, wHi: 0.55, lo: 0.1, span: 0.8, redLo: 0.12, redHi: 0.35, bandLo: -0.1, bandHi: -0.02, y0: 0.2, y1: 0.5 };
 
-export const WARM_POP = { hue: (78 * Math.PI) / 180, cMin: 0.05, cMax: 0.075, keep: 0.4, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3, side: 4, castLo: 0.015, castHi: 0.045 };
+/**
+ * 14 Nov (the freediver "turns grey"): at the default Warmth 50 the pull stopped half way, which for a blue subject
+ * is dead neutral. Now the Warmth slider reaches the full pull at 50, the pull is for the subject's lit parts only
+ * (graded L litLo..litHi) that stand lighter than the water behind them (source L against the backdrop's or the
+ * AI overlay's local water, upLo..upHi), toward a paler, more skin-like tone (hue 78° → 65°, cMin 0.05 → 0.026,
+ * cMax 0.075 → 0.034), and the result keeps at least min(floorKeep × its chroma, floor): never a grey. With the
+ * engine's own masks the tone is `engineTone` of that: the looks run after the pull there and deepen a warm colour
+ * (a white rope came out orange).
+ */
+export const WARM_POP = { hue: (65 * Math.PI) / 180, cMin: 0.026, cMax: 0.034, keep: 0.25, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3, side: 4, castLo: 0.015, castHi: 0.045, litLo: 0.3, litHi: 0.5, upLo: -0.03, upHi: 0.05, floor: 0.018, floorKeep: 0.5, engineTone: 0.35 };
 
 export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
 
@@ -400,8 +410,23 @@ export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFol
  *   boostWarm / boostWarmShare  more of the warm hue (with the Warmth slider) and a higher ceiling for it (still a
  *                  share of what is left on the cool side: never neutral, never warm).
  * No more of the cast comes off than before (castMax): the grey sticker was the cast going, not the contrast.
+ *
+ * Never a grey, no ring (14 Nov, the owner's freediver in deep blue: "turns grey, and a ring of water around him";
+ * the outline method made no difference). Taking half of a red-less subject's cast off leaves slate grey, and the
+ * outline's water went with it. Now:
+ *   - the cut is smaller (cast 0.45 → 0.3 per unit S, castMax 0.62 → 0.4): dark parts (a wetsuit, a dark back) keep
+ *     at least 60% of their colour and stay in the water's light;
+ *   - the lit parts of a close subject that stand lighter than the water behind them (skin, a belt, a pale belly:
+ *     WARM_POP litLo..litHi on the graded L, upLo..upHi on the source's L against the local water's) go to a warm,
+ *     skin-like neutral instead (warmPop, `tone` per unit S up to toneMax, × the Warmth slider up to 50), with a
+ *     chroma floor (WARM_POP.floor): a partial pull is the pixel's own hue or the warm one at the floor, never a
+ *     grey. What is darker than the water (and the blurred rim of a dark subject against bright water) is not
+ *     warmed; a far, veiled subject is not either (warmCloseLo..Hi of its closeness: the orange sticker of 12 Nov);
+ *   - within SEG_TONE.trustLo..trustHi mask px of the contour the whole restore follows the pixel: only as far as
+ *     it departs from the local water (rimLo..rimHi, Oklab; apply.ts segRim), so the water under an outline that
+ *     runs wide keeps its colour. For that the local water's L now rides in R on thick parts too (`thick` + L).
  */
-export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, cast: 0.45, castMax: 0.62, hue: (65 * Math.PI) / 180, warm: 0.014, warmShare: 0.12, litLo: 0.1, litHi: 0.35, hiLo: 0.85, hiHi: 0.97, detail: 0.25, rMin: 0.7, rMax: 1.45, lift: 0.012, boostWarm: 0.03, boostWarmShare: 0.15, boostDetail: 0.7, boostLift: 0.025, edge: 3, farKeep: 0.35, veilLo: 0.065, veilHi: 0.125, pack: 32, levels: 16 };
+export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, cast: 0.3, castMax: 0.4, tone: 0.9, toneMax: 1, warmCloseLo: 0.35, warmCloseHi: 0.75, rimLo: 0.07, rimHi: 0.15, thick: 9, hue: (65 * Math.PI) / 180, warm: 0.014, warmShare: 0.12, litLo: 0.1, litHi: 0.35, hiLo: 0.85, hiHi: 0.97, detail: 0.25, rMin: 0.7, rMax: 1.45, lift: 0.012, boostWarm: 0.03, boostWarmShare: 0.15, boostDetail: 0.7, boostLift: 0.025, edge: 3, farKeep: 0.35, veilLo: 0.065, veilHi: 0.125, pack: 32, levels: 16 };
 
 /** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
 export function popStrengthK(s: { subjectPopStrength?: number }): number {
