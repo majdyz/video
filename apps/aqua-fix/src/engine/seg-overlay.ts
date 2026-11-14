@@ -138,8 +138,8 @@ export const SEG_WATER = { blur: 1 / 20, wide: 1 / 5, alphaMax: 0.02, evLo: 0.01
 
 type Guide = { width: number; height: number; data: Float32Array };
 
-/** R value of composeSegStrength on thick parts (the grade skips its per-pixel water test above 2). */
-export const SEG_THICK = 9;
+/** R of composeSegStrength on thick parts is this + the local water's L (the tone weight skips its per-pixel water test above 2; the AI restore reads the L back: apply.ts segRim). */
+export const SEG_THICK = SEG_RESTORE.thick;
 
 /**
  * The R channel of the strength texture with an AI overlay: its value (the local water's L, −1 or SEG_THICK), the
@@ -373,10 +373,11 @@ export function composeSegStrength(o: SegOverlay, guide: Guide | null = null): {
       const d = a < 0.995 ? (a - 0.5) * 2 * R : Math.max(R, dIn[i] - 0.5);
       a = 0.5 + Math.min(R, d * (SEG_TONE.rampIn / ramp)) / (2 * R);
     }
-    // Thick parts carry R = SEG_THICK (no per-pixel test: their ramp is long, the contour's water gets next to nothing).
+    // Thick parts carry R = SEG_THICK + the water's L: no per-pixel test in the tone weight (their ramp is long), but
+    // the AI subject restore runs its own near the contour (apply.ts segRim: its colour on water showed as a ring).
     // (The thinness only where the per-pixel test runs and a part is near: elsewhere nothing reads it.)
     const tested = !!wf && ramp <= 1.5 * SEG_TONE.rampIn;
-    out[i * 4] = packSegR(!wf ? -1 : tested ? wf.L[i] : SEG_THICK, close[i], tested && thick[i] > 0.01 ? segThin(thick[i]) : 0);
+    out[i * 4] = packSegR(!wf ? -1 : tested ? wf.L[i] : SEG_THICK + Math.min(1.5, Math.max(0, wf.L[i])), close[i], tested && thick[i] > 0.01 ? segThin(thick[i]) : 0);
     out[i * 4 + 1] = (wf ? wf.trust[i] : 1) * (o.quality ?? 1);
     out[i * 4 + 2] = a;
     out[i * 4 + 3] = o.near[i];

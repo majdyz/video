@@ -260,7 +260,8 @@ export const DETAIL_TAPS: readonly (readonly [number, number, number])[] = [
  * forward instead of fading to grey; a full clearing with desaturation turns a blue-grey shark into a flat white
  * cut-out (the clearing alone raises a blue-cast grey's luminance).
  */
-export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.3 };
+/** k / cMax 0 (14 Nov, second pass): no cast clearing, the subject keeps its own hue and chroma; the negative desat alone is left, a small chroma boost (× (1 − desat)) on the subject's red-starved lit parts. edgeFloor 0.3 → 0 (14 Nov): the engine's masks reach past the subject, and a third of the tone on plain water showed as a paler ring around it. */
+export const SUBJECT_CLEAR = { k: 0, cMax: 0, desat: -0.4, edgeFloor: 0 };
 
 /**
  * Subject pop separation (on top of SUBJECT_CLEAR), per unit of the pop weight P = subject tone weight × pop
@@ -323,9 +324,21 @@ export const SUBJECT_CLEAR = { k: 0.35, cMax: 0.045, desat: -0.15, edgeFloor: 0.
  */
 export const SEABED = { hue: (75 * Math.PI) / 180, chroma: 0.02, keep: 0.15, lift: 0.06, grid: 6, wLo: 0, wHi: 0.55, lo: 0.1, span: 0.8, redLo: 0.12, redHi: 0.35, bandLo: -0.1, bandHi: -0.02, y0: 0.2, y1: 0.5 };
 
-export const WARM_POP = { hue: (78 * Math.PI) / 180, cMin: 0.05, cMax: 0.075, keep: 0.4, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3, side: 4, castLo: 0.015, castHi: 0.045 };
+/**
+ * 14 Nov (the freediver "turns grey"): at the default Warmth 50 the pull stopped half way, which for a blue subject
+ * is dead neutral. Now the Warmth slider reaches the full pull at 50, the pull is for the subject's lit parts only
+ * (graded L litLo..litHi) that stand lighter than the water behind them (source L against the backdrop's or the
+ * AI overlay's local water, upLo..upHi), toward a paler, more skin-like tone (hue 78° → 65°, cMin 0.05 → 0.026,
+ * cMax 0.075 → 0.034), and the result keeps at least min(floorKeep × its chroma, floor): never a grey. With the
+ * engine's own masks the tone is `engineTone` of that: the looks run after the pull there and deepen a warm colour
+ * (a white rope came out orange).
+ * Second pass, 14 Nov: `amount` 0. The pull is off (the subject keeps its own hue, see SEG_RESTORE): sharks came out
+ * beige, and sand under a leaked outline orange. The code stays for a future, better-informed use.
+ */
+export const WARM_POP = { hue: (65 * Math.PI) / 180, cMin: 0.026, cMax: 0.034, keep: 0.25, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3, side: 4, castLo: 0.015, castHi: 0.045, litLo: 0.3, litHi: 0.5, upLo: -0.03, upHi: 0.05, floor: 0.018, floorKeep: 0.5, engineTone: 0.35, amount: 0 };
 
-export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
+/** 14 Nov, third pass ("almost no pop"): lift 0.1 → 0.28 and clarity 0.22 → 0.38 with the engine's own masks (the mild step of the strength sweep, greyfix/v3: the middle one washed overlapping sharks out). The engine's masks reach past the subject, so the pop's lift, clarity and Vivid sparing also need the pixel itself to stand off the backdrop (waterLo..waterHi of its departure, a stricter ramp than the tone's): the water and the blurred rim around a diver's arms came up as a pale glow. */
+export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.3, lift: 0.2, waterLo: 0.05, waterHi: 0.12, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
 
 /**
  * AI subject restore: what a real AI mask on the frame adds to Subject pop (grade-shader segRestore; never with the
@@ -400,8 +413,60 @@ export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFol
  *   boostWarm / boostWarmShare  more of the warm hue (with the Warmth slider) and a higher ceiling for it (still a
  *                  share of what is left on the cool side: never neutral, never warm).
  * No more of the cast comes off than before (castMax): the grey sticker was the cast going, not the contrast.
+ *
+ * Never a grey, no ring (14 Nov, the owner's freediver in deep blue: "turns grey, and a ring of water around him";
+ * the outline method made no difference). Taking half of a red-less subject's cast off leaves slate grey, and the
+ * outline's water went with it. Now:
+ *   - the cut is smaller (cast 0.45 → 0.3 per unit S, castMax 0.62 → 0.4): dark parts (a wetsuit, a dark back) keep
+ *     at least 60% of their colour and stay in the water's light;
+ *   - the lit parts of a close subject that stand lighter than the water behind them (skin, a belt, a pale belly:
+ *     WARM_POP litLo..litHi on the graded L, upLo..upHi on the source's L against the local water's) go to a warm,
+ *     skin-like neutral instead (warmPop, `tone` per unit S up to toneMax, × the Warmth slider up to 50), with a
+ *     chroma floor (WARM_POP.floor): a partial pull is the pixel's own hue or the warm one at the floor, never a
+ *     grey. What is darker than the water (and the blurred rim of a dark subject against bright water) is not
+ *     warmed; a far, veiled subject is not either (warmCloseLo..Hi of its closeness: the orange sticker of 12 Nov);
+ *   - within SEG_TONE.trustLo..trustHi mask px of the contour the whole restore follows the pixel: only as far as
+ *     it departs from the local water (rimLo..rimHi, Oklab; apply.ts segRim), so the water under an outline that
+ *     runs wide keeps its colour. For that the local water's L now rides in R on thick parts too (`thick` + L).
+ *
+ * Own hue only (14 Nov, second pass; the review of the above: "Basic hammerheads still beige-grey, the ray's leaked
+ * sand orange, the freediver only modestly better"). Without red no pull toward neutral or warm can be right for
+ * every subject, and wherever the outline leaks it paints. Inside the outline the colour is now never neutralised
+ * and never tinted: no cast cut, no warm pull (WARM_POP.amount 0, SUBJECT_CLEAR k 0). The subject pops by light:
+ *   sep / boostSep   its lightness moves away from the local water's (per unit S up to Pop 50 / per unit X above, × 4·L·(1 − L)): what is lighter
+ *                    than the water behind it gets lighter, what is darker gets darker, by how far the source's L is
+ *                    from the water's over `sepRange` (signed, smooth through 0; the clip's pop direction where
+ *                    there is no water to compare with). A dark diver against bright water is not lifted into it;
+ *                    never downward (a dark blue pushed darker leaves the display's gamut and comes back
+ *                    greyer); what is darker than the water is lifted by `sepDark` of the step instead (a midtone
+ *                    lift: the subject as if seen through less water, with room for more of its colour);
+ *   detail / boostDetail  the local contrast (per unit S up to Pop 50 / per unit X above), upward only (rMin 1: what
+ *                    is lighter than its neighbourhood gets lighter; nothing is darkened, the gamut again);
+ *   head             all the lightening together takes at most this share of the pixel's headroom to white (a soft
+ *                    shoulder): a light spot lifted to white lost its colour (clipped);
+ *   vib / boostVib   a little more of its own colour (chroma × (1 + vib), hue kept; fading out vibLo..vibHi so a
+ *                    saturated subject is not pushed), by how far the pixel's lightness is from the water's (|t|:
+ *                    water under a leaked outline is not made bluer): its chroma never ends under the plain grade's.
+ * The rim test and the feather are as above; the Warmth slider has nothing left to act on.
+ * Third pass, 14 Nov ("almost no pop: freediver new ≈ off"): the middle step of a strength sweep (sep 0.07 → 0.13,
+ * sepDark 0 → 0.45, detail 0.5 → 0.8, vib 0.3 → 0.45): the subject reads 10–18% lighter than in the plain grade on
+ * the three reference frames, with more of its own chroma. Two limits came with it (the freediver near the surface,
+ * 28–29 s): the chroma boost stops where the colour is as strong as open water's (vibLo..vibHi 0.06..0.12: a lifted
+ * dark torso went electric blue), and the lift and the local contrast fade out over hiLo..hiHi (graded L) with `head` 0.4 (bright water
+ * under a leaked outline went white).
  */
-export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, cast: 0.45, castMax: 0.62, hue: (65 * Math.PI) / 180, warm: 0.014, warmShare: 0.12, litLo: 0.1, litHi: 0.35, hiLo: 0.85, hiHi: 0.97, detail: 0.25, rMin: 0.7, rMax: 1.45, lift: 0.012, boostWarm: 0.03, boostWarmShare: 0.15, boostDetail: 0.7, boostLift: 0.025, edge: 3, farKeep: 0.35, veilLo: 0.065, veilHi: 0.125, pack: 32, levels: 16 };
+export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, sep: 0.13, boostSep: 0.04, sepRange: 0.12, sepDark: 0.45, head: 0.4, vib: 0.45, boostVib: 0.15, vibLo: 0.06, vibHi: 0.12, rimLo: 0.07, rimHi: 0.15, thick: 9, hue: (65 * Math.PI) / 180, hiLo: 0.7, hiHi: 0.9, detail: 0.8, rMin: 1, rMax: 1.45, boostDetail: 0.7, edge: 3, farKeep: 0.35, veilLo: 0.065, veilHi: 0.125, pack: 32, levels: 16 };
+
+/**
+ * White guard (Subjects on, open water). Subjects on puts the subject's pixels on the object path (the pop's own
+ * confidence map), whose white balance takes the blue out of anything that still has red. On a near-white source
+ * that carried the water's cast (white fins, a light rope: bluish white) the balance overshoots: the pixel lands on
+ * the far side of neutral, yellow-green (the owner's freediver at 11 s: white fins "turn yellow/beige", 14 Nov).
+ * A light pixel (graded L over lLo..lHi) whose source was on the water's side and whose graded colour has crossed
+ * to the other side of neutral (by `cross` of its chroma along the water's hue) loses that chroma: white gear
+ * stays white. Darker things (skin, a yellow fin that was yellow in the source) are not touched.
+ */
+export const WHITE_GUARD = { lLo: 0.72, lHi: 0.86, cross: 0.5, srcLo: 0.004 };
 
 /** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
 export function popStrengthK(s: { subjectPopStrength?: number }): number {

@@ -312,19 +312,38 @@ const STYLES: Record<string, UserSettings> = { natural: { ...DEFAULT_SETTINGS },
     const old = [C * Math.cos(h * D) * (1 - k) + Math.cos(WARM_POP.hue) * ct * k, C * Math.sin(h * D) * (1 - k) + Math.sin(WARM_POP.hue) * ct * k];
     if (h <= 195 && C >= 0.06) assert.ok(green(old), `plain mix at ${h}° C ${C}: ${hueOf(old).toFixed(0)}°`);
   }
-  // A blue subject (straight across from the cream): within a hair of the plain mix.
-  for (const h of [250, 258, 265]) for (const k of [0.25, 0.5, 0.75]) {
+  // A blue subject (straight across from the cream): within a hair of the plain mix, except where that mix would
+  // be a grey (the freediver in deep blue, 14 Nov: "turns grey"): there the chroma floor holds, on the blue side
+  // before the pull crosses neutral and on the warm side after, never sideways.
+  const floorOf = (C: number) => Math.min(WARM_POP.floorKeep * C, WARM_POP.floor);
+  for (const h of [237, 245, 252]) for (const k of [0.25, 0.5, 0.75]) {
     const C = 0.07, ct = Math.min(WARM_POP.cMax, Math.max(WARM_POP.keep * C, WARM_POP.cMin));
     const o = warmPop(0.5, ...ab(C, h), k);
     const old = [C * Math.cos(h * D) * (1 - k) + Math.cos(WARM_POP.hue) * ct * k, C * Math.sin(h * D) * (1 - k) + Math.sin(WARM_POP.hue) * ct * k];
-    assert.ok(Math.hypot(o[0] - old[0], o[1] - old[1]) < 0.006, `blue ${h}° k ${k}: moved ${Math.hypot(o[0] - old[0], o[1] - old[1])}`);
+    if (Math.hypot(old[0], old[1]) >= floorOf(C) + 0.006) assert.ok(Math.hypot(o[0] - old[0], o[1] - old[1]) < 0.006, `blue ${h}° k ${k}: moved ${Math.hypot(o[0] - old[0], o[1] - old[1])}`);
   }
+  for (const h of [165, 200, 235, 250, 258, 265, 290]) for (const C of [0.03, 0.06, 0.1]) {
+    let prevWarm = false;
+    for (let k = 0.02; k <= 1.0001; k += 0.02) {
+      const o = warmPop(0.5, ...ab(C, h), k), c = Math.hypot(o[0], o[1]), warm = o[0] * Math.cos(WARM_POP.hue) + o[1] * Math.sin(WARM_POP.hue) > 0;
+      assert.ok(c >= floorOf(C) - 1e-9, `never a grey: ${h}° C ${C} at k ${k.toFixed(2)} keeps chroma ${c.toFixed(4)}`);
+      // Where the floor holds, the hue lies between the pixel's own and the warm one (never on the far side of either).
+      if (c < floorOf(C) + 1e-6) {
+        const off = (x: number, y: number) => Math.abs(((x - y + 540) % 360) - 180), d1 = off(hueOf(o), h), d2 = off(hueOf(o), WARM_POP.hue / D);
+        assert.ok(d1 + d2 <= off(h, WARM_POP.hue / D) + 10 || Math.min(d1, d2) < 45, `floor hue at ${h}° k ${k.toFixed(2)}: ${hueOf(o).toFixed(0)}°`);
+      }
+      assert.ok(warm || !prevWarm, `once warm, warm (${h}° k ${k.toFixed(2)})`);
+      prevWarm = warm;
+    }
+  }
+  // An already neutral pixel has nothing to floor: no colour is painted on it at a partial pull beyond the mix.
+  assert.ok(Math.hypot(...warmPop(0.5, 0, 0, 0.3)) <= 0.3 * WARM_POP.cMax + 1e-9);
   // Both shaders carry the same form.
   for (const code of [GRADE_GLSL, GRADE_WGSL]) assert.ok(code.includes("pow(max(0.0, 1.0 - k), WP_SIDE)") && /WP_SIDE(: f32)? = 4\.0000/.test(code));
   // … and it is for a subject that carries a cast: the weight fades out where the graded colour is near neutral
   // already (a region the tap balanced is not painted cream), and is whole on a cast subject (as before the tap).
   assert.ok(WARM_POP.castLo >= 0.01 && WARM_POP.castHi <= 0.05, "a blue-cast subject (C ≥ 0.05 as graded) keeps the full pull");
-  assert.ok(GRADE_GLSL.includes("* smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);") && GRADE_WGSL.includes("* smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);"));
+  assert.ok(GRADE_GLSL.includes("* smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale) * warmLit(lk.x) * warmUp;") && GRADE_WGSL.includes("* smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale) * warmLit(lk.x) * warmUp;"));
   console.log("ok  the subject's warm pull passes through neutral: a tapped teal shadow is not turned green");
 }
 

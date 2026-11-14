@@ -335,6 +335,12 @@ export function backdropSubject(L: number, a: number, b: number, u: number, v: n
   return smoothstep(lo, hi, backdropDev(L, a, b, u, v, fit));
 }
 
+/** The backdrop surface's Oklab L at upright (u, v): the water's lightness there (mirrored in the shaders' backdropL). */
+export function backdropL(u: number, v: number, fit: ArrayLike<number>): number {
+  const x = u - 0.5, y = v - 0.5;
+  return fit[0] + fit[1] * x + fit[2] * y + fit[3] * x * x + fit[4] * x * y + fit[5] * y * y;
+}
+
 /** Raw departure of a pixel from the backdrop surface (see backdropSubject; mirrored in the shaders' backdropDev). */
 export function backdropDev(L: number, a: number, b: number, u: number, v: number, fit: ArrayLike<number>): number {
   const x = u - 0.5, y = v - 0.5;

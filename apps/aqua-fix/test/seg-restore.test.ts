@@ -8,95 +8,99 @@
 //   node --experimental-strip-types apps/aqua-fix/test/seg-restore.test.ts
 import assert from "node:assert/strict";
 import { analyzeThumbnail, ANALYSIS_W, ANALYSIS_H } from "../src/engine/analyze.ts";
-import { applyGrade, segColourK, segRestore, segToneWeight } from "../src/engine/apply.ts";
+import { applyGrade, segColourK, segRestore, segRim, segToneWeight, segWaterL, whiteGuard } from "../src/engine/apply.ts";
 import { linearToOklab, srgbToLinear } from "../src/engine/color.ts";
 import { GRADE_GLSL, GRADE_WGSL, SEG_TONE } from "../src/engine/grade-shader.ts";
-import { DEFAULT_SETTINGS, SEG_RESTORE, guideTexture, type UserSettings } from "../src/engine/params.ts";
+import { DEFAULT_SETTINGS, SEG_RESTORE, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, WHITE_GUARD, guideTexture, type UserSettings } from "../src/engine/params.ts";
 import { composeSegStrength, engineSubjectMaps, packSegR, SEG_THICK, subjectCloseness, unpackSegR, waterField } from "../src/engine/seg-overlay.ts";
 
 const R = SEG_RESTORE, wx = Math.cos(R.hue), wy = Math.sin(R.hue);
 const along = (a: number, b: number) => a * wx + b * wy;
 
-// 1. The stage itself, on Oklab colours.
+// 1. The stage itself, on Oklab colours. Second pass of 14 Nov (the owner's freediver in deep blue "turns grey, and a
+// ring of water around him"; then the review of the first fix: "sharks still beige-grey, leaked sand orange"): inside
+// the outline the colour is never neutralised and never tinted. The subject keeps its own hue and at least its own
+// chroma, and pops by light: its lightness moves away from the local water's (up only: a dark blue pushed darker
+// leaves the display's gamut and comes back greyer), with local contrast and a little more of its own colour.
 {
-  assert.deepEqual(segRestore(0.4, -0.05, -0.04, 0, 0.5, 1.2), [0.4, -0.05, -0.04], "no AI weight (or Pop 0): untouched");
-  // A cast-blue pixel (teal) loses a share of its cast step by step and stays on the water's side of neutral.
-  const C0 = Math.hypot(0.05, 0.04);
-  let prevC = C0, prevL = 0.4;
-  const keptAt: Record<number, number> = {};
-  for (const s of [0.5, 1, 1.5, 2]) {
-    for (const warmth of [0, 0.5, 1]) {
-      const [L, a, b] = segRestore(0.4, -0.05, -0.04, s, warmth, 1);
-      assert.ok(along(a, b) < -0.005, `never neutral, never warm (S ${s}, Warmth ${warmth}: ${along(a, b).toFixed(4)} along the warm hue)`);
-      assert.ok(Math.hypot(a, b) >= (1 - R.castMax) * (1 - R.warmShare) * C0 - 1e-9, `at least a third of the cast stays (S ${s}, Warmth ${warmth})`);
-      assert.ok(L > 0.4 && L < 0.4 + 0.06, `a small lift only (S ${s}: ${L.toFixed(3)})`);
-    }
-    const [L, a, b] = segRestore(0.4, -0.05, -0.04, s, 0.5, 1);
-    const C = Math.hypot(a, b);
-    // (The share taken off stops at castMax, reached at Pop 75.)
-    assert.ok(s <= 1.5 ? C < prevC - 1e-4 : C <= prevC + 1e-9, `Pop up, cast down (S ${s}: ${C.toFixed(4)} vs ${prevC.toFixed(4)})`);
-    assert.ok(L > prevL, `Pop up, lighter (S ${s}: ${L.toFixed(3)})`);
-    keptAt[s] = C / C0;
-    prevC = C; prevL = L;
+  const hueOf = (a: number, b: number) => ((Math.atan2(b, a) * 180) / Math.PI + 360) % 360;
+  assert.deepEqual(segRestore(0.4, -0.05, -0.04, 0, 1.2), [0.4, -0.05, -0.04], "no AI weight (or Pop 0): untouched");
+  for (const [a0, b0] of [[-0.05, -0.04], [-0.02, -0.09], [0.08, 0.1], [0.03, -0.06], [0, 0]]) for (const L of [0.1, 0.3, 0.5, 0.7, 0.95]) for (const s of [0.25, 0.5, 1, 1.5, 2]) for (const t of [-1, -0.4, 0, 0.4, 1]) for (const ck of [0, 0.35, 1]) {
+    const x = s > 1 ? s - 1 : 0, [L1, a, b] = segRestore(L, a0, b0, s, 1, ck, x, t), C0 = Math.hypot(a0, b0), C = Math.hypot(a, b);
+    assert.ok(C >= C0 - 1e-12, `never less chroma than the plain grade (L ${L}, S ${s}, t ${t}: ${C.toFixed(4)} vs ${C0.toFixed(4)})`);
+    assert.ok(C <= C0 * (1 + R.vib + R.boostVib) + 1e-12, "a capped boost");
+    if (C0 > 0) assert.ok(Math.abs(((hueOf(a, b) - hueOf(a0, b0) + 540) % 360) - 180) < 1e-6, "the hue is the subject's own: never neutralised, never tinted");
+    // Lightness: lighter than the water → lighter; darker → never darkened, lifted by sepDark of the step at most.
+    // (Not in the highlights, hiLo..hiHi: what is bright already is left alone, bright water under a leak too.)
+    if (t > 0) assert.ok((L >= R.hiHi ? L1 === L : L1 > L) && L1 - L <= (R.sep * Math.min(1, s) + R.boostSep * x) + 1e-9, `lighter than the water: lifted, by a bounded step (${L} -> ${L1.toFixed(3)})`);
+    if (t === 0) assert.equal(L1, L);
+    if (t < 0) assert.ok(L1 >= L && L1 - L <= R.sepDark * (R.sep * Math.min(1, s) + R.boostSep * x) + 1e-9, "darker than the water: never darkened, a share of the lift at most");
   }
-  // The owner's target: Pop 50 takes a third to a half of the cast, Pop 100 at most about two thirds.
-  // (At full weight, deep inside a close subject; a whole animal, with its feathered rim, loses less: section 3.)
-  assert.ok(keptAt[1] >= 0.45 && keptAt[1] <= 0.67, `Pop 50 keeps ${(keptAt[1] * 100).toFixed(0)}% of the cast`);
-  assert.ok(keptAt[2] >= 0.32 && keptAt[2] < keptAt[1] - 0.05, `Pop 100 keeps ${(keptAt[2] * 100).toFixed(0)}% of the cast`);
-  // Warmth 0: a share of the cast goes, nothing is added.
-  const [, a0, b0] = segRestore(0.4, -0.05, -0.04, 2, 0, 1);
-  assert.ok(Math.abs(Math.hypot(a0, b0) - (1 - R.castMax) * C0) < 1e-9 && Math.abs(a0 * -0.04 - b0 * -0.05) < 1e-9, "Warmth off: the hue is kept");
-  // The colour share (the mask's edge, a thin / small / far subject): none of the colour at 0, the lift and the
-  // local contrast as before.
-  const full = segRestore(0.4, -0.05, -0.04, 1, 0.5, 1.2), part = segRestore(0.4, -0.05, -0.04, 1, 0.5, 1.2, 0, R.farKeep), none = segRestore(0.4, -0.05, -0.04, 1, 0.5, 1.2, 0, 0);
-  assert.ok(Math.abs(none[1] + 0.05) < 1e-9 && Math.abs(none[2] + 0.04) < 1e-9 && none[0] === full[0], "colour share 0: the colour is the plain grade's");
-  assert.ok(Math.hypot(part[1], part[2]) > Math.hypot(full[1], full[2]) + 0.005 && Math.hypot(part[1], part[2]) < C0 - 0.003, `a far subject keeps more of the cast (${(Math.hypot(part[1], part[2]) / C0).toFixed(2)} vs ${(Math.hypot(full[1], full[2]) / C0).toFixed(2)})`);
+  assert.ok(R.sepDark >= 0 && R.sepDark <= 1, "what is darker than the water is never deepened (a dark blue pushed darker comes back greyer: gamut)");
+  // More Pop, more separation; the slider's upper half adds to it.
+  let prev = 0.5;
+  for (const s of [0.5, 1, 1.5, 2]) { const l = segRestore(0.5, -0.05, -0.04, s, 1, 1, s > 1 ? s - 1 : 0, 1)[0]; assert.ok(l > prev + 0.004, `Pop up, more lift (S ${s}: ${l.toFixed(3)})`); prev = l; }
+  // The chroma boost: by the colour share (the edge feather, a far subject), by how far the pixel's lightness is
+  // from the water's (water under a leaked outline is not made bluer), not on an already saturated colour.
+  const cOf = (o: number[]) => Math.hypot(o[1], o[2]), C0 = Math.hypot(0.05, 0.04);
+  assert.ok(cOf(segRestore(0.5, -0.05, -0.04, 1, 1, 1, 0, 1)) > 1.15 * C0, "a clear subject: its own colour, more of it");
+  assert.ok(Math.abs(cOf(segRestore(0.5, -0.05, -0.04, 1, 1, 0, 0, 1)) - C0) < 1e-12, "colour share 0 (the contour): the plain grade's chroma");
+  assert.ok(Math.abs(cOf(segRestore(0.5, -0.05, -0.04, 1, 1, 1, 0, 0)) - C0) < 1e-12, "at the water's lightness: the plain grade's chroma");
+  assert.ok(cOf(segRestore(0.5, -0.05, -0.04, 1, 1, R.farKeep, 0, 1)) < cOf(segRestore(0.5, -0.05, -0.04, 1, 1, 1, 0, 1)), "a far subject gets less of it");
+  assert.ok(Math.abs(cOf(segRestore(0.5, -0.2, -0.16, 2, 1, 1, 1, 1)) - Math.hypot(0.2, 0.16)) < 1e-12, "a saturated colour is not pushed");
+  // Local contrast: a spot lighter than its neighbourhood gets lighter; nothing is darkened; clamped.
+  const up = segRestore(0.5, 0, 0, 1, 1.3, 1, 0, 0)[0], dn = segRestore(0.5, 0, 0, 1, 0.95, 1, 0, 0)[0], cap = segRestore(0.5, 0, 0, 1, 50, 1, 0, 0)[0], lo = segRestore(0.5, 0, 0, 1, 0.01, 1, 0, 0)[0];
+  assert.ok(up > 0.5 && dn <= 0.5 && cap > up && cap < 0.5 * R.rMax ** R.detail && Math.abs(lo - 0.5 * R.rMin ** R.detail) < 1e-9, `local contrast (${up.toFixed(3)} / ${dn.toFixed(3)})`);
+  // The shoulder: all the lightening together never takes more than `head` of the headroom to white.
+  for (const L of [0.3, 0.6, 0.8, 0.95]) assert.ok(segRestore(L, 0, 0, 2, 50, 1, 1, 1)[0] <= L + R.head * (1 - L) + 1e-9, `no clipped highlight (L ${L})`);
+  assert.ok(R.rMin >= 0.9, "next to no darkening side in the local contrast (gamut again)");
+  for (const L of [0, 0.2, 0.5, 0.8, 1]) { const l = segRestore(L, 0, 0, 2, R.rMax, 1, 1, 1)[0]; assert.ok(l >= L - 1e-9 && l <= 1.6 * L + 0.12, `L ${L} -> ${l.toFixed(3)}`); }
   // segColourK: the edge feather over the mask's read-back distance × the subject's closeness.
-  const at = (d: number, close?: number): number[] => [-1, 1, 0.5 + d / (2 * SEG_TONE.alphaR), 1, ...(close === undefined ? [] : [close])];
+  const at = (d: number, close?: number, r = -1): number[] => [r, 1, 0.5 + d / (2 * SEG_TONE.alphaR), 1, ...(close === undefined ? [] : [close, 0])];
   assert.equal(segColourK(at(0)), 0, "nothing on the contour");
   assert.equal(segColourK(at(-2)), 0, "nothing outside the mask");
   assert.equal(segColourK(at(R.edge)), 1, "whole from `edge` px inside a close subject");
   assert.ok(R.edge > SEG_TONE.rampIn, "the colour fades in over more of the mask than the tone does");
   assert.ok(Math.abs(segColourK(at(SEG_TONE.alphaR, 0)) - R.farKeep) < 1e-9, "a far subject gets the farKeep share, however deep");
-  assert.ok(Math.abs(segColourK(at(SEG_TONE.alphaR, 0.5)) - (R.farKeep + 1) / 2) < 1e-9);
   for (let d = 0.25; d <= SEG_TONE.alphaR; d += 0.25) assert.ok(segColourK(at(d)) >= segColourK(at(d - 0.25)) - 1e-9 && segColourK(at(d)) - segColourK(at(d - 0.25)) < 0.2, `no step in the colour share (d ${d})`);
-  // The closeness rides in R next to the water's L (or its −1 / SEG_THICK): packed and unpacked without loss.
-  for (const r of [-1, 0, 0.37, 1, SEG_THICK]) for (const c of [0, 0.25, 0.5, 1]) {
+  // The closeness rides in R next to the water's L (or its −1 / SEG_THICK + L): packed and unpacked without loss.
+  for (const r of [-1, 0, 0.37, 1, SEG_THICK, SEG_THICK + 0.6]) for (const c of [0, 0.25, 0.5, 1]) {
     const [r1, c1] = unpackSegR(packSegR(r, c));
     assert.ok(Math.abs(r1 - r) < 1e-5 && c1 === c, `pack ${r} / ${c} -> ${r1} / ${c1}`);
   }
   assert.equal(packSegR(0.37, 0), 0.37, "closeness 0 leaves R as it was");
-  // An already warm subject (an orange fish) keeps its colour: no extra saturation.
-  const [, af, bf] = segRestore(0.6, 0.08, 0.1, 2, 1, 1);
-  assert.ok(Math.abs(af - 0.08) < 1e-9 && Math.abs(bf - 0.1) < 1e-9, "a warm subject is not saturated further");
-  // A green or magenta pixel is not "cool": its chroma stays (only the warm floor may add along the warm hue).
-  const gx = -wy * 0.06, gy = wx * 0.06;
-  const [, ag, bg] = segRestore(0.5, gx, gy, 2, 0, 1);
-  assert.ok(Math.abs(ag - gx) < 1e-9 && Math.abs(bg - gy) < 1e-9, "a hue across the warm axis keeps its chroma");
-  // White spots stay white, blacks stay neutral.
-  const [, aw, bw] = segRestore(0.98, 0, 0, 2, 1, 1), [, ak, bk] = segRestore(0.05, 0, 0, 2, 1, 1);
-  assert.ok(Math.hypot(aw, bw) < 1e-6 && Math.hypot(ak, bk) < 1e-6, "no warmth on highlights or blacks");
-  // Local contrast: a spot lighter than its neighbourhood gets lighter, the back around it darker; clamped.
-  const up = segRestore(0.5, 0, 0, 1, 0, 1.3, 1)[0], dn = segRestore(0.5, 0, 0, 1, 0, 0.9, 1)[0], cap = segRestore(0.5, 0, 0, 1, 0, 50, 1)[0];
-  assert.ok(up > 0.5 && dn < 0.5 && Math.abs(cap - 0.5 * R.rMax ** R.detail) < 1e-9, `local contrast (${up.toFixed(3)} / ${dn.toFixed(3)})`);
-  // The lift makes up what Subject pop's own lift has not given: nothing on top of a full lift, all of it after a deepening.
-  assert.equal(segRestore(0.4, 0, 0, 1, 0, 1, R.lift)[0], 0.4, "already lifted: no more");
-  assert.ok(segRestore(0.4, 0, 0, 1, 0, 1, -0.05)[0] > segRestore(0.4, 0, 0, 1, 0, 1, 0)[0], "a deepened subject is brought back up");
-  for (const L of [0, 0.2, 0.5, 0.8, 1]) { const l = segRestore(L, 0, 0, 2, 1, R.rMax, -0.2)[0]; assert.ok(l >= L - 1e-9 && l <= 1.25, `L ${L} -> ${l.toFixed(3)}`); }
-  // The upper half of the Pop slider (x = the AI weight × (multiplier − 1): 0 up to Pop 50, 1 at Pop 100) bites:
-  // mostly more local contrast (the base terms alone stop growing: castMax is reached at Pop 75), a little more of
-  // the cast off and a little more lift. Still the animal in the scene's light: on the water's side of neutral, at
-  // least a quarter of its cast kept, no big lift.
-  assert.deepEqual(segRestore(0.4, -0.05, -0.04, 1, 0.5, 1.2, 0, 1, 0), segRestore(0.4, -0.05, -0.04, 1, 0.5, 1.2), "Pop 50 and below: the tuned look, untouched");
-  const x0 = segRestore(0.4, -0.05, -0.04, 2, 0.5, 1.3, 0, 1, 0), x1 = segRestore(0.4, -0.05, -0.04, 2, 0.5, 1.3, 0, 1, 1), bd = segRestore(0.4, -0.05, -0.04, 2, 0.5, 0.8, 0, 1, 1), bd0 = segRestore(0.4, -0.05, -0.04, 2, 0.5, 0.8, 0, 1, 0);
-  assert.ok(x1[0] > x0[0] + 0.04 && bd[0] < bd0[0] - 0.03, `Pop 100: spots clearly lighter (${x0[0].toFixed(3)} -> ${x1[0].toFixed(3)}), the back around them darker (${bd0[0].toFixed(3)} -> ${bd[0].toFixed(3)})`);
-  for (const warmth of [0, 0.5, 1]) {
-    const [L, a, b] = segRestore(0.4, -0.05, -0.04, 2, warmth, 1, 0, 1, 1);
-    assert.ok(along(a, b) < -0.004, `boosted: never neutral, never warm (Warmth ${warmth}: ${along(a, b).toFixed(4)})`);
-    assert.ok(Math.hypot(a, b) >= 0.25 * C0, `boosted: a quarter of the cast stays (Warmth ${warmth}: ${((Math.hypot(a, b) / C0) * 100).toFixed(0)}%)`);
-    assert.ok(L > 0.4 && L < 0.4 + 0.07, `boosted: still a small lift on a flat patch (${L.toFixed(3)})`);
+  // The rim test: near the contour the restore follows the pixel, so water under an outline that runs wide is left
+  // alone. The local water's L rides in R: as it is on thin parts, + SEG_THICK on thick ones.
+  assert.equal(segWaterL(at(1, 1, 0.5)), 0.5); assert.ok(Math.abs(segWaterL(at(1, 1, SEG_THICK + 0.5)) - 0.5) < 1e-9); assert.ok(segWaterL(at(1, 1, -1)) < 0);
+  for (const r of [0.5, SEG_THICK + 0.5]) {
+    assert.equal(segRim(at(1, 1, r), [0.5, -0.05, -0.08], -0.53, -0.848), 0, "water under the contour: none of the restore");
+    assert.equal(segRim(at(1, 1, r), [0.5 - R.rimHi, -0.05, -0.08], -0.53, -0.848), 1, "a pixel that departs from the water: all of it");
+    assert.equal(segRim(at(SEG_TONE.trustHi, 1, r), [0.5, -0.05, -0.08], -0.53, -0.848), 1, "deep inside the mask rules");
+    let pv = 0;
+    for (let d = 0; d <= SEG_TONE.alphaR; d += 0.25) { const v = segRim(at(d, 1, r), [0.5, -0.05, -0.08], -0.53, -0.848); assert.ok(v >= pv - 1e-9 && v - pv < 0.25, "no step in the rim"); pv = v; }
   }
-  for (const L of [0, 0.2, 0.5, 0.8, 1]) { const l = segRestore(L, 0, 0, 2, 1, R.rMax, 0, 1, 1)[0]; assert.ok(l >= L - 1e-9 && l <= 1.6 * L + 0.05, `boosted L ${L} -> ${l.toFixed(3)}`); }
+  assert.equal(segRim(at(1, 1, -1), [0.5, -0.05, -0.08], -0.53, -0.848), 1, "no water to compare with: the mask rules");
+  // The engine's own (Basic) masks: no cast clearing and no warm pull either; a small chroma boost only.
+  assert.equal(SUBJECT_CLEAR.k, 0); assert.equal(SUBJECT_CLEAR.cMax, 0); assert.ok(SUBJECT_CLEAR.desat < 0 && SUBJECT_CLEAR.desat >= -0.5);
+  assert.equal(WARM_POP.amount, 0, "the warm pull is off");
+  assert.equal(SUBJECT_CLEAR.edgeFloor, 0, "no tone on plain water inside the engine's mask");
+}
+
+// 1c. White guard (the owner's freediver at 11 s: white fins "turn yellow/beige" with Subjects on). Subjects on puts
+// the subject on the object path, whose white balance pushed a bluish-white source past neutral to yellow-green. A
+// light pixel that was on the water's side and has crossed to the far side loses that chroma: white gear stays white.
+{
+  const vx = -0.53, vy = -0.848; // the water's hue (unit): blue
+  const G = WHITE_GUARD;
+  assert.equal(whiteGuard(0.9, 0.02 * -vx, 0.02 * -vy, 0.025 * vx, 0.025 * vy, vx, vy, 0), 1, "Subjects off: nothing");
+  assert.equal(whiteGuard(0.9, 0.02 * -vx, 0.02 * -vy, 0.025 * vx, 0.025 * vy, vx, vy, 1), 0, "a white fin pushed to yellow: back to white");
+  assert.equal(whiteGuard(0.9, 0.02 * vx, 0.02 * vy, 0.025 * vx, 0.025 * vy, vx, vy, 1), 1, "still on the water's side: untouched");
+  assert.equal(whiteGuard(G.lLo, 0.05 * -vx, 0.05 * -vy, 0.03 * vx, 0.03 * vy, vx, vy, 1), 1, "skin and other midtones keep the colour the balance gives them");
+  assert.equal(whiteGuard(0.9, 0.08 * -vx, 0.08 * -vy, 0.06 * -vx, 0.06 * -vy, vx, vy, 1), 1, "a fin that was yellow in the source stays yellow");
+  let prev = 1;
+  for (let L = G.lLo; L <= G.lHi + 1e-9; L += 0.01) { const v = whiteGuard(L, 0.02 * -vx, 0.02 * -vy, 0.025 * vx, 0.025 * vy, vx, vy, 1); assert.ok(v <= prev + 1e-9 && prev - v < 0.25, "no step over the lightness"); prev = v; }
+  for (const code of [GRADE_GLSL, GRADE_WGSL]) for (const s of ["whiteGuard(lab, lab0.yz, p[14].xy, p[22].z)", "WG_CROSS", "SP_WATER_LO"]) assert.ok(code.includes(s), `both shaders carry ${s}`);
+  assert.ok(SUBJECT_POP.waterLo > 0.02 && SUBJECT_POP.waterHi > SUBJECT_POP.waterLo, "the engine-mask pop needs the pixel itself to stand off the water");
 }
 
 // 2. The AI tone weight: nothing at Pop 0, full from a low Pop; nothing on or outside the contour.
@@ -156,15 +160,17 @@ const along = (a: number, b: number) => a * wx + b * wy;
   assert.equal(diff(off, p0, () => true).max, 0, "Pop 0 is the plain grade, to the code value");
   const d50 = diff(off, p50, core).mean, d100 = diff(off, p100, core).mean;
   // (To see, not to jump at: the first restore changed this subject by 7% of full scale and read as a sticker.)
-  assert.ok(d50 > 0.02 * 255 && d50 < 0.06 * 255, `Pop 50 is there to see on the subject, and no more (${((d50 / 255) * 100).toFixed(1)}% of full scale)`);
+  // (This animal is darker than its water: it is never lifted into it and next to never deepened, so its flat back
+  // hardly moves; its light spots do. A subject lighter than its water is lifted clearly: section 1.)
+  assert.ok(d50 > 0 && d50 < 0.06 * 255, `Pop 50 leaves a dark animal's back close to the plain grade (${((d50 / 255) * 100).toFixed(1)}% of full scale)`);
   assert.ok(d100 > 1.2 * d50, `Pop 100 is clearly more than Pop 50 (${((d100 / 255) * 100).toFixed(1)}% vs ${((d50 / 255) * 100).toFixed(1)}%)`);
   for (const [name, p] of [["50", p50], ["100", p100]] as const) assert.equal(diff(off, p, outside).max, 0, `Pop ${name}: the water outside the mask is untouched`);
   // The feather: the outermost ring of the mask moves less than the ring 2 px in, which moves less than the core (no step, no halo).
   const ring = (k: number) => (x: number, y: number) => isSub(x, y) && Math.min(x - X0, X1 - 1 - x, y - Y0, Y1 - 1 - y) === k;
   const r0 = diff(off, p100, ring(0)).mean, r2 = diff(off, p100, ring(2)).mean;
   assert.ok(r0 < 0.5 * r2 && r2 <= d100 * 1.2, `feathered edge (ring 0: ${r0.toFixed(1)}, ring 2: ${r2.toFixed(1)}, core: ${d100.toFixed(1)})`);
-  // Colour: the back loses a share of its cast (red up) and stays in the scene's light: on the water's side of
-  // neutral, its hue the plain grade's, its lightness too. It used to end near neutral (the grey-brown sticker).
+  // Colour: the animal keeps its own. Hue the plain grade's, chroma not under it (to the display's rounding), back
+  // and spots alike: no grey, no beige.
   const mean = (p: Uint8ClampedArray, spot: boolean) => {
     const s = [0, 0, 0]; let n = 0;
     for (let y = Y0 + 6; y < Y1 - 6; y++) for (let x = X0 + 6; x < X1 - 6; x++) if ((x % 6 === 2 && y % 6 === 2) === spot) { for (let c = 0; c < 3; c++) s[c] += p[(y * W + x) * 4 + c]; n++; }
@@ -172,17 +178,14 @@ const along = (a: number, b: number) => a * wx + b * wy;
   };
   const b0 = mean(off, false), b50 = mean(p50, false), b1 = mean(p100, false), s0 = mean(off, true), s1 = mean(p100, true);
   const lab = (c: number[]) => linearToOklab(srgbToLinear(c[0] / 255), srgbToLinear(c[1] / 255), srgbToLinear(c[2] / 255));
-  const [wL, wa, wb] = lab(b0), C0 = Math.hypot(wa, wb), hue = (a: number, b: number) => (Math.atan2(b, a) * 180) / Math.PI;
-  assert.ok(b1[0] > b50[0] && b50[0] > b0[0], `the back gets some red back (${b0.map(Math.round)} -> ${b50.map(Math.round)} -> ${b1.map(Math.round)})`);
-  for (const [name, c, lo, hi] of [["50", b50, 0.45, 0.85], ["100", b1, 0.27, 0.7]] as const) { // (0.27: the tone target's shadow toe leaves this dark back a little lighter, and its plain-grade chroma reads 3 points higher; the restore itself is unchanged)
-    const [L, a, b] = lab(c), kept = Math.hypot(a, b) / C0;
-    assert.ok(kept >= lo && kept <= hi, `Pop ${name}: ${(kept * 100).toFixed(0)}% of the back's cast is kept (a share goes, never all)`);
-    assert.ok(along(a, b) < -0.01, `Pop ${name}: the back stays on the water's side of neutral (${along(a, b).toFixed(3)})`);
-    assert.ok(Math.abs(((hue(a, b) - hue(wa, wb) + 540) % 360) - 180) < 15, `Pop ${name}: its hue is the plain grade's (${hue(a, b).toFixed(0)}° vs ${hue(wa, wb).toFixed(0)}°)`);
-    assert.ok(Math.abs(L - wL) < 0.04, `Pop ${name}: its lightness stays close to the plain grade's (${L.toFixed(3)} vs ${wL.toFixed(3)})`);
+  const hue = (a: number, b: number) => (Math.atan2(b, a) * 180) / Math.PI;
+  for (const [name, c, ref] of [["Pop 50 back", b50, b0], ["Pop 100 back", b1, b0], ["Pop 100 spots", s1, s0]] as const) {
+    const [L, a, b] = lab(c), [L0, a0, bb0] = lab(ref), kept = Math.hypot(a, b) / Math.hypot(a0, bb0);
+    assert.ok(kept >= 0.97 && kept <= 1.6, `${name}: ${(kept * 100).toFixed(0)}% of the plain grade's chroma (never less)`);
+    assert.ok(along(a, b) < -0.01, `${name}: on the water's side of neutral (${along(a, b).toFixed(3)})`);
+    assert.ok(Math.abs(((hue(a, b) - hue(a0, bb0) + 540) % 360) - 180) < 8, `${name}: its hue is the plain grade's (${hue(a, b).toFixed(0)}° vs ${hue(a0, bb0).toFixed(0)}°)`);
+    assert.ok(Math.abs(L - L0) < 0.2, `${name}: no jump in lightness (${L.toFixed(3)} vs ${L0.toFixed(3)})`);
   }
-  const [, sa, sb] = lab(s1);
-  assert.ok(along(sa, sb) < 0, `the spots are not warmed past neutral (${along(sa, sb).toFixed(3)})`);
   const lum = (c: number[]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
   assert.ok(lum(s1) - lum(b1) > lum(s0) - lum(b0), `the spots stand out more from the back (${(lum(s1) - lum(b1)).toFixed(1)} vs ${(lum(s0) - lum(b0)).toFixed(1)})`);
   // The engine's own (basic) masks never get the restore.
@@ -229,15 +232,15 @@ const along = (a: number, b: number) => a * wx + b * wy;
   assert.ok(unpackSegR(sFar.data[mid * 4])[1] < 0.2);
   assert.deepEqual(unpackSegR(sNone.data[mid * 4]).slice(0, 2), [-1, 1], "no guide: no water test, the colour as for a close subject");
   for (let i = 0; i < W * H; i++) for (const c of [2, 3]) assert.equal(sFar.data[i * 4 + c], sClose.data[i * 4 + c], "the mask's distance and the ML weight do not depend on the closeness");
-  // Graded: the far animal keeps clearly more of its cast than the same mask on the close one, at the same Pop.
+  // Graded: neither loses colour (the plain grade's chroma or more), at the same Pop.
   const kept = (f: typeof close, strength: typeof sClose) => {
     const g = (ai: boolean) => applyGrade({ params: f.an.params, settings: { ...DEFAULT_SETTINGS, vivid: 1, subjectPop: ai, subjectPopStrength: 1 }, depth: f.an.depth, clahe: f.an.clahe, ...(ai ? { seg: { strength, popDir: -1 } } : {}) }, f.px, W, H);
     const off = g(false), on = g(true), C = (p: Uint8ClampedArray) => { const [, a, b] = linearToOklab(srgbToLinear(p[mid * 4] / 255), srgbToLinear(p[mid * 4 + 1] / 255), srgbToLinear(p[mid * 4 + 2] / 255)); return Math.hypot(a, b); };
     return C(on) / C(off);
   };
   const kClose = kept(close, sClose), kFar = kept(far, sFar);
-  assert.ok(kFar > kClose + 0.15 && kFar < 0.98, `Pop 100: the far animal keeps ${(kFar * 100).toFixed(0)}% of its cast, the close one ${(kClose * 100).toFixed(0)}%`);
-  console.log(`seg-restore: Pop 100 keeps ${(kClose * 100).toFixed(0)}% of a close animal's cast, ${(kFar * 100).toFixed(0)}% of a far one's`);
+  assert.ok(kClose >= 0.97 && kFar >= 0.97 && kClose < 1.6 && kFar < 1.6, `Pop 100: the close animal has ${(kClose * 100).toFixed(0)}% of the plain grade's chroma, the far one ${(kFar * 100).toFixed(0)}%`);
+  console.log(`seg-restore: Pop 100 leaves ${(kClose * 100).toFixed(0)}% of a close animal's chroma, ${(kFar * 100).toFixed(0)}% of a far one's`);
 }
 
 // 3c. Off the AI's mask an AI frame is the plain grade's. In the reference: section 3 (the water outside the mask
@@ -253,11 +256,11 @@ const along = (a: number, b: number) => a * wx + b * wy;
 
 // 4. WebGL2 and WebGPU carry the same stage and constants as this reference.
 for (const [name, code] of [["GLSL", GRADE_GLSL], ["WGSL", GRADE_WGSL]] as const) {
-  for (const fn of ["segRestore(", "segColourK(an)", "guideLum(", "SR_POP_GATE * ", "SR_WARM_SHARE + SR_X_WARM_SHARE * x) * max(0.0, -dot(ab, wh))", "* cool * ck"]) assert.ok(code.includes(fn), `${name} has ${fn}`);
-  assert.ok(!code.includes("SR_WARM_MAX"), `${name}: no warm chroma floor any more`);
+  for (const fn of ["segRestore(", "segColourK(an)", "guideLum(", "SR_POP_GATE * ", "segRim(an, lab0)", "SEG_THICK_R", "sepT", "SR_SEP_DARK", "whiteGuard(lab, lab0.yz, p[14].xy, p[22].z)", "abs(clamp(t, -1.0, 1.0))", "WP_AMOUNT * "]) assert.ok(code.includes(fn), `${name} has ${fn}`);
+  for (const gone of ["SR_CAST", "SR_WARM", "segWarmK"]) assert.ok(!code.includes(gone), `${name}: no ${gone} any more (no cast cut, no warm pull under an AI mask)`);
   const c = (k: string, v: number, d = 4) => assert.ok(new RegExp(`${k}(: f32)? = ${v.toFixed(d).replace(".", "\\.")};`).test(code), `${name} ${k} = ${v.toFixed(d)}`);
-  c("SR_CAST", R.cast); c("SR_CAST_MAX", R.castMax); c("SR_WARM", R.warm); c("SR_WARM_SHARE", R.warmShare); c("SR_FAR_KEEP", R.farKeep); c("SR_DETAIL", R.detail); c("SR_LIFT", R.lift);
-  c("SR_X_WARM", R.boostWarm); c("SR_X_WARM_SHARE", R.boostWarmShare); c("SR_X_DETAIL", R.boostDetail); c("SR_X_LIFT", R.boostLift);
+  c("SR_SEP", R.sep); c("SR_X_SEP", R.boostSep); c("SR_SEP_RANGE", R.sepRange); c("SR_SEP_DARK", R.sepDark); c("SR_VIB", R.vib); c("SR_X_VIB", R.boostVib); c("SR_VIB_LO", R.vibLo); c("SR_VIB_HI", R.vibHi);
+  c("SR_FAR_KEEP", R.farKeep); c("SR_DETAIL", R.detail); c("SR_X_DETAIL", R.boostDetail); c("SR_RIM_LO", R.rimLo); c("SR_RIM_HI", R.rimHi);
   assert.ok(code.includes("segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0))"), `${name}: the boost is the AI weight × (Pop multiplier − 1), 0 up to Pop 50`);
   c("SR_DARK_LO", R.darkLo); c("SR_DARK_HI", R.darkHi); c("SR_POP_GATE", R.popGate); c("SR_COS", wx, 6); c("SR_SIN", wy, 6);
 }
