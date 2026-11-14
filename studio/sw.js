@@ -8,8 +8,8 @@
 // network-first so a deploy never serves an index pointing at deleted
 // bundles. Each deploy gets a new cache and the old one is deleted on
 // activate.
-const VERSION = "studio-0a3bb4f14bd0";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-BHbXx2W4.js","./assets/analysis-worker-DBKxEzrx.js","./assets/bridge-BfQvf-VF.js","./assets/colour-D69dO99J.js","./assets/dewarp-PjQ-ECze.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-DpgySSaF.js","./assets/fisheye-BC_1Fvg3.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-BC0Ys3KB.js","./assets/index-FcHBQoAO.css","./assets/media-CZ7O_KcA.js","./assets/motion-m-JDmW4V.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/videoframe-colorspace-zfqeaqOD.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-D4TrakeJ.js"];
+const VERSION = "studio-e544b57a6f0a";
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-BHbXx2W4.js","./assets/analysis-worker-DBKxEzrx.js","./assets/bridge-BAAR5aT1.js","./assets/colour-BJS_VFjd.js","./assets/dewarp-CdnXPyy0.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-0sCeuHCW.js","./assets/fisheye-BC_1Fvg3.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-DZJHpImD.js","./assets/index-FcHBQoAO.css","./assets/media-CCP01e0B.js","./assets/motion-m-JDmW4V.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/videoframe-colorspace-zfqeaqOD.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-D4TrakeJ.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
