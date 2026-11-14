@@ -5,7 +5,8 @@
 //   ffmpeg -i clip.mov -vf fps=1,scale=270:480 -pix_fmt rgba -f rawvideo frames.rgba
 //   git archive <old commit> apps/aqua-fix/src/engine | tar -x -C /tmp/old
 //   node --experimental-strip-types pop-compare.ts <name> frames.rgba 270 480 <t0,t1,...> <oldEngineDir> <newEngineDir> <outDir> [thr] [ai,basic,person]
-//   env: DILATE, ONLY (times), BOX u0,v0,u1,v1 (+ BOXT), LIGHTK, POP, WARMTH, MASK, MASKONLY, DBG
+//   env: DILATE, ONLY (times), BOX u0,v0,u1,v1 (+ BOXT), LIGHTK, POP, WARMTH, MASK, MASKONLY, DBG,
+//        SWEEP (JSON list of {name, SEG_RESTORE, SUBJECT_POP, SUBJECT_CLEAR} overrides: strips "off | level ...")
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -25,9 +26,10 @@ async function loadEngine(dir: string) {
   const { applyGrade } = await load("apply.ts");
   const color = await load("color.ts");
   const { SEG_TONE } = await load("grade-shader.ts");
-  const { DEFAULT_SETTINGS, guideTexture } = await load("params.ts");
+  const params = await load("params.ts");
+  const { DEFAULT_SETTINGS, guideTexture } = params;
   const so = await load("seg-overlay.ts");
-  return { analyzeThumbnail, ANALYSIS_W, ANALYSIS_H, applyGrade, color, SEG_TONE, DEFAULT_SETTINGS, guideTexture, so };
+  return { analyzeThumbnail, ANALYSIS_W, ANALYSIS_H, applyGrade, color, SEG_TONE, DEFAULT_SETTINGS, guideTexture, so, params };
 }
 const E = { old: await loadEngine(oldDir), new: await loadEngine(newDir) };
 const { linearToOklab, srgbToLinear } = E.new.color;
@@ -128,6 +130,14 @@ for (let fi = 0; fi < times.length; fi++) {
     renders[`${ek}.off`] = g(false, false, false);
     if (modes.includes("ai")) renders[`${ek}.ai`] = g(true, true, false);
     if (modes.includes("basic")) renders[`${ek}.basic`] = g(true, false, false);
+    // SWEEP='[{"name":"A","SEG_RESTORE":{...},"SUBJECT_POP":{...},"SUBJECT_CLEAR":{...}}, ...]': the new engine again at each level.
+    if (ek === "new" && process.env.SWEEP) for (const lvl of JSON.parse(process.env.SWEEP)) {
+      const saved: Record<string, object> = {};
+      for (const k of ["SEG_RESTORE", "SUBJECT_POP", "SUBJECT_CLEAR"]) if (lvl[k]) { saved[k] = { ...e.params[k] }; Object.assign(e.params[k], lvl[k]); }
+      if (modes.includes("ai")) renders[`${lvl.name}.ai`] = g(true, true, false);
+      if (modes.includes("basic")) renders[`${lvl.name}.basic`] = g(true, false, false);
+      for (const k of Object.keys(saved)) Object.assign(e.params[k], saved[k]);
+    }
     if (modes.includes("person")) { renders[`${ek}.offp`] = g(false, false, true); renders[`${ek}.aip`] = g(true, true, true); renders[`${ek}.basicp`] = g(true, false, true); }
   }
   // Metrics.
@@ -141,7 +151,7 @@ for (let fi = 0; fi < times.length; fi++) {
   const row: any = { t: times[fi], area: +(area * 100).toFixed(2) };
   for (const [k, p] of Object.entries(renders)) {
     const ek = k.split(".")[0], kind = k.split(".")[1];
-    const ref = kind === "off" || kind === "offp" ? undefined : renders[`${ek}.${kind.endsWith("p") ? "offp" : "off"}`];
+    const ref = kind === "off" || kind === "offp" ? undefined : renders[`${ek === "old" ? "old" : "new"}.${kind.endsWith("p") ? "offp" : "off"}`];
     row[k] = { subj: m(p, subj, ref), ring: m(p, ring, ref), halo: m(p, halo, ref) };
   }
   let offDiff = 0;
@@ -166,6 +176,10 @@ for (let fi = 0; fi < times.length; fi++) {
   if (modes.includes("ai")) await strip([renders["new.off"], renders["old.ai"], renders["new.ai"]], `${tag}_ai.png`, undefined, ttl("AI outline"));
   if (modes.includes("basic")) await strip([renders["new.off"], renders["old.basic"], renders["new.basic"]], `${tag}_basic.png`, undefined, ttl("Basic"));
   if (modes.includes("person")) { await strip([renders["new.offp"], renders["old.aip"], renders["new.aip"]], `${tag}_ai-person.png`); await strip([renders["new.offp"], renders["old.basicp"], renders["new.basicp"]], `${tag}_basic-person.png`); }
+  if (process.env.SWEEP) {
+    const names = JSON.parse(process.env.SWEEP).map((l: any) => l.name as string);
+    for (const m of modes.filter((x) => x === "ai" || x === "basic")) await strip([renders["new.off"], ...names.map((n: string) => renders[`${n}.${m}`])], `${tag}_${m}_sweep.png`, ["Subjects off", ...names.map((n: string) => `on - ${n}`)], ttl(m === "ai" ? "AI outline" : "Basic"));
+  }
   if (process.env.MASK) await strip([px, maskImg], `${tag}_mask.png`, ["source", "mask"]);
 }
 fs.writeFileSync(path.join(outDir, `${name}.metrics.json`), JSON.stringify(rows, null, 1));

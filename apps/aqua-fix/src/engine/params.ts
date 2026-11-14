@@ -261,7 +261,7 @@ export const DETAIL_TAPS: readonly (readonly [number, number, number])[] = [
  * cut-out (the clearing alone raises a blue-cast grey's luminance).
  */
 /** k / cMax 0 (14 Nov, second pass): no cast clearing, the subject keeps its own hue and chroma; the negative desat alone is left, a small chroma boost (× (1 − desat)) on the subject's red-starved lit parts. edgeFloor 0.3 → 0 (14 Nov): the engine's masks reach past the subject, and a third of the tone on plain water showed as a paler ring around it. */
-export const SUBJECT_CLEAR = { k: 0, cMax: 0, desat: -0.35, edgeFloor: 0 };
+export const SUBJECT_CLEAR = { k: 0, cMax: 0, desat: -0.4, edgeFloor: 0 };
 
 /**
  * Subject pop separation (on top of SUBJECT_CLEAR), per unit of the pop weight P = subject tone weight × pop
@@ -337,7 +337,8 @@ export const SEABED = { hue: (75 * Math.PI) / 180, chroma: 0.02, keep: 0.15, lif
  */
 export const WARM_POP = { hue: (65 * Math.PI) / 180, cMin: 0.026, cMax: 0.034, keep: 0.25, lLo: 0.2, lHi: 0.55, wLo: 0.03, wHi: 0.3, side: 4, castLo: 0.015, castHi: 0.045, litLo: 0.3, litHi: 0.5, upLo: -0.03, upHi: 0.05, floor: 0.018, floorKeep: 0.5, engineTone: 0.35, amount: 0 };
 
-export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
+/** 14 Nov, third pass ("almost no pop"): lift 0.1 → 0.28 and clarity 0.22 → 0.38 with the engine's own masks (the mild step of the strength sweep, greyfix/v3: the middle one washed overlapping sharks out). The engine's masks reach past the subject, so the pop's lift, clarity and Vivid sparing also need the pixel itself to stand off the backdrop (waterLo..waterHi of its departure, a stricter ramp than the tone's): the water and the blurred rim around a diver's arms came up as a pale glow. */
+export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.3, lift: 0.2, waterLo: 0.05, waterHi: 0.12, chromaFollow: 0.3, chromaFollowDark: 0.7, engineKeep: 0.5, keepDarkLo: 0.25, keepDarkHi: 0.4, darkLo: 0.2, darkHi: 0.45, hueMax: (20 * Math.PI) / 180 };
 
 /**
  * AI subject restore: what a real AI mask on the frame adds to Subject pop (grade-shader segRestore; never with the
@@ -436,8 +437,9 @@ export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFol
  *                    than the water behind it gets lighter, what is darker gets darker, by how far the source's L is
  *                    from the water's over `sepRange` (signed, smooth through 0; the clip's pop direction where
  *                    there is no water to compare with). A dark diver against bright water is not lifted into it;
- *                    downward only `sepDown` of it: a dark blue pushed darker leaves the display's gamut and
- *                    comes back greyer;
+ *                    never downward (a dark blue pushed darker leaves the display's gamut and comes back
+ *                    greyer); what is darker than the water is lifted by `sepDark` of the step instead (a midtone
+ *                    lift: the subject as if seen through less water, with room for more of its colour);
  *   detail / boostDetail  the local contrast (per unit S up to Pop 50 / per unit X above), upward only (rMin 1: what
  *                    is lighter than its neighbourhood gets lighter; nothing is darkened, the gamut again);
  *   head             all the lightening together takes at most this share of the pixel's headroom to white (a soft
@@ -446,8 +448,25 @@ export const SUBJECT_POP = { vividKeep: 0.8, clarity: 0.22, lift: 0.1, chromaFol
  *                    saturated subject is not pushed), by how far the pixel's lightness is from the water's (|t|:
  *                    water under a leaked outline is not made bluer): its chroma never ends under the plain grade's.
  * The rim test and the feather are as above; the Warmth slider has nothing left to act on.
+ * Third pass, 14 Nov ("almost no pop: freediver new ≈ off"): the middle step of a strength sweep (sep 0.07 → 0.13,
+ * sepDark 0 → 0.45, detail 0.5 → 0.8, vib 0.3 → 0.45): the subject reads 10–18% lighter than in the plain grade on
+ * the three reference frames, with more of its own chroma. Two limits came with it (the freediver near the surface,
+ * 28–29 s): the chroma boost stops where the colour is as strong as open water's (vibLo..vibHi 0.06..0.12: a lifted
+ * dark torso went electric blue), and the lift and the local contrast fade out over hiLo..hiHi (graded L) with `head` 0.4 (bright water
+ * under a leaked outline went white).
  */
-export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, sep: 0.07, boostSep: 0.04, sepRange: 0.12, sepDown: 0, head: 0.5, vib: 0.3, boostVib: 0.15, vibLo: 0.1, vibHi: 0.22, rimLo: 0.07, rimHi: 0.15, thick: 9, hue: (65 * Math.PI) / 180, hiLo: 0.85, hiHi: 0.97, detail: 0.5, rMin: 1, rMax: 1.45, boostDetail: 0.7, edge: 3, farKeep: 0.35, veilLo: 0.065, veilHi: 0.125, pack: 32, levels: 16 };
+export const SEG_RESTORE = { darkLo: 0.1, darkHi: 0.28, popGate: 4, sep: 0.13, boostSep: 0.04, sepRange: 0.12, sepDark: 0.45, head: 0.4, vib: 0.45, boostVib: 0.15, vibLo: 0.06, vibHi: 0.12, rimLo: 0.07, rimHi: 0.15, thick: 9, hue: (65 * Math.PI) / 180, hiLo: 0.7, hiHi: 0.9, detail: 0.8, rMin: 1, rMax: 1.45, boostDetail: 0.7, edge: 3, farKeep: 0.35, veilLo: 0.065, veilHi: 0.125, pack: 32, levels: 16 };
+
+/**
+ * White guard (Subjects on, open water). Subjects on puts the subject's pixels on the object path (the pop's own
+ * confidence map), whose white balance takes the blue out of anything that still has red. On a near-white source
+ * that carried the water's cast (white fins, a light rope: bluish white) the balance overshoots: the pixel lands on
+ * the far side of neutral, yellow-green (the owner's freediver at 11 s: white fins "turn yellow/beige", 14 Nov).
+ * A light pixel (graded L over lLo..lHi) whose source was on the water's side and whose graded colour has crossed
+ * to the other side of neutral (by `cross` of its chroma along the water's hue) loses that chroma: white gear
+ * stays white. Darker things (skin, a yellow fin that was yellow in the source) are not touched.
+ */
+export const WHITE_GUARD = { lLo: 0.72, lHi: 0.86, cross: 0.5, srcLo: 0.004 };
 
 /** Subject pop Strength (UserSettings.subjectPopStrength, 0..1, 0.5 = default) → the shader's multiplier (p23.w). */
 export function popStrengthK(s: { subjectPopStrength?: number }): number {

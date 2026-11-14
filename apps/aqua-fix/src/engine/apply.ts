@@ -5,7 +5,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { popFields, toneCurve, nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, tapParams, waterTintOf, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { WHITE_GUARD, popFields, toneCurve, nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, tapParams, waterTintOf, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { SEG_TONE, segJbuWeights } from "./grade-shader.ts";
 import { SEG_THICK, unpackSegR } from "./seg-overlay.ts";
@@ -289,7 +289,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const twAi = an ? segToneWeight(an, lab0, vla / vln, vlb / vln, tone, popK) : 0;
   const toneW = (an ? twAi : SUBJECT_POP.engineKeep * objectWeight(subj) * (SUBJECT_CLEAR.edgeFloor + (1 - SUBJECT_CLEAR.edgeFloor) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP))) * smoothstep(SUBJECT_POP.darkLo, SUBJECT_POP.darkHi, cbY);
   const popS = Math.max(objectNeutralOf(p), an ? segPop(an[3]) : 0);
-  const popP = toneW * popS * popK;
+  // (With the engine's own masks the pop also needs the pixel itself to stand off the backdrop: SUBJECT_POP.waterLo..Hi.)
+  const popP = toneW * popS * popK * (an ? 1 : smoothstep(SUBJECT_POP.waterLo, SUBJECT_POP.waterHi, bdevP));
   // AI subject restore amount S (SEG_RESTORE): the AI weight (its own, lower dark fade) × the Pop multiplier.
   // Near the contour a pixel that is plain water gets none of it (segRim): an outline that runs wide leaves the
   // water its colour (no grey ring around the subject).
@@ -333,7 +334,9 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const cSrc = Math.hypot(a0, bb0);
   const lab1 = linearToOklab(Math.max(0, out[0]), Math.max(0, out[1]), Math.max(0, out[2]));
   const L = lab1[0];
-  let a = lab1[1], b = lab1[2];
+  // White guard (WHITE_GUARD): a light, water-cast source the object path's balance pushed past neutral stays white.
+  const wg = whiteGuard(L, lab1[1], lab1[2], a0, bb0, vla / vln, vlb / vln, tone);
+  let a = lab1[1] * wg, b = lab1[2] * wg;
   let C = Math.hypot(a, b);
   const cMax = p.chromaK * cSrc + p.chromaC0;
   let scale = C > cMax ? cMax / C : 1;
@@ -475,6 +478,18 @@ export function warmLit(L: number): number {
   return smoothstep(WARM_POP.litLo, WARM_POP.litHi, L) * (1 - smoothstep(SEG_RESTORE.hiLo, SEG_RESTORE.hiHi, L));
 }
 
+/**
+ * White guard (WHITE_GUARD; grade-shader whiteGuard): the chroma scale of a light pixel whose source (as, bs) was on
+ * the water's side of neutral ((vx, vy): the water's hue, unit) and whose graded colour (a, b) has crossed to the
+ * far side. `w` = the Subjects amount (p22.z): 0 leaves everything alone.
+ */
+export function whiteGuard(L: number, a: number, b: number, as: number, bs: number, vx: number, vy: number, w: number): number {
+  const C = Math.hypot(a, b);
+  if (w <= 0 || C < 1e-5) return 1;
+  const k = clamp(w, 0, 1) * smoothstep(WHITE_GUARD.lLo, WHITE_GUARD.lHi, L) * smoothstep(0, WHITE_GUARD.srcLo, as * vx + bs * vy);
+  return 1 - k * smoothstep(0, WHITE_GUARD.cross, -(a * vx + b * vy) / C);
+}
+
 /** Hue guard (grade-shader popHue): on the subject (weight w) the hue stays within SUBJECT_POP.hueMax of the source's. */
 function popHue(a: number, b: number, as: number, bs: number, w: number): [number, number] {
   const C = Math.hypot(a, b), Cs = Math.hypot(as, bs);
@@ -614,8 +629,8 @@ export function segRestore(L: number, a: number, b: number, s: number, lr: numbe
   // Its own colour, a little more of it (hue kept); a saturated subject is left alone.
   const kv = 1 + (R.vib * Math.min(1, s) + R.boostVib * x) * ck * (1 - smoothstep(R.vibLo, R.vibHi, Math.hypot(a, b))) * Math.abs(clamp(t, -1, 1));
   // Local contrast against the neighbourhood, then the separation: lighter than the water → lighter, darker → darker.
-  let L1 = L * Math.pow(clamp(lr, R.rMin, R.rMax), R.detail * Math.min(1, s) + R.boostDetail * x);
-  L1 += (R.sep * Math.min(1, s) + R.boostSep * x) * (t < 0 ? R.sepDown : 1) * clamp(t, -1, 1) * 4 * L1 * Math.max(0, 1 - L1);
+  let L1 = L * Math.pow(clamp(lr, R.rMin, R.rMax), (R.detail * Math.min(1, s) + R.boostDetail * x) * (1 - smoothstep(R.hiLo, R.hiHi, L)));
+  L1 += (R.sep * Math.min(1, s) + R.boostSep * x) * (t < 0 ? -R.sepDark : 1) * clamp(t, -1, 1) * 4 * L1 * Math.max(0, 1 - L1) * (1 - smoothstep(R.hiLo, R.hiHi, L));
   // A soft shoulder on the lightening: at most `head` of the headroom to white (no clipped, colourless highlights).
   const hr = R.head * Math.max(0, 1 - L);
   if (L1 > L) L1 = hr > 1e-5 ? L + hr * (1 - Math.exp(-(L1 - L) / hr)) : L;

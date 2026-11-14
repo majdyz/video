@@ -8,10 +8,10 @@
 //   node --experimental-strip-types apps/aqua-fix/test/seg-restore.test.ts
 import assert from "node:assert/strict";
 import { analyzeThumbnail, ANALYSIS_W, ANALYSIS_H } from "../src/engine/analyze.ts";
-import { applyGrade, segColourK, segRestore, segRim, segToneWeight, segWaterL } from "../src/engine/apply.ts";
+import { applyGrade, segColourK, segRestore, segRim, segToneWeight, segWaterL, whiteGuard } from "../src/engine/apply.ts";
 import { linearToOklab, srgbToLinear } from "../src/engine/color.ts";
 import { GRADE_GLSL, GRADE_WGSL, SEG_TONE } from "../src/engine/grade-shader.ts";
-import { DEFAULT_SETTINGS, SEG_RESTORE, SUBJECT_CLEAR, WARM_POP, guideTexture, type UserSettings } from "../src/engine/params.ts";
+import { DEFAULT_SETTINGS, SEG_RESTORE, SUBJECT_CLEAR, SUBJECT_POP, WARM_POP, WHITE_GUARD, guideTexture, type UserSettings } from "../src/engine/params.ts";
 import { composeSegStrength, engineSubjectMaps, packSegR, SEG_THICK, subjectCloseness, unpackSegR, waterField } from "../src/engine/seg-overlay.ts";
 
 const R = SEG_RESTORE, wx = Math.cos(R.hue), wy = Math.sin(R.hue);
@@ -30,13 +30,13 @@ const along = (a: number, b: number) => a * wx + b * wy;
     assert.ok(C >= C0 - 1e-12, `never less chroma than the plain grade (L ${L}, S ${s}, t ${t}: ${C.toFixed(4)} vs ${C0.toFixed(4)})`);
     assert.ok(C <= C0 * (1 + R.vib + R.boostVib) + 1e-12, "a capped boost");
     if (C0 > 0) assert.ok(Math.abs(((hueOf(a, b) - hueOf(a0, b0) + 540) % 360) - 180) < 1e-6, "the hue is the subject's own: never neutralised, never tinted");
-    // Lightness: away from the water's. Lighter than the water → lighter; darker → not lifted into it, and darkened
-    // by sepDown of the step at most.
-    if (t > 0) assert.ok(L1 > L && L1 - L <= (R.sep * Math.min(1, s) + R.boostSep * x) + 1e-9, `lighter than the water: lifted, by a bounded step (${L} -> ${L1.toFixed(3)})`);
+    // Lightness: lighter than the water → lighter; darker → never darkened, lifted by sepDark of the step at most.
+    // (Not in the highlights, hiLo..hiHi: what is bright already is left alone, bright water under a leak too.)
+    if (t > 0) assert.ok((L >= R.hiHi ? L1 === L : L1 > L) && L1 - L <= (R.sep * Math.min(1, s) + R.boostSep * x) + 1e-9, `lighter than the water: lifted, by a bounded step (${L} -> ${L1.toFixed(3)})`);
     if (t === 0) assert.equal(L1, L);
-    if (t < 0) assert.ok(L1 <= L && L - L1 <= R.sepDown * (R.sep * Math.min(1, s) + R.boostSep * x) + 1e-9, "darker than the water: never lifted into it");
+    if (t < 0) assert.ok(L1 >= L && L1 - L <= R.sepDark * (R.sep * Math.min(1, s) + R.boostSep * x) + 1e-9, "darker than the water: never darkened, a share of the lift at most");
   }
-  assert.ok(R.sepDown <= 0.25, "next to no deepening: a dark blue pushed darker comes back greyer (gamut)");
+  assert.ok(R.sepDark >= 0 && R.sepDark <= 1, "what is darker than the water is never deepened (a dark blue pushed darker comes back greyer: gamut)");
   // More Pop, more separation; the slider's upper half adds to it.
   let prev = 0.5;
   for (const s of [0.5, 1, 1.5, 2]) { const l = segRestore(0.5, -0.05, -0.04, s, 1, 1, s > 1 ? s - 1 : 0, 1)[0]; assert.ok(l > prev + 0.004, `Pop up, more lift (S ${s}: ${l.toFixed(3)})`); prev = l; }
@@ -84,6 +84,23 @@ const along = (a: number, b: number) => a * wx + b * wy;
   assert.equal(SUBJECT_CLEAR.k, 0); assert.equal(SUBJECT_CLEAR.cMax, 0); assert.ok(SUBJECT_CLEAR.desat < 0 && SUBJECT_CLEAR.desat >= -0.5);
   assert.equal(WARM_POP.amount, 0, "the warm pull is off");
   assert.equal(SUBJECT_CLEAR.edgeFloor, 0, "no tone on plain water inside the engine's mask");
+}
+
+// 1c. White guard (the owner's freediver at 11 s: white fins "turn yellow/beige" with Subjects on). Subjects on puts
+// the subject on the object path, whose white balance pushed a bluish-white source past neutral to yellow-green. A
+// light pixel that was on the water's side and has crossed to the far side loses that chroma: white gear stays white.
+{
+  const vx = -0.53, vy = -0.848; // the water's hue (unit): blue
+  const G = WHITE_GUARD;
+  assert.equal(whiteGuard(0.9, 0.02 * -vx, 0.02 * -vy, 0.025 * vx, 0.025 * vy, vx, vy, 0), 1, "Subjects off: nothing");
+  assert.equal(whiteGuard(0.9, 0.02 * -vx, 0.02 * -vy, 0.025 * vx, 0.025 * vy, vx, vy, 1), 0, "a white fin pushed to yellow: back to white");
+  assert.equal(whiteGuard(0.9, 0.02 * vx, 0.02 * vy, 0.025 * vx, 0.025 * vy, vx, vy, 1), 1, "still on the water's side: untouched");
+  assert.equal(whiteGuard(G.lLo, 0.05 * -vx, 0.05 * -vy, 0.03 * vx, 0.03 * vy, vx, vy, 1), 1, "skin and other midtones keep the colour the balance gives them");
+  assert.equal(whiteGuard(0.9, 0.08 * -vx, 0.08 * -vy, 0.06 * -vx, 0.06 * -vy, vx, vy, 1), 1, "a fin that was yellow in the source stays yellow");
+  let prev = 1;
+  for (let L = G.lLo; L <= G.lHi + 1e-9; L += 0.01) { const v = whiteGuard(L, 0.02 * -vx, 0.02 * -vy, 0.025 * vx, 0.025 * vy, vx, vy, 1); assert.ok(v <= prev + 1e-9 && prev - v < 0.25, "no step over the lightness"); prev = v; }
+  for (const code of [GRADE_GLSL, GRADE_WGSL]) for (const s of ["whiteGuard(lab, lab0.yz, p[14].xy, p[22].z)", "WG_CROSS", "SP_WATER_LO"]) assert.ok(code.includes(s), `both shaders carry ${s}`);
+  assert.ok(SUBJECT_POP.waterLo > 0.02 && SUBJECT_POP.waterHi > SUBJECT_POP.waterLo, "the engine-mask pop needs the pixel itself to stand off the water");
 }
 
 // 2. The AI tone weight: nothing at Pop 0, full from a low Pop; nothing on or outside the contour.
@@ -239,10 +256,10 @@ const along = (a: number, b: number) => a * wx + b * wy;
 
 // 4. WebGL2 and WebGPU carry the same stage and constants as this reference.
 for (const [name, code] of [["GLSL", GRADE_GLSL], ["WGSL", GRADE_WGSL]] as const) {
-  for (const fn of ["segRestore(", "segColourK(an)", "guideLum(", "SR_POP_GATE * ", "segRim(an, lab0)", "SEG_THICK_R", "sepT", "SR_SEP_DOWN", "abs(clamp(t, -1.0, 1.0))", "WP_AMOUNT * "]) assert.ok(code.includes(fn), `${name} has ${fn}`);
+  for (const fn of ["segRestore(", "segColourK(an)", "guideLum(", "SR_POP_GATE * ", "segRim(an, lab0)", "SEG_THICK_R", "sepT", "SR_SEP_DARK", "whiteGuard(lab, lab0.yz, p[14].xy, p[22].z)", "abs(clamp(t, -1.0, 1.0))", "WP_AMOUNT * "]) assert.ok(code.includes(fn), `${name} has ${fn}`);
   for (const gone of ["SR_CAST", "SR_WARM", "segWarmK"]) assert.ok(!code.includes(gone), `${name}: no ${gone} any more (no cast cut, no warm pull under an AI mask)`);
   const c = (k: string, v: number, d = 4) => assert.ok(new RegExp(`${k}(: f32)? = ${v.toFixed(d).replace(".", "\\.")};`).test(code), `${name} ${k} = ${v.toFixed(d)}`);
-  c("SR_SEP", R.sep); c("SR_X_SEP", R.boostSep); c("SR_SEP_RANGE", R.sepRange); c("SR_SEP_DOWN", R.sepDown); c("SR_VIB", R.vib); c("SR_X_VIB", R.boostVib); c("SR_VIB_LO", R.vibLo); c("SR_VIB_HI", R.vibHi);
+  c("SR_SEP", R.sep); c("SR_X_SEP", R.boostSep); c("SR_SEP_RANGE", R.sepRange); c("SR_SEP_DARK", R.sepDark); c("SR_VIB", R.vib); c("SR_X_VIB", R.boostVib); c("SR_VIB_LO", R.vibLo); c("SR_VIB_HI", R.vibHi);
   c("SR_FAR_KEEP", R.farKeep); c("SR_DETAIL", R.detail); c("SR_X_DETAIL", R.boostDetail); c("SR_RIM_LO", R.rimLo); c("SR_RIM_HI", R.rimHi);
   assert.ok(code.includes("segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0))"), `${name}: the boost is the AI weight × (Pop multiplier − 1), 0 up to Pop 50`);
   c("SR_DARK_LO", R.darkLo); c("SR_DARK_HI", R.darkHi); c("SR_POP_GATE", R.popGate); c("SR_COS", wx, 6); c("SR_SIN", wy, 6);

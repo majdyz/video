@@ -5,7 +5,7 @@
 // data textures: u_data0 = fields (z, conf, dSmooth), u_data1 = CLAHE LUTs
 // (x = bin, y = tile), u_data2 = guide colour (linear rgb).
 
-import { CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, TONE_TOE, WARM_POP, SEABED } from "./params.ts";
+import { WHITE_GUARD, CONF_BRIGHT, DEHAZE_LUM, DETAIL_GUARD, DETAIL_TAPS, HAZE_LIFT, HIGHLIGHT_PINK, LOOK, OBJECT_NEUTRAL, PERSON_LUM, SKIN, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, TONE_TOE, WARM_POP, SEABED } from "./params.ts";
 import { GAMUT_CHROMA_EDGE, GAMUT_CHROMA_KNEE, GAMUT_SCALE_MIN } from "./color.ts";
 import { BACKDROP } from "./backdrop.ts";
 import { RED_GLSL, RED_WGSL } from "./red.ts";
@@ -190,6 +190,8 @@ const float SP_ENGINE = ${SUBJECT_POP.engineKeep.toFixed(4)};
 const float SP_KEEP_LO = ${SUBJECT_POP.keepDarkLo.toFixed(4)};
 const float SP_KEEP_HI = ${SUBJECT_POP.keepDarkHi.toFixed(4)};
 const float SP_CHROMA_DARK = ${SUBJECT_POP.chromaFollowDark.toFixed(4)};
+const float SP_WATER_LO = ${SUBJECT_POP.waterLo.toFixed(4)};
+const float SP_WATER_HI = ${SUBJECT_POP.waterHi.toFixed(4)};
 const float SP_DARK_LO = ${SUBJECT_POP.darkLo.toFixed(4)};
 const float SP_DARK_HI = ${SUBJECT_POP.darkHi.toFixed(4)};
 const float SP_HUE_COS = ${Math.cos(SUBJECT_POP.hueMax).toFixed(6)};
@@ -229,7 +231,11 @@ const float SR_POP_GATE = ${SEG_RESTORE.popGate.toFixed(4)};
 const float SR_SEP = ${SEG_RESTORE.sep.toFixed(4)};
 const float SR_X_SEP = ${SEG_RESTORE.boostSep.toFixed(4)};
 const float SR_SEP_RANGE = ${SEG_RESTORE.sepRange.toFixed(4)};
-const float SR_SEP_DOWN = ${SEG_RESTORE.sepDown.toFixed(4)};
+const float SR_SEP_DARK = ${SEG_RESTORE.sepDark.toFixed(4)};
+const float WG_L_LO = ${WHITE_GUARD.lLo.toFixed(4)};
+const float WG_L_HI = ${WHITE_GUARD.lHi.toFixed(4)};
+const float WG_CROSS = ${WHITE_GUARD.cross.toFixed(4)};
+const float WG_SRC_LO = ${WHITE_GUARD.srcLo.toFixed(4)};
 const float SR_HEAD = ${SEG_RESTORE.head.toFixed(4)};
 const float SR_VIB = ${SEG_RESTORE.vib.toFixed(4)};
 const float SR_X_VIB = ${SEG_RESTORE.boostVib.toFixed(4)};
@@ -578,6 +584,14 @@ float backdropDev(vec3 lab, vec2 uv) {
   float ea = lab.y - eA, eb = lab.z - eB;
   return sqrt(el * el + BD_AB2 * (ea * ea + eb * eb));
 }
+// White guard (WHITE_GUARD; apply.ts whiteGuard): the chroma scale of a light pixel whose source was on the water's
+// side of neutral (vh: the water's hue) and whose graded colour has crossed to the far side; w = the Subjects amount.
+float whiteGuard(vec3 lab, vec2 abSrc, vec2 vh, float w) {
+  float C = length(lab.yz);
+  if (w <= 0.0 || C < 1e-5) return 1.0;
+  float k = clamp(w, 0.0, 1.0) * smoothstepf(WG_L_LO, WG_L_HI, lab.x) * smoothstepf(0.0, WG_SRC_LO, dot(abSrc, vh));
+  return 1.0 - k * smoothstepf(0.0, WG_CROSS, -dot(lab.yz, vh) / C);
+}
 // The backdrop surface's Oklab L at uv: the water's lightness there (backdrop.ts backdropL).
 float backdropL(vec2 uv) {
   float x = uv.x - 0.5, y = uv.y - 0.5;
@@ -820,8 +834,8 @@ float segColourK(vec4 an) {
 vec3 segRestore(vec3 lk, float s, float lr, float ck, float x, float t) {
   if (s <= 0.0) return lk;
   float kv = 1.0 + (SR_VIB * min(1.0, s) + SR_X_VIB * x) * ck * (1.0 - smoothstepf(SR_VIB_LO, SR_VIB_HI, length(lk.yz))) * abs(clamp(t, -1.0, 1.0));
-  float L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * min(1.0, s) + SR_X_DETAIL * x);
-  L += (SR_SEP * min(1.0, s) + SR_X_SEP * x) * (t < 0.0 ? SR_SEP_DOWN : 1.0) * clamp(t, -1.0, 1.0) * 4.0 * L * max(0.0, 1.0 - L);
+  float L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), (SR_DETAIL * min(1.0, s) + SR_X_DETAIL * x) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x)));
+  L += (SR_SEP * min(1.0, s) + SR_X_SEP * x) * (t < 0.0 ? -SR_SEP_DARK : 1.0) * clamp(t, -1.0, 1.0) * 4.0 * L * max(0.0, 1.0 - L) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
   // A soft shoulder on the lightening: at most SR_HEAD of the headroom to white.
   float hr = SR_HEAD * max(0.0, 1.0 - lk.x);
   if (L > lk.x) L = hr > 1e-5 ? lk.x + hr * (1.0 - exp(-(L - lk.x) / hr)) : lk.x;
@@ -964,7 +978,8 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   float tw = toneWeight(subj, an, depart, lab0);
   float ow = tw * smoothstepf(SP_DARK_LO, SP_DARK_HI, cbY);
   float popS = popStrength(an);
-  float popP = ow * popS * p[23].w;
+  // (With the engine's own masks the pop also needs the pixel itself to stand off the backdrop: SP_WATER_LO..HI.)
+  float popP = ow * popS * p[23].w * (p[24].y > 0.5 ? 1.0 : smoothstepf(SP_WATER_LO, SP_WATER_HI, bdev));
   // AI subject restore amount (SEG_RESTORE): the AI weight (its own, lower dark fade) x the Pop multiplier; 0
   // without a real AI mask on the frame.
   // Near the contour a pixel that is plain water gets none of it (segRim): no grey ring around the subject.
@@ -993,6 +1008,8 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // Chroma ceiling relative to the source, then saturation.
   float cSrc = length(lab0.yz);
   vec3 lab = linearToOklab(max(o, vec3(0.0)));
+  // White guard: a light, water-cast source the object path's balance pushed past neutral stays white.
+  lab.yz *= whiteGuard(lab, lab0.yz, p[14].xy, p[22].z);
   float C = length(lab.yz);
   float cMax = chromaK * cSrc + chromaC0;
   float scale = (C > cMax ? cMax / C : 1.0);
@@ -1457,6 +1474,12 @@ fn warmPop(L: f32, ab: vec2<f32>, k: f32, tone: f32) -> vec2<f32> {
   return o + dir * (-od + sqrt(max(0.0, od * od - C1 * C1 + cf * cf)));
 }
 fn warmLit(L: f32) -> f32 { return smoothstepf(WP_LIT_LO, WP_LIT_HI, L) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, L)); }
+fn whiteGuard(lab: vec3<f32>, abSrc: vec2<f32>, vh: vec2<f32>, w: f32) -> f32 {
+  let C = length(lab.yz);
+  if (w <= 0.0 || C < 1e-5) { return 1.0; }
+  let k = clamp(w, 0.0, 1.0) * smoothstepf(WG_L_LO, WG_L_HI, lab.x) * smoothstepf(0.0, WG_SRC_LO, dot(abSrc, vh));
+  return 1.0 - k * smoothstepf(0.0, WG_CROSS, -dot(lab.yz, vh) / C);
+}
 fn backdropL(uv: vec2<f32>) -> f32 {
   let p = params.p;
   let x = uv.x - 0.5; let y = uv.y - 0.5;
@@ -1555,8 +1578,8 @@ fn segColourK(an: vec4<f32>) -> f32 {
 fn segRestore(lk: vec3<f32>, s: f32, lr: f32, ck: f32, x: f32, t: f32) -> vec3<f32> {
   if (s <= 0.0) { return lk; }
   let kv = 1.0 + (SR_VIB * min(1.0, s) + SR_X_VIB * x) * ck * (1.0 - smoothstepf(SR_VIB_LO, SR_VIB_HI, length(lk.yz))) * abs(clamp(t, -1.0, 1.0));
-  var L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * min(1.0, s) + SR_X_DETAIL * x);
-  L = L + (SR_SEP * min(1.0, s) + SR_X_SEP * x) * select(1.0, SR_SEP_DOWN, t < 0.0) * clamp(t, -1.0, 1.0) * 4.0 * L * max(0.0, 1.0 - L);
+  var L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), (SR_DETAIL * min(1.0, s) + SR_X_DETAIL * x) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x)));
+  L = L + (SR_SEP * min(1.0, s) + SR_X_SEP * x) * select(1.0, -SR_SEP_DARK, t < 0.0) * clamp(t, -1.0, 1.0) * 4.0 * L * max(0.0, 1.0 - L) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
   let hr = SR_HEAD * max(0.0, 1.0 - lk.x);
   if (L > lk.x) { if (hr > 1e-5) { L = lk.x + hr * (1.0 - exp(-(L - lk.x) / hr)); } else { L = lk.x; } }
   return vec3<f32>(L, lk.yz * kv);
@@ -1673,7 +1696,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   let tw = toneWeight(subj, an, depart, lab0);
   let ow = tw * smoothstepf(SP_DARK_LO, SP_DARK_HI, cbY);
   let popS = popStrength(an);
-  let popP = ow * popS * p[23].w;
+  let popP = ow * popS * p[23].w * select(smoothstepf(SP_WATER_LO, SP_WATER_HI, bdev), 1.0, p[24].y > 0.5);
   // AI subject restore amount (SEG_RESTORE): 0 without a real AI mask on the frame.
   var segS = 0.0;
   if (p[24].y > 0.5) { segS = tw * smoothstepf(SR_DARK_LO, SR_DARK_HI, cbY) * p[23].w * segRim(an, lab0); }
@@ -1696,6 +1719,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   }
   let cSrc = length(lab0.yz);
   var lab = linearToOklab(max(o, vec3(0.0)));
+  lab = vec3<f32>(lab.x, lab.yz * whiteGuard(lab, lab0.yz, p[14].xy, p[22].z));
   let C = length(lab.yz);
   let cMax = chromaK * cSrc + chromaC0;
   var scale = select(1.0, cMax / C, C > cMax);
