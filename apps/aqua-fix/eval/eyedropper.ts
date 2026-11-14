@@ -1,6 +1,6 @@
 // The manual override pair, measured on the CPU reference (apply.ts, tap.ts) over valset clips.
 //
-//   node --experimental-strip-types apps/aqua-fix/eval/eyedropper.ts [--valset <dir>] [--only id,id] [--at 2] [--gw 480]
+//   node --experimental-strip-types apps/aqua-fix/eval/eyedropper.ts [--valset <dir>] [--only id,id,skin] [--at 2] [--gw 480]
 //        [--board out.jpg] [--json out.json] [--style vivid|natural|blue]
 //
 // Each clip is replayed to `--at` seconds at preview cadence (clip-sim.ts: profile, lock, easing), so the tap is
@@ -21,7 +21,13 @@
 //     (the score.ts metrics then cannot move; run score.ts for the full comparison against its baseline).
 //  4. Water colour −1 / +1 against 0: the median CIELAB hue of the water pixels, and the mean CIEDE2000 move of the
 //     water pixels vs the warm / subject pixels (skin, sand in sunlight, fish, coral: they should move little).
+//  5. Tap on skin (the owner's freediver clip, hand-marked skin as in skin-check.ts): what the tap takes the point
+//     for when left to decide, and the Oklab chroma / hue of the patch in the graded picture under the automatic
+//     balance, with the tap as decided, and with the tap told it is skin (the studio's second tap on the same
+//     spot). Natural skin: hue about 45°, chroma 0.045–0.085 before the looks. Twice: without a person mask (this
+//     harness has no segmenter) and with a box round the diver as the mask (what the app's segmenter marks, roughly).
 //
+// TAPDBG=1 prints, per tapped point, what the tap is read from (source ratios, the balance, the maps, the corrected colour).
 // --board writes one row per clip: source | auto | tap (the point marked) | water −1 | water +1.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -29,10 +35,10 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { ANALYSIS_H, ANALYSIS_W } from "../src/engine/analyze.ts";
-import { applyGrade, type ApplyContext } from "../src/engine/apply.ts";
-import { linearToSrgb, srgbToLinear } from "../src/engine/color.ts";
+import { applyGrade, gradePixel, resolveContext, type ApplyContext } from "../src/engine/apply.ts";
+import { linearToOklab, linearToSrgb, srgbToLinear } from "../src/engine/color.ts";
 import { DEFAULT_SETTINGS, type UserSettings } from "../src/engine/params.ts";
-import { solveTap, tapRect, tapSample, type TapSolve } from "../src/engine/tap.ts";
+import { correctionOnly, solveTap, tapRect, tapSample, type TapSolve } from "../src/engine/tap.ts";
 import { ClipSim } from "./clip-sim.ts";
 import { deltaE00, srgb8ToLab } from "./colour-metrics.ts";
 
@@ -67,6 +73,16 @@ const REAL: { id: string; u: number; v: number; what: string }[] = [
   { id: "tilt_sand_to_open_garajau", u: 0.2, v: 0.3, what: "gravel under a heavy cyan cast (red nearly gone)" },
   { id: "sand_flounder", u: 0.5, v: 0.3, what: "grey-beige sand" },
 ];
+/** Real skin: a point on a diver's skin (a file outside the valset, at its own time). */
+const FREEDIVER = "/home/majdyz/video-data/user-clips/freediver-line-skinred.mov";
+/** `person`: the diver's box (x0, y0, x1, y1), as in skin-check.ts. */
+const SKIN_TAPS: { id: string; file: string; at: number; u: number; v: number; what: string; person: [number, number, number, number] }[] = [
+  { id: "freediver_line", file: FREEDIVER, at: 20, u: 0.545, v: 0.31, what: "hand at the face", person: [0.33, 0.27, 0.6, 0.68] },
+  { id: "freediver_line", file: FREEDIVER, at: 20, u: 0.4, v: 0.642, what: "foot", person: [0.33, 0.27, 0.6, 0.68] },
+  { id: "freediver_line", file: FREEDIVER, at: 25, u: 0.435, v: 0.315, what: "hands", person: [0.31, 0.27, 0.55, 0.8] },
+  { id: "freediver_line", file: FREEDIVER, at: 25, u: 0.44, v: 0.59, what: "black suit (not skin)", person: [0.31, 0.27, 0.55, 0.8] },
+  { id: "freediver_line", file: FREEDIVER, at: 25, u: 0.8, v: 0.5, what: "open water (not skin)", person: [0.31, 0.27, 0.55, 0.8] },
+];
 /** Synthetic grey card clips (one per kind of water). */
 const CARD_CLIPS = ["blue_thresher", "blue_whaleshark", "reef_bannerfish", "reef_redsea_shallow", "divers_shallow_reef", "school_sardines", "tilt_reef_to_blue_barracuda", "cave_cenote_sunlit", "green_cantabrian", "green_combjelly", "school_seabass_green", "green_blacksea"];
 const CARD = { u: 0.5, v: 0.8, w: 0.1, h: 0.12, grey: 0.45 };
@@ -84,10 +100,11 @@ function decode(file: string, vf: string, w: number, h: number, extra: string[] 
 }
 
 type Frame = { id: string; thumbs: Uint8ClampedArray[]; full: Uint8ClampedArray; w: number; h: number; fps: number; f: number };
-function load(id: string): Frame | null {
-  const c = (JSON.parse(fs.readFileSync(path.join(VALSET, "valset.json"), "utf8")) as { id: string; file: string }[]).find((x) => x.id === id);
+function load(id: string, from?: string, AT_ = AT): Frame | null {
+  const AT = AT_;
+  const c = from ? { file: from } : (JSON.parse(fs.readFileSync(path.join(VALSET, "valset.json"), "utf8")) as { id: string; file: string }[]).find((x) => x.id === id);
   if (!c) return null;
-  const file = path.join(VALSET, c.file);
+  const file = from ?? path.join(VALSET, c.file);
   if (!fs.existsSync(file)) return null;
   const st = JSON.parse(spawnSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate", "-of", "json", file], { encoding: "utf8" }).stdout).streams[0];
   const [fa, fb] = String(st.r_frame_rate).split("/").map(Number), fps = fa / (fb || 1);
@@ -133,6 +150,20 @@ function blockChroma(img: Uint8ClampedArray, w: number, h: number, u: number, v:
   return Math.hypot(lab[1], lab[2]);
 }
 
+function dbg(tag: string, st: Omit<ApplyContext, "settings">, rgb: readonly [number, number, number], u: number, v: number): void {
+  if (!process.env.TAPDBG) return;
+  const l = rgb.map(srgbToLinear);
+  const o = gradePixel(resolveContext({ ...st, settings: correctionOnly(BASE) }), rgb[0], rgb[1], rgb[2], u, v);
+  const [L, a, b] = linearToOklab(srgbToLinear(o[0]), srgbToLinear(o[1]), srgbToLinear(o[2]));
+  const [, sa, sb] = linearToOklab(l[0], l[1], l[2]);
+  const g = st.depth.guide!, n = g.length / 3;
+  const p90 = [0, 1, 2].map((c) => { const x = new Float64Array(n); for (let i = 0; i < n; i++) x[i] = g[i * 3 + c]; x.sort(); return x[Math.floor(0.9 * (n - 1))]; });
+  const x = Math.min(st.depth.width - 1, Math.floor(u * st.depth.width)), y = Math.min(st.depth.height - 1, Math.floor(v * st.depth.height));
+  const fl = Array.from(st.depth.fields.subarray((y * st.depth.width + x) * 4, (y * st.depth.width + x) * 4 + 4));
+  const h = (A: number, B: number) => `${Math.hypot(A, B).toFixed(3)}@${(((Math.atan2(B, A) * 180) / Math.PI + 360) % 360).toFixed(0)}`;
+  process.stderr.write(`DBG ${tag.padEnd(40)} src r/g ${(l[0] / l[1]).toFixed(2)} b/g ${(l[2] / l[1]).toFixed(2)} Y ${l[1].toFixed(2)} srcLab ${h(sa, sb)} | wb ${st.params.wb.map((q) => q.toFixed(2))} waterWb ${st.params.waterWb.map((q) => q.toFixed(2))} veil r/g ${(st.params.veilColor[0] / st.params.veilColor[1]).toFixed(2)} b/g ${(st.params.veilColor[2] / st.params.veilColor[1]).toFixed(2)} p90 r/g ${(p90[0] / p90[1]).toFixed(2)} b/g ${(p90[2] / p90[1]).toFixed(2)} | fields ${fl.map((q) => q.toFixed(2))} | corr L ${L.toFixed(2)} ${h(a, b)}\n`);
+}
+
 function sampleAt(full: Uint8ClampedArray, w: number, h: number, u: number, v: number): [number, number, number] {
   const r = tapRect(u, v, w, h);
   const x0 = Math.round(r.x * w), y0 = Math.round(r.y * h), pw = Math.max(1, Math.round(r.w * w)), ph = Math.max(1, Math.round(r.h * h));
@@ -153,6 +184,7 @@ let identical = true, identicalN = 0;
 
 function measureTap(fr: Frame, st: Omit<ApplyContext, "settings">, auto: Uint8ClampedArray, u: number, v: number, what: string, kind: Kind): { row: TapRow; tapped: Uint8ClampedArray; settings: UserSettings } {
   const rgb = sampleAt(fr.full, fr.w, fr.h, u, v);
+  dbg(`${fr.id} ${what}`, st, rgb, u, v);
   const solve = solveTap({ ...st, settings: BASE }, rgb, u, v);
   const settings: UserSettings = solve.ok ? { ...BASE, wbTap: solve.gains } : BASE;
   const tapped = solve.ok ? applyGrade({ ...st, settings }, fr.full, fr.w, fr.h) : auto;
@@ -230,6 +262,46 @@ for (const id of ids) {
   process.stderr.write(`${id} done\n`);
 }
 
+// 5. Skin.
+type SkinRow = { mask: boolean; id: string; what: string; at: number; u: number; v: number; kind: string; gains: [number, number] | null; limited: boolean; auto: [number, number]; tap: [number, number]; asSkin: [number, number]; skinGains: [number, number] | null; skinLimited: boolean };
+const skins: SkinRow[] = [];
+/** Oklab chroma and hue (degrees) of the mean colour (linear light) of the block around the point. */
+function blockOklab(img: Uint8ClampedArray, w: number, h: number, u: number, v: number, half: number): [number, number] {
+  const cx = Math.round(u * w - 0.5), cy = Math.round(v * h - 0.5);
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let y = Math.max(0, cy - half); y <= Math.min(h - 1, cy + half); y++) for (let x = Math.max(0, cx - half); x <= Math.min(w - 1, cx + half); x++) {
+    const i = (y * w + x) * 4;
+    r += srgbToLinear(img[i] / 255); g += srgbToLinear(img[i + 1] / 255); b += srgbToLinear(img[i + 2] / 255); n++;
+  }
+  const [, A, B] = linearToOklab(r / n, g / n, b / n);
+  return [Math.hypot(A, B), ((Math.atan2(B, A) * 180) / Math.PI + 360) % 360];
+}
+if (!ONLY || ONLY.has("skin")) for (const at of [...new Set(SKIN_TAPS.map((x) => `${x.file}@${x.at}`))]) {
+  const pts = SKIN_TAPS.filter((x) => `${x.file}@${x.at}` === at);
+  const fr = load(pts[0].id, pts[0].file, pts[0].at);
+  if (!fr) { process.stderr.write(`skip ${pts[0].id} @${pts[0].at}s (missing or too short)\n`); continue; }
+  const st0 = stateAt(fr);
+  for (const mask of [false, true]) {
+  const person = new Float32Array(st0.depth.width * st0.depth.height);
+  const [bx0, by0, bx1, by1] = pts[0].person;
+  for (let y = 0; y < st0.depth.height; y++) for (let x = 0; x < st0.depth.width; x++) { const pu = (x + 0.5) / st0.depth.width, pv = (y + 0.5) / st0.depth.height; if (pu >= bx0 && pu <= bx1 && pv >= by0 && pv <= by1) person[y * st0.depth.width + x] = 1; }
+  const st = mask ? { ...st0, depth: { ...st0.depth, person } } : st0;
+  const auto = applyGrade({ ...st, settings: BASE }, fr.full, fr.w, fr.h);
+  for (const p of pts) {
+    const rgb = sampleAt(fr.full, fr.w, fr.h, p.u, p.v);
+    dbg(`SKIN${mask ? "+mask" : ""} ${p.what} @${p.at}`, st, rgb, p.u, p.v);
+    const free = solveTap({ ...st, settings: BASE }, rgb, p.u, p.v), forced = solveTap({ ...st, settings: BASE }, rgb, p.u, p.v, "skin");
+    const graded = (s: TapSolve) => (s.ok ? applyGrade({ ...st, settings: { ...BASE, wbTap: s.gains } }, fr.full, fr.w, fr.h) : auto);
+    skins.push({
+      mask, id: p.id, what: p.what, at: p.at, u: p.u, v: p.v, kind: free.ok ? free.kind : free.reason, gains: free.ok ? free.gains : null, limited: free.ok ? free.limited : true,
+      auto: blockOklab(auto, fr.w, fr.h, p.u, p.v, 2), tap: blockOklab(graded(free), fr.w, fr.h, p.u, p.v, 2), asSkin: blockOklab(graded(forced), fr.w, fr.h, p.u, p.v, 2),
+      skinGains: forced.ok ? forced.gains : null, skinLimited: forced.ok ? forced.limited : true,
+    });
+  }
+  }
+  process.stderr.write(`${pts[0].id} @${pts[0].at}s done\n`);
+}
+
 const f1 = (x: number | null | undefined, w = 6) => (x === null || x === undefined || !Number.isFinite(x) ? "-" : x.toFixed(1)).padStart(w);
 const mean = (v: number[]) => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : NaN);
 const lines: string[] = [];
@@ -238,7 +310,7 @@ for (const kind of ["real", "card", "card-full"] as const) {
   if (!rows.length) continue;
   lines.push(kind === "real" ? `1. TAP ON A REAL NEUTRAL (${STYLE} style; CIELAB C*ab of the region's mean colour, neutral = 0)` : kind === "card" ? "2. TAP ON A SYNTHETIC GREY CARD (45 % grey under half the frame's cast, part of the clip)" : "2b. STRESS: THE CARD UNDER THE FRAME'S FULL CAST (open blue water leaves it next to no red)");
   lines.push(`${"clip".padEnd(28)} ${"point".padEnd(46)} source |  patch: auto → tap | region: auto → tap |  gains R / B  | frame dE00 | note`);
-  for (const t of rows) lines.push(`${t.id.padEnd(28)} ${t.what.slice(0, 46).padEnd(46)} ${f1(t.src)} | ${f1(t.autoPatch, 11)} → ${f1(t.tapPatch, 4)} | ${f1(t.autoRegion, 12)} → ${f1(t.tapRegion, 4)} | ${t.gains ? `${t.gains[0].toFixed(2)} / ${t.gains[1].toFixed(2)}`.padStart(12) : "           -"} | ${f1(t.frameDE, 10)} | ${!t.solve.ok ? `not sampled (${t.solve.reason})` : t.limited ? "soft-limited" : ""}`);
+  for (const t of rows) lines.push(`${t.id.padEnd(28)} ${t.what.slice(0, 46).padEnd(46)} ${f1(t.src)} | ${f1(t.autoPatch, 11)} → ${f1(t.tapPatch, 4)} | ${f1(t.autoRegion, 12)} → ${f1(t.tapRegion, 4)} | ${t.gains ? `${t.gains[0].toFixed(2)} / ${t.gains[1].toFixed(2)}`.padStart(12) : "           -"} | ${f1(t.frameDE, 10)} | ${!t.solve.ok ? `not sampled (${t.solve.reason})` : `${t.solve.kind === "skin" ? "TAKEN FOR SKIN " : ""}${t.limited ? "soft-limited" : ""}`}`);
   const ok = rows.filter((t) => t.solve.ok && !t.limited);
   const lim = rows.filter((t) => !t.solve.ok || t.limited);
   lines.push(`${"MEAN (not limited)".padEnd(75)} ${f1(mean(ok.map((t) => t.src)))} | ${f1(mean(ok.map((t) => t.autoPatch)), 11)} → ${f1(mean(ok.map((t) => t.tapPatch)), 4)} | ${f1(mean(ok.map((t) => t.autoRegion)), 12)} → ${f1(mean(ok.map((t) => t.tapRegion)), 4)} |              | ${f1(mean(ok.map((t) => t.frameDE)), 10)} | ${ok.length} of ${rows.length} taps neutralised`);
@@ -254,8 +326,15 @@ for (const h of hues) lines.push(`${h.id.padEnd(28)} ${f1(100 * h.waterShare, 7)
   const d = (a: number | null, b: number | null) => (a === null || b === null ? NaN : ((a - b + 540) % 360) - 180);
   lines.push(`${"MEAN (clips with water)".padEnd(28)} ${" ".repeat(9)}hue shift ${f1(mean(hw.map((h) => d(h.hue.minus, h.hue.zero))))}° / ${f1(mean(hw.map((h) => d(h.hue.plus, h.hue.zero))))}°${" ".repeat(9)} | ${f1(mean(hw.map((h) => h.water.minus)), 14)} ${f1(mean(hw.map((h) => h.water.plus)))} | ${f1(mean(hw.map((h) => h.subject.minus)), 16)} ${f1(mean(hw.map((h) => h.subject.plus)))}`);
 }
+if (skins.length) {
+  const ch = (x: [number, number]) => `${x[0].toFixed(3)} @ ${x[1].toFixed(0).padStart(3)}°`;
+  const g = (x: [number, number] | null, lim: boolean) => (x ? `${x[0].toFixed(2)} / ${x[1].toFixed(2)}${lim ? " (limited)" : ""}` : "-");
+  lines.push("", `5. TAP ON SKIN (${STYLE} style; Oklab chroma @ hue of the patch as shown; natural skin about 45°)`);
+  lines.push(`${"clip".padEnd(16)} ${"point".padEnd(27)} mask taken for |        auto →     as decided (gains R / B)        →  told it is skin (gains R / B)`);
+  for (const k of skins) lines.push(`${k.id.padEnd(16)} ${`${k.what} @${k.at}s`.padEnd(27)} ${k.mask ? "box " : "none"} ${k.kind.padEnd(9)} | ${ch(k.auto)} → ${ch(k.tap)} (${g(k.gains, k.limited)}) → ${ch(k.asSkin)} (${g(k.skinGains, k.skinLimited)})`);
+}
 console.log(lines.join("\n"));
-if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify({ style: STYLE, at: AT, gw: GW, taps, hues, identical }, null, 1) + "\n");
+if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify({ style: STYLE, at: AT, gw: GW, taps, hues, skins, identical }, null, 1) + "\n");
 
 if (sharp && cells.length) {
   const labels = ["source", "auto (one tap)", "tap-to-neutral at the mark", "Water colour −1 (teal)", "Water colour +1 (blue)"];

@@ -96,9 +96,9 @@ export default function App() {
   /** Full screen: the picture alone (the Fullscreen API where there is one, else the page's own chrome hidden). */
   const [immersive, setImmersive] = useState(false);
   const [tapPulse, setTapPulse] = useState<{ u: number; v: number; t: number } | null>(null);
-  /** Tap-to-neutral: the picture is waiting for a tap on something white or grey (Colour → White point). */
+  /** Tap to fix: the picture is waiting for a tap on something white or grey, or on skin (Colour → Tap to fix). */
   const [picking, setPicking] = useState(false);
-  // A tap on the picture (White point, Subjects) answers at once (owner, 13 Nov: both felt dead): a ring where the
+  // A tap on the picture (Tap to fix, Subjects) answers at once (owner, 13 Nov: both felt dead): a ring where the
   // finger lands and "Reading…" / "Finding…" in the banner, before the tap is confirmed (the double-tap wait) and
   // its work (the solve, the AI) is done.
   const [tapRing, setTapRing] = useState<{ u: number; v: number; t: number } | null>(null);
@@ -464,8 +464,8 @@ export default function App() {
     if (selectActive) void studio.refreshSubjects();
   }, [studio, selectActive]);
   /**
-   * Tap-to-neutral: while on (from Colour → White point), a tap on the picture picks the point that should be white
-   * or grey; the before / after line steps aside so the whole picture shows the result. Leaving Colour, closing the
+   * Tap to fix: while on (from Colour → Tap to fix), a tap on the picture picks the point that should be white
+   * or grey, or skin (the engine works out which); the before / after line steps aside so the whole picture shows the result. Leaving Colour, closing the
    * sheet or starting an export ends it.
    */
   const pickActive = picking && pane === "colour" && paneOpen && ready && !exporting && tools.colour.enabled;
@@ -645,7 +645,7 @@ export default function App() {
             onTap={selectActive || pickActive || photo ? undefined : () => studio.togglePlay()}
             onTapDown={pickActive || selectActive ? tapDown : undefined}
             onTapAt={pickActive ? (u, v) => tapRun(studio.tapNeutral(u, v)) : selectActive ? (u, v) => { tapRun(studio.toggleSubjectAt(u, v)); setTapPulse({ u, v, t: performance.now() }); } : undefined}
-            tapHint={pickActive ? "tap something that should be white or grey to balance the colour to it" : undefined}
+            tapHint={pickActive ? "tap something white or grey, or a diver's skin, to balance the colour to it" : undefined}
             overlay={pickActive ? <><NeutralMark pick={neutralMark} /><TapRing at={tapRing} /></> : selectActive ? <><SubjectOutlines getSelection={getSelection} pulse={tapPulse} /><TapRing at={tapRing} /></> : undefined}
             onZoom={onZoom}
             interactive={ready && !exporting}
