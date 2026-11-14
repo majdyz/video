@@ -21,6 +21,8 @@ import {
   SHOT_IN_HINT,
   SHOT_IN_LABEL,
   type NeutralPick,
+  NEUTRAL_HINT,
+  neutralKindLabel,
   type ToolId,
   type ToolsState,
 } from "../pipeline/tools.ts";
@@ -244,13 +246,13 @@ export function AdvancedControls({ tool, tools, setTools, stab, onMotionLog, neu
     const up = (patch: Partial<typeof c>) => setTools((t) => ({ ...t, colour: { ...t.colour, ...patch } }));
     return (
       <div className="adv">
-        {/* The two manual overrides, for when the automatic colour is off: a white point and the water's hue. */}
+        {/* The two manual overrides, for when the automatic colour is off: a tap on a white / grey or on skin, and the water's hue. */}
         {neutral && (
           <div className="adv__field">
-            <span className="adv__label">White point <small aria-live="polite">{neutral.active ? "Tap something in the picture that should be white or grey" : neutral.pick ? (neutral.pick.limited ? "From your tap, as far as is safe" : "From your tap") : "Automatic. Colour off? Pick sand, a tank or bubbles"}</small></span>
+            <span className="adv__label">Tap to fix <small aria-live="polite">{neutral.active ? NEUTRAL_HINT : neutral.pick ? `Balanced to ${neutralKindLabel(neutral.pick.kind)}${neutral.pick.limited ? ", as far as is safe" : ""}` : "Automatic. Colour off? Tap sand, a tank, bubbles or skin"}</small></span>
             <div className="adv__actions">
               <button type="button" className={`btn btn--ghost neutral-btn${neutral.active ? " is-on" : ""}`} aria-pressed={neutral.active} onClick={neutral.onToggle} disabled={!tools.colour.enabled}>
-                {neutral.active ? "Done" : neutral.pick ? "Pick again" : "Pick white point"}
+                {neutral.active ? "Done" : neutral.pick ? "Tap again" : "Tap to fix"}
               </button>
               {neutral.pick && <button type="button" className="link-btn" onClick={neutral.onReset}>Reset</button>}
             </div>

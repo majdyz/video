@@ -71,7 +71,7 @@ function colourParams(tools: ToolsState, set: Setter, footage: FootageStatus | n
     STYLE,
     // Behind More: the manual overrides. What water it was shot in (a correction hint; Auto = the engine's own reading), a white point (tap the picture) and the water's tint.
     { id: "scene", label: SHOT_IN_LABEL, more: true, value: scene?.label ?? "Auto", choices: { items: COLOUR_PRESETS, value: c.preset, onChange: (id) => up({ preset: id as typeof c.preset }), note: SHOT_IN_HINT } },
-    ...(neutral ? [{ id: "white", label: "White point", more: true, value: neutral.active ? "Tap…" : neutral.pick ? "Set" : "Auto", action: neutral.onToggle, lit: neutral.active } as Param] : []),
+    ...(neutral ? [{ id: "white", label: "Tap to fix", more: true, value: neutral.active ? "Tap…" : neutral.pick ? (neutral.pick.kind === "skin" ? "Skin" : "White") : "Auto", action: neutral.onToggle, lit: neutral.active } as Param] : []),
     { id: "water", label: "Water tint", more: true, value: waterHueLabel(c.waterHue ?? 0), slider: { value: c.waterHue ?? 0, min: -100, max: 100, def: 0, format: waterHueLabel, onChange: (v) => up({ waterHue: Math.abs(v) < 4 ? 0 : v }) } },
     { id: "sat", label: "Saturation", more: true, value: `${Math.round(c.saturation * 100)}%`, slider: { value: c.saturation * 100, min: 0, max: 200, def: 100, format: (v) => `${Math.round(v)}%`, onChange: (v) => up({ saturation: v / 100 }) } },
     { id: "clarity", label: "Clarity", more: true, value: pct(c.clarity * 100), slider: { value: c.clarity * 100, min: 0, max: 100, def: DEFAULT_COLOUR.clarity * 100, onChange: (v) => up({ clarity: v / 100 }) } },
@@ -146,7 +146,7 @@ function subjectParams(tools: ToolsState, set: Setter, subjects: SubjectControls
 export function ToolDock({ pane, tools, setTools, stab, camera, photo, footage, onFootage, onMotionLog, subjects, neutral, disabled, status, onClose, playback, styleThumbs }: {
   /** Colour → Style as pictures of the frame on screen; without it, the plain choices. */
   styleThumbs?: StyleThumbSource | null;
-  /** Colour: tap-to-neutral (the "White point" bubble). */
+  /** Colour: tap to balance on a white / grey or on skin (the "Tap to fix" bubble). */
   neutral?: NeutralControls | null;
   onClose: () => void;
   /** Video: play / pause from the bubbles (the timeline steps aside while a tool is open; a tap on the picture may pick subjects). */

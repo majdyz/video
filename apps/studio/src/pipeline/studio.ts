@@ -37,8 +37,8 @@ import { gridWanted, type SeedCandidate } from "./seg/seeds.ts";
 import { exportWaitS, headWait, SEG_EXPORT, SEG_EXPORT_RUNNING, SEG_EXPORT_UNAVAILABLE, segCoverageNote, SegExportUse } from "./seg/export-use.ts";
 import type { ClipInfo } from "./probe.ts";
 import { COLOUR_STYLES, styleFlags, type ColourStyle } from "./tools.ts";
-import { clipKeyOf, colourSettings, DEFAULT_TOOLS, exportSuffix, neutralNote, profileDefaults, solveParams, type ColourLook, type ColourState, type DewarpState, type NeutralPick, type ToolsState } from "./tools.ts";
-import type { TapSolve } from "../../../aqua-fix/src/engine/tap.ts";
+import { clipKeyOf, colourSettings, DEFAULT_TOOLS, exportSuffix, neutralNote, NEUTRAL_RETAP, profileDefaults, solveParams, type ColourLook, type ColourState, type DewarpState, type NeutralPick, type ToolsState } from "./tools.ts";
+import type { TapKind, TapSolve } from "../../../aqua-fix/src/engine/tap.ts";
 
 const PHONE_UW_DEFAULTS = profileDefaults("phone-ultra-wide");
 /** Longest the paused preview is repainted for a lock handover (the crossfade, then the shots' balance landing; ms). */
@@ -1551,37 +1551,48 @@ export class Studio {
     } else this.setTools({ ...this.tools, colour: { ...this.tools.colour, ...patch } });
   }
 
+  /** The latest tap that could be read: where, when and what it was taken for (a tap on the same spot asks for the other kind). */
+  private lastTap: { u: number; v: number; t: number; kind: TapKind; clip: string } | null = null;
+
   /**
-   * Tap-to-neutral: the user taps a point of the picture (upright 0..1) that should be white or grey. Playback
-   * pauses, the engine reads the source there and solves the balance offset that grades it to neutral on top of the
-   * clip's automatic balance (aqua-fix tap.ts), and the pick is stored with the clip's colour settings (the selected
-   * segment's once split): preview and export read the same two gains, and a second tap replaces the first.
-   * Resolves to the pick, or null when the point could not be used (the note says why).
+   * Tap to fix: the user taps a point of the picture (upright 0..1) that should be white or grey, or a diver's
+   * skin. Playback pauses, the engine reads the source there, works out which of the two it is and solves the
+   * balance offset that grades it to neutral, or to a natural skin colour, on top of the clip's automatic balance
+   * (aqua-fix tap.ts), and the pick is stored with the clip's colour settings (the selected segment's once split):
+   * preview and export read the same two gains, and a second tap replaces the first. A second tap on the same
+   * spot of the same frame (within NEUTRAL_RETAP) is the user saying the tap read it wrong: it is solved as the
+   * other kind. `want` forces the kind (the debug API). Resolves to the pick, or null when the point could not be
+   * used (the note says why).
    */
-  async tapNeutral(u: number, v: number): Promise<NeutralPick | null> {
+  async tapNeutral(u: number, v: number, want?: TapKind): Promise<NeutralPick | null> {
     const e = this.engine;
     if (!e || this.exporting || this.snap.phase !== "ready" || !this.tools.colour.enabled) return null;
     crumb(`neutral ${u.toFixed(2)},${v.toFixed(2)}`);
     if (!this.paused()) this.pause();
     const t = this.playhead();
+    const last = this.lastTap;
+    if (!want && last && last.clip === this.clipKey && Math.abs(last.u - u) < NEUTRAL_RETAP && Math.abs(last.v - v) < NEUTRAL_RETAP && Math.abs(last.t - t) < 0.05) want = last.kind === "skin" ? "neutral" : "skin";
     let r: TapSolve | null = null;
     try {
       // Not before the clip's scene lock (the photo's balance) is in: the offset is solved on top of it.
-      if (this.snap.colourProfiled) r = await e.solveNeutral(u, v, this.settingsAt(t));
+      if (this.snap.colourProfiled) r = await e.solveNeutral(u, v, this.settingsAt(t), want);
     } catch (err) {
       console.warn("[neutral] tap failed", err);
     }
     this.set({ neutralNote: neutralNote(r) });
-    // Nothing usable there (too dark, clipped, no red left): an earlier pick stays as it is.
+    // What this spot was read as, also when nothing came of it: the next tap on it then tries the other kind.
+    if (r && r.ok) this.lastTap = { u, v, t, kind: r.kind, clip: this.clipKey };
+    // Nothing usable there (too dark, clipped, no red left, right already): an earlier pick stays as it is.
     if (!r || !r.ok || (r.gains[0] === 1 && r.gains[1] === 1)) return null;
-    const pick: NeutralPick = { r: r.gains[0], b: r.gains[1], u, v, t, limited: r.limited, clip: this.clipKey };
-    console.info(`[neutral] ${u.toFixed(3)},${v.toFixed(3)} @${t.toFixed(2)}s: R ×${pick.r.toFixed(2)} B ×${pick.b.toFixed(2)}, chroma ${r.before.toFixed(3)} → ${r.after.toFixed(3)}${r.limited ? " (limited)" : ""}`);
+    const pick: NeutralPick = { r: r.gains[0], b: r.gains[1], u, v, t, limited: r.limited, clip: this.clipKey, kind: r.kind };
+    console.info(`[neutral] ${u.toFixed(3)},${v.toFixed(3)} @${t.toFixed(2)}s as ${r.kind}: R ×${pick.r.toFixed(2)} B ×${pick.b.toFixed(2)}, off target ${r.before.toFixed(3)} → ${r.after.toFixed(3)}${r.limited ? " (limited)" : ""}`);
     this.patchColour({ neutral: pick });
     return pick;
   }
 
   /** Back to the automatic balance. */
   clearNeutral(): void {
+    this.lastTap = null;
     this.set({ neutralNote: null });
     this.patchColour({ neutral: null });
   }

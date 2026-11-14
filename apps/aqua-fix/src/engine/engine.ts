@@ -39,7 +39,7 @@ import {
   type UserSettings,
   type Vec3,
 } from "./params.ts";
-import { TAP_SOLVE, solveTap, tapRect, tapSample, type TapSolve } from "./tap.ts";
+import { TAP_SOLVE, solveTap, tapRect, tapSample, type TapKind, type TapSolve } from "./tap.ts";
 
 /** Lower bound on the analysis slot (ms); the slot itself is clip time (ANALYSIS_SLOT_S, see tick). */
 export const ANALYSIS_INTERVAL_MS = 70;
@@ -1023,12 +1023,12 @@ export class GradeEngine {
   }
 
   /**
-   * Tap-to-neutral (tap.ts): the balance offset that makes the point at upright (u, v) of the current source grade
-   * to neutral, solved against the grade as it is drawn now (the parameters in force under the clip lock, the maps
+   * Tap to fix (tap.ts): the balance offset that makes the point at upright (u, v) of the current source grade
+   * to neutral, or to a natural skin colour when the point is skin (the tap decides; `want` forces it), solved against the grade as it is drawn now (the parameters in force under the clip lock, the maps
    * of this frame, `settings` without any earlier tap). Reads the source around the point back from the GPU; changes
    * nothing: the caller stores the gains in the clip's settings (UserSettings.wbTap). Null before the first analysis.
    */
-  async solveNeutral(u: number, v: number, settings: UserSettings = this.settings): Promise<TapSolve | null> {
+  async solveNeutral(u: number, v: number, settings: UserSettings = this.settings, want?: TapKind): Promise<TapSolve | null> {
     const f = this.fields, g = this.guide, c = this.clahe;
     const W = this.backend.outputWidth, H = this.backend.outputHeight;
     if (!this.hasAnalysis || !f || !g || !c || !W || !H) return null;
@@ -1041,7 +1041,7 @@ export class GradeEngine {
     const lut = new Float32Array(c.width * c.height);
     for (let i = 0; i < lut.length; i++) lut[i] = c.data[i * 4];
     const clahe: ClaheLuts = { tilesX: CLAHE_TILES_X, tilesY: CLAHE_TILES_Y, bins: CLAHE_BINS, data: lut };
-    return solveTap({ params: this.current, settings: { ...settings, wbTap: undefined }, depth, clahe }, tapSample(px), u, v);
+    return solveTap({ params: this.current, settings: { ...settings, wbTap: undefined }, depth, clahe }, tapSample(px), u, v, want);
   }
 
   /** The person detector's current boxes (upright 0..1), for prompting the ML segmenter with a diver's box. */

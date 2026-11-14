@@ -41,18 +41,20 @@ export type ColourState = {
   blue?: boolean;
   /** Noise reduction (Advanced): "auto" (default) follows the clip's measured noise, "strong" pushes harder, "off" skips it. */
   noise?: NoiseReduction;
-  /** Tap-to-neutral: the white / grey point the user tapped and the balance offset solved there (null / absent = none). */
+  /** Tap to fix: the white / grey point or the skin the user tapped and the balance offset solved there (null / absent = none). */
   neutral?: NeutralPick | null;
   /** "Water colour", −100..100 (0 = auto): the water's hue toward teal (−) or a deeper blue (+); subjects keep theirs. */
   waterHue?: number;
 };
 
 /**
- * A tap-to-neutral pick (engine tap.ts): gains on red and blue on top of the clip's automatic balance, where and
- * when the user tapped (upright 0..1, clip seconds), and whether the engine had to stop short of neutral. `clip`
- * names the file it was solved on: the offset corrects that clip's balance and is ignored on any other.
+ * A Tap to fix pick (engine tap.ts): gains on red and blue on top of the clip's automatic balance, where and
+ * when the user tapped (upright 0..1, clip seconds), and whether the engine had to stop short of its target. `clip`
+ * names the file it was solved on: the offset corrects that clip's balance and is ignored on any other. `kind`:
+ * what the tapped point was balanced to, a white / grey or skin (absent on picks saved before it existed: neutral).
  */
-export type NeutralPick = { r: number; b: number; u: number; v: number; t: number; limited?: boolean; clip: string };
+export type NeutralPick = { r: number; b: number; u: number; v: number; t: number; limited?: boolean; clip: string; kind?: NeutralKind };
+export type NeutralKind = "neutral" | "skin";
 
 /** The key a pick is tied to. */
 export function clipKeyOf(file: { name: string; size: number; lastModified?: number } | null | undefined): string {
@@ -66,16 +68,26 @@ export function neutralFor(c: Pick<ColourState, "neutral">, clip?: string): Neut
 }
 
 /** What the engine made of a tap (aqua-fix tap.ts TapSolve), as the UI needs it. */
-export type NeutralResult = { ok: true; gains: [number, number]; limited: boolean } | { ok: false; reason: "dark" | "bright" } | null;
+export type NeutralResult = { ok: true; gains: [number, number]; limited: boolean; kind?: NeutralKind } | { ok: false; reason: "dark" | "bright" } | null;
+
+/** What a pick was balanced to, as the UI names it. */
+export function neutralKindLabel(kind: NeutralKind | undefined): string {
+  return kind === "skin" ? "skin" : "white";
+}
 
 /** The line under the picture after a tap. */
 export function neutralNote(r: NeutralResult): string {
   if (!r) return "Colour is still reading this frame. Tap again in a moment";
-  if (!r.ok) return r.reason === "dark" ? "Too dark to read there. Tap something brighter" : "That spot is blown out. Tap a white or grey that still has detail";
-  if (!r.limited) return "Balanced to that point";
-  return r.gains[0] === 1 && r.gains[1] === 1 ? "No red left there to balance. Try sand, a tank or bubbles nearer the camera" : "Balanced as far as is safe: that spot has little red left";
+  if (!r.ok) return r.reason === "dark" ? "Too dark to read there. Tap something brighter" : "That spot is blown out. Tap a white, a grey or skin that still has detail";
+  const skin = r.kind === "skin";
+  if (r.gains[0] === 1 && r.gains[1] === 1) return r.limited ? (skin ? "Cannot balance to skin there safely. Try skin nearer the camera, or something white" : "No red left there to balance. Try sand, a tank or bubbles nearer the camera") : `Already balanced to ${neutralKindLabel(r.kind)}. ${skin ? "White or grey" : "Skin"}? Tap it again`;
+  // The tap decides which it was; a second tap on the same spot takes it for the other (Studio.tapNeutral).
+  const again = skin ? "White or grey? Tap it again" : "Skin? Tap it again";
+  return r.limited ? `Balanced to ${neutralKindLabel(r.kind)} as far as is safe: little red left there` : `Balanced to ${neutralKindLabel(r.kind)}. ${again}`;
 }
-export const NEUTRAL_HINT = "Tap something that should be white or grey";
+export const NEUTRAL_HINT = "Tap something white or grey, or a diver's skin";
+/** A second tap this close to the pick (share of the picture's width / height, on the same frame) asks for the other kind. */
+export const NEUTRAL_RETAP = 0.04;
 
 /** The Water tint slider's value text. */
 export function waterHueLabel(v: number): string {

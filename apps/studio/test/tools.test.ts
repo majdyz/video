@@ -7,6 +7,8 @@ import {
   colourSettings,
   clipKeyOf,
   neutralFor,
+  NEUTRAL_HINT,
+  neutralKindLabel,
   neutralNote,
   waterHueLabel,
   lookOf,
@@ -116,8 +118,18 @@ assert.deepEqual(colourSettings({ ...DEFAULT_TOOLS.colour, neutral: undefined, w
   assert.equal(waterHueLabel(-35), "Teal 35");
   assert.equal(waterHueLabel(60), "Blue 60");
   // What a tap tells the user.
-  assert.match(neutralNote({ ok: true, gains: [1.4, 0.8], limited: false }), /Balanced/);
-  assert.match(neutralNote({ ok: true, gains: [2, 0.6], limited: true }), /as far as is safe/);
+  assert.match(neutralNote({ ok: true, gains: [1.4, 0.8], limited: false }), /^Balanced to white/);
+  assert.match(neutralNote({ ok: true, gains: [1.4, 0.8], limited: false, kind: "neutral" }), /^Balanced to white\. Skin\?/);
+  assert.match(neutralNote({ ok: true, gains: [0.8, 1.1], limited: false, kind: "skin" }), /^Balanced to skin\. White or grey\?/);
+  assert.match(neutralNote({ ok: true, gains: [2, 0.6], limited: true }), /^Balanced to white as far as is safe/);
+  assert.match(neutralNote({ ok: true, gains: [2, 0.6], limited: true, kind: "skin" }), /^Balanced to skin as far as is safe/);
+  assert.match(neutralNote({ ok: true, gains: [1, 1], limited: false, kind: "skin" }), /^Already balanced to skin/);
+  assert.match(neutralNote({ ok: true, gains: [1, 1], limited: true, kind: "skin" }), /^Cannot balance to skin/);
+  assert.equal(NEUTRAL_HINT, "Tap something white or grey, or a diver's skin");
+  assert.equal(neutralKindLabel(undefined), "white");
+  // The pick carries what it was balanced to; a pick saved before the field existed still applies.
+  assert.deepEqual(colourSettings({ ...DEFAULT_TOOLS.colour, neutral: { r: 0.8, b: 1.1, u: 0.5, v: 0.5, t: 0, clip: "c", kind: "skin" } }, "c").wbTap, [0.8, 1.1]);
+  assert.deepEqual(colourSettings({ ...DEFAULT_TOOLS.colour, neutral: { r: 0.8, b: 1.1, u: 0.5, v: 0.5, t: 0, clip: "c" } }, "c").wbTap, [0.8, 1.1]);
   assert.match(neutralNote({ ok: true, gains: [1, 1], limited: true }), /No red left/);
   assert.match(neutralNote({ ok: false, reason: "dark" }), /dark/);
   assert.match(neutralNote({ ok: false, reason: "bright" }), /blown out/);

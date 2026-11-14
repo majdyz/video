@@ -1,12 +1,12 @@
-// The manual override pair: tap-to-neutral (tap.ts, params.ts tapParams) and "Water colour" (WATER_TINT).
+// The manual override pair: Tap to fix (a tap on a white / grey or on skin: tap.ts, params.ts tapParams) and "Water colour" (WATER_TINT).
 //   node --experimental-strip-types apps/aqua-fix/test/tap.test.ts
 import assert from "node:assert/strict";
 import { applyGrade, gradePixel, resolveContext, warmPop, waterTint, type ApplyContext } from "../src/engine/apply.ts";
 import { linearToOklab, linearToSrgb, srgbToLinear } from "../src/engine/color.ts";
 import { GRADE_GLSL, GRADE_WGSL } from "../src/engine/grade-shader.ts";
 import { lockParams } from "../src/engine/lock.ts";
-import { BLUE_WATER, CLAHE_BINS, CLAHE_TILES_X, CLAHE_TILES_Y, DEFAULT_SETTINGS, IDENTITY_PARAMS, TAP, WARM_POP, WATER_TINT, packUniforms, tapGains, tapParams, waterTintOf, type ClaheLuts, type DepthMap, type GradeParams, type UserSettings } from "../src/engine/params.ts";
-import { TAP_SOLVE, correctionOnly, solveTap, tapRect, tapSample } from "../src/engine/tap.ts";
+import { BLUE_WATER, CLAHE_BINS, CLAHE_TILES_X, CLAHE_TILES_Y, DEFAULT_SETTINGS, IDENTITY_PARAMS, SKIN, TAP, WARM_POP, WATER_TINT, packUniforms, tapGains, tapParams, waterTintOf, type ClaheLuts, type DepthMap, type GradeParams, type UserSettings } from "../src/engine/params.ts";
+import { TAP_SKIN, TAP_SOLVE, correctionOnly, solveTap, tapRect, tapSample } from "../src/engine/tap.ts";
 
 const D = Math.PI / 180;
 const near = (a: number, b: number, eps: number, msg: string) => assert.ok(Math.abs(a - b) <= eps, `${msg}: ${a} vs ${b}`);
@@ -326,4 +326,123 @@ const STYLES: Record<string, UserSettings> = { natural: { ...DEFAULT_SETTINGS },
   assert.ok(WARM_POP.castLo >= 0.01 && WARM_POP.castHi <= 0.05, "a blue-cast subject (C ≥ 0.05 as graded) keeps the full pull");
   assert.ok(GRADE_GLSL.includes("* smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);") && GRADE_WGSL.includes("* smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale);"));
   console.log("ok  the subject's warm pull passes through neutral: a tapped teal shadow is not turned green");
+}
+
+// 10. Tap to fix: the same tap on a diver's skin. The tap works out which it was given (tap.ts TAP_SKIN): a point
+//     that is warm under the automatic balance is skin when that asks for the smaller correction, a point on a
+//     detected person that is neither dark nor neutral is skin, everything else a white or grey. Skin is balanced
+//     to a natural skin colour (the skin hue, a moderate chroma), not to grey, through the same limits.
+{
+  const K = TAP_SKIN;
+  const labOf = (o: readonly number[]) => { const [L, a, b] = linearToOklab(srgbToLinear(o[0]), srgbToLinear(o[1]), srgbToLinear(o[2])); return { L, c: Math.hypot(a, b), h: ((Math.atan2(b, a) / D) % 360 + 360) % 360, a, b }; };
+  const off = (h: number) => Math.abs(((h - K.hue / D + 540) % 360) - 180);
+  // Skin as it is in air (light, medium, deep), then under the water's cast (per-channel, linear) at half the light.
+  const SKINS: Record<string, number[]> = { light: [224, 172, 140], medium: [198, 134, 103], deep: [141, 85, 54] };
+  const under = (name: string, cast: readonly number[], k = 0.5) => srgb(SKINS[name].map((c, i) => Math.min(1, srgbToLinear(c / 255) * cast[i] * k)));
+  const onPerson = (m: ReturnType<typeof maps>) => ({ depth: { ...m.depth, person: new Float32Array(m.depth.width * m.depth.height).fill(1) }, clahe: m.clahe });
+  // How far a colour is from reading as skin: its distance from the skin hue's ray between pale and the top of the range.
+  const skinDist = (o: { a: number; b: number }) => { const al = Math.min(K.cHi, Math.max(K.pale, o.a * Math.cos(K.hue) + o.b * Math.sin(K.hue))); return Math.hypot(o.a - al * Math.cos(K.hue), o.b - al * Math.sin(K.hue)); };
+  const same = (g: readonly number[]) => g[0] === 1 && g[1] === 1;
+  const costOf = (g: readonly number[]) => Math.max(Math.abs(Math.log(g[0])), Math.abs(Math.log(g[1])));
+  assert.equal(K.hue, SKIN.hue);
+  assert.ok(K.cLo >= 0.03 && K.cHi <= 0.1 && K.pale > TAP_SOLVE.limited && K.pale < K.cLo, "a moderate chroma, never neutral");
+
+  // a. Skin the automatic balance leaves warm (a mild cast it mostly took out: nothing to do; or one it overshot
+  //    into red, orange or pink): read as skin from its colour alone, no person mask, and brought to the skin
+  //    colour, the same in every style. Red skin has its red taken down, never pushed further.
+  let solved = 0;
+  for (const [what, cast] of [["a mild blue cast", [0.8, 1, 1.08]], ["gone red", [1.5, 1, 0.85]], ["gone orange", [1.6, 1, 0.6]], ["gone pink", [1.05, 1, 1.35]]] as const) for (const name of Object.keys(SKINS)) {
+    const px = under(name, cast);
+    let first: [number, number] | null = null;
+    for (const [style, settings] of Object.entries(STYLES)) {
+      const ctx: ApplyContext = { params: PARAMS, settings, ...maps(px.map(srgbToLinear), 1) };
+      const corr = { ...ctx, settings: correctionOnly(settings) };
+      const s = solveTap(ctx, px, 0.5, 0.5);
+      assert.ok(s.ok && s.kind === "skin" && s.after <= s.before, `${name} skin, ${what}, ${style}: ${JSON.stringify(s)}`);
+      if (!s.ok) continue;
+      const o = labOf(gradeAt({ ...corr, settings: { ...corr.settings, wbTap: s.gains } }, px));
+      if (!s.limited) assert.ok(s.after <= TAP_SOLVE.limited && skinDist(o) <= TAP_SOLVE.limited && o.c > K.cLo - TAP_SOLVE.limited && o.c < K.cHi + TAP_SOLVE.limited, `${name} skin, ${what}, ${style}: ${o.c.toFixed(3)} @ ${o.h.toFixed(0)}° ${JSON.stringify(s)}`);
+      if (!s.limited && !same(s.gains)) solved++;
+      if (what === "a mild blue cast") assert.ok(!s.limited && costOf(s.gains) < 0.1, `${name} skin, ${what}: next to nothing to do (${s.gains})`);
+      if (!s.limited) { first ??= s.gains; assert.deepEqual(s.gains, first, "the same gains in every style"); }
+      // The smaller, safer correction of the two: taken for a grey, the same point would be pushed further (or the guards would step in).
+      const n = solveTap(ctx, px, 0.5, 0.5, "neutral");
+      assert.ok(n.ok && n.kind === "neutral" && (n.limited || costOf(n.gains) > costOf(s.gains)),
+ `${name} skin, ${what}: neutral ${JSON.stringify(n)}`);
+      if (what === "gone red" || what === "gone orange") assert.ok(s.gains[0] <= 1 && (s.limited || s.gains[0] < 1) && s.gains[0] > 1 / TAP.max, `${name} skin, ${what}: red comes down (${s.gains})`);
+    }
+  }
+  assert.ok(solved >= 20, `skin off its colour is solved in full (${solved} of 36)`);
+
+  // b. Skin under a heavy blue or green cast: the automatic balance leaves it cold, and by its colour alone it is a
+  //    grey like any other (the tap balances it to white, as before). Told it is skin (the studio's second tap on
+  //    the same spot), or on a detected person, it is balanced to skin: warm, at the skin hue, red up, inside the limits.
+  let masked = 0;
+  for (const [what, cast] of [["blue", [0.3, 1, 1.5]], ["green", [0.3, 1, 0.8]], ["deep blue", [0.2, 1, 1.8]]] as const) for (const name of Object.keys(SKINS)) for (const conf of [1, 0]) {
+    const px = under(name, cast), m = maps(px.map(srgbToLinear), conf);
+    const ctx: ApplyContext = { params: PARAMS, settings: STYLES.natural, ...m };
+    const tag = `${name} skin under ${what}, conf ${conf}`;
+    const before = labOf(gradeAt({ ...ctx, settings: correctionOnly(ctx.settings) }, px));
+    assert.ok(!(before.c >= K.minC && off(before.h) <= K.band / D), `${tag}: not warm to begin with (${before.c.toFixed(3)} @ ${before.h.toFixed(0)}°)`);
+    const free = solveTap(ctx, px, 0.5, 0.5);
+    assert.ok(free.ok && free.kind === "neutral", `${tag}: ${JSON.stringify(free)}`);
+    for (const [how, c2, want] of [["told", ctx, "skin"], ["on a person", { ...ctx, ...onPerson(m) }, undefined]] as const) {
+      const s = solveTap(c2, px, 0.5, 0.5, want);
+      // On a person the skin memory colour (SKIN) may leave it all but neutral: then it is a white like any other.
+      const auto = labOf(gradeAt({ ...c2, settings: correctionOnly(c2.settings) }, px));
+      if (how === "on a person" && auto.c <= TAP_SOLVE.limited) { assert.ok(s.ok && s.kind === "neutral" && costOf(s.gains) < 0.3, `${tag}, ${how}: ${JSON.stringify(s)}`); continue; }
+      // … and skin that would take more than a cut-short tap may (limitedMax) is not assumed from the mask alone
+      // (a point the mask's skin colour already turned warm is skin by its colour, as in a.).
+      const max = (g: readonly number[]) => Math.max(g[0], 1 / g[0], g[1], 1 / g[1]);
+      const asked = solveTap(c2, px, 0.5, 0.5, "skin");
+      const byMask = how === "on a person" && !(auto.c >= K.minC && off(auto.h) <= K.band / D);
+      if (byMask && asked.ok && max(asked.gains) > TAP_SOLVE.limitedMax) { assert.ok(s.ok && s.kind === "neutral", `${tag}, ${how}: ${JSON.stringify(s)}`); continue; }
+      assert.ok(s.ok && s.kind === "skin" && !s.limited, `${tag}, ${how}: ${JSON.stringify(s)}`);
+      if (!s.ok) continue;
+      if (how === "on a person") masked++;
+      if (byMask) assert.ok(max(s.gains) <= TAP_SOLVE.limitedMax, `${tag}, ${how}: gains ${s.gains}`);
+      assert.ok(s.gains[0] >= 1 && s.gains[0] <= TAP.max && s.gains[1] >= 1 / TAP.max && s.gains[1] <= TAP.max, `${tag}, ${how}: gains ${s.gains}`);
+      const o = labOf(gradeAt({ ...c2, settings: { ...correctionOnly(c2.settings), wbTap: s.gains } }, px));
+      // Reads as skin (pale at the least): never grey-blue, never green.
+      assert.ok(skinDist(o) <= TAP_SOLVE.limited + 1e-9, `${tag}, ${how}: ${o.c.toFixed(3)} @ ${o.h.toFixed(0)}° gains ${s.gains}`);
+      if (how === "told") assert.ok(s.gains[0] > 1.5 && off(o.h) < 6 && o.c > K.cLo - 0.006, `${tag}, ${how}: ${o.c.toFixed(3)} @ ${o.h.toFixed(0)}° gains ${s.gains}`);
+      // On screen in every style the point leaves the cold side.
+      for (const [style, settings] of Object.entries(STYLES)) {
+        const shown = labOf(gradeAt({ ...c2, settings: { ...settings, wbTap: s.gains } }, px));
+        assert.ok(shown.c < 0.03 || off(shown.h) < 60, `${tag}, ${how}, ${style}: shown ${shown.c.toFixed(3)} @ ${shown.h.toFixed(0)}°`);
+      }
+    }
+    // A grey under the same cast is still a grey: balanced to white.
+    const grey = srgb([0.25 * cast[0], 0.25, 0.25 * cast[2]]);
+    const g = solveTap({ params: PARAMS, settings: STYLES.natural, ...maps(grey.map(srgbToLinear), conf) }, grey, 0.5, 0.5);
+    assert.ok(g.ok && g.kind === "neutral" && g.after < g.before, `grey under ${what}: ${JSON.stringify(g)}`);
+  }
+
+  assert.ok(masked >= 9, `skin on a person is read as skin (${masked} of 18)`);
+
+  // c. Not everything on a person is skin: a dark suit stays a neutral target.
+  {
+    const suit = srgb([0.0035, 0.006, 0.008]);
+    const s = solveTap({ params: PARAMS, settings: STYLES.natural, ...onPerson(maps(suit.map(srgbToLinear), 1)) }, suit, 0.5, 0.5);
+    assert.ok(s.ok && s.kind === "neutral", `on a person, not skin: ${JSON.stringify(s)}`);
+  }
+
+  // d. Skin with no red left (deep, far): the same guards as a neutral. Flagged, bounded, never dragged to the limit, never green.
+  {
+    const lin = [0.004, 0.16, 0.34], px = srgb(lin);
+    const P: GradeParams = { ...PARAMS, wb: [3, 1, 1], waterWb: [1.9, 1, 1], veilColor: [0.01, 0.12, 0.3] };
+    for (const style of Object.values(STYLES)) for (const mask of [false, true]) {
+      const m = maps(lin, 1), ctx: ApplyContext = { params: P, settings: style, ...(mask ? onPerson(m) : m) };
+      const s = solveTap(ctx, px, 0.5, 0.5, "skin");
+      assert.ok(s.ok && s.kind === "skin" && s.limited, JSON.stringify(s));
+      if (!s.ok) continue;
+      assert.ok(s.gains[0] <= TAP_SOLVE.limitedMax && s.gains[1] >= 1 / TAP_SOLVE.limitedMax && s.after <= s.before, `bounded: ${JSON.stringify(s)}`);
+      const o = labOf(gradeAt({ ...ctx, settings: { ...correctionOnly(style), wbTap: s.gains } }, px));
+      assert.ok(!(o.c > TAP_SOLVE.limited && o.h > TAP_SOLVE.greenLo && o.h < TAP_SOLVE.greenHi), `green (${o.h.toFixed(0)}°)`);
+    }
+  }
+  // Too dark and clipped points are refused whatever they are said to be.
+  assert.deepEqual(solveTap({ params: PARAMS, settings: STYLES.vivid, ...maps([0, 0, 0], 1) }, [0.02, 0.03, 0.04], 0.5, 0.5, "skin"), { ok: false, reason: "dark" });
+  assert.deepEqual(solveTap({ params: PARAMS, settings: STYLES.vivid, ...maps([1, 1, 1], 1) }, [1, 0.99, 1], 0.5, 0.5, "skin"), { ok: false, reason: "bright" });
+  console.log(`ok  tap to fix: skin is told from white and balanced to a natural skin colour, inside the same limits (${solved}/36 warm taps moved and solved in full, ${masked}/18 cold taps on a person read as skin)`);
 }
