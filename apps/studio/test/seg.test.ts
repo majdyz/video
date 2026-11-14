@@ -290,13 +290,14 @@ const img = (dx: number, dy: number): Gray => {
   assert.ok(step < 0.9, `the ramp varies smoothly (max ${step.toFixed(2)} per texel)`);
 }
 
-// The pop tone (subject clearing): shrinks the water cast along the pixel's own hue, bounded, never a fixed target.
+// The pop tone (subject clearing): the pixel's own hue, never a fixed target. Since 14 Nov nothing of the cast is
+// cleared (SUBJECT_CLEAR.k 0: a red-less subject cleared of its cast is a grey one); a small chroma boost is left.
 {
   const vh: [number, number] = [-0.6, -0.8]; // the water's hue (unit)
   const blue: [number, number] = [-0.06, -0.08], other: [number, number] = [-0.02, -0.11], warm: [number, number] = [0.05, 0.03];
   const [ba, bb] = clearCast(blue[0], blue[1], vh[0], vh[1], 1);
   assert.ok(Math.abs(Math.atan2(bb, ba) - Math.atan2(blue[1], blue[0])) < 1e-9, "the hue never turns");
-  assert.ok(Math.hypot(ba, bb) < Math.hypot(...blue) && Math.hypot(...blue) - Math.hypot(ba, bb) <= SUBJECT_CLEAR.cMax + SUBJECT_CLEAR.desat * 0.1 + 1e-9, "a bounded step toward neutral");
+  assert.ok(Math.hypot(ba, bb) >= Math.hypot(...blue) && Math.hypot(ba, bb) <= 1.5 * Math.hypot(...blue), "never toward neutral: the subject's chroma or a little more");
   assert.deepEqual(clearCast(blue[0], blue[1], vh[0], vh[1], 0), blue, "no weight: untouched");
   const [oa, ob] = clearCast(other[0], other[1], vh[0], vh[1], 1);
   assert.ok(Math.hypot(ba - oa, bb - ob) > 0.35 * Math.hypot(blue[0] - other[0], blue[1] - other[1]), "two subject colours stay apart, about in proportion to the chroma (no single pasted colour)");

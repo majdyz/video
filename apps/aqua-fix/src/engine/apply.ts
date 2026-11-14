@@ -377,6 +377,8 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // darker (a wetsuit, a dark back, and the blurred rim of either against bright water) keeps the water's light.
   const waterL = an ? segWaterL(an) : ow > 0 && fit && fit.length === 18 ? backdropL(u, v, fit) : -1;
   const warmUp = waterL >= 0 ? smoothstep(WARM_POP.upLo, WARM_POP.upHi, lab0[0] - waterL) : 1;
+  // Which way the AI restore moves the subject's lightness (SEG_RESTORE.sep): away from the local water's, −1..1.
+  const sepT = waterL >= 0 ? Math.sign(lab0[0] - waterL) * smoothstep(0, SEG_RESTORE.sepRange, Math.abs(lab0[0] - waterL)) : popDir;
   // Under an AI mask the pop's own lift (or its deepening of a subject darker than the water) is left out: the AI
   // restore's small lift is all the subject gets (SEG_RESTORE.lift), and its chroma is not scaled along.
   const Lp = an ? Lv : Lv + SUBJECT_POP.lift * popP * popDir * 4 * Lv * Math.max(0, 1 - Lv);
@@ -386,7 +388,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   vv[0] = Lp; vv[1] *= kc; vv[2] *= kc;
   const hn0 = highlightPink(vv[0], vv[1], vv[2]);
   const hn1 = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * popS, 0, 1));
-  const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * (an ? 0 : smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) * (s.subjectPop ? Math.min(1, 2 * Math.max(0, s.subjectPopWarmth ?? 0)) : 0) * castW * warmLit(vv[0]) * warmUp;
+  const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * (an ? 0 : smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) * (s.subjectPop ? Math.min(1, 2 * Math.max(0, s.subjectPopWarmth ?? 0)) : 0) * WARM_POP.amount * castW * warmLit(vv[0]) * warmUp;
   const hn = warmPop(vv[0], hn1[0], hn1[1], wk, WARM_POP.engineTone);
   // Blue water style (opt-in): cobalt water, orange warm subjects, neutral silver, deeper shadows.
   const bl = blueLook(vv[0], hn[0], hn[1], s.blue ?? 0, greenWeight(p));
@@ -405,7 +407,7 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // AI subject restore (SEG_RESTORE; grade-shader segRestore): after every look, so none of them amplifies it.
   if (segS > 0) {
     const lr = (lumI + DETAIL_GUARD.eps) / (guideLum(ctx.depth, u, v) + DETAIL_GUARD.eps);
-    [bl[0], bl[1], bl[2]] = segRestore(bl[0], bl[1], bl[2], segS, s.subjectPop ? Math.min(1, Math.max(0, s.subjectPopWarmth ?? 0)) : 0, lr, 0, segColourK(an!), popK > 1 ? segS * (1 - 1 / popK) : 0, segWarmK(an!) * warmUp);
+    [bl[0], bl[1], bl[2]] = segRestore(bl[0], bl[1], bl[2], segS, lr, segColourK(an!), popK > 1 ? segS * (1 - 1 / popK) : 0, sepT);
   }
   // Tone target (analyze.ts TONE): one gamma on the graded lightness, the same for every pixel of the frame.
   if ((p.toneGamma ?? 1) > 1) bl[0] = toneCurve(bl[0], p.toneGamma!);
@@ -598,45 +600,26 @@ export function segColourK(an: readonly number[]): number {
 }
 
 /**
- * The warm share of the AI subject restore (SEG_RESTORE warmClose*; grade-shader segWarmK): the edge feather × how
- * close the subject is (an[4]). A far subject gets none: it keeps the water's light, a little clearer.
- */
-export function segWarmK(an: readonly number[]): number {
-  const d = (an[2] - 0.5) * 2 * SEG_TONE.alphaR;
-  return smoothstep(0, SEG_RESTORE.edge, d) * smoothstep(SEG_RESTORE.warmCloseLo, SEG_RESTORE.warmCloseHi, clamp(an[4] ?? 1, 0, 1));
-}
-
-/**
  * AI subject restore (SEG_RESTORE; mirrors grade-shader segRestore) on the finished Oklab colour: `s` = the AI tone
- * weight × the Pop multiplier (0..2), `warmth` = the Warmth slider (0..1), `lr` =
- * the source pixel's luminance over its neighbourhood's (the analysis guide), `lifted` = the lift Subject pop has
- * already applied (SUBJECT_POP.lift × P × the clip's direction; negative = deepened), `ck` = the colour share
- * (segColourK), `x` = the boost of the slider's upper half (the AI weight × (the Pop multiplier − 1): 0 up to Pop 50,
- * 1 at Pop 100; SEG_RESTORE boost*), `wk` = the warm share (segWarmK).
- * The colour: a cool pixel loses a modest share of its cast (hue kept), and the lit parts of a close subject are
- * then pulled to a warm, skin-like neutral (warmPop), as if lit: the darks keep the water's light. Never a grey: at
- * least 1 − castMax of the cast stays where the pull does not reach, and the pull has a chroma floor.
+ * weight × the Pop multiplier (0..2), `lr` = the source pixel's luminance over its neighbourhood's (the analysis
+ * guide), `ck` = the colour share (segColourK), `x` = the boost of the slider's upper half (the AI weight × (the Pop
+ * multiplier − 1): 0 up to Pop 50, 1 at Pop 100), `t` = which way the lightness goes (−1..1: away from the local
+ * water's).
+ * The subject keeps its own hue: nothing is neutralised or tinted. A little more of its own chroma (never less),
+ * local contrast against the neighbourhood, and its lightness moved away from the water's.
  */
-export function segRestore(L: number, a: number, b: number, s: number, warmth: number, lr: number, lifted = 0, ck = 1, x = 0, wk = 0): [number, number, number] {
+export function segRestore(L: number, a: number, b: number, s: number, lr: number, ck = 1, x = 0, t = 1): [number, number, number] {
   if (s <= 0) return [L, a, b];
-  const R = SEG_RESTORE, wx = Math.cos(R.hue), wy = Math.sin(R.hue);
-  // De-blue: a cool pixel loses a share of its chroma (hue kept); warm, green and magenta pixels keep theirs.
-  const C = Math.hypot(a, b);
-  const cool = C > 1e-5 ? smoothstep(0, 0.5, -(a * wx + b * wy) / C) : 0;
-  const k = 1 - Math.min(R.castMax, R.cast * s) * cool * ck;
-  a *= k; b *= k;
-  // Warm-up: a little chroma along the warm hue, never more than warmShare of what is left on the cool side of it;
-  // lit parts only, highlights stay white.
-  const lit = smoothstep(R.litLo, R.litHi, L) * (1 - smoothstep(R.hiLo, R.hiHi, L));
-  const add = Math.min((R.warm * s + R.boostWarm * x) * Math.min(1, 2 * warmth) * lit * ck, (R.warmShare + R.boostWarmShare * x) * Math.max(0, -(a * wx + b * wy)));
-  a += wx * add; b += wy * add;
-  // The lit parts of a close subject: to the warm neutral (through the floor, never a grey).
-  [a, b] = warmPop(L, a, b, Math.min(R.toneMax, R.tone * s) * Math.min(1, 2 * warmth) * cool * wk * warmLit(L), 1);
-  // Local contrast against the neighbourhood, then the midtone lift: up to lift × S in all, whatever the pop's own
-  // lift did (its dark fade, or its deepening of a subject darker than the water, is made up for).
-  let L1 = L * Math.pow(clamp(lr, R.rMin, R.rMax), R.detail * s + R.boostDetail * x);
-  L1 += Math.max(0, R.lift * s + R.boostLift * x - lifted) * 4 * L1 * Math.max(0, 1 - L1);
-  return [L1, a, b];
+  const R = SEG_RESTORE;
+  // Its own colour, a little more of it (hue kept); a saturated subject is left alone.
+  const kv = 1 + (R.vib * Math.min(1, s) + R.boostVib * x) * ck * (1 - smoothstep(R.vibLo, R.vibHi, Math.hypot(a, b))) * Math.abs(clamp(t, -1, 1));
+  // Local contrast against the neighbourhood, then the separation: lighter than the water → lighter, darker → darker.
+  let L1 = L * Math.pow(clamp(lr, R.rMin, R.rMax), R.detail * Math.min(1, s) + R.boostDetail * x);
+  L1 += (R.sep * Math.min(1, s) + R.boostSep * x) * (t < 0 ? R.sepDown : 1) * clamp(t, -1, 1) * 4 * L1 * Math.max(0, 1 - L1);
+  // A soft shoulder on the lightening: at most `head` of the headroom to white (no clipped, colourless highlights).
+  const hr = R.head * Math.max(0, 1 - L);
+  if (L1 > L) L1 = hr > 1e-5 ? L + hr * (1 - Math.exp(-(L1 - L) / hr)) : L;
+  return [L1, a * kv, b * kv];
 }
 
 function clamp(x: number, lo: number, hi: number): number {

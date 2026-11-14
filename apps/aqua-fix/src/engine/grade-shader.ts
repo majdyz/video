@@ -184,6 +184,7 @@ const float WP_UP_HI = ${WARM_POP.upHi.toFixed(4)};
 const float WP_FLOOR = ${WARM_POP.floor.toFixed(4)};
 const float WP_FLOOR_KEEP = ${WARM_POP.floorKeep.toFixed(4)};
 const float WP_ENGINE_TONE = ${WARM_POP.engineTone.toFixed(4)};
+const float WP_AMOUNT = ${WARM_POP.amount.toFixed(4)};
 const float SP_CHROMA = ${SUBJECT_POP.chromaFollow.toFixed(4)};
 const float SP_ENGINE = ${SUBJECT_POP.engineKeep.toFixed(4)};
 const float SP_KEEP_LO = ${SUBJECT_POP.keepDarkLo.toFixed(4)};
@@ -225,35 +226,30 @@ const float SEG_JBU_HI = ${SEG_TONE.jbuHi.toFixed(4)};
 const float SR_DARK_LO = ${SEG_RESTORE.darkLo.toFixed(4)};
 const float SR_DARK_HI = ${SEG_RESTORE.darkHi.toFixed(4)};
 const float SR_POP_GATE = ${SEG_RESTORE.popGate.toFixed(4)};
-const float SR_CAST = ${SEG_RESTORE.cast.toFixed(4)};
-const float SR_CAST_MAX = ${SEG_RESTORE.castMax.toFixed(4)};
-const float SR_TONE = ${SEG_RESTORE.tone.toFixed(4)};
-const float SR_TONE_MAX = ${SEG_RESTORE.toneMax.toFixed(4)};
-const float SR_WARM_CLOSE_LO = ${SEG_RESTORE.warmCloseLo.toFixed(4)};
-const float SR_WARM_CLOSE_HI = ${SEG_RESTORE.warmCloseHi.toFixed(4)};
+const float SR_SEP = ${SEG_RESTORE.sep.toFixed(4)};
+const float SR_X_SEP = ${SEG_RESTORE.boostSep.toFixed(4)};
+const float SR_SEP_RANGE = ${SEG_RESTORE.sepRange.toFixed(4)};
+const float SR_SEP_DOWN = ${SEG_RESTORE.sepDown.toFixed(4)};
+const float SR_HEAD = ${SEG_RESTORE.head.toFixed(4)};
+const float SR_VIB = ${SEG_RESTORE.vib.toFixed(4)};
+const float SR_X_VIB = ${SEG_RESTORE.boostVib.toFixed(4)};
+const float SR_VIB_LO = ${SEG_RESTORE.vibLo.toFixed(4)};
+const float SR_VIB_HI = ${SEG_RESTORE.vibHi.toFixed(4)};
 const float SR_RIM_LO = ${SEG_RESTORE.rimLo.toFixed(4)};
 const float SR_RIM_HI = ${SEG_RESTORE.rimHi.toFixed(4)};
 const float SEG_THICK_R = ${SEG_RESTORE.thick.toFixed(4)};
 const float SR_COS = ${Math.cos(SEG_RESTORE.hue).toFixed(6)};
 const float SR_SIN = ${Math.sin(SEG_RESTORE.hue).toFixed(6)};
-const float SR_WARM = ${SEG_RESTORE.warm.toFixed(4)};
-const float SR_WARM_SHARE = ${SEG_RESTORE.warmShare.toFixed(4)};
 const float SR_FAR_KEEP = ${SEG_RESTORE.farKeep.toFixed(4)};
 const float SR_EDGE = ${SEG_RESTORE.edge.toFixed(4)};
 const float SEG_PACK = ${SEG_RESTORE.pack.toFixed(4)};
 const float SEG_LEVELS = ${SEG_RESTORE.levels.toFixed(4)};
-const float SR_LIT_LO = ${SEG_RESTORE.litLo.toFixed(4)};
-const float SR_LIT_HI = ${SEG_RESTORE.litHi.toFixed(4)};
 const float SR_HI_LO = ${SEG_RESTORE.hiLo.toFixed(4)};
 const float SR_HI_HI = ${SEG_RESTORE.hiHi.toFixed(4)};
 const float SR_DETAIL = ${SEG_RESTORE.detail.toFixed(4)};
 const float SR_R_MIN = ${SEG_RESTORE.rMin.toFixed(4)};
 const float SR_R_MAX = ${SEG_RESTORE.rMax.toFixed(4)};
-const float SR_LIFT = ${SEG_RESTORE.lift.toFixed(4)};
-const float SR_X_WARM = ${SEG_RESTORE.boostWarm.toFixed(4)};
-const float SR_X_WARM_SHARE = ${SEG_RESTORE.boostWarmShare.toFixed(4)};
 const float SR_X_DETAIL = ${SEG_RESTORE.boostDetail.toFixed(4)};
-const float SR_X_LIFT = ${SEG_RESTORE.boostLift.toFixed(4)};
 const float ON_WARM_COS = ${Math.cos(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_SIN = ${Math.sin(OBJECT_NEUTRAL.warmHue).toFixed(6)};
 const float ON_WARM_LO = ${OBJECT_NEUTRAL.warmLo.toFixed(4)};
@@ -809,11 +805,6 @@ float segRim(vec4 an, vec3 lab0) {
   float ev = smoothstepf(SR_RIM_LO * k, SR_RIM_HI * k, length(vec2(lab0.x - lw, lab0.y * p[14].y - lab0.z * p[14].x)));
   return mix(ev, 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));
 }
-// The warm share of the AI subject restore (apply.ts segWarmK): the edge feather x how close the subject is.
-float segWarmK(vec4 an) {
-  float d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
-  return smoothstepf(0.0, SR_EDGE, d) * smoothstepf(SR_WARM_CLOSE_LO, SR_WARM_CLOSE_HI, clamp(g_segClose, 0.0, 1.0));
-}
 // The colour share of the AI subject restore (SEG_RESTORE edge / farKeep; apply.ts segColourK): the edge feather over
 // the mask's read-back distance (an.z; whole SR_EDGE mask px inside the contour) x the subject's closeness
 // (g_segClose, set by animalStrength: SR_FAR_KEEP for a far subject, 1 for a close one).
@@ -822,29 +813,19 @@ float segColourK(vec4 an) {
   return smoothstepf(0.0, SR_EDGE, d) * mix(SR_FAR_KEEP, 1.0, clamp(g_segClose, 0.0, 1.0));
 }
 // AI subject restore (SEG_RESTORE in params.ts; mirrors apply.ts segRestore) on the finished Oklab colour: s = the AI
-// tone weight x the Pop multiplier (0..2), lr = the source pixel's luminance over its neighbourhood's, lifted = the
-// lift Subject pop has already applied, ck = the colour share (segColourK), x = the boost of the slider's upper half
-// (the AI weight x (the Pop multiplier - 1): 0 up to Pop 50; SEG_RESTORE boost*). Only with a real AI mask on the frame
-// (s = 0 otherwise). wk = the warm share (segWarmK x what stands lighter than the water): the lit parts of a close
-// subject go to the warm neutral (warmPop), its darks keep the water's light, a modest share of the cast off.
-vec3 segRestore(vec3 lk, float s, float lr, float lifted, float ck, float x, float wk) {
+// tone weight x the Pop multiplier (0..2), lr = the source pixel's luminance over its neighbourhood's, ck = the
+// colour share (segColourK), x = the boost of the slider's upper half (0 up to Pop 50), t = which way the lightness
+// goes (-1..1: away from the local water's). Only with a real AI mask on the frame (s = 0 otherwise). The subject
+// keeps its own hue: a little more of its own chroma (never less), local contrast, its lightness away from the water's.
+vec3 segRestore(vec3 lk, float s, float lr, float ck, float x, float t) {
   if (s <= 0.0) return lk;
-  vec2 wh = vec2(SR_COS, SR_SIN);
-  vec2 ab = lk.yz;
-  // De-blue: a cool pixel loses a share of its chroma (hue kept); warm, green and magenta pixels keep theirs.
-  float C = length(ab);
-  float cool = C > 1e-5 ? smoothstepf(0.0, 0.5, -dot(ab, wh) / C) : 0.0;
-  ab *= 1.0 - min(SR_CAST_MAX, SR_CAST * s) * cool * ck;
-  // Warm-up: a little chroma along the warm hue, never more than SR_WARM_SHARE of what is left on the cool side of
-  // it; lit parts only, highlights stay white.
-  float lit = smoothstepf(SR_LIT_LO, SR_LIT_HI, lk.x) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
-  ab += wh * min((SR_WARM * s + SR_X_WARM * x) * min(1.0, 2.0 * p[24].z) * lit * ck, (SR_WARM_SHARE + SR_X_WARM_SHARE * x) * max(0.0, -dot(ab, wh)));
-  // The lit parts of a close subject: to the warm neutral (through the floor, never a grey).
-  ab = warmPop(lk.x, ab, min(SR_TONE_MAX, SR_TONE * s) * min(1.0, 2.0 * p[24].z) * cool * wk * warmLit(lk.x), 1.0);
-  // Local contrast against the neighbourhood, then the midtone lift (up to SR_LIFT x s in all).
-  float L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * s + SR_X_DETAIL * x);
-  L += max(0.0, SR_LIFT * s + SR_X_LIFT * x - lifted) * 4.0 * L * max(0.0, 1.0 - L);
-  return vec3(L, ab);
+  float kv = 1.0 + (SR_VIB * min(1.0, s) + SR_X_VIB * x) * ck * (1.0 - smoothstepf(SR_VIB_LO, SR_VIB_HI, length(lk.yz))) * abs(clamp(t, -1.0, 1.0));
+  float L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * min(1.0, s) + SR_X_DETAIL * x);
+  L += (SR_SEP * min(1.0, s) + SR_X_SEP * x) * (t < 0.0 ? SR_SEP_DOWN : 1.0) * clamp(t, -1.0, 1.0) * 4.0 * L * max(0.0, 1.0 - L);
+  // A soft shoulder on the lightening: at most SR_HEAD of the headroom to white.
+  float hr = SR_HEAD * max(0.0, 1.0 - lk.x);
+  if (L > lk.x) L = hr > 1e-5 ? lk.x + hr * (1.0 - exp(-(L - lk.x) / hr)) : lk.x;
+  return vec3(L, lk.yz * kv);
 }
 float warmClamp(vec2 ab, vec3 lin, float srcFar, float person, float strength) {
   if (strength <= 0.0) return 1.0;
@@ -1053,7 +1034,9 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
   // wetsuit, a dark back, the blurred rim of either against bright water) keeps the water's light.
   float waterL = p[24].y > 0.5 ? segWaterL(an) : (p[16].w > 0.0 ? backdropL(uv) : -1.0);
   float warmUp = waterL >= 0.0 ? smoothstepf(WP_UP_LO, WP_UP_HI, lab0.x - waterL) : 1.0;
-  float wk = smoothstepf(WP_WLO, WP_WHI, ow) * min(1.0, 2.0 * p[24].z) * (p[24].y > 0.5 ? 0.0 : depart) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale) * warmLit(lk.x) * warmUp;
+  // Which way the AI restore moves the subject's lightness (SR_SEP): away from the local water's.
+  float sepT = waterL >= 0.0 ? sign(lab0.x - waterL) * smoothstepf(0.0, SR_SEP_RANGE, abs(lab0.x - waterL)) : p[24].x;
+  float wk = smoothstepf(WP_WLO, WP_WHI, ow) * min(1.0, 2.0 * p[24].z) * WP_AMOUNT * (p[24].y > 0.5 ? 0.0 : depart) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale) * warmLit(lk.x) * warmUp;
   lk.yz = warmPop(lk.x, lk.yz, wk, WP_ENGINE_TONE);
   // Blue water style (opt-in, p25.w): cobalt water, orange warm subjects, neutral silver, deeper shadows.
   vec4 bl = blueLook(lk, p[25].w, p[22].w);
@@ -1069,7 +1052,7 @@ vec3 gradeD(vec3 src, vec3 base, vec2 uv) {
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
   // AI subject restore: after every look, so none of them amplifies it.
-  if (segS > 0.0) lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0)), segWarmK(an) * warmUp);
+  if (segS > 0.0) lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0)), sepT);
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
   if (p[24].w > 1.0) { float tl = max(lk.x, 1e-6); lk.x = pow(tl, 1.0 + (p[24].w - 1.0) * smoothstepf(TONE_TOE_LO, TONE_TOE_HI, tl)); }
   // Skin guard (look-fit.ts SKIN_GUARD): a person's skin never red or orange, pale skin not cold. After every look.
@@ -1488,10 +1471,6 @@ fn segRim(an: vec4<f32>, lab0: vec3<f32>) -> f32 {
   let ev = smoothstepf(SR_RIM_LO * k, SR_RIM_HI * k, length(vec2<f32>(lab0.x - lw, lab0.y * params.p[14].y - lab0.z * params.p[14].x)));
   return mix(ev, 1.0, smoothstepf(SEG_TRUST_LO, SEG_TRUST_HI, d));
 }
-fn segWarmK(an: vec4<f32>) -> f32 {
-  let d = (an.z - 0.5) * 2.0 * SEG_ALPHA_R;
-  return smoothstepf(0.0, SR_EDGE, d) * smoothstepf(SR_WARM_CLOSE_LO, SR_WARM_CLOSE_HI, clamp(g_segClose, 0.0, 1.0));
-}
 fn seabedCell(i: i32, j: i32) -> f32 {
   let n = i32(SB_GRID);
   let k = clamp(j, 0, n - 1) * n + clamp(i, 0, n - 1);
@@ -1573,20 +1552,14 @@ fn segColourK(an: vec4<f32>) -> f32 {
   return smoothstepf(0.0, SR_EDGE, d) * mix(SR_FAR_KEEP, 1.0, clamp(g_segClose, 0.0, 1.0));
 }
 // AI subject restore (SEG_RESTORE; see the GLSL segRestore).
-fn segRestore(lk: vec3<f32>, s: f32, lr: f32, lifted: f32, ck: f32, x: f32, wk: f32) -> vec3<f32> {
+fn segRestore(lk: vec3<f32>, s: f32, lr: f32, ck: f32, x: f32, t: f32) -> vec3<f32> {
   if (s <= 0.0) { return lk; }
-  let wh = vec2<f32>(SR_COS, SR_SIN);
-  var ab = lk.yz;
-  let C = length(ab);
-  var cool = 0.0;
-  if (C > 1e-5) { cool = smoothstepf(0.0, 0.5, -dot(ab, wh) / C); }
-  ab = ab * (1.0 - min(SR_CAST_MAX, SR_CAST * s) * cool * ck);
-  let lit = smoothstepf(SR_LIT_LO, SR_LIT_HI, lk.x) * (1.0 - smoothstepf(SR_HI_LO, SR_HI_HI, lk.x));
-  ab = ab + wh * min((SR_WARM * s + SR_X_WARM * x) * min(1.0, 2.0 * params.p[24].z) * lit * ck, (SR_WARM_SHARE + SR_X_WARM_SHARE * x) * max(0.0, -dot(ab, wh)));
-  ab = warmPop(lk.x, ab, min(SR_TONE_MAX, SR_TONE * s) * min(1.0, 2.0 * params.p[24].z) * cool * wk * warmLit(lk.x), 1.0);
-  var L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * s + SR_X_DETAIL * x);
-  L = L + max(0.0, SR_LIFT * s + SR_X_LIFT * x - lifted) * 4.0 * L * max(0.0, 1.0 - L);
-  return vec3<f32>(L, ab);
+  let kv = 1.0 + (SR_VIB * min(1.0, s) + SR_X_VIB * x) * ck * (1.0 - smoothstepf(SR_VIB_LO, SR_VIB_HI, length(lk.yz))) * abs(clamp(t, -1.0, 1.0));
+  var L = lk.x * pow(clamp(lr, SR_R_MIN, SR_R_MAX), SR_DETAIL * min(1.0, s) + SR_X_DETAIL * x);
+  L = L + (SR_SEP * min(1.0, s) + SR_X_SEP * x) * select(1.0, SR_SEP_DOWN, t < 0.0) * clamp(t, -1.0, 1.0) * 4.0 * L * max(0.0, 1.0 - L);
+  let hr = SR_HEAD * max(0.0, 1.0 - lk.x);
+  if (L > lk.x) { if (hr > 1e-5) { L = lk.x + hr * (1.0 - exp(-(L - lk.x) / hr)); } else { L = lk.x; } }
+  return vec3<f32>(L, lk.yz * kv);
 }
 fn warmClamp(ab: vec2<f32>, lin: vec3<f32>, srcFar: f32, person: f32, strength: f32) -> f32 {
   if (strength <= 0.0) { return 1.0; }
@@ -1754,7 +1727,8 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
   var waterL = -1.0;
   if (p[24].y > 0.5) { waterL = segWaterL(an); } else if (p[16].w > 0.0) { waterL = backdropL(uv); }
   let warmUp = select(1.0, smoothstepf(WP_UP_LO, WP_UP_HI, lab0.x - waterL), waterL >= 0.0);
-  let wk = smoothstepf(WP_WLO, WP_WHI, ow) * min(1.0, 2.0 * p[24].z) * select(depart, 0.0, p[24].y > 0.5) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale) * warmLit(lk.x) * warmUp;
+  let sepT = select(p[24].x, sign(lab0.x - waterL) * smoothstepf(0.0, SR_SEP_RANGE, abs(lab0.x - waterL)), waterL >= 0.0);
+  let wk = smoothstepf(WP_WLO, WP_WHI, ow) * min(1.0, 2.0 * p[24].z) * WP_AMOUNT * select(depart, 0.0, p[24].y > 0.5) * smoothstepf(WP_CAST_LO, WP_CAST_HI, length(lab.yz) * scale) * warmLit(lk.x) * warmUp;
   lk = vec3(lk.x, warmPop(lk.x, lk.yz, wk, WP_ENGINE_TONE));
   let bl = blueLook(lk, params.p[25].w, p[22].w);
   lk = bl.xyz;
@@ -1765,7 +1739,7 @@ fn gradeD(src: vec3<f32>, base: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     lk = vec3(lk.x + SB_LIFT * sb, mix(lk.yz, vec2<f32>(cos(SB_HUE), sin(SB_HUE)) * SB_CHROMA + SB_KEEP * lk.yz, sb));
   }
   // AI subject restore: after every look, so none of them amplifies it.
-  if (segS > 0.0) { lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), 0.0, segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0)), segWarmK(an) * warmUp); }
+  if (segS > 0.0) { lk = segRestore(lk, segS, (lumI + DG_EPS) / (guideLum(uv) + DG_EPS), segColourK(an), segS * max(0.0, 1.0 - 1.0 / max(p[23].w, 1.0)), sepT); }
   // Tone target (analyze.ts TONE, p24.w): one gamma on the graded lightness, the same for every pixel of the frame.
   if (params.p[24].w > 1.0) { let tl = max(lk.x, 1e-6); lk = vec3(pow(tl, 1.0 + (params.p[24].w - 1.0) * smoothstepf(TONE_TOE_LO, TONE_TOE_HI, tl)), lk.yz); }
   // Skin guard (look-fit.ts SKIN_GUARD): a person's skin never red or orange, pale skin not cold. After every look.

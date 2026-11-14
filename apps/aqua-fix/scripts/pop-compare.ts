@@ -5,7 +5,7 @@
 //   ffmpeg -i clip.mov -vf fps=1,scale=270:480 -pix_fmt rgba -f rawvideo frames.rgba
 //   git archive <old commit> apps/aqua-fix/src/engine | tar -x -C /tmp/old
 //   node --experimental-strip-types pop-compare.ts <name> frames.rgba 270 480 <t0,t1,...> <oldEngineDir> <newEngineDir> <outDir> [thr] [ai,basic,person]
-//   env: DILATE, ONLY (times), BOX u0,v0,u1,v1 (+ BOXT), POP, WARMTH, MASK, MASKONLY, DBG
+//   env: DILATE, ONLY (times), BOX u0,v0,u1,v1 (+ BOXT), LIGHTK, POP, WARMTH, MASK, MASKONLY, DBG
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -48,6 +48,7 @@ function boxBlur(src: Float32Array, r: number): Float32Array {
 }
 
 let curT = 0;
+let devMap = new Float32Array(0);
 function maskOf(px: Uint8ClampedArray): Uint8Array {
   const BOX = BOX0 && curT <= +(process.env.BOXT ?? 1e9) ? BOX0 : null;
   const ch = [0, 1, 2].map(() => new Float32Array(W * H));
@@ -55,7 +56,11 @@ function maskOf(px: Uint8ClampedArray): Uint8Array {
   const r = Math.round(W / 4);
   const bg = ch.map((c) => boxBlur(boxBlur(c, r), r));
   const raw = new Uint8Array(W * H);
-  for (let i = 0; i < W * H; i++) raw[i] = Math.hypot(ch[0][i] - bg[0][i], ch[1][i] - bg[1][i], ch[2][i] - bg[2][i]) > thr ? 1 : 0;
+  devMap = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) devMap[i] = Math.hypot(ch[0][i] - bg[0][i], ch[1][i] - bg[1][i], ch[2][i] - bg[2][i]);
+  // (LIGHTK: what is lighter than the blurred frame needs that many times the departure: bright water in a steep gradient is not a subject.)
+  const LK = +(process.env.LIGHTK ?? 1);
+  for (let i = 0; i < W * H; i++) raw[i] = Math.hypot(ch[0][i] - bg[0][i], ch[1][i] - bg[1][i], ch[2][i] - bg[2][i]) > thr * (ch[0][i] > bg[0][i] ? LK : 1) ? 1 : 0;
   const on = new Uint8Array(W * H);
   for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) { let c = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) c += raw[(y + dy) * W + x + dx]; on[y * W + x] = c >= 5 ? 1 : 0; }
   // Drop parts under 0.15% of the frame.
@@ -126,7 +131,7 @@ for (let fi = 0; fi < times.length; fi++) {
     if (modes.includes("person")) { renders[`${ek}.offp`] = g(false, false, true); renders[`${ek}.aip`] = g(true, true, true); renders[`${ek}.basicp`] = g(true, false, true); }
   }
   // Metrics.
-  const subj = (i: number) => on0[i] === 1 && dIn0[i] >= 2, halo = (i: number) => on[i] === 1 && !on0[i] && dOut0[i] >= 2, ring = (i: number) => !on[i] && dOut[i] >= 2 && dOut[i] <= 12;
+  const subj = (i: number) => on0[i] === 1 && dIn0[i] >= 2, halo = (i: number) => on[i] === 1 && !on0[i] && dOut0[i] >= 2 && devMap[i] < 0.5 * thr, ring = (i: number) => !on[i] && dOut[i] >= 2 && dOut[i] <= 12 && devMap[i] < 0.5 * thr; // (water only: what the stand-in mask missed, another shark of the school, is not water)
   const m = (p: Uint8ClampedArray, where: (i: number) => boolean, ref?: Uint8ClampedArray) => {
     let n = 0, C = 0, L = 0, dE = 0, a = 0, b = 0;
     for (let i = 0; i < W * H; i++) if (where(i)) { const l = labOf(p, i); n++; C += Math.hypot(l[1], l[2]); L += l[0]; a += l[1]; b += l[2]; if (ref) { const q = labOf(ref, i); dE += Math.hypot(l[0] - q[0], l[1] - q[1], l[2] - q[2]); } }
