@@ -5,7 +5,7 @@
 
 import { stillStrength, type AnimalMap } from "./animals.ts";
 import { capChroma, fitToGamut, linearToOklab, linearToSrgb, luminance, oklabToLinear, srgbToLinear } from "./color.ts";
-import { WHITE_GUARD, popFields, toneCurve, nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, SEG_RESTORE, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, tapParams, waterTintOf, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
+import { WHITE_GUARD, popFields, toneCurve, nrOpen, nrStrength, DETAIL_GUARD, DETAIL_TAPS, detailGuardOf, OBJECT_NEUTRAL, SUBJECT_CLEAR, SUBJECT_POP, SUBJECT_DEEP, SEG_RESTORE, WARM_POP, popStrengthK, objectNeutralOf, CONF_BRIGHT, DEHAZE_LUM, LOOK, PERSON_LUM, SKIN, ULAP, VIVID, VIVID_LOOK, BLUE_WATER, RICH_LOOK, HIGHLIGHT_PINK, HAZE_LIFT, SEABED, NR, TEMPORAL, boostParams, tapParams, waterTintOf, vividAmountOf, blueAmountOf, deepHaze, hazeLiftRatio, hazeLiftT, hazeParams, hazeSettings, hazeWeight, lookParams, lookSettings, presetParams, presetSettings, pushOf, resolveSettings, type ClaheLuts, type DepthMap, type GradeParams, type GradeSettings, type UserSettings } from "./params.ts";
 import { shadowFloorAt } from "./analyze.ts";
 import { SEG_TONE, segJbuWeights } from "./grade-shader.ts";
 import { SEG_THICK, unpackSegR } from "./seg-overlay.ts";
@@ -290,16 +290,47 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   const toneW = (an ? twAi : SUBJECT_POP.engineKeep * objectWeight(subj) * (SUBJECT_CLEAR.edgeFloor + (1 - SUBJECT_CLEAR.edgeFloor) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP))) * smoothstep(SUBJECT_POP.darkLo, SUBJECT_POP.darkHi, cbY);
   const popS = Math.max(objectNeutralOf(p), an ? segPop(an[3]) : 0);
   // (With the engine's own masks the pop also needs the pixel itself to stand off the backdrop: SUBJECT_POP.waterLo..Hi.)
-  const popP = toneW * popS * popK * (an ? 1 : smoothstep(SUBJECT_POP.waterLo, SUBJECT_POP.waterHi, bdevP));
+  const popP0 = toneW * popS * popK * (an ? 1 : smoothstep(SUBJECT_POP.waterLo, SUBJECT_POP.waterHi, bdevP));
   // AI subject restore amount S (SEG_RESTORE): the AI weight (its own, lower dark fade) × the Pop multiplier.
   // Near the contour a pixel that is plain water gets none of it (segRim): an outline that runs wide leaves the
   // water its colour (no grey ring around the subject).
-  const segS = an ? twAi * smoothstep(SEG_RESTORE.darkLo, SEG_RESTORE.darkHi, cbY) * popK * segRim(an, lab0, vla / vln, vlb / vln) : 0;
+  const segW = an ? twAi * popK * segRim(an, lab0, vla / vln, vlb / vln) : 0;
+  // A colourful thing whose hue is not the water's (a red buoy, an orange float) already stands out: it takes a
+  // small share of the lit pop only (SUBJECT_DEEP.farKeep), so it does not pull the eye off the subject.
+  // Over the seabed (seabedW) a faint light part (SEG closeness → 0; with the engine's masks any) is lifted less
+  // (SUBJECT_DEEP.bed): a paler patch of sand or reef under a leaked outline is, by every measure a pixel has, a faint
+  // light subject. (Not all of it off: lit haze reads as seabed to that grid, and far sharks in it lost their pop.)
+  const farCol = 1 - (1 - SUBJECT_DEEP.farKeep) * smoothstep(VIVID.cLo, VIVID.cHi, Math.hypot(pa, pb)) * hueFar(pa, pb, p);
+  const popCol = farCol * (1 - SUBJECT_DEEP.bed * seabedW(p, u, v) * (1 - (an ? clamp(an[4] ?? 1, 0, 1) : 0)));
+  // A faint part (closeness → 0) that is thick as well (thinness 0) is a far, big thing: haze, a stretch of reef, a
+  // region of lighter water under a leaked outline. Its lit pop is kept at SUBJECT_DEEP.farLit (lifted as a whole
+  // it read as a pale patch); a faint animal is thin (a far shark), a thick one stands out (close).
+  const litPart = an ? Math.max(SUBJECT_DEEP.farLit, smoothstep(SUBJECT_DEEP.farLo, SUBJECT_DEEP.farHi, an[4] ?? 1), Math.min(1, 4 * clamp(an[5] ?? 0, 0, 1))) : 1;
+  const segS = segW * smoothstep(SEG_RESTORE.darkLo, SEG_RESTORE.darkHi, cbY) * popCol * litPart;
+  // Which way the subject's lightness goes (SEG_RESTORE.sep / SUBJECT_DEEP): away from the local water's, −1..1. The
+  // water's L is the AI overlay's local estimate, or the backdrop surface's with the engine's own masks.
+  const waterL = an ? segWaterL(an) : ow > 0 && fit && fit.length === 18 ? backdropL(u, v, fit) : -1;
+  const popDir = an ? ctx.seg!.popDir ?? 1 : 1;
+  // (A close subject under an AI outline stands far off the water and straddles its lightness: the range is wider
+  // there, SEG_RESTORE.sepClose ×, so its shading is not cut into a light and a dark half.)
+  const sepR = SEG_RESTORE.sepRange * (1 + (SEG_RESTORE.sepClose - 1) * (an ? clamp(an[4] ?? 1, 0, 1) : 0));
+  const sepT = waterL >= 0 ? (lab0[0] >= waterL ? smoothstep(0, sepR, lab0[0] - waterL) : -smoothstep(0, SUBJECT_DEEP.range, waterL - lab0[0])) : popDir;
+  // What stands lighter than the water is lifted (the pop, the AI restore); what stands darker is deepened instead
+  // (SUBJECT_DEEP), with no dark fade: `up` is the lit share of the pop, `deepW` the weight of the deepening.
+  const up = waterL >= 0 ? 1 - smoothstep(0, SUBJECT_DEEP.engineLo, waterL - lab0[0]) : 1;
+  // (The engine's backdrop is a fitted surface, not the water next to the subject: there the pixel has to be clearly
+  // under it, SUBJECT_DEEP.engineLo..engineHi of L: a pale shark a little under the fit went dimmer and bluer.)
+  // (Under an AI outline the deepening fades in over a longer way on a thick part, SEG_TONE.alphaR of the read-back
+  // distance against rampIn on a thin one: an outline that ends inside a big dark body, or sits on one as an
+  // island, leaves a soft step, not a cut-out.)
+  const deepW = (an ? segW * Math.max(0, -sepT) * smoothstep(0, SEG_TONE.alphaR + (SEG_TONE.rampIn - SEG_TONE.alphaR) * clamp(an[5] ?? 0, 0, 1), (an[2] - 0.5) * 2 * SEG_TONE.alphaR) : SUBJECT_DEEP.engine * objectWeight(subj) * smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP) * smoothstep(SUBJECT_POP.waterLo, SUBJECT_POP.waterHi, bdevP) * popS * popK * (waterL >= 0 ? smoothstep(SUBJECT_DEEP.engineLo, SUBJECT_DEEP.engineHi, waterL - lab0[0]) : 0)) * farCol;
+  const popP = an ? popP0 : popP0 * up * popCol;
   // Local contrast on encoded luminance (CLAHE), mixed by clarity (the subject takes more: SUBJECT_POP.clarity).
   if (s.clarity > 0) {
     const encY = linearToSrgb(clamp(Y, 0, 1));
     const eq = sampleClahe(ctx.clahe, u, v, encY);
-    const encNew = encY + (eq - encY) * (s.clarity + SUBJECT_POP.clarity * popP);
+    // (Not in the highlights, SUBJECT_POP.hiLo..hiHi: a small pale fish went a blocky white.)
+    const encNew = encY + (eq - encY) * (s.clarity + SUBJECT_POP.clarity * popP * (1 - smoothstep(SUBJECT_POP.hiLo, SUBJECT_POP.hiHi, cbY)));
     const Ynew = srgbToLinear(clamp(encNew, 0, 1));
     ratio = Y > 1e-5 ? Ynew / Y : 1;
     for (let c = 0; c < 3; c++) out[c] *= ratio;
@@ -375,22 +406,20 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   // (SUBJECT_POP).
   const vv = vividLook(looked[0], guarded[0], guarded[1], s.vivid ?? 0, greenWeight(p));
   const Lv = popP > 0 && !an ? vividLook(looked[0], guarded[0], guarded[1], (s.vivid ?? 0) * (1 - SUBJECT_POP.vividKeep * Math.min(1, popP)), greenWeight(p))[0] : vv[0];
-  const popDir = an ? ctx.seg!.popDir ?? 1 : 1;
   // The warm pull is for what stands lighter than the water behind it (skin, a pale belly, a white fin: lit); what is
   // darker (a wetsuit, a dark back, and the blurred rim of either against bright water) keeps the water's light.
-  const waterL = an ? segWaterL(an) : ow > 0 && fit && fit.length === 18 ? backdropL(u, v, fit) : -1;
   const warmUp = waterL >= 0 ? smoothstep(WARM_POP.upLo, WARM_POP.upHi, lab0[0] - waterL) : 1;
-  // Which way the AI restore moves the subject's lightness (SEG_RESTORE.sep): away from the local water's, −1..1.
-  const sepT = waterL >= 0 ? Math.sign(lab0[0] - waterL) * smoothstep(0, SEG_RESTORE.sepRange, Math.abs(lab0[0] - waterL)) : popDir;
   // Under an AI mask the pop's own lift (or its deepening of a subject darker than the water) is left out: the AI
   // restore's small lift is all the subject gets (SEG_RESTORE.lift), and its chroma is not scaled along.
-  const Lp = an ? Lv : Lv + SUBJECT_POP.lift * popP * popDir * 4 * Lv * Math.max(0, 1 - Lv);
+  const Lp = an ? Lv : Lv + SUBJECT_POP.lift * popP * popDir * 4 * Lv * Math.max(0, 1 - Lv) * (1 - smoothstep(SUBJECT_POP.hiLo, SUBJECT_POP.hiHi, Lv));
   // The chroma follows part of the lift: a lifted blue-grey stays blue-grey.
   const cf = SUBJECT_POP.chromaFollowDark + (SUBJECT_POP.chromaFollow - SUBJECT_POP.chromaFollowDark) * smoothstep(SUBJECT_POP.keepDarkLo, SUBJECT_POP.keepDarkHi, Lv);
   const kc = 1 + cf * (Lp / Math.max(1e-4, Lv) - 1);
   vv[0] = Lp; vv[1] *= kc; vv[2] *= kc;
   const hn0 = highlightPink(vv[0], vv[1], vv[2]);
-  const hn1 = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * popS, 0, 1));
+  // (Only where the source has no red left: there the grade cannot have found a colour of its own. What still has
+  // red (yellow fins, a float) keeps the hue the plain grade gave it: held to the cast source's, it went green.)
+  const hn1 = popHue(hn0[0], hn0[1], a0, bb0, clamp(toneW * popS, 0, 1) * redDeficit(r0, g0, b0));
   const wk = smoothstep(WARM_POP.wLo, WARM_POP.wHi, toneW) * (an ? 0 : smoothstep(BACKDROP.subjLo, BACKDROP.subjHi, bdevP)) * (s.subjectPop ? Math.min(1, 2 * Math.max(0, s.subjectPopWarmth ?? 0)) : 0) * WARM_POP.amount * castW * warmLit(vv[0]) * warmUp;
   const hn = warmPop(vv[0], hn1[0], hn1[1], wk, WARM_POP.engineTone);
   // Blue water style (opt-in): cobalt water, orange warm subjects, neutral silver, deeper shadows.
@@ -411,6 +440,11 @@ export function gradePixel(ctx: PixelContext, sr: number, sg: number, sb: number
   if (segS > 0) {
     const lr = (lumI + DETAIL_GUARD.eps) / (guideLum(ctx.depth, u, v) + DETAIL_GUARD.eps);
     [bl[0], bl[1], bl[2]] = segRestore(bl[0], bl[1], bl[2], segS, lr, segColourK(an!), popK > 1 ? segS * (1 - 1 / popK) : 0, sepT);
+  }
+  // What is darker than the water behind it is deepened (SUBJECT_DEEP; grade-shader subjectDeepen), with either mask.
+  if (deepW > 0) {
+    const lr = (lumI + DETAIL_GUARD.eps) / (guideLum(ctx.depth, u, v) + DETAIL_GUARD.eps);
+    [bl[0], bl[1], bl[2]] = subjectDeepen(bl[0], bl[1], bl[2], deepW, lr);
   }
   // Tone target (analyze.ts TONE): one gamma on the graded lightness, the same for every pixel of the frame.
   if ((p.toneGamma ?? 1) > 1) bl[0] = toneCurve(bl[0], p.toneGamma!);
@@ -627,14 +661,33 @@ export function segRestore(L: number, a: number, b: number, s: number, lr: numbe
   if (s <= 0) return [L, a, b];
   const R = SEG_RESTORE;
   // Its own colour, a little more of it (hue kept); a saturated subject is left alone.
-  const kv = 1 + (R.vib * Math.min(1, s) + R.boostVib * x) * ck * (1 - smoothstep(R.vibLo, R.vibHi, Math.hypot(a, b))) * Math.abs(clamp(t, -1, 1));
+  const tp = clamp(t, 0, 1);
+  const kv = 1 + (R.vib * Math.min(1, s) + R.boostVib * x) * ck * (1 - smoothstep(R.vibLo, R.vibHi, Math.hypot(a, b))) * tp;
   // Local contrast against the neighbourhood, then the separation: lighter than the water → lighter, darker → darker.
-  let L1 = L * Math.pow(clamp(lr, R.rMin, R.rMax), (R.detail * Math.min(1, s) + R.boostDetail * x) * (1 - smoothstep(R.hiLo, R.hiHi, L)));
-  L1 += (R.sep * Math.min(1, s) + R.boostSep * x) * (t < 0 ? -R.sepDark : 1) * clamp(t, -1, 1) * 4 * L1 * Math.max(0, 1 - L1) * (1 - smoothstep(R.hiLo, R.hiHi, L));
+  let L1 = L * Math.pow(clamp(lr, R.rMin, R.rMax), (R.detail * Math.min(1, s) + R.boostDetail * x) * tp * (1 - smoothstep(R.hiLo, R.hiHi, L)));
+  L1 += (R.sep * Math.min(1, s) + R.boostSep * x) * tp * 4 * L1 * Math.max(0, 1 - L1) * (1 - smoothstep(R.hiLo, R.hiHi, L));
   // A soft shoulder on the lightening: at most `head` of the headroom to white (no clipped, colourless highlights).
   const hr = R.head * Math.max(0, 1 - L);
   if (L1 > L) L1 = hr > 1e-5 ? L + hr * (1 - Math.exp(-(L1 - L) / hr)) : L;
   return [L1, a * kv, b * kv];
+}
+
+/**
+ * Deepening of a subject darker than the water behind it (SUBJECT_DEEP; mirrors grade-shader subjectDeepen) on the
+ * finished Oklab colour: `w` = the subject weight × how far the source's L is under the local water's (0..1, ×
+ * the Pop multiplier), `lr` = the source pixel's luminance over its neighbourhood's. The lightness is scaled down
+ * (the veil of water in front of it taken off) with local contrast both ways, and the chroma is scaled with it: the
+ * hue and the saturation stay, so the colour stays inside the gamut (a richer black, never a grey one).
+ */
+export function subjectDeepen(L: number, a: number, b: number, w: number, lr: number): [number, number, number] {
+  if (w <= 0 || L <= 1e-5) return [L, a, b];
+  const D = SUBJECT_DEEP, g = Math.min(D.wMax, w);
+  // What is clearly lighter than its neighbourhood (a ray's spots, a mask's rim, bubbles: spotLo..spotHi of the ratio)
+  // is not deepened with the body but lifted a little (spot): the pattern stands out instead of sinking with it.
+  const hl = smoothstep(D.spotLo, D.spotHi, lr) * (1 - smoothstep(D.spotLLo, D.spotLHi, L));
+  const f = Math.pow(clamp(lr, D.rMin, D.rMax), D.detail * g) * (1 - D.k * g * smoothstep(D.toeLo, D.toeHi, L) * (1 - hl) + D.spot * g * hl);
+  const fc = Math.pow(Math.min(1, f), D.chroma);
+  return [L * f, a * fc, b * fc];
 }
 
 function clamp(x: number, lo: number, hi: number): number {

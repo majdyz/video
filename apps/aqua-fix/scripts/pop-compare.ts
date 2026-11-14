@@ -5,8 +5,8 @@
 //   ffmpeg -i clip.mov -vf fps=1,scale=270:480 -pix_fmt rgba -f rawvideo frames.rgba
 //   git archive <old commit> apps/aqua-fix/src/engine | tar -x -C /tmp/old
 //   node --experimental-strip-types pop-compare.ts <name> frames.rgba 270 480 <t0,t1,...> <oldEngineDir> <newEngineDir> <outDir> [thr] [ai,basic,person]
-//   env: DILATE, ONLY (times), BOX u0,v0,u1,v1 (+ BOXT), LIGHTK, POP, WARMTH, MASK, MASKONLY, DBG,
-//        SWEEP (JSON list of {name, SEG_RESTORE, SUBJECT_POP, SUBJECT_CLEAR} overrides: strips "off | level ...")
+//   env: DILATE, ONLY (times), BOX u0,v0,u1,v1 (+ BOXT), LIGHTK, POP, WARMTH, MASK, MASKONLY, DBG, DBGPX ("x,y;x,y"), NOOLD,
+//        SWEEP (JSON list of {name, <params.ts constant>: {...}} overrides: strips "off | level ...")
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -125,15 +125,26 @@ for (let fi = 0; fi < times.length; fi++) {
       }
       for (const [k, v] of Object.entries(h)) { v.sort((x, y) => x - y); console.log("DBG", k, [0.05, 0.25, 0.5, 0.75, 0.95].map((q) => v[Math.floor(q * (v.length - 1))].toFixed(3)).join(" ")); }
     }
+    // DBGPX="x,y;x,y": the overlay's read-back at those pixels (new engine).
+    if (process.env.DBGPX && ek === "new") {
+      const { segSample, segRim, segToneWeight, segWaterL, seabedW } = await import(pathToFileURL(path.join(newDir, "apply.ts")).href);
+      const vl = e.color.linearToOklab(an.params.veilColor[0], an.params.veilColor[1], an.params.veilColor[2]), vn = Math.hypot(vl[1], vl[2]) || 1;
+      for (const q of process.env.DBGPX.split(";")) {
+        const [x, y] = q.split(",").map(Number), i = y * W + x, a = segSample(strength, (x + 0.5) / W, (y + 0.5) / H), l0 = labOf(px, i);
+        console.log("DBGPX", q, "mask", on[i], "an", Array.from(a as number[]).map((v) => +v.toFixed(3)).join(" "), "L0", l0[0].toFixed(3), "waterL", segWaterL(a).toFixed(3), "tw", segToneWeight(a, l0, vl[1] / vn, vl[2] / vn, an.params.subjectTone ?? 0, 1).toFixed(3), "rim", segRim(a, l0, vl[1] / vn, vl[2] / vn).toFixed(3), "tone", an.params.subjectTone, "seabedW", seabedW(an.params, (x + 0.5) / W, (y + 0.5) / H).toFixed(2));
+      }
+    }
     const set = (pop: boolean) => ({ ...e.DEFAULT_SETTINGS, vivid: 1, seabed: 0.6, subjectPop: pop, subjectPopStrength: +(process.env.POP ?? 0.5), subjectPopWarmth: +(process.env.WARMTH ?? 0.5) });
     const g = (pop: boolean, seg: boolean, pers: boolean) => e.applyGrade({ params: an.params, settings: set(pop), depth: pers ? { ...an.depth, person } : an.depth, clahe: an.clahe, ...(seg ? { seg: { strength, popDir } } : {}) }, px, W, H) as Uint8ClampedArray;
+    // (NOOLD: the old engine is not rendered; its tiles show its Subjects off.)
+    const skip = ek === "old" && !!process.env.NOOLD;
     renders[`${ek}.off`] = g(false, false, false);
-    if (modes.includes("ai")) renders[`${ek}.ai`] = g(true, true, false);
-    if (modes.includes("basic")) renders[`${ek}.basic`] = g(true, false, false);
+    if (modes.includes("ai")) renders[`${ek}.ai`] = skip ? renders[`${ek}.off`] : g(true, true, false);
+    if (modes.includes("basic")) renders[`${ek}.basic`] = skip ? renders[`${ek}.off`] : g(true, false, false);
     // SWEEP='[{"name":"A","SEG_RESTORE":{...},"SUBJECT_POP":{...},"SUBJECT_CLEAR":{...}}, ...]': the new engine again at each level.
     if (ek === "new" && process.env.SWEEP) for (const lvl of JSON.parse(process.env.SWEEP)) {
       const saved: Record<string, object> = {};
-      for (const k of ["SEG_RESTORE", "SUBJECT_POP", "SUBJECT_CLEAR"]) if (lvl[k]) { saved[k] = { ...e.params[k] }; Object.assign(e.params[k], lvl[k]); }
+      for (const k of Object.keys(lvl).filter((q) => q !== "name")) if (lvl[k]) { saved[k] = { ...e.params[k] }; Object.assign(e.params[k], lvl[k]); }
       if (modes.includes("ai")) renders[`${lvl.name}.ai`] = g(true, true, false);
       if (modes.includes("basic")) renders[`${lvl.name}.basic`] = g(true, false, false);
       for (const k of Object.keys(saved)) Object.assign(e.params[k], saved[k]);
