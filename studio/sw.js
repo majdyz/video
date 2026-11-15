@@ -8,8 +8,8 @@
 // network-first so a deploy never serves an index pointing at deleted
 // bundles. Each deploy gets a new cache and the old one is deleted on
 // activate.
-const VERSION = "studio-c05f2b35ab99";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-DBKxEzrx.js","./assets/analysis-worker-kSdlTGNn.js","./assets/bridge-I-4W7Inu.js","./assets/colour-DhtqvEQo.js","./assets/dewarp-CFvLHRft.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-C_-Imz-B.js","./assets/fisheye-BC_1Fvg3.js","./assets/frame-worker-Bf6wfUvw.js","./assets/index-C7aip1hW.js","./assets/index-FcHBQoAO.css","./assets/media-CWONqX4U.js","./assets/motion-m-JDmW4V.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/videoframe-colorspace-zfqeaqOD.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-D4TrakeJ.js"];
+const VERSION = "studio-ed5005bbb8b1";
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-DBKxEzrx.js","./assets/analysis-worker-kSdlTGNn.js","./assets/audio-override-jaq2wKp1.js","./assets/bridge-DnKWO9yl.js","./assets/colour-Dr1jzSIm.js","./assets/dewarp-CKBe54nR.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-CXuOMAfO.js","./assets/fisheye-BC_1Fvg3.js","./assets/frame-worker-Bf6wfUvw.js","./assets/id3-DXEcgV95.js","./assets/index-C38H8bdY.css","./assets/index-C6IouRy-.js","./assets/media-DHHTyaNU.js","./assets/motion-nVlgvZJY.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/videoframe-colorspace-DuDUJxCV.js","./assets/vision_bundle-DgfK8w8l.js","./assets/web-Iw751zTt.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -71,6 +71,8 @@ self.addEventListener("fetch", (event) => {
   // AI subject detection: the models (~33 MB) live in the app's own cache across deploys (seg/model.ts); the
   // onnxruntime-web WASM runtime (~22 MB) is a hashed asset, cached below like the bundles.
   if (req.url.includes("/seg/")) return;
+  // Sound › Clean voice: its model and runtime (~17 MB, audio/dfn3/) live in the app's own cache too (voice-worker.ts).
+  if (req.url.includes("/audio/dfn3/")) return;
   const immutable = req.url.includes("/mediapipe/") || req.url.includes("/assets/");
   if (immutable) {
     event.respondWith(caches.match(req).then((hit) => hit || fetch(req).then((res) => put(req, res))).then(coi));
