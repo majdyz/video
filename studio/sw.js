@@ -1,4 +1,4 @@
-// DiveGrade service worker: offline launch and offline tools.
+// Service worker: offline launch and offline tools.
 //
 // The build (vite.config.ts, studioServiceWorker) replaces the two
 // placeholders below: VERSION becomes a hash of the built files, PRECACHE
@@ -8,8 +8,8 @@
 // network-first so a deploy never serves an index pointing at deleted
 // bundles. Each deploy gets a new cache and the old one is deleted on
 // activate.
-const VERSION = "studio-adf0b5c1e85e";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-BxZg5iQH.js","./assets/analysis-worker-iPw8EVSV.js","./assets/audio-override-jaq2wKp1.js","./assets/bridge-B3e7S2Iz.js","./assets/colour-DPNWaaNf.js","./assets/dewarp-DbNRR3oL.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-By9CchtU.js","./assets/fisheye-BC_1Fvg3.js","./assets/frame-worker-Bf6wfUvw.js","./assets/id3-DXEcgV95.js","./assets/index-B5g7RKUZ.css","./assets/index-DxfyuQBE.js","./assets/media-CDTtgX02.js","./assets/motion-BAiyZznP.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/speakers-worker-DDHVTXVT.js","./assets/videoframe-colorspace-DuDUJxCV.js","./assets/vision_bundle-CLaTQxtn.js","./assets/vision_bundle-DgfK8w8l.js","./assets/water-worker-BxZVjb8M.js","./assets/web-Iw751zTt.js"];
+const VERSION = "studio-e05b071500e0";
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-BxZg5iQH.js","./assets/analysis-worker-iPw8EVSV.js","./assets/audio-override-jaq2wKp1.js","./assets/bridge-CGl7Gv5h.js","./assets/colour-PxZU9jZT.js","./assets/dewarp-DVnyQIpo.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-CjxnIwZ6.js","./assets/fisheye-BC_1Fvg3.js","./assets/frame-worker-Bf6wfUvw.js","./assets/id3-DXEcgV95.js","./assets/index-B5g7RKUZ.css","./assets/index-D18ruY7o.js","./assets/media-CYcKxCR1.js","./assets/motion-BAiyZznP.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/speakers-worker-DDHVTXVT.js","./assets/videoframe-colorspace-DuDUJxCV.js","./assets/vision_bundle-CLaTQxtn.js","./assets/vision_bundle-DgfK8w8l.js","./assets/water-worker-BxZVjb8M.js","./assets/web-Iw751zTt.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
