@@ -1,0 +1,12 @@
+Fixframe bundles the following third-party components, each under its own licence:
+
+- React, React DOM — MIT — (c) Meta Platforms, Inc.
+- onnxruntime-web — MIT — (c) Microsoft Corporation
+- MediaPipe Tasks (vision) runtime and models — Apache-2.0 — (c) Google LLC
+- EdgeTAM segmentation model — Apache-2.0 — (c) Meta Platforms, Inc.
+- DeepFilterNet3 (speech enhancement) — MIT / Apache-2.0 — (c) Hendrik Schröter
+- Spleeter 2-stem model — MIT — (c) Deezer
+- YAMNet audio classifier — Apache-2.0 — (c) Google LLC
+- VoxLock target-speaker model — Apache-2.0 as stated by its publisher
+- Gyroflow lens profiles — CC0-1.0
+Full licence texts for bundled models are shipped beside them (audio/*/LICENSE*).

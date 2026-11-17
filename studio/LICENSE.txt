@@ -1,0 +1,29 @@
+Fixframe — Proprietary Licence
+
+Copyright (c) 2026 ZM Labs LLC (Sharjah Media City Free Zone, UAE). All rights reserved.
+
+This software, including its source code, compiled/bundled code, shaders, models
+trained or tuned by ZM Labs, documentation and assets ("the Software"), is
+proprietary and confidential.
+
+You may use the Software only as an end user through the official web app at
+https://majdyz.github.io/video/studio/ (or another official ZM Labs distribution).
+
+Without prior written permission from ZM Labs LLC you may NOT:
+  1. copy, reproduce, publish, mirror or redistribute the Software, in whole or part;
+  2. modify it or create derivative works;
+  3. use it, or any part of it, for any commercial purpose or in a commercial product
+     or service;
+  4. decompile, disassemble, reverse engineer, de-minify or otherwise attempt to derive
+     its source code, algorithms or models, except where such restriction is prohibited
+     by applicable law;
+  5. use the Software or its code to train, fine-tune, evaluate or prompt machine-learning
+     or AI systems, or to rebuild an equivalent product.
+
+Third-party components bundled with the Software are licensed under their own terms
+(see THIRD-PARTY-NOTICES in the distribution); nothing here limits those licences.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. IN NO EVENT SHALL
+ZM LABS LLC BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM ITS USE.
+
+Contact: zamil.majdy@gmail.com

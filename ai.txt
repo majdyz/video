@@ -1,0 +1,3 @@
+# Fixframe (c) ZM Labs LLC. Proprietary. Not licensed for AI training, scraping or code reproduction.
+User-Agent: *
+Disallow: /
