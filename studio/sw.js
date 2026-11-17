@@ -8,8 +8,8 @@
 // network-first so a deploy never serves an index pointing at deleted
 // bundles. Each deploy gets a new cache and the old one is deleted on
 // activate.
-const VERSION = "studio-473fb99be0fe";
-const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-BxZg5iQH.js","./assets/analysis-worker-iPw8EVSV.js","./assets/audio-override-jaq2wKp1.js","./assets/bridge-BLlmb-DK.js","./assets/colour-VJ3wtO0E.js","./assets/dewarp-BM2YnjIb.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-C-P11WAv.js","./assets/fisheye-BC_1Fvg3.js","./assets/frame-worker-Bf6wfUvw.js","./assets/id3-DXEcgV95.js","./assets/index-B5g7RKUZ.css","./assets/index-YTA-Oo6l.js","./assets/media-C1V2cxCx.js","./assets/motion-BAiyZznP.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/speakers-worker-DDHVTXVT.js","./assets/videoframe-colorspace-DuDUJxCV.js","./assets/vision_bundle-CLaTQxtn.js","./assets/vision_bundle-DgfK8w8l.js","./assets/water-worker-BxZVjb8M.js","./assets/web-Iw751zTt.js"];
+const VERSION = "studio-ad1a0db410f3";
+const PRECACHE = ["./","./index.html","./manifest.webmanifest","./icon.svg","./icon-192.png","./apple-touch-icon.png","./calib/hlg-hevc.mp4","./calib/hlg-vp9.webm","./calib/pq-hevc.mp4","./calib/pq-vp9.webm","./calib/wide-hevc.mp4","./calib/wide-vp9.webm","./assets/analysis-worker-BxZg5iQH.js","./assets/analysis-worker-iPw8EVSV.js","./assets/audio-override-jaq2wKp1.js","./assets/bridge-C2TAPaSu.js","./assets/colour-COgz-BcM.js","./assets/dewarp-DxcVcZzv.js","./assets/dist-1Myv_BFQ.js","./assets/export-journal-BkzOmAZ3.js","./assets/fisheye-BC_1Fvg3.js","./assets/frame-worker-Bf6wfUvw.js","./assets/id3-DXEcgV95.js","./assets/index-DPRG1GcH.css","./assets/index-DwFn1fOM.js","./assets/media-vTyV7hso.js","./assets/motion-BAiyZznP.js","./assets/opfs-worker-ZrutHdOu.js","./assets/person-worker-PK8s94hj.js","./assets/rolldown-runtime-S-ySWqyJ.js","./assets/speakers-worker-CeBye_Bs.js","./assets/videoframe-colorspace-DuDUJxCV.js","./assets/vision_bundle-CLaTQxtn.js","./assets/vision_bundle-DgfK8w8l.js","./assets/water-worker-BxZVjb8M.js","./assets/web-Iw751zTt.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -71,9 +71,9 @@ self.addEventListener("fetch", (event) => {
   // AI subject detection: the models (~33 MB) live in the app's own cache across deploys (seg/model.ts); the
   // onnxruntime-web WASM runtime (~22 MB) is a hashed asset, cached below like the bundles.
   if (req.url.includes("/seg/")) return;
-  // Sound: its models (Clean voice ~17 MB, audio/dfn3/; Voices ~42 MB, audio/speakers/) live in the app's own cache too
-  // (voice-worker.ts, speakers-worker.ts).
-  if (req.url.includes("/audio/dfn3/") || req.url.includes("/audio/speakers/")) return;
+  // Sound: its models (Clean voice ~17 MB, audio/dfn3/; Voices ~42 MB, audio/speakers/; Solo 64 MB, audio/voxlock/;
+  // Concert 47 MB, audio/concert/) live in the app's own cache too (voice-, speakers-, solo-, concert-worker.ts).
+  if (["/audio/dfn3/", "/audio/speakers/", "/audio/voxlock/", "/audio/concert/"].some((d) => req.url.includes(d))) return;
   const immutable = req.url.includes("/mediapipe/") || req.url.includes("/assets/");
   if (immutable) {
     event.respondWith(caches.match(req).then((hit) => hit || fetch(req).then((res) => put(req, res))).then(coi));
